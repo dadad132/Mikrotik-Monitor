@@ -1,0 +1,170 @@
+# ============================================================================
+# MikroTik Monitor (mikromon) — example configuration
+#
+# Copy this file to `config.yaml` and edit it. `config.yaml` is gitignored so
+# your credentials stay out of version control.
+#
+#   cp config.example.yaml config.yaml
+#
+# All thresholds defined under `defaults:` apply to every device and can be
+# overridden per-device under `devices[].thresholds:`.
+# ============================================================================
+
+# How often (seconds) to poll every device. 60s is a good balance.
+poll_interval: 60
+
+# Where to persist state between runs (which conditions are already alerted,
+# last-seen log lines, known DHCP clients, etc). Relative to the working dir.
+state_file: ./state.json
+
+# Logging verbosity for the monitor itself: DEBUG / INFO / WARNING / ERROR
+log_level: INFO
+
+# Time-series metrics -> SQLite file. Powers the web dashboard and the
+# Prometheus /metrics endpoint (for Grafana). Comment out to disable.
+metrics_db: ./metrics.db
+metrics_retention_days: 30
+
+# Web dashboard (run it with:  python -m mikromon dashboard -c config.yaml)
+web:
+  host: 127.0.0.1     # 0.0.0.0 to expose on the network — see "access anywhere" below
+  port: 8080
+  secure_cookies: false   # set true when serving over HTTPS (behind a proxy/tunnel)
+  # Token for Prometheus/Grafana to scrape /metrics without a login. Generate a
+  # random one, e.g.  python -c "import secrets;print(secrets.token_urlsafe(24))"
+  # metrics_token: "paste-a-long-random-token-here"
+
+# User accounts for the dashboard. When set, the dashboard requires login and
+# each user only sees the devices an admin grants them. Create the first admin:
+#   python -m mikromon useradd --user admin --password 'strong-pass' \
+#       --role admin --devices '*' -c config.yaml
+# Then manage the rest from the /admin page in the browser.
+auth_db: ./auth.db
+
+# Accessing from anywhere (securely):
+#   * Easiest & safest: a tunnel — Cloudflare Tunnel, Tailscale, or ngrok —
+#     so you DON'T port-forward. Point it at 127.0.0.1:8080.
+#   * Or a reverse proxy (Caddy/nginx) terminating HTTPS in front of the
+#     dashboard; then set web.host: 0.0.0.0 and web.secure_cookies: true.
+#   Always use HTTPS for remote access so the login cookie isn't sent in clear.
+
+# Require a condition to be observed this many polls in a row before alerting.
+# 2 means a single bad poll (a blip) will NOT page you — it must persist.
+confirmations: 2
+
+# ----------------------------------------------------------------------------
+# Email / SMTP — where alerts are delivered.
+# ----------------------------------------------------------------------------
+smtp:
+  host: smtp.gmail.com
+  port: 587
+  username: alerts@yourcompany.com
+  password: "your-app-password"      # for Gmail/O365 use an App Password
+  use_tls: true                       # STARTTLS on port 587 (recommended)
+  use_ssl: false                      # implicit SSL on port 465 (set port: 465)
+  from_addr: alerts@yourcompany.com
+  to_addrs:
+    - itadmin@yourcompany.com
+    # - oncall@yourcompany.com
+  subject_prefix: "[MikroMon]"
+  # Only email alerts at or above this severity: INFO / WARNING / CRITICAL
+  min_severity: INFO
+
+# ----------------------------------------------------------------------------
+# Default thresholds (apply to all devices unless overridden).
+# ----------------------------------------------------------------------------
+defaults:
+  cpu_warn: 80              # % CPU load -> WARNING
+  cpu_crit: 95             # % CPU load -> CRITICAL
+  mem_free_warn_pct: 15    # free RAM below this % -> WARNING
+  mem_free_crit_pct: 7     # free RAM below this % -> CRITICAL
+  disk_free_warn_pct: 15   # free storage below this % -> WARNING
+  disk_free_crit_pct: 5    # free storage below this % -> CRITICAL
+  temp_warn_c: 60          # board temperature -> WARNING
+  temp_crit_c: 75          # board temperature -> CRITICAL
+  flap_window_s: 600       # window for counting interface link-downs
+  flap_threshold: 4        # link-downs within window -> flapping alert
+
+  # Learned-baseline anomaly detection (device-count / WAN traffic / per-client).
+  # "Normal" is learned automatically per time-of-day; these tune sensitivity.
+  baseline_alpha: 0.1      # how fast it adapts (lower = steadier, less twitchy)
+  baseline_warmup: 24      # samples a time-slot needs before it can alert
+  baseline_z: 3.0          # std-devs above normal to call something abnormal
+  baseline_buckets: hour   # hour | hourweek (separate weekends) | global
+  client_min_count: 5      # ignore device-count spikes on tiny networks
+  client_count_ratio: 1.5  # must be >=1.5x the typical device count to alert
+  traffic_floor_mbit: 1    # ignore throughput spikes on near-idle links
+  traffic_ratio: 1.5       # must be >=1.5x typical throughput to alert
+  client_floor_mbit: 5     # ignore per-client usage below this
+  client_usage_ratio: 2.0  # a client must use >=2x its own normal to alert
+
+# ----------------------------------------------------------------------------
+# Devices to monitor.
+# ----------------------------------------------------------------------------
+devices:
+  - name: "HQ-Router"
+    host: 192.168.88.1
+    api_port: 8728           # 8728 = plain API, 8729 = API-SSL
+    username: monitor        # use a dedicated READ-ONLY user (see README)
+    password: "change-me"
+    use_ssl: false
+    verify_ssl: false        # set true if the router has a valid certificate
+    timeout: 10
+
+    # LAN subnets — logins/activity sourced from OUTSIDE these are treated as
+    # higher-risk (e.g. an admin login from a public IP).
+    lan_subnets:
+      - 192.168.88.0/24
+
+    # WAN failover detection. Leave `wan:` empty to AUTO-DETECT: the monitor
+    # treats the lowest-distance default route as "primary" and alerts when a
+    # higher-distance backup route is carrying traffic instead. Fill it in to
+    # get friendlier names in the alerts and to pin which uplink is primary.
+    wan:
+      primary:
+        interface: ether1
+        gateway: ""          # optional: the primary next-hop IP
+      backup:
+        interface: lte1
+        gateway: ""
+      # Optional active probe: ping these from the router to confirm real
+      # reachability (not just that a route exists). Empty = route-table only.
+      ping_targets: []        # e.g. [8.8.8.8, 1.1.1.1]
+
+    # Interfaces to watch for link down / flapping. Empty = watch all enabled
+    # physical-ish interfaces automatically.
+    monitor_interfaces:
+      - ether1
+      - lte1
+
+    # Which sources to count for the device-count anomaly check.
+    # Options: dhcp (bound leases), wireless (wifi clients), arp, hotspot.
+    client_count_sources: [dhcp, wireless]
+
+    # Interfaces to track for WAN throughput. Empty = auto (the wan: uplinks).
+    traffic_interfaces: []
+
+    # Toggle individual checks for this device.
+    checks:
+      reachability: true       # is the router itself answering on the API port
+      wan_failover: true       # client moved onto a backup uplink
+      internet_down: true      # no usable default route / all WANs down
+      resources: true          # CPU / RAM / disk / temperature / reboot
+      interfaces: true         # link up/down and flapping
+      security: true           # logins, failed logins, config changes
+      dhcp_new_clients: false  # alert when a never-before-seen client appears
+      client_count: true       # abnormally many connected devices (learned)
+      wan_traffic: true        # abnormal WAN throughput / data usage (learned)
+      client_usage: false      # per-client top-talkers (needs queues/kid-control)
+
+    # Per-device overrides (optional) — same keys as `defaults:`.
+    # thresholds:
+    #   cpu_warn: 70
+
+  # - name: "Branch-2"
+  #   host: 10.20.0.1
+  #   api_port: 8728
+  #   username: monitor
+  #   password: "change-me"
+  #   checks:
+  #     dhcp_new_clients: true

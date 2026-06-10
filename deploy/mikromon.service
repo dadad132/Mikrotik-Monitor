@@ -1,0 +1,28 @@
+[Unit]
+Description=MikroTik Monitor (mikromon)
+Documentation=https://github.com/your-org/mikromon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mikromon
+Group=mikromon
+WorkingDirectory=/opt/mikromon
+ExecStart=/opt/mikromon/.venv/bin/python -m mikromon run -c /opt/mikromon/config.yaml
+Restart=always
+RestartSec=10
+
+# --- hardening (the monitor only needs read-only network access) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# state.json lives in the working directory; allow writes there only.
+ReadWritePaths=/opt/mikromon
+
+[Install]
+WantedBy=multi-user.target

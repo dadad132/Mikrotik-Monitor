@@ -1,0 +1,66 @@
+# ============================================================================
+# LOCAL TESTING config for mikromon.
+#
+# Two easy ways to try mikromon on this machine:
+#
+#   A) No router at all — watch a simulated one:
+#          python -m mikromon demo
+#      (ignores this file; writes alert emails to ./outbox/)
+#
+#   B) A real router reachable at localhost (e.g. a CHR, or an SSH tunnel:
+#      `ssh -L 8728:192.168.88.1:8728 user@gateway`), using THIS file:
+#          python -m mikromon test-connection -c config.local.yaml
+#          python -m mikromon run -c config.local.yaml
+#
+# Alerts are written to ./outbox/ as .eml + .html (open them in any mail
+# client / browser) so you don't need a mail server. If you'd rather catch
+# them with a local SMTP inbox, run a catcher and point smtp.* at it:
+#          pip install aiosmtpd
+#          python -m aiosmtpd -n -l localhost:1025
+# (Python 3.12 removed the old `python -m smtpd`; aiosmtpd replaces it.)
+# ============================================================================
+
+poll_interval: 10          # fast, for local testing
+confirmations: 1           # alert immediately (no debounce) while testing
+state_file: ./local-state.json
+log_level: INFO
+
+# Write every alert digest to ./outbox/*.eml + *.html — no SMTP needed.
+outbox_dir: ./outbox
+
+# Optional: also deliver to a local SMTP catcher (uncomment after starting one).
+# smtp:
+#   host: localhost
+#   port: 1025
+#   use_tls: false
+#   from_addr: mikromon@localhost
+#   to_addrs: [itadmin@localhost]
+#   min_severity: INFO
+
+defaults:
+  baseline_warmup: 3        # learn quickly so anomaly checks react during a test
+  baseline_z: 2.0
+  baseline_buckets: global
+
+devices:
+  - name: "Local-Router"
+    host: 127.0.0.1
+    api_port: 8728
+    username: monitor
+    password: "change-me"
+    lan_subnets: [192.168.88.0/24]
+    wan:
+      primary: { interface: ether1 }
+      backup:  { interface: lte1 }
+    client_count_sources: [dhcp, wireless]
+    checks:
+      reachability: true
+      wan_failover: true
+      internet_down: true
+      resources: true
+      interfaces: true
+      security: true
+      dhcp_new_clients: false
+      client_count: true
+      wan_traffic: true
+      client_usage: false

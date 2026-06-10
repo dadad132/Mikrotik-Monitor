@@ -1,0 +1,23 @@
+# Secrets & runtime state — never commit these
+config.yaml
+state.json
+*-state.json
+outbox/
+backups/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Stray / unrelated files in this workspace
+/main
+.sixth/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/

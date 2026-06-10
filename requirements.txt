@@ -1,0 +1,3 @@
+# MikroTik Monitor (mikromon) runtime dependencies
+librouteros>=3.2.1   # MikroTik RouterOS binary API client (works on v6 and v7)
+PyYAML>=6.0          # configuration file parsing
