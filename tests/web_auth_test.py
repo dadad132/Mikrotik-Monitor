@@ -44,10 +44,10 @@ def opener(redirect=True):
     return urllib.request.build_opener(*handlers)
 
 
-def req(op, path, data=None):
+def req(op, path, data=None, base=BASE):
     body = urllib.parse.urlencode(data).encode() if data else None
     try:
-        r = op.open(urllib.request.Request(BASE + path, data=body), timeout=5)
+        r = op.open(urllib.request.Request(base + path, data=body), timeout=5)
         return getattr(r, "status", r.code), r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "replace")
@@ -77,6 +77,34 @@ check("admin sees all devices",
 check("user scoped to allowed",
       a.allowed_devices(a.get_user("bob"), ["R1", "R2"]) == ["R2"])
 a.close()
+
+# ---- first-run setup (empty auth DB, separate server) ----------------------
+print("First-run setup (bootstrap admin in browser):")
+adb_empty = os.path.join(tmp, "empty.db")
+AuthStore(adb_empty).close()  # create schema, zero users
+srv0 = ThreadingHTTPServer(("127.0.0.1", 8097), web.make_handler(
+    mdb, sfile, AuthStore(adb_empty), web.SessionManager()))
+threading.Thread(target=srv0.serve_forever, daemon=True).start()
+B0 = "http://127.0.0.1:8097"
+try:
+    st, _ = req(opener(redirect=False), "/", base=B0)
+    check("no admin -> / redirects to /setup", st == 303)
+    st, body = req(opener(), "/setup", base=B0)
+    check("/setup shows create-admin form",
+          st == 200 and "administrator" in body.lower())
+    op0 = opener()
+    st, body = req(op0, "/setup", {"username": "root", "password": "rootpass"}, B0)
+    check("creating first admin logs in -> dashboard", st == 200 and "mikromon" in body)
+    st, _ = req(opener(redirect=False), "/setup", base=B0)
+    check("setup closed once an admin exists (-> /login)", st == 303)
+    a3 = AuthStore(adb_empty)
+    u = a3.get_user("root")
+    check("first admin persisted as admin/all-devices",
+          u and u["role"] == "admin" and u["devices"] == "*")
+    a3.close()
+finally:
+    srv0.shutdown()
+    srv0.server_close()
 
 # ---- live server -----------------------------------------------------------
 srv = ThreadingHTTPServer(("127.0.0.1", 8098), web.make_handler(

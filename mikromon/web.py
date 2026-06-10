@@ -26,7 +26,7 @@ import secrets
 import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from .auth import AuthStore
 from .metrics import MetricsStore
@@ -191,6 +191,24 @@ def _render_login(error: str = "") -> str:
             f'</form></div></div></body></html>')
 
 
+def _render_setup(error: str = "") -> str:
+    msg = f'<p style="color:#dc2626">{html.escape(error)}</p>' if error else ""
+    return (f'<!doctype html><html><head><meta charset="utf-8">'
+            f'<title>First-run setup</title><style>{_PAGE_CSS}</style></head><body>'
+            f'<div class="wrap"><div class="box" style="max-width:420px;'
+            f'margin:70px auto"><h2>Welcome to mikromon</h2>'
+            f'<p>Create the first <b>administrator</b> account to get started. '
+            f'You can add more users (and limit which devices they see) from the '
+            f'Admin page afterwards.</p>{msg}'
+            f'<form method="POST" action="/setup">'
+            f'<p><input name="username" placeholder="Admin username" autofocus '
+            f'style="width:100%"></p>'
+            f'<p><input name="password" type="password" '
+            f'placeholder="Password (min 6 characters)" style="width:100%"></p>'
+            f'<button class="btn" type="submit">Create admin account</button>'
+            f'</form></div></div></body></html>')
+
+
 def _render_admin(auth: AuthStore, known_devices, csrf: str, user) -> str:
     rows = []
     for u in auth.list_users():
@@ -343,6 +361,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if auth is None:
                 return self._serve_data(path, url, user=None, allowed=None)
 
+            # First-run bootstrap: with no admin yet, force creating one.
+            needs_setup = auth.count_admins() == 0
+            if path == "/setup":
+                if not needs_setup:
+                    return self._redirect("/login")
+                err = parse_qs(url.query).get("error", [""])[0]
+                return self._send(200, _render_setup(err),
+                                  "text/html; charset=utf-8")
+            if needs_setup:
+                return self._redirect("/setup")
+
             if path == "/login":
                 if self._session():
                     return self._redirect("/")
@@ -430,6 +459,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if auth is None:
                 return self._send(404, "not found")
             path = urlparse(self.path).path
+            if path == "/setup":
+                return self._post_setup()
             if path == "/login":
                 return self._post_login()
             if path == "/logout":
@@ -465,6 +496,19 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if flat.get("all"):
                 return "*"
             return multi.get("devices", [])
+
+        def _post_setup(self):
+            # Only valid while no admin exists (prevents abuse after setup).
+            if auth.count_admins() > 0:
+                return self._redirect("/login")
+            flat, _ = self._form()
+            try:
+                auth.add_user(flat.get("username", ""), flat.get("password", ""),
+                              role="admin", devices="*")
+            except Exception as exc:  # noqa: BLE001 — show the reason on the form
+                return self._redirect("/setup?error=" + quote(str(exc)))
+            token = sessions.create(flat["username"].strip())
+            return self._redirect("/", self._cookie_header(token))
 
         def _post_login(self):
             flat, _ = self._form()

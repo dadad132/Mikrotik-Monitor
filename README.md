@@ -268,7 +268,14 @@ log in as **admin/admin123** (sees both demo routers) or **branch/branch123**
 
 Set `auth_db:` in the config and the dashboard requires a **login**, with each
 user restricted to the devices an admin grants — users never see each other's
-routers. Create the first admin (then manage the rest from the `/admin` page):
+routers.
+
+**Getting started — create the first admin in the browser.** With no users yet,
+opening the dashboard redirects to a one-time **`/setup`** page to create the
+initial administrator. After that, `/setup` is disabled and you manage everyone
+from the **`/admin`** page (or the CLI below). No command line needed to start.
+
+CLI user management (equivalent to the `/admin` page):
 
 ```bash
 python -m mikromon useradd --user admin --password 'strong-pass' --role admin --devices '*' -c config.yaml
