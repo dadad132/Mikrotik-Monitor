@@ -187,7 +187,7 @@ def demo_config(outbox_dir: str = "outbox") -> AppConfig:
     return AppConfig(
         poll_interval=2, state_file="./demo-state.json", confirmations=1,
         smtp=None, outbox_dir=outbox_dir, metrics_db="./demo-metrics.db",
-        auth_db="./demo-auth.db",
+        auth_db="./demo-auth.db", devices_db="./demo-devices.db",
         devices=[_demo_device("DEMO-Router-HQ"), _demo_device("DEMO-Router-Branch")])
 
 

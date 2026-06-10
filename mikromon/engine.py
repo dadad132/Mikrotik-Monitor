@@ -26,8 +26,21 @@ class Engine:
         # `devices`/`notifiers` can be injected (used by the demo and tests).
         self.notifiers = (notifiers if notifiers is not None
                           else build_notifiers(config))
-        self.devices = (devices if devices is not None
-                        else [Device(d) for d in config.devices])
+        # Device source: injected > web-managed store (devices_db) > YAML.
+        self.devices_store = None
+        if devices is not None:
+            self.devices = devices
+        elif getattr(config, "devices_db", None):
+            from .devices_store import DevicesStore
+
+            self.devices_store = DevicesStore(config.devices_db)
+            seeded = self.devices_store.seed_from(config.devices, config.defaults)
+            if seeded:
+                log.info("Seeded %d device(s) from YAML into %s",
+                         seeded, config.devices_db)
+            self.devices = self._devices_from_store()
+        else:
+            self.devices = [Device(d) for d in config.devices]
         # Time source for checks (overridable so the demo can use a stable
         # simulated clock, making throughput math deterministic).
         self.now_fn = time.time
@@ -36,7 +49,11 @@ class Engine:
             self.metrics = MetricsStore(config.metrics_db)
             self.metrics.prune(getattr(config, "metrics_retention_days", 30))
         self._stop = threading.Event()
-        self.state.prune_unknown_devices({d.name for d in config.devices})
+        self.state.prune_unknown_devices({d.name for d in self.devices})
+
+    def _devices_from_store(self):
+        return [Device(c) for c in
+                self.devices_store.list_configs(self.config.defaults)]
 
     def _flush_metrics(self, ctx) -> None:
         if self.metrics and ctx.samples:
@@ -65,6 +82,10 @@ class Engine:
 
     def run_once(self) -> list:
         """Poll all devices once, dispatch alerts, persist state. Returns alerts."""
+        # Pick up devices added/edited/removed in the dashboard since last poll.
+        if self.devices_store is not None:
+            self.devices = self._devices_from_store()
+            self.state.prune_unknown_devices({d.name for d in self.devices})
         batch = []
         for device in self.devices:
             batch.extend(self._poll_device(device))

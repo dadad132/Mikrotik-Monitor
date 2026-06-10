@@ -264,6 +264,24 @@ simulated incident, then serves the dashboard populated with that data —
 log in as **admin/admin123** (sees both demo routers) or **branch/branch123**
 (sees only one), to see the access control in action.
 
+## Managing devices from the dashboard (no YAML editing)
+
+Set `devices_db:` in the config and admins manage routers entirely in the
+browser at **`/devices`** — add, edit, delete, and **test the connection** to a
+device, with no file editing. The monitor picks up changes on its **next poll**
+(no restart). On first run, any devices in `config.yaml` are imported once to
+seed the database; after that the database is the source of truth.
+
+- Each device captures host/DDNS, API port, credentials, SSL, WAN interfaces,
+  LAN subnets, client-count sources, and per-device check toggles.
+- **Test connection** does a live reachability + API check and shows the board,
+  version and uptime — handy when provisioning a new site.
+- New devices then appear in the per-user device list at `/admin`, so you can
+  grant the right people access (see below).
+
+> Device credentials are stored so the monitor can log into the router (like
+> `config.yaml` today); `devices.db` is gitignored — keep it private.
+
 ## Users & access control
 
 Set `auth_db:` in the config and the dashboard requires a **login**, with each

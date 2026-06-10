@@ -100,7 +100,8 @@ def main(argv=None) -> int:
         web.serve(config.metrics_db, config.state_file, config.web_host,
                   args.port or config.web_port, auth_db=config.auth_db,
                   secure_cookies=config.web_secure_cookies,
-                  metrics_token=config.metrics_token)
+                  metrics_token=config.metrics_token,
+                  devices_db=config.devices_db, defaults=config.defaults)
         return 0
 
     if args.command == "list-checks":
@@ -225,9 +226,10 @@ def _cmd_demo(args) -> int:
     from .notify import build_notifiers
 
     config = demo_config()
-    for path in (config.state_file, config.metrics_db, config.auth_db):
+    for path in (config.state_file, config.metrics_db, config.auth_db,
+                 config.devices_db):
         if path and os.path.exists(path):
-            os.unlink(path)  # start the story (and accounts) fresh
+            os.unlink(path)  # start the story (and accounts/devices) fresh
     devices = demo_devices(config)
     engine = Engine(config, devices=devices, notifiers=build_notifiers(config))
     frames = devices[0].frames
@@ -258,15 +260,22 @@ def _cmd_demo(args) -> int:
           f"Open the digests in ./{config.outbox_dir}/")
     if args.serve:
         from . import web
+        from .devices_store import DevicesStore
 
         seed_demo_users(config.auth_db)
+        ds = DevicesStore(config.devices_db)  # populate the /devices page
+        ds.seed_from(config.devices, config.defaults)
+        ds.close()
         port = args.port or config.web_port
         print(f"\nServing the dashboard with the demo data on "
               f"http://127.0.0.1:{port}  (Ctrl-C to stop)")
-        print("  Log in as  admin/admin123   (sees both routers, manages users)")
+        print("  Log in as  admin/admin123   (sees both routers; Devices + Admin)")
         print("         or  branch/branch123 (sees only DEMO-Router-Branch)")
+        print("  As admin, use the Devices page to add/edit/test routers, and")
+        print("  Admin to create users and choose which devices each one sees.")
         web.serve(config.metrics_db, config.state_file, "127.0.0.1", port,
-                  auth_db=config.auth_db)
+                  auth_db=config.auth_db, devices_db=config.devices_db,
+                  defaults=config.defaults)
     else:
         print("Tip: re-run with --serve to view this data in the web dashboard "
               "(with login + per-user device access).")

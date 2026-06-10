@@ -41,6 +41,12 @@ web:
 # Then manage the rest from the /admin page in the browser.
 auth_db: ./auth.db
 
+# Manage devices from the dashboard (admins use the /devices page to add, edit,
+# delete, and test routers) instead of editing this file. When set, the devices
+# below are imported once to seed it; after that the database is the source of
+# truth and the monitor picks up changes on its next poll (no restart needed).
+devices_db: ./devices.db
+
 # Accessing from anywhere (securely):
 #   * Easiest & safest: a tunnel — Cloudflare Tunnel, Tailscale, or ngrok —
 #     so you DON'T port-forward. Point it at 127.0.0.1:8080.

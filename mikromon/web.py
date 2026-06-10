@@ -29,8 +29,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
 from .auth import AuthStore
+from .config import DEFAULT_CHECKS
 from .metrics import MetricsStore
 from .util import human_bps
+
+_CLIENT_SOURCES = ["dhcp", "wireless", "arp", "hotspot"]
+esc = html.escape
 
 log = logging.getLogger(__name__)
 
@@ -129,7 +133,8 @@ _PAGE_CSS = """
 def _header(user) -> str:
     right = '<div style="font-size:12px">auto-refresh 10s</div>'
     if user:
-        links = ' <a href="/admin">Admin</a>' if user.get("role") == "admin" else ""
+        links = (' <a href="/devices">Devices</a> <a href="/admin">Admin</a>'
+                 if user.get("role") == "admin" else "")
         right = (f'<div style="font-size:12px">{html.escape(user["username"])}'
                  f' ({html.escape(user["role"])}){links} '
                  f'<a href="/logout">Log out</a></div>')
@@ -252,6 +257,100 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user) -> str:
             f'<p><a href="/">&larr; back to dashboard</a></p></div></body></html>')
 
 
+def _page(title: str, body: str) -> str:
+    return (f'<!doctype html><html><head><meta charset="utf-8">'
+            f'<title>{esc(title)}</title><style>{_PAGE_CSS}</style></head>'
+            f'<body>{body}</body></html>')
+
+
+def _render_devices(store, csrf, user, edit_name=None, msg="") -> str:
+    if store is None:
+        return _page("Devices", _header(user) + '<div class="wrap"><h1>Devices'
+                     '</h1><div class="box">Device management is not enabled. '
+                     'Set <code>devices_db:</code> in the config.</div></div>')
+    pre = (store.raw(edit_name) or {}) if edit_name else {}
+    wan = pre.get("wan") or {}
+
+    trows = ""
+    for n in store.names():
+        host = (store.raw(n) or {}).get("host", "")
+        trows += (
+            f'<tr><td><b>{esc(n)}</b></td><td>{esc(host)}</td>'
+            f'<td><a href="/devices?edit={quote(n)}">edit</a></td>'
+            f'<td>{_mini_form("/devices/test", csrf, n, "test", "btn")}</td>'
+            f'<td>{_mini_form("/devices/delete", csrf, n, "delete", "btn red", n)}'
+            f'</td></tr>')
+    if not trows:
+        trows = '<tr><td colspan="5">No devices yet — add one below.</td></tr>'
+
+    sources_sel = set(pre.get("client_count_sources") or ["dhcp", "wireless"])
+    src_boxes = "".join(
+        f'<label><input type="checkbox" name="sources" value="{s}"'
+        f'{" checked" if s in sources_sel else ""}> {s}</label> '
+        for s in _CLIENT_SOURCES)
+    checks_pre = pre.get("checks") or {}
+    chk_boxes = "".join(
+        f'<label><input type="checkbox" name="checks" value="{k}"'
+        f'{" checked" if checks_pre.get(k, DEFAULT_CHECKS[k]) else ""}> {k}</label> '
+        for k in DEFAULT_CHECKS)
+
+    def v(key, d=""):
+        return esc(pre.get(key, d))
+
+    form = f"""<form method="POST" action="/devices/save">
+      <input type="hidden" name="csrf" value="{csrf}">
+      <input type="hidden" name="original_name" value="{esc(edit_name or '')}">
+      <p>Name <input name="name" value="{v('name')}">
+         Host / DDNS <input name="host" value="{v('host')}">
+         API port <input name="api_port" size="6" value="{esc(str(pre.get('api_port', 8728)))}"></p>
+      <p>Username <input name="username" value="{v('username')}">
+         Password <input name="password" type="password"
+           placeholder="{'(unchanged)' if edit_name else ''}">
+         <label><input type="checkbox" name="use_ssl"
+           {' checked' if pre.get('use_ssl') else ''}> API-SSL</label>
+         <label><input type="checkbox" name="verify_ssl"
+           {' checked' if pre.get('verify_ssl') else ''}> verify cert</label></p>
+      <p>LAN subnets <input name="lan_subnets" size="34"
+         value="{esc(','.join(pre.get('lan_subnets') or []))}"> (comma-separated)</p>
+      <p>WAN primary iface <input name="wan_primary"
+           value="{esc((wan.get('primary') or {}).get('interface', ''))}">
+         backup iface <input name="wan_backup"
+           value="{esc((wan.get('backup') or {}).get('interface', ''))}"></p>
+      <p>Monitor interfaces <input name="monitor_interfaces" size="34"
+         value="{esc(','.join(pre.get('monitor_interfaces') or []))}">
+         (comma; blank = auto)</p>
+      <p>Client-count sources: {src_boxes}</p>
+      <p>Checks: {chk_boxes}</p>
+      <button class="btn" type="submit">{'Save changes' if edit_name else 'Add device'}</button>
+      {'<a href="/devices" style="margin-left:8px">cancel</a>' if edit_name else ''}
+    </form>"""
+    msg_html = f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else ""
+    inner = (f'<div class="wrap"><h1>Devices</h1>{msg_html}'
+             f'<div class="box"><table><tr><th>Name</th><th>Host</th><th></th>'
+             f'<th></th><th></th></tr>{trows}</table></div>'
+             f'<div class="box"><h2>{"Edit device" if edit_name else "Add a device"}'
+             f'</h2>{form}</div><p><a href="/">&larr; dashboard</a></p></div>')
+    return _page("Devices", _header(user) + inner)
+
+
+def _mini_form(action, csrf, name, label, cls, confirm=None) -> str:
+    onsub = (f' onsubmit="return confirm(\'Delete {esc(confirm)}?\')"'
+             if confirm else "")
+    return (f'<form class="inline" method="POST" action="{action}"{onsub}>'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            f'<input type="hidden" name="name" value="{esc(name)}">'
+            f'<button class="{cls}" type="submit">{label}</button></form>')
+
+
+def _render_test_result(name, ok, detail, user) -> str:
+    color = "#16a34a" if ok else "#dc2626"
+    inner = (f'<div class="wrap"><h1>Connection test: {esc(name)}</h1>'
+             f'<div class="box"><p style="color:{color};font-weight:700">'
+             f'{"SUCCESS" if ok else "FAILED"}</p><pre>{esc(detail)}</pre></div>'
+             f'<p><a href="/devices">&larr; back to devices</a></p></div>')
+    return _page("Test", _header(user) + inner)
+
+
 def _render_prometheus(store, allowed=None) -> str:
     lines = []
     for device, metric, label, value, _ts in store.all_latest():
@@ -291,7 +390,8 @@ class SessionManager:
 # ============================ HTTP handler =================================
 def make_handler(metrics_db, state_file, auth: AuthStore | None,
                  sessions: SessionManager, secure_cookies=False,
-                 metrics_token=None):
+                 metrics_token=None, devices_db=None, defaults=None):
+    defaults = defaults or {}
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "mikromon"
@@ -392,6 +492,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._redirect("/login")
             if path == "/admin":
                 return self._serve_admin(user)
+            if path == "/devices":
+                return self._serve_devices(url, user)
 
             store = self._store()
             allowed = AuthStore.allowed_devices(user, _known_devices(
@@ -454,6 +556,103 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 auth, known, self._session()["csrf"], user),
                 "text/html; charset=utf-8")
 
+        # ---- device management (admin only) ----
+        def _serve_devices(self, url, user):
+            if not AuthStore.is_admin(user):
+                return self._send(403, "forbidden")
+            edit = parse_qs(url.query).get("edit", [None])[0]
+            store = self._devstore()
+            try:
+                page = _render_devices(store, self._session()["csrf"], user,
+                                       edit_name=edit)
+            finally:
+                if store:
+                    store.close()
+            return self._send(200, page, "text/html; charset=utf-8")
+
+        def _devstore(self):
+            if not devices_db:
+                return None
+            from .devices_store import DevicesStore
+            return DevicesStore(devices_db)
+
+        def _devices_post(self, path, flat, multi, user):
+            store = self._devstore()
+            if store is None:
+                return self._send(400, "device management not enabled "
+                                       "(set devices_db in config)")
+            try:
+                if path == "/devices/delete":
+                    store.delete(flat.get("name", ""))
+                    return self._redirect("/devices")
+                if path == "/devices/test":
+                    return self._device_test(store, flat.get("name", ""), user)
+                if path == "/devices/save":
+                    raw = self._device_form_to_raw(store, flat, multi)
+                    store.upsert(raw, defaults,
+                                 original_name=flat.get("original_name") or None)
+                    return self._redirect("/devices")
+                return self._send(404, "not found")
+            except Exception as exc:  # noqa: BLE001 — surface validation errors
+                return self._send(400, f"Error: {exc}")
+            finally:
+                store.close()
+
+        @staticmethod
+        def _device_form_to_raw(store, flat, multi):
+            def csv(s):
+                return [x.strip() for x in (s or "").split(",") if x.strip()]
+            pwd = flat.get("password", "")
+            orig = flat.get("original_name") or None
+            if not pwd and orig:  # keep existing password when left blank on edit
+                pwd = (store.raw(orig) or {}).get("password", "")
+            checks_sel = set(multi.get("checks", []))
+            return {
+                "name": flat.get("name", "").strip(),
+                "host": flat.get("host", "").strip(),
+                "api_port": int(flat.get("api_port") or 8728),
+                "username": flat.get("username", ""),
+                "password": pwd,
+                "use_ssl": "use_ssl" in flat,
+                "verify_ssl": "verify_ssl" in flat,
+                "timeout": int(flat.get("timeout") or 10),
+                "lan_subnets": csv(flat.get("lan_subnets")),
+                "wan": {"primary": {"interface": flat.get("wan_primary", "").strip()},
+                        "backup": {"interface": flat.get("wan_backup", "").strip()}},
+                "monitor_interfaces": csv(flat.get("monitor_interfaces")),
+                "client_count_sources": multi.get("sources") or ["dhcp", "wireless"],
+                "checks": {k: (k in checks_sel) for k in DEFAULT_CHECKS},
+            }
+
+        def _device_test(self, store, name, user):
+            raw = store.raw(name)
+            if not raw:
+                return self._send(404, "no such device")
+            from .config import build_device
+            from .device import Device, DeviceError
+
+            cfg = build_device(raw, defaults)
+            dev = Device(cfg)
+            try:
+                if not dev.reachable():
+                    return self._send(200, _render_test_result(
+                        name, False, f"UNREACHABLE: no TCP response from "
+                        f"{cfg.host}:{cfg.api_port}", user),
+                        "text/html; charset=utf-8")
+                dev.connect()
+                res = dev.fetch(["resource"]).resource
+                detail = (f"board={res.get('board-name', '?')}  "
+                          f"version={res.get('version', '?')}  "
+                          f"uptime={res.get('uptime', '?')}  "
+                          f"cpu={res.get('cpu-load', '?')}%")
+                return self._send(200, _render_test_result(name, True, detail, user),
+                                  "text/html; charset=utf-8")
+            except DeviceError as exc:
+                return self._send(200, _render_test_result(name, False, str(exc),
+                                  user), "text/html; charset=utf-8")
+            finally:
+                dev.close()
+
         # ---- POST ----
         def do_POST(self):
             if auth is None:
@@ -473,6 +672,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             flat, multi = self._form()
             if flat.get("csrf") != self._session()["csrf"]:
                 return self._send(400, "bad csrf token")
+            if path.startswith("/devices/"):
+                return self._devices_post(path, flat, multi, user)
             try:
                 if path == "/admin/add":
                     auth.add_user(flat.get("username", ""), flat.get("password", ""),
@@ -523,19 +724,20 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
 
 def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,
-          secure_cookies=False, metrics_token=None):
+          secure_cookies=False, metrics_token=None, devices_db=None,
+          defaults=None):
     if metrics_db and not os.path.exists(metrics_db):
         log.warning("metrics DB %s not found yet — start the monitor first",
                     metrics_db)
     auth = AuthStore(auth_db) if auth_db else None
     if auth and not auth.count_admins():
-        log.warning("No admin users exist yet. Create one: "
-                    "python -m mikromon useradd --user admin --password ... "
-                    "--role admin -c <config>")
+        log.info("No admin yet — open the dashboard to create the first admin "
+                 "at /setup.")
     sessions = SessionManager()
     httpd = ThreadingHTTPServer(
         (host, port), make_handler(metrics_db, state_file, auth, sessions,
-                                   secure_cookies, metrics_token))
+                                   secure_cookies, metrics_token, devices_db,
+                                   defaults))
     scheme = "auth ON" if auth else "auth OFF (open)"
     log.info("Dashboard at http://%s:%d  [%s]  Prometheus: /metrics",
              host, port, scheme)

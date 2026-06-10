@@ -131,6 +131,8 @@ class AppConfig:
     auth_db: str | None = None      # if set, the dashboard requires login
     web_secure_cookies: bool = False  # set True when serving behind HTTPS
     metrics_token: str | None = None  # bearer/query token for Prometheus scraping
+    devices_db: str | None = None   # if set, devices are managed in the dashboard
+    defaults: dict = field(default_factory=lambda: dict(DEFAULT_THRESHOLDS))
     devices: list = field(default_factory=list)
 
 
@@ -182,41 +184,19 @@ def load_config(path: str) -> AppConfig:
         if not smtp.to_addrs:
             raise ConfigError("smtp.to_addrs must list at least one recipient.")
 
+    devices_db = raw.get("devices_db") or None
     devices = []
     raw_devices = raw.get("devices") or []
-    if not raw_devices:
-        raise ConfigError("No devices configured under 'devices:'.")
+    if not raw_devices and not devices_db:
+        raise ConfigError("No devices configured under 'devices:' (and no "
+                          "'devices_db:' set for web-managed devices).")
     seen = set()
     for i, d in enumerate(raw_devices):
-        where = f"devices[{i}]"
-        name = _require(d, "name", where)
-        if name in seen:
-            raise ConfigError(f"Duplicate device name: {name!r}")
-        seen.add(name)
-        wan_raw = d.get("wan") or {}
-        devices.append(DeviceConfig(
-            name=str(name),
-            host=str(_require(d, "host", where)),
-            api_port=int(d.get("api_port", 8728)),
-            username=str(d.get("username", "")),
-            password=str(d.get("password", "")),
-            use_ssl=bool(d.get("use_ssl", False)),
-            verify_ssl=bool(d.get("verify_ssl", False)),
-            timeout=int(d.get("timeout", 10)),
-            lan_subnets=list(d.get("lan_subnets") or []),
-            wan=WanConfig(
-                primary=_endpoint(wan_raw.get("primary")),
-                backup=_endpoint(wan_raw.get("backup")),
-                ping_targets=[str(t) for t in (wan_raw.get("ping_targets") or [])],
-            ),
-            monitor_interfaces=[str(x) for x in (d.get("monitor_interfaces") or [])],
-            client_count_sources=[str(x).lower() for x in
-                                  (d.get("client_count_sources")
-                                   or ["dhcp", "wireless"])],
-            traffic_interfaces=[str(x) for x in (d.get("traffic_interfaces") or [])],
-            checks={**DEFAULT_CHECKS, **(d.get("checks") or {})},
-            thresholds={**defaults, **(d.get("thresholds") or {})},
-        ))
+        dev = build_device(d, defaults, where=f"devices[{i}]")
+        if dev.name in seen:
+            raise ConfigError(f"Duplicate device name: {dev.name!r}")
+        seen.add(dev.name)
+        devices.append(dev)
 
     return AppConfig(
         poll_interval=int(raw.get("poll_interval", 60)),
@@ -232,5 +212,59 @@ def load_config(path: str) -> AppConfig:
         web_secure_cookies=bool((raw.get("web") or {}).get("secure_cookies", False)),
         metrics_token=(raw.get("web") or {}).get("metrics_token") or None,
         auth_db=raw.get("auth_db") or None,
+        devices_db=devices_db,
+        defaults=defaults,
         devices=devices,
     )
+
+
+def build_device(d: dict, defaults: dict, where: str = "device") -> DeviceConfig:
+    """Construct a validated DeviceConfig from a raw dict (YAML or the DB)."""
+    if not isinstance(d, dict):
+        raise ConfigError(f"{where}: device entry must be a mapping.")
+    wan_raw = d.get("wan") or {}
+    return DeviceConfig(
+        name=str(_require(d, "name", where)),
+        host=str(_require(d, "host", where)),
+        api_port=int(d.get("api_port", 8728) or 8728),
+        username=str(d.get("username", "")),
+        password=str(d.get("password", "")),
+        use_ssl=bool(d.get("use_ssl", False)),
+        verify_ssl=bool(d.get("verify_ssl", False)),
+        timeout=int(d.get("timeout", 10) or 10),
+        lan_subnets=list(d.get("lan_subnets") or []),
+        wan=WanConfig(
+            primary=_endpoint(wan_raw.get("primary")),
+            backup=_endpoint(wan_raw.get("backup")),
+            ping_targets=[str(t) for t in (wan_raw.get("ping_targets") or [])],
+        ),
+        monitor_interfaces=[str(x) for x in (d.get("monitor_interfaces") or [])],
+        client_count_sources=[str(x).lower() for x in
+                              (d.get("client_count_sources")
+                               or ["dhcp", "wireless"])],
+        traffic_interfaces=[str(x) for x in (d.get("traffic_interfaces") or [])],
+        checks={**DEFAULT_CHECKS, **(d.get("checks") or {})},
+        thresholds={**defaults, **(d.get("thresholds") or {})},
+    )
+
+
+def device_to_dict(cfg: DeviceConfig) -> dict:
+    """Serialize a DeviceConfig back to a plain dict (for storage / edit forms)."""
+    return {
+        "name": cfg.name, "host": cfg.host, "api_port": cfg.api_port,
+        "username": cfg.username, "password": cfg.password,
+        "use_ssl": cfg.use_ssl, "verify_ssl": cfg.verify_ssl,
+        "timeout": cfg.timeout, "lan_subnets": list(cfg.lan_subnets),
+        "wan": {
+            "primary": {"interface": cfg.wan.primary.interface,
+                        "gateway": cfg.wan.primary.gateway},
+            "backup": {"interface": cfg.wan.backup.interface,
+                       "gateway": cfg.wan.backup.gateway},
+            "ping_targets": list(cfg.wan.ping_targets),
+        },
+        "monitor_interfaces": list(cfg.monitor_interfaces),
+        "client_count_sources": list(cfg.client_count_sources),
+        "traffic_interfaces": list(cfg.traffic_interfaces),
+        "checks": dict(cfg.checks),
+        "thresholds": dict(cfg.thresholds),
+    }
