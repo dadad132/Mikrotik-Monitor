@@ -115,8 +115,31 @@ _PAGE_CSS = """
  .card{background:#fff;border-radius:10px;padding:14px 18px;
    box-shadow:0 1px 3px rgba(0,0,0,.1)}
  .card h2{font-size:16px;margin:0 0 10px;display:flex;align-items:center;gap:8px}
+ .card{border-left:4px solid #16a34a}
+ .card.warn{border-left-color:#d97706}.card.crit{border-left-color:#dc2626}
  .dot{width:12px;height:12px;border-radius:50%;display:inline-block}
  .state{margin-left:auto;font-size:11px;color:#6b7280}
+ /* NOC summary bar */
+ .noc{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));
+   gap:12px;padding:18px 20px 0}
+ .tile{background:#fff;border-radius:10px;padding:12px 14px;
+   box-shadow:0 1px 3px rgba(0,0,0,.1);border-top:3px solid #6b7280;cursor:default}
+ .tile.click{cursor:pointer}.tile.click:hover{box-shadow:0 2px 8px rgba(0,0,0,.18)}
+ .tile .num{font-size:28px;font-weight:700;line-height:1}
+ .tile .lbl{font-size:11px;color:#6b7280;text-transform:uppercase;
+   letter-spacing:.04em;margin-top:6px}
+ .tile.green{border-top-color:#16a34a}.tile.green .num{color:#16a34a}
+ .tile.red{border-top-color:#dc2626}.tile.red .num{color:#dc2626}
+ .tile.amber{border-top-color:#d97706}.tile.amber .num{color:#d97706}
+ .tile.planned{border-top-color:#cbd5e1}.tile.planned .num{color:#9ca3af;font-size:20px}
+ .tile.planned .lbl::after{content:" · soon";color:#9ca3af}
+ /* filter / search bar */
+ .fbar{display:flex;gap:8px;align-items:center;padding:16px 20px 0;flex-wrap:wrap}
+ .fbar input{flex:1;min-width:200px;padding:7px 10px;border:1px solid #d1d5db;
+   border-radius:6px}
+ .fbtn{background:#e5e7eb;border:0;padding:6px 12px;border-radius:6px;cursor:pointer;
+   font-size:13px}.fbtn.on{background:#2563eb;color:#fff}
+ .muted{color:#6b7280;font-size:12px}
  table{width:100%;border-collapse:collapse;font-size:13px}
  td,th{padding:4px 6px;border-bottom:1px solid #f0f0f0;text-align:left}
  .probs{margin-top:8px;color:#b91c1c;font-size:13px}.probs ul{margin:4px 0 0 18px}
@@ -142,10 +165,97 @@ def _header(user) -> str:
             f'{right}</header>')
 
 
+def _severity(d) -> str:
+    """Worst-first ordering key: offline = crit, any problem = warn, else ok."""
+    if not d["up"]:
+        return "crit"
+    return "warn" if d["problems"] else "ok"
+
+
+def _wan_unhealthy(d) -> bool:
+    keys = {p["key"] for p in d["problems"]}
+    return (not d["up"]) or any("wan" in k or "internet" in k for k in keys)
+
+
+def _fleet_summary(devs) -> dict:
+    """At-a-glance NOC counters derived from the live device views."""
+    total = len(devs)
+    online = sum(1 for d in devs if d["up"])
+    alerts = sum(len(d["problems"]) for d in devs)
+    wan_bad = sum(1 for d in devs if _wan_unhealthy(d))
+    lat = [d["metrics"]["latency_ms"] for d in devs if "latency_ms" in d["metrics"]]
+    vpns = [d["metrics"]["vpn_up"] for d in devs if "vpn_up" in d["metrics"]]
+    return {
+        "total": total, "online": online, "offline": total - online,
+        "alerts": alerts, "wan_ok": total - wan_bad, "wan_bad": wan_bad,
+        "latency": (sum(lat) / len(lat)) if lat else None,
+        "vpns": int(sum(vpns)) if vpns else None,
+    }
+
+
+def _tile(num, lbl, cls="", filt=None) -> str:
+    click = ' click" onclick="setf(\'%s\')' % filt if filt else ""
+    return (f'<div class="tile {cls}{click}"><div class="num">{num}</div>'
+            f'<div class="lbl">{lbl}</div></div>')
+
+
+def _render_noc_bar(s) -> str:
+    health = "green" if s["wan_bad"] == 0 else ("red" if s["offline"] else "amber")
+    lat = f'{s["latency"]:.0f} ms' if s["latency"] is not None else "—"
+    vpns = s["vpns"] if s["vpns"] is not None else "—"
+    return (
+        '<div class="noc">'
+        + _tile(s["total"], "Devices", filt="all")
+        + _tile(s["online"], "Online", "green", filt="all")
+        + _tile(s["offline"], "Offline", "red" if s["offline"] else "", filt="offline")
+        + _tile(s["alerts"], "Active alerts",
+                "amber" if s["alerts"] else "", filt="problems")
+        + _tile(f'{s["wan_ok"]}/{s["total"]}', "WAN healthy", health)
+        + _tile(lat, "Avg latency",
+                "" if s["latency"] is not None else "planned")
+        + _tile(vpns, "VPN tunnels",
+                "green" if s["vpns"] else "planned")
+        + "</div>")
+
+
+_DASH_JS = """
+<script>
+ var q=document.getElementById('q');
+ function apply(){
+   var t=(q&&q.value||'').toLowerCase();
+   var f=document.body.getAttribute('data-filter')||'all';
+   var n=0;
+   document.querySelectorAll('.card').forEach(function(c){
+     var nm=c.getAttribute('data-name'), sv=c.getAttribute('data-sev');
+     var show=!t||nm.indexOf(t)>=0;
+     if(show&&f==='problems') show=sv!=='ok';
+     if(show&&f==='offline') show=sv==='crit';
+     c.style.display=show?'':'none'; if(show)n++;
+   });
+   var e=document.getElementById('empty'); if(e)e.style.display=n?'none':'';
+ }
+ function setf(f){
+   document.body.setAttribute('data-filter',f);
+   try{sessionStorage.setItem('flt',f);}catch(e){}
+   document.querySelectorAll('.fbtn').forEach(function(b){
+     b.classList.toggle('on',b.getAttribute('data-f')===f);});
+   apply();
+ }
+ if(q) q.addEventListener('input',apply);
+ var saved='all'; try{saved=sessionStorage.getItem('flt')||'all';}catch(e){}
+ setf(saved);
+</script>"""
+
+
 def _render_dashboard(store, state, user=None, allowed=None) -> str:
+    devs = sorted(_all_devices(store, state, allowed),
+                  key=lambda d: ({"crit": 0, "warn": 1, "ok": 2}[_severity(d)],
+                                 d["device"].lower()))
+    summary = _fleet_summary(devs)
     cards = []
-    for d in _all_devices(store, state, allowed):
+    for d in devs:
         up = d["up"]
+        sev = _severity(d)
         dot = "#16a34a" if up else "#dc2626"
         m = d["metrics"]
         rows = []
@@ -170,15 +280,26 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
                         f'({html.escape(str(p["level"]))})</li>' for p in d["problems"])
         probs_html = (f'<div class="probs"><b>Active problems:</b><ul>{probs}</ul>'
                       f'</div>' if probs else '<div class="ok">No active problems</div>')
-        cards.append(f'<div class="card"><h2><span class="dot" style="background:'
+        cls = "card" + ("" if sev == "ok" else f" {sev}")
+        cards.append(f'<div class="{cls}" data-name="{html.escape(d["device"].lower())}"'
+                     f' data-sev="{sev}"><h2><span class="dot" style="background:'
                      f'{dot}"></span>{html.escape(d["device"])}<span class="state">'
                      f'{"ONLINE" if up else "OFFLINE"}</span></h2><table>'
                      f'{"".join(rows)}</table>{probs_html}</div>')
-    body = "".join(cards) or "<p style='padding:20px'>No devices to show.</p>"
+    grid = "".join(cards) or "<p style='padding:20px'>No devices to show.</p>"
+    fbar = ('<div class="fbar"><input id="q" placeholder="Filter devices by name…">'
+            '<button class="fbtn" data-f="all" onclick="setf(\'all\')">All</button>'
+            '<button class="fbtn" data-f="problems" onclick="setf(\'problems\')">'
+            'Problems</button>'
+            '<button class="fbtn" data-f="offline" onclick="setf(\'offline\')">'
+            'Offline</button></div>') if devs else ""
+    empty = ('<p id="empty" class="muted" style="padding:0 20px;display:none">'
+             'No devices match this filter.</p>')
     return (f'<!doctype html><html><head><meta charset="utf-8">'
             f'<meta http-equiv="refresh" content="10"><title>mikromon</title>'
             f'<style>{_PAGE_CSS}</style></head><body>{_header(user)}'
-            f'<div class="grid">{body}</div></body></html>')
+            f'{_render_noc_bar(summary)}{fbar}'
+            f'<div class="grid">{grid}</div>{empty}{_DASH_JS}</body></html>')
 
 
 def _render_login(error: str = "") -> str:
