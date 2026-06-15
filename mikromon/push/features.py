@@ -74,34 +74,62 @@ def _route_matches(route, link):
     return bool(link.gateway) and gw == link.gateway
 
 
+_MANGLE = ("ip", "firewall", "mangle")
+_POL_TAG = "mikromon:sdwan:pol:"   # mangle mark-routing rule
+_RT_TAG = "mikromon:sdwan:rt:"     # the matching marked default route
+
+
 def sdwan_read(pusher, cfg):
-    return _default_routes(pusher.api)
+    routes = _default_routes(pusher.api)
+    policy = [r for r in pusher.api.fetch(_MANGLE)
+              if str(r.get("comment", "")).startswith(_POL_TAG)]
+    return {"routes": routes, "policy": policy}
+
+
+def _policy_rows(current):
+    rows = []
+    for m in current.get("policy", []):
+        enc = m.get("comment", "")[len(_POL_TAG):]
+        subnet, _, via = enc.partition("|")
+        rows.append({"subnet": m.get("src-address", subnet), "via": via})
+    return rows
 
 
 def sdwan_summary(current, cfg):
-    if not current:
-        return ["No default (0.0.0.0/0) routes found on the router."]
-    return [f"{r.get('gateway', '?')} · distance {r.get('distance', '?')}"
-            f"{' · inactive' if r.get('active') in ('false', False) else ''}"
-            for r in current]
+    routes = current.get("routes", [])
+    lines = [f"{r.get('gateway', '?')} · distance {r.get('distance', '?')}"
+             f"{' · inactive' if r.get('active') in ('false', False) else ''}"
+             for r in routes] or ["No default (0.0.0.0/0) routes found."]
+    lines.append(f"{len(current.get('policy', []))} LAN→WAN policy rule(s)")
+    return lines
 
 
 def sdwan_form(current, cfg):
     links = ", ".join(e.label(i) for i, e in enumerate(cfg.wan.links)) or "(none)"
     return [
-        {"type": "select", "name": "mode", "label": "Mode",
-         "options": [("failover", "Failover (strict priority)"),
-                     ("loadbalance", "Load balance (share equally)")],
+        {"type": "select", "name": "mode", "label": "Failover / load-balance mode",
+         "options": [("failover", "Failover — strict priority (top WAN first)"),
+                     ("loadbalance", "Load balance — share across links")],
          "value": "failover"},
-        {"type": "static", "label": "WAN uplinks (priority order)", "value": links,
-         "hint": "Edit the order on the Devices page. Failover sets each link's "
-                 "route distance to its priority; load-balance sets them equal."},
+        {"type": "static", "label": "Using these WAN uplinks (priority order)",
+         "value": links,
+         "hint": "Edit them in the WAN uplinks box above. Apply sets each link's "
+                 "default-route distance to its priority (or equal for load-balance)."},
+        {"type": "rows", "name": "pol",
+         "label": "Send specific LANs out a chosen WAN (policy routing)",
+         "cols": [("subnet", "LAN subnet or host", "192.168.88.0/24"),
+                  ("via", "out this WAN (interface or gateway)", "ether1")],
+         "rows": _policy_rows(current),
+         "hint": "Each row marks that source and routes it via the chosen WAN "
+                 "(mangle mark + marked default route). Leave empty for none."},
     ]
 
 
 def sdwan_plan(pusher, cfg, flat, multi):
     mode = flat.get("mode", "failover")
-    routes = _default_routes(pusher.api)
+    # distance for failover/load-balance — skip our own marked policy routes
+    routes = [r for r in _default_routes(pusher.api)
+              if not str(r.get("comment", "")).startswith("mikromon:sdwan")]
     ops = []
     for i, link in enumerate(cfg.wan.links):
         want = "1" if mode == "loadbalance" else str(i + 1)
@@ -109,7 +137,28 @@ def sdwan_plan(pusher, cfg, flat, multi):
             if _route_matches(r, link) and _norm(r.get("distance", "")) != want:
                 ops.append(_set_field(_ROUTE, r, "distance", want,
                                       f"route via {link.label(i)}"))
-    return Plan(cfg.name, ops, summary=f"sd-wan {mode}")
+    # per-subnet policy: a mangle mark + a marked default route per row
+    mangle_desired, route_desired = [], []
+    for r in _rows(multi, "pol", ("subnet", "via")):
+        subnet, via = r["subnet"], r["via"]
+        if not subnet or not via:
+            continue
+        mark = "mm-" + _slug(via)
+        enc = f"{subnet}|{via}"
+        mangle_desired.append({
+            "chain": "prerouting", "src-address": subnet, "action": "mark-routing",
+            "new-routing-mark": mark, "passthrough": "yes", "comment": _POL_TAG + enc})
+        route_desired.append({
+            "dst-address": "0.0.0.0/0", "gateway": via, "routing-mark": mark,
+            "comment": _RT_TAG + enc})
+    mangle_plan = pusher.plan_managed_list(
+        _MANGLE, "comment", mangle_desired,
+        owns=_prefix_owner(_POL_TAG), label="policy mark")
+    route_plan = pusher.plan_managed_list(
+        _ROUTE, "comment", route_desired,
+        owns=_prefix_owner(_RT_TAG), label="policy route")
+    return Plan(cfg.name, ops + mangle_plan.ops + route_plan.ops,
+                summary=f"sd-wan {mode}")
 
 
 # ===========================================================================

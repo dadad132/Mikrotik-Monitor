@@ -202,6 +202,11 @@ _PAGE_CSS = """
    font-weight:700;flex-shrink:0}
  .wanrow input{flex:1;min-width:90px}
  .wanrow .wandel{padding:4px 10px;line-height:1}
+ .rowtbl{width:100%;margin-top:6px}
+ .rowtbl th{font-size:11px;color:#64748b;text-transform:uppercase;
+   letter-spacing:.03em;padding:4px 6px;border-bottom:1px solid #e2e8f0}
+ .rowtbl td{padding:4px 6px;border-bottom:1px solid #f1f5f9}
+ .rowtbl input{padding:6px 8px}
  .btn{background:#2563eb;color:#fff;border:0;padding:8px 15px;border-radius:7px;
    cursor:pointer;font:inherit;font-weight:600}.btn:hover{background:#1d4ed8}
  .btn.red{background:#dc2626}.btn.red:hover{background:#b91c1c}
@@ -730,7 +735,9 @@ _FEATURE_JS = """
 <script>
  function pushAddRow(name){
    var t=document.getElementById('tmpl-'+name);
-   document.getElementById('rows-'+name).appendChild(t.content.cloneNode(true));
+   var host=document.querySelector('#rows-'+name+' tbody')
+            || document.getElementById('rows-'+name);
+   host.appendChild(t.content.cloneNode(true));
  }
 </script>"""
 
@@ -768,22 +775,23 @@ def _field_html(desc) -> str:
     if t == "rows":
         cols = desc["cols"]
         name = desc["name"]
+        ths = "".join(f"<th>{esc(lbl)}</th>" for _c, lbl, _ph in cols) + "<th></th>"
 
         def row_html(r):
-            ins = "".join(
-                f'<input name="{name}__{c}" placeholder="{esc(ph)}" '
-                f'value="{esc((r or {}).get(c, ""))}">' for c, _lbl, ph in cols)
-            return (f'<div class="wanrow">{ins}<button type="button" '
-                    f'class="btn ghost" onclick="this.parentNode.remove()">'
-                    f'&times;</button></div>')
-        heads = " · ".join(lbl for _c, lbl, _ph in cols)
+            tds = "".join(
+                f'<td><input name="{name}__{c}" placeholder="{esc(ph)}" '
+                f'value="{esc((r or {}).get(c, ""))}" style="width:100%"></td>'
+                for c, _lbl, ph in cols)
+            return (f'<tr>{tds}<td><button type="button" class="btn ghost" '
+                    f'title="remove row" onclick="this.closest(\'tr\').remove()">'
+                    f'&times;</button></td></tr>')
         body = "".join(row_html(r) for r in desc.get("rows", [])) + row_html({})
-        return (f'<div class="f full"><label class="f">{esc(label)} '
-                f'<span class="muted">({esc(heads)})</span></label>'
-                f'<div id="rows-{name}">{body}</div>'
+        return (f'<div class="f full"><label class="f">{esc(label)}</label>'
+                f'<table class="rowtbl" id="rows-{name}"><thead><tr>{ths}</tr>'
+                f'</thead><tbody>{body}</tbody></table>'
                 f'<button type="button" class="btn ghost" '
-                f'onclick="pushAddRow(\'{name}\')" style="margin-top:4px">+ Add row'
-                f'</button>{hint}'
+                f'onclick="pushAddRow(\'{name}\')" style="margin-top:6px">'
+                f'+ Add row</button>{hint}'
                 f'<template id="tmpl-{name}">{row_html({})}</template></div>')
     return ""
 
@@ -852,10 +860,57 @@ def _adopt_box(name, slug, feature, csrf, unmanaged) -> str:
             f'{rows}</table></div>')
 
 
+def _wan_uplink_editor(name, cfg, csrf) -> str:
+    """Editable WAN uplink list (saved to the device record, not pushed)."""
+    def row(link):
+        return (f'<tr>'
+                f'<td><input name="link_name" placeholder="ISP name (Vodacom)" '
+                f'value="{esc(link.name if link else "")}" style="width:100%"></td>'
+                f'<td><input name="link_iface" placeholder="ether1 / lte1" '
+                f'value="{esc(link.interface if link else "")}" style="width:100%">'
+                f'</td>'
+                f'<td><input name="link_gw" placeholder="gateway IP (optional)" '
+                f'value="{esc(link.gateway if link else "")}" style="width:100%">'
+                f'</td><td><button type="button" class="btn ghost" '
+                f'onclick="this.closest(\'tr\').remove()">&times;</button></td></tr>')
+    links = list(getattr(cfg.wan, "links", [])) if cfg else []
+    body = "".join(row(link) for link in links) + row(None)
+    return (f'<div class="box"><h2>WAN uplinks</h2>'
+            f'<p class="muted">List your internet links in <b>priority order</b> '
+            f'(top = primary). Failover and load-balancing below use this order. '
+            f'Saved on the device — no router change.</p>'
+            f'<form method="POST" action="/device/wan">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            f'<input type="hidden" name="device" value="{esc(name)}">'
+            f'<table class="rowtbl" id="rows-wl"><thead><tr><th>Name</th>'
+            f'<th>Interface</th><th>Gateway</th><th></th></tr></thead>'
+            f'<tbody>{body}</tbody></table>'
+            f'<button type="button" class="btn ghost" onclick="pushAddRow(\'wl\')" '
+            f'style="margin-top:6px">+ Add uplink</button>'
+            f'<div class="actions" style="margin-top:12px">'
+            f'<button class="btn" type="submit">Save WAN uplinks</button></div>'
+            f'</form><template id="tmpl-wl">{row(None)}</template></div>')
+
+
+_TAB_INTRO = {
+    "sdwan": "Add your internet links, set failover or load-balancing priority, "
+             "and choose which LANs go out which WAN.",
+    "security": "Toggle common firewall protections. Existing rules below can be "
+                "viewed; mikromon only manages the ones it creates.",
+    "nextdns": "Point DNS at a filtering service and list any IPs that bypass it.",
+    "qos": "Cap upload/download speed for a subnet or interface (simple queues). "
+           "Add a row, then Preview.",
+    "portfwd": "Forward an external port to an internal device, or adopt forwards "
+               "the router already has.",
+    "interfaces": "A read-only view of the router's ports, VLANs and bridges.",
+    "remote": "Grant a temporary firewall opening for Winbox/SSH/WebFig.",
+}
+
+
 def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                         fields=None, preview=None, submitted=None, error="",
                         msg="", recent=None, facts=None, unmanaged=None,
-                        confirm_action="/device/push") -> str:
+                        confirm_action="/device/push", cfg=None) -> str:
     tabbar = _device_tabbar(name, slug, AuthStore.is_admin(user or {}))
     q = quote(name)
     banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
@@ -900,10 +955,16 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
             form = ""  # read-only feature (e.g. Interfaces)
         body = state + form + _adopt_box(name, slug, feature, csrf, unmanaged)
 
+    # The SD-WAN tab gets an inline WAN-uplink editor (device metadata, so it
+    # works even when the router is unreachable). Hidden during the confirm step.
+    wan_editor = (_wan_uplink_editor(name, cfg, csrf)
+                  if slug == "sdwan" and preview is None else "")
     logbox = _recent_log_box(recent or [], device=name)
+    intro = (f'<p class="muted" style="margin:-6px 0 14px">{_TAB_INTRO[slug]}</p>'
+             if slug in _TAB_INTRO else "")
     inner = (f'<div class="wrap" style="max-width:1100px">'
-             f'<h1>{esc(name)} &middot; {esc(feature["title"])}</h1>{tabbar}'
-             f'{_facts_strip(facts or {})}{banner}{err}{body}{logbox}'
+             f'<h1>{esc(name)} &middot; {esc(feature["title"])}</h1>{tabbar}{intro}'
+             f'{_facts_strip(facts or {})}{banner}{err}{wan_editor}{body}{logbox}'
              f'<p class="muted">These engines are experimental — every push is '
              f'dry-run-first and logged above so you can see exactly what the '
              f'router accepted or rejected.</p>'
@@ -1552,14 +1613,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             recent = audit.recent(device=name, limit=8) if audit else []
             if audit:
                 audit.close()
+            from .config import build_device
+
+            cfg = build_device(raw, defaults)  # device metadata (no router needed)
             summary_lines = fields = unmanaged = None
             if preview is None and not error:
-                from .config import build_device
                 from .device import DeviceError
                 from .push import Pusher, PushError, rw_device
                 from .push.api import PushApi
 
-                cfg = build_device(raw, defaults)
                 dev = rw_device(cfg)
                 api = PushApi(dev)
                 try:
@@ -1579,8 +1641,37 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 name, user, slug, feature, csrf, summary_lines=summary_lines,
                 fields=fields, preview=preview, submitted=submitted, error=error,
                 msg=msg, recent=recent, facts=facts, unmanaged=unmanaged,
-                confirm_action=confirm_action)
+                confirm_action=confirm_action, cfg=cfg)
             return self._send(200, page, "text/html; charset=utf-8")
+
+        def _device_wan_post(self, flat, multi, user):
+            if not AuthStore.is_admin(user or {}):
+                return self._send(403, "forbidden")
+            name = flat.get("device", "")
+            store = self._devstore()
+            if store is None:
+                return self._send(400, "device management not enabled")
+            raw = store.raw(name)
+            if raw is None:
+                store.close()
+                return self._send(404, "no such device")
+            links = []
+            for nm, ifc, gw in zip(multi.get("link_name", []),
+                                   multi.get("link_iface", []),
+                                   multi.get("link_gw", [])):
+                nm, ifc, gw = nm.strip(), ifc.strip(), gw.strip()
+                if nm or ifc or gw:
+                    links.append({"name": nm, "interface": ifc, "gateway": gw})
+            raw["wan"] = {"links": links,
+                          "ping_targets": (raw.get("wan") or {}).get("ping_targets", [])}
+            try:
+                store.upsert(raw, defaults, original_name=name)
+            except Exception as exc:  # noqa: BLE001 — surface validation errors
+                store.close()
+                return self._send(400, f"Error: {exc}")
+            store.close()
+            return self._redirect(f"/device?name={quote(name)}&tab=sdwan&msg=" +
+                                  quote("WAN uplinks saved."))
 
         def _device_adopt_post(self, flat, user):
             from .config import build_device
@@ -1808,6 +1899,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._device_push_post(flat, multi, user)
             if path == "/device/adopt":
                 return self._device_adopt_post(flat, user)
+            if path == "/device/wan":
+                return self._device_wan_post(flat, multi, user)
             try:
                 if path == "/admin/add":
                     auth.add_user(flat.get("username", ""), flat.get("password", ""),

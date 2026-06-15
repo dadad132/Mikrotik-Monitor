@@ -348,6 +348,28 @@ check("portfwd_unmanaged offers only dst-nat rules (not masquerade)",
       [u["id"] for u in um] == ["*1"])
 
 
+# ---- 11. sd-wan: failover distances + per-subnet policy --------------------
+print("sd-wan:")
+link1 = _t.SimpleNamespace(interface="ether1", gateway="", name="ISP1",
+                           label=lambda i=0: "ISP1")
+scfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[link1]))
+sapi = FakeApi({("ip", "route"): [
+    {".id": "*1", "dst-address": "0.0.0.0/0", "gateway": "ether1",
+     "distance": "5"}],
+    ("ip", "firewall", "mangle"): []})
+sp = Pusher(scfg, sapi, dry_run=True)
+plan = F.sdwan_plan(sp, scfg, {"mode": "failover"},
+                    {"pol__subnet": ["10.0.0.0/24"], "pol__via": ["ether2"]})
+check("failover sets the primary link's route distance to 1",
+      any(o.action == "set" and o.params.get("distance") == "1" for o in plan.ops))
+check("policy adds a mangle mark-routing rule",
+      any(o.path == ("ip", "firewall", "mangle")
+          and o.params.get("action") == "mark-routing" for o in plan.ops))
+check("policy adds a marked default route",
+      any(o.path == ("ip", "route") and o.params.get("routing-mark")
+          and o.params.get("dst-address") == "0.0.0.0/0" for o in plan.ops))
+
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

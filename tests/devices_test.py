@@ -89,11 +89,29 @@ B = "http://127.0.0.1:8096"
 
 
 def op_login(user, pw):
-    op = urllib.request.build_opener(
-        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    cj = http.cookiejar.CookieJar()
+    op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
     op.open(urllib.request.Request(B + "/login", data=urllib.parse.urlencode(
         {"username": user, "password": pw}).encode()), timeout=5)
+    op.cj = cj
     return op
+
+
+class _NoRedir(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None  # don't auto-follow 303 (the target may poll a router)
+
+
+def post_status(op, path, data):
+    """POST and return just the status, WITHOUT following the 303 redirect."""
+    o = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(op.cj), _NoRedir)
+    body = urllib.parse.urlencode(data, doseq=True).encode()
+    try:
+        r = o.open(urllib.request.Request(B + path, data=body), timeout=8)
+        return getattr(r, "status", r.code)
+    except urllib.error.HTTPError as e:
+        return e.code
 
 
 def get(op, path):
@@ -170,6 +188,20 @@ try:
     st, _ = post(nobody, "/device/push",
                  {"csrf": "x", "device": "WebR1", "feature": "security"})
     check("non-admin blocked from pushing config (403)", st == 403)
+    # --- WAN uplinks editable from the SD-WAN tab (saved to the device) ---
+    st = post_status(admin, "/device/wan",
+                     {"csrf": csrf, "device": "WebR1",
+                      "link_name": ["Fibre", "LTE"],
+                      "link_iface": ["ether1", "lte1"], "link_gw": ["", ""]})
+    check("WAN save accepted (redirect)", st == 303)
+    saved = DevicesStore(wdb)
+    raw = saved.raw("WebR1")
+    check("WAN uplinks saved from the SD-WAN tab",
+          [l["interface"] for l in raw["wan"]["links"]] == ["ether1", "lte1"])
+    saved.close()
+    st = post_status(nobody, "/device/wan",
+                     {"csrf": "x", "device": "WebR1", "link_iface": ["x"]})
+    check("non-admin blocked from editing WAN (403)", st == 403)
     st, _ = post(admin, "/devices/delete", {"csrf": csrf, "name": "WebR1"})
     saved = DevicesStore(wdb)
     check("device deleted via web", saved.names() == [])
