@@ -157,6 +157,19 @@ try:
     check("non-admin blocked from the Backups tab (403)", st == 403)
     st, _ = post(nobody, "/device/backup", {"csrf": "x", "device": "WebR1"})
     check("non-admin blocked from creating a backup (403)", st == 403)
+    # --- all engines opened: device tabs + activity log ---
+    st, body = get(admin, "/device?name=WebR1")
+    check("device tab bar links every engine (sd-wan/security/qos/portfwd)",
+          all(s in body for s in ("tab=sdwan", "tab=security", "tab=qos",
+                                  "tab=portfwd", "tab=nextdns", "tab=remote",
+                                  "tab=interfaces")))
+    st, body = get(admin, "/logs")
+    check("admin can open the activity log", st == 200 and "activity log" in body.lower())
+    st, _ = get(nobody, "/logs")
+    check("non-admin blocked from the activity log (403)", st == 403)
+    st, _ = post(nobody, "/device/push",
+                 {"csrf": "x", "device": "WebR1", "feature": "security"})
+    check("non-admin blocked from pushing config (403)", st == 403)
     st, _ = post(admin, "/devices/delete", {"csrf": csrf, "name": "WebR1"})
     saved = DevicesStore(wdb)
     check("device deleted via web", saved.names() == [])

@@ -266,7 +266,8 @@ def _nav(user, active) -> str:
         return ""
     items = [("/", "Dashboard"), ("/inventory", "Inventory")]
     if user.get("role") == "admin":
-        items += [("/devices", "Devices"), ("/admin", "Users")]
+        items += [("/devices", "Devices"), ("/logs", "Activity"),
+                  ("/admin", "Users")]
     links = "".join(
         f'<a href="{href}" class="{"on" if href == active else ""}">{label}</a>'
         for href, label in items)
@@ -510,8 +511,14 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
 
 _DEVICE_TABS = ["Overview", "SD-WAN", "Security", "NextDNS", "QoS",
                 "Port forwarding", "Interfaces", "Remote access", "Backups"]
-# Tabs that are wired to the real engine today (the rest show as "soon").
-_LIVE_TABS = {"Overview": "", "Backups": "backups"}
+# label -> url slug (all tabs are wired to the engine now)
+_LIVE_TABS = {"Overview": "", "SD-WAN": "sdwan", "Security": "security",
+              "NextDNS": "nextdns", "QoS": "qos", "Port forwarding": "portfwd",
+              "Interfaces": "interfaces", "Remote access": "remote",
+              "Backups": "backups"}
+# tabs that WRITE to the router (admins only); Overview + Interfaces are read-only
+_ADMIN_TABS = {"sdwan", "security", "nextdns", "qos", "portfwd", "remote",
+               "backups"}
 
 
 def _device_tabbar(name, active, is_admin=True) -> str:
@@ -519,8 +526,7 @@ def _device_tabbar(name, active, is_admin=True) -> str:
     out = []
     for t in _DEVICE_TABS:
         slug = _LIVE_TABS.get(t)
-        # Backups writes to the router → admins only; others are read-only.
-        live = slug is not None and (t != "Backups" or is_admin)
+        live = slug is not None and not (slug in _ADMIN_TABS and not is_admin)
         if live:
             href = f"/device?name={q}" + (f"&tab={slug}" if slug else "")
             cls = "on" if (slug or "overview") == active else ""
@@ -717,6 +723,173 @@ def _render_device_backups(name, user, facts, csrf, *, backups=None,
              f'{_facts_strip(facts)}{banner}{err}{action}'
              f'<p><a href="/device?name={q}">&larr; overview</a></p></div>')
     return _page(esc(name) + " · Backups", _header(user, "/") + inner)
+
+
+# ---- generic feature tabs (SD-WAN / Security / NextDNS / QoS / …) ----------
+_FEATURE_JS = """
+<script>
+ function pushAddRow(name){
+   var t=document.getElementById('tmpl-'+name);
+   document.getElementById('rows-'+name).appendChild(t.content.cloneNode(true));
+ }
+</script>"""
+
+
+def _field_html(desc) -> str:
+    t = desc.get("type")
+    label = desc.get("label", "")
+    hint = (f'<div class="muted" style="margin-top:3px">{desc["hint"]}</div>'
+            if desc.get("hint") else "")
+    if t == "toggle":
+        ck = " checked" if desc.get("on") else ""
+        d = (f'<div class="muted">{esc(desc["desc"])}</div>'
+             if desc.get("desc") else "")
+        return (f'<div class="f"><label class="chk"><input type="checkbox" '
+                f'name="{desc["name"]}" value="{esc(desc["value"])}"{ck}> '
+                f'<b>{esc(label)}</b></label>{d}</div>')
+    if t == "text":
+        return (f'<div class="f"><label class="f">{esc(label)}</label>'
+                f'<input name="{desc["name"]}" value="{esc(desc.get("value",""))}" '
+                f'placeholder="{esc(desc.get("placeholder",""))}" '
+                f'style="width:100%">{hint}</div>')
+    if t == "textarea":
+        return (f'<div class="f full"><label class="f">{esc(label)}</label>'
+                f'<textarea name="{desc["name"]}" rows="4" style="width:100%">'
+                f'{esc(desc.get("value",""))}</textarea>{hint}</div>')
+    if t == "select":
+        opts = "".join(
+            f'<option value="{esc(v)}"{" selected" if v == desc.get("value") else ""}>'
+            f'{esc(lbl)}</option>' for v, lbl in desc["options"])
+        return (f'<div class="f"><label class="f">{esc(label)}</label>'
+                f'<select name="{desc["name"]}">{opts}</select>{hint}</div>')
+    if t == "static":
+        return (f'<div class="f full"><label class="f">{esc(label)}</label>'
+                f'<div>{esc(desc.get("value",""))}</div>{hint}</div>')
+    if t == "rows":
+        cols = desc["cols"]
+        name = desc["name"]
+
+        def row_html(r):
+            ins = "".join(
+                f'<input name="{name}__{c}" placeholder="{esc(ph)}" '
+                f'value="{esc((r or {}).get(c, ""))}">' for c, _lbl, ph in cols)
+            return (f'<div class="wanrow">{ins}<button type="button" '
+                    f'class="btn ghost" onclick="this.parentNode.remove()">'
+                    f'&times;</button></div>')
+        heads = " · ".join(lbl for _c, lbl, _ph in cols)
+        body = "".join(row_html(r) for r in desc.get("rows", [])) + row_html({})
+        return (f'<div class="f full"><label class="f">{esc(label)} '
+                f'<span class="muted">({esc(heads)})</span></label>'
+                f'<div id="rows-{name}">{body}</div>'
+                f'<button type="button" class="btn ghost" '
+                f'onclick="pushAddRow(\'{name}\')" style="margin-top:4px">+ Add row'
+                f'</button>{hint}'
+                f'<template id="tmpl-{name}">{row_html({})}</template></div>')
+    return ""
+
+
+def _hidden_from_multi(multi, skip=("csrf", "apply")) -> str:
+    out = []
+    for k, vals in multi.items():
+        if k in skip:
+            continue
+        for v in vals:
+            out.append(f'<input type="hidden" name="{esc(k)}" value="{esc(v)}">')
+    return "".join(out)
+
+
+def _log_status_badge(status) -> str:
+    cls = {"ok": "ok", "error": "crit", "preview": "warn",
+           "rolled-back": "warn"}.get(status, "warn")
+    return f'<span class="badge {cls}">{esc(status)}</span>'
+
+
+def _recent_log_box(recent, device=None) -> str:
+    if not recent:
+        return ('<div class="box"><h2>Recent activity</h2>'
+                '<p class="muted">No push activity logged yet.</p></div>')
+    rows = ""
+    for r in recent:
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ts"]))
+        dev = f'<td>{esc(r["device"])}</td>' if device is None else ""
+        rows += (f'<tr><td class="muted">{when}</td>{dev}'
+                 f'<td>{esc(r["feature"])}</td><td>{esc(r["mode"])}</td>'
+                 f'<td>{_log_status_badge(r["status"])}</td>'
+                 f'<td>{esc(r["summary"])}'
+                 f'<details><summary class="muted">detail</summary>'
+                 f'<pre style="white-space:pre-wrap;background:#f8fafc;padding:8px;'
+                 f'border-radius:6px">{esc(r["detail"])}</pre></details></td></tr>')
+    devh = "<th>Device</th>" if device is None else ""
+    return (f'<div class="box"><h2>Recent activity</h2><table>'
+            f'<tr><th>When</th>{devh}<th>Feature</th><th>Mode</th><th>Status</th>'
+            f'<th>Summary</th></tr>{rows}</table></div>')
+
+
+def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
+                        fields=None, preview=None, submitted=None, error="",
+                        msg="", recent=None, facts=None) -> str:
+    tabbar = _device_tabbar(name, slug, AuthStore.is_admin(user or {}))
+    q = quote(name)
+    banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
+              f'</div>' if msg else "")
+    err = (f'<div class="box" style="border-left:4px solid #dc2626">'
+           f'<b>Could not reach the router:</b> {esc(error)}<br>'
+           f'<span class="muted">See the activity log below for the full error. '
+           f'Check the host and the read-write push user on the Devices page.'
+           f'</span></div>' if error else "")
+
+    if preview is not None:
+        body = (f'<div class="box"><h2>Dry run — nothing has been written yet</h2>'
+                f'<pre style="background:#f8fafc;padding:12px;border-radius:8px;'
+                f'white-space:pre-wrap">{esc(preview.diff_text())}</pre>'
+                f'<form method="POST" action="/device/push" class="actions">'
+                f'<input type="hidden" name="csrf" value="{csrf}">'
+                f'<input type="hidden" name="apply" value="1">'
+                f'{_hidden_from_multi(submitted or {})}'
+                f'<button class="btn" type="submit">Confirm &amp; apply to the '
+                f'router</button>'
+                f'<a class="btn ghost" href="/device?name={q}&tab={slug}">Cancel'
+                f'</a></form></div>')
+    elif error:
+        body = ""
+    else:
+        sm = "".join(f'<li>{esc(s)}</li>' for s in (summary_lines or []))
+        state = (f'<div class="box"><h2>Current</h2><ul style="margin:0 0 0 18px">'
+                 f'{sm}</ul></div>')
+        if fields is not None:
+            ff = "".join(_field_html(d) for d in fields)
+            preview_btn = ('<button class="btn" type="submit">Preview changes '
+                           '(dry-run)</button>')
+            form = (f'<div class="box"><h2>{esc(feature["title"])}</h2>'
+                    f'<form method="POST" action="/device/push">'
+                    f'<input type="hidden" name="csrf" value="{csrf}">'
+                    f'<input type="hidden" name="device" value="{esc(name)}">'
+                    f'<input type="hidden" name="feature" value="{esc(slug)}">'
+                    f'<div class="fields">{ff}</div>'
+                    f'<div class="actions" style="margin-top:14px">{preview_btn}'
+                    f'</div></form></div>')
+        else:
+            form = ""  # read-only feature (e.g. Interfaces)
+        body = state + form
+
+    logbox = _recent_log_box(recent or [], device=name)
+    inner = (f'<div class="wrap" style="max-width:1100px">'
+             f'<h1>{esc(name)} &middot; {esc(feature["title"])}</h1>{tabbar}'
+             f'{_facts_strip(facts or {})}{banner}{err}{body}{logbox}'
+             f'<p class="muted">These engines are experimental — every push is '
+             f'dry-run-first and logged above so you can see exactly what the '
+             f'router accepted or rejected.</p>'
+             f'<p><a href="/device?name={q}">&larr; overview</a></p></div>')
+    return _page(esc(name) + " · " + feature["title"],
+                 _header(user, "/") + inner + _FEATURE_JS)
+
+
+def _render_logs(user, rows) -> str:
+    inner = (f'<div class="wrap" style="max-width:1100px"><h1>Push activity log</h1>'
+             f'<p class="muted">Every config-push (preview, apply, success and '
+             f'failure) across all devices. Expand a row for the full diff and '
+             f'any error.</p>{_recent_log_box(rows, device=None)}</div>')
+    return _page("Activity log", _header(user, "/logs") + inner)
 
 
 _AUTH_BRAND = ('<div class="brand" style="justify-content:center;color:#0f172a;'
@@ -1028,7 +1201,8 @@ class SessionManager:
 # ============================ HTTP handler =================================
 def make_handler(metrics_db, state_file, auth: AuthStore | None,
                  sessions: SessionManager, secure_cookies=False,
-                 metrics_token=None, devices_db=None, defaults=None):
+                 metrics_token=None, devices_db=None, defaults=None,
+                 push_log_db=None):
     defaults = defaults or {}
 
     class Handler(BaseHTTPRequestHandler):
@@ -1132,6 +1306,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._serve_admin(user)
             if path == "/devices":
                 return self._serve_devices(url, user)
+            if path == "/logs":
+                return self._serve_logs(user)
 
             store = self._store()
             known = set(_known_devices(store, _load_state(state_file)))
@@ -1165,11 +1341,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         return self._send(404, "no such device")
                     if allowed is not None and dev not in allowed:
                         return self._send(403, "forbidden")
-                    if q.get("tab", [""])[0] == "backups":
+                    tab = q.get("tab", [""])[0]
+                    if tab == "backups":
                         if user is not None and not AuthStore.is_admin(user):
                             return self._send(403, "forbidden")
                         return self._device_backups_page(
                             dev, user, msg=q.get("msg", [""])[0])
+                    if tab:
+                        from .push import FEATURES
+                        if tab in FEATURES:
+                            return self._feature_tab_page(
+                                dev, user, tab, msg=q.get("msg", [""])[0])
                     return self._send(200, _render_device(store, state, dev, user),
                                       "text/html; charset=utf-8")
                 if path == "/api/devices":
@@ -1314,6 +1496,118 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             finally:
                 dev.close()
 
+        # ---- generic feature tabs (SD-WAN/Security/NextDNS/QoS/…) ----
+        def _auditlog(self):
+            if not push_log_db:
+                return None
+            from .push import AuditLog
+            return AuditLog(push_log_db)
+
+        def _feature_tab_page(self, name, user, slug, preview=None,
+                              submitted=None, error="", msg=""):
+            from .push import FEATURES
+
+            feature = FEATURES.get(slug)
+            if feature is None:
+                return self._send(404, "no such feature")
+            raw = self._device_raw(name)
+            if raw is None:
+                return self._send(400, "device not managed in the dashboard")
+            if feature.get("write") and not AuthStore.is_admin(user or {}):
+                return self._send(403, "forbidden")
+            facts = (_load_state(state_file).get("devices", {})
+                     .get(name, {}).get("facts", {}))
+            sess = self._session()
+            csrf = sess["csrf"] if sess else ""
+            audit = self._auditlog()
+            recent = audit.recent(device=name, limit=8) if audit else []
+            if audit:
+                audit.close()
+            summary_lines = fields = None
+            if preview is None and not error:
+                from .config import build_device
+                from .device import DeviceError
+                from .push import Pusher, PushError, rw_device
+                from .push.api import PushApi
+
+                cfg = build_device(raw, defaults)
+                dev = rw_device(cfg)
+                api = PushApi(dev)
+                try:
+                    api.connect()
+                    pusher = Pusher(cfg, api)
+                    current = feature["read"](pusher, cfg)
+                    summary_lines = feature["summary"](current, cfg)
+                    if "form" in feature:
+                        fields = feature["form"](current, cfg)
+                except (DeviceError, PushError) as exc:
+                    error = str(exc)
+                finally:
+                    dev.close()
+            page = _render_feature_tab(
+                name, user, slug, feature, csrf, summary_lines=summary_lines,
+                fields=fields, preview=preview, submitted=submitted, error=error,
+                msg=msg, recent=recent, facts=facts)
+            return self._send(200, page, "text/html; charset=utf-8")
+
+        def _device_push_post(self, flat, multi, user):
+            from .config import build_device
+            from .device import DeviceError
+            from .push import FEATURES, Pusher, PushError, rw_device
+            from .push.api import PushApi
+
+            slug = flat.get("feature", "")
+            name = flat.get("device", "")
+            feature = FEATURES.get(slug)
+            raw = self._device_raw(name)
+            if feature is None or raw is None:
+                return self._send(404, "not found")
+            if feature.get("write") and not AuthStore.is_admin(user or {}):
+                return self._send(403, "forbidden")
+            cfg = build_device(raw, defaults)
+            commit = flat.get("apply") == "1"
+            uname = (user or {}).get("username", "")
+            audit = self._auditlog()
+            dev = rw_device(cfg)
+            api = PushApi(dev)
+            pusher = Pusher(cfg, api, dry_run=not commit, audit=audit, user=uname)
+            try:
+                # Reading the router (connect + diff) — log failures here so a
+                # bad host/credential shows up in the activity log too.
+                try:
+                    api.connect()
+                    plan = feature["plan"](pusher, cfg, flat, multi)
+                except (DeviceError, PushError) as exc:
+                    if audit:
+                        audit.append(name, uname, slug,
+                                     "apply" if commit else "dry-run", "error",
+                                     f"could not read the router: {exc}", str(exc))
+                    return self._feature_tab_page(name, user, slug, error=str(exc))
+                try:
+                    pusher.apply(plan, feature=slug)  # logs its own outcome
+                except PushError as exc:
+                    return self._feature_tab_page(name, user, slug, error=str(exc))
+                if not commit:
+                    return self._feature_tab_page(name, user, slug, preview=plan,
+                                                  submitted=multi)
+                return self._redirect(
+                    f"/device?name={quote(name)}&tab={slug}&msg=" +
+                    quote("Changes applied to the router."))
+            finally:
+                dev.close()
+                if audit:
+                    audit.close()
+
+        def _serve_logs(self, user):
+            if not AuthStore.is_admin(user):
+                return self._send(403, "forbidden")
+            audit = self._auditlog()
+            rows = audit.recent(limit=200) if audit else []
+            if audit:
+                audit.close()
+            return self._send(200, _render_logs(user, rows),
+                              "text/html; charset=utf-8")
+
         def _devices_post(self, path, flat, multi, user):
             store = self._devstore()
             if store is None:
@@ -1428,6 +1722,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._devices_post(path, flat, multi, user)
             if path == "/device/backup":
                 return self._device_backup_post(flat, user)
+            if path == "/device/push":
+                return self._device_push_post(flat, multi, user)
             try:
                 if path == "/admin/add":
                     auth.add_user(flat.get("username", ""), flat.get("password", ""),
@@ -1479,7 +1775,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
 def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,
           secure_cookies=False, metrics_token=None, devices_db=None,
-          defaults=None):
+          defaults=None, push_log_db=None):
     if metrics_db and not os.path.exists(metrics_db):
         log.warning("metrics DB %s not found yet — start the monitor first",
                     metrics_db)
@@ -1491,7 +1787,7 @@ def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,
     httpd = ThreadingHTTPServer(
         (host, port), make_handler(metrics_db, state_file, auth, sessions,
                                    secure_cookies, metrics_token, devices_db,
-                                   defaults))
+                                   defaults, push_log_db))
     scheme = "auth ON" if auth else "auth OFF (open)"
     log.info("Dashboard at http://%s:%d  [%s]  Prometheus: /metrics",
              host, port, scheme)

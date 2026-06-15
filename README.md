@@ -407,10 +407,23 @@ are built on. Its design is safety-first:
 - **Automatic rollback.** Each operation carries an inverse; if an apply fails
   partway through, the completed operations are undone in reverse.
 
-**In the dashboard:** open a device → the **Backups** tab (admin only) lists the
-restore points on the router, and **Create backup** shows a dry-run preview
-before it writes anything. Add the device's **read-write push user** on the
-Devices page — no YAML editing.
+**In the dashboard:** open a device and every tab is wired to the engine —
+**SD-WAN** (failover/load-balance by route distance), **Security** (tagged
+firewall drops), **NextDNS** (DNS servers + bypass list), **QoS** (simple
+queues), **Port forwarding** (dst-nat), **Interfaces** (read-only), **Remote
+access** (temporary allow rule) and **Backups**. Each write tab is admin-only,
+shows the current state, previews the **dry-run diff**, and applies on confirm.
+Add the device's **read-write push user** on the Devices page — no YAML editing.
+
+**Activity log:** the **Activity** tab (and the bottom of every device tab)
+shows every push — preview, apply, success and failure — with the full diff and
+any error, so when a real router rejects something you can see exactly what and
+why. (Enable with `push_log_db:` in the config.)
+
+> These config-push tabs are **experimental** until validated on real hardware.
+> They are dry-run-first, only ever touch rows they tagged (`comment` starting
+> `mikromon:…`), and roll back automatically on failure — but verify on a lab
+> unit and watch the Activity log.
 
 **From the CLI** (same engine):
 

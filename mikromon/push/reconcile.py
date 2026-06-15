@@ -23,19 +23,26 @@ def _norm(v) -> str:
 
 
 def reconcile_list(path, key, desired, current, *, manage_tag=None,
-                   label="rule"):
+                   owns=None, label="rule"):
     """Return a list of Operations to make `current` match `desired`.
 
     path        RouterOS menu path tuple, e.g. ("ip","firewall","address-list")
     key         field used to match a desired row to an existing one (e.g. "address")
     desired     list of dicts: the params each managed row should have
     current     list of dicts as read from the router (each incl. ".id", "comment")
-    manage_tag  if set, scope ownership to rows whose comment == manage_tag
+    manage_tag  if set, the default `comment` stamped on rows we create
+    owns        optional predicate(row)->bool deciding which existing rows are
+                ours (defaults to comment == manage_tag). Use this for features
+                that own several rules sharing a comment *prefix*.
     """
     ops: list[Operation] = []
 
+    if owns is None:
+        def owns(row):
+            return manage_tag is None or str(row.get("comment", "")) == manage_tag
+
     def owned(row) -> bool:
-        return manage_tag is None or str(row.get("comment", "")) == manage_tag
+        return owns(row)
 
     cur_owned = [r for r in current if owned(r)]
     cur_by_key = {r.get(key): r for r in cur_owned}

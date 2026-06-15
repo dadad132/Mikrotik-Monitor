@@ -175,6 +175,128 @@ check("backup plan is a single run op",
 check("backup dry-run previews the save",
       "nightly" in p.apply(plan)["diff"])
 
+# ---- 6. ownership by comment PREFIX (multi-rule features) ------------------
+print("ownership by prefix:")
+from mikromon.push.reconcile import reconcile_list as rl
+SEC = ("ip", "firewall", "filter")
+cur = [
+    {".id": "*1", "chain": "input", "action": "drop", "comment": "mikromon:sec:a"},
+    {".id": "*2", "chain": "input", "action": "drop", "comment": "manual-rule"},
+]
+ops = rl(SEC, "comment",
+         [{"chain": "input", "action": "drop", "comment": "mikromon:sec:b"}],
+         cur, owns=lambda r: str(r.get("comment", "")).startswith("mikromon:sec:"),
+         label="sec")
+check("prefix-owned stale rule removed (*1)",
+      any(o.action == "remove" and o.params.get(".id") == "*1" for o in ops))
+check("new prefixed rule added",
+      any(o.action == "add" and o.params.get("comment") == "mikromon:sec:b"
+          for o in ops))
+check("manual rule (*2) untouched",
+      not any(o.params.get(".id") == "*2" for o in ops))
+
+
+# ---- 7. plan_settings on a singleton menu (e.g. /ip/dns) -------------------
+print("plan_settings:")
+api = FakeApi({("ip", "dns"): [{".id": "*0", "servers": "1.1.1.1",
+                                "allow-remote-requests": "false"}]})
+p = Pusher(cfg, api, dry_run=False)
+plan = p.plan_settings(("ip", "dns"),
+                       {"servers": "8.8.8.8", "allow-remote-requests": "false"})
+check("settings plan only includes changed fields",
+      len(plan.ops) == 1 and plan.ops[0].params.get("servers") == "8.8.8.8"
+      and "allow-remote-requests" not in plan.ops[0].params)
+check("settings op carries the row id", plan.ops[0].params.get(".id") == "*0")
+check("settings inverse restores old value",
+      plan.ops[0].inverse.params.get("servers") == "1.1.1.1")
+p.apply(plan)
+check("settings apply updates the row",
+      api.state[("ip", "dns")][0]["servers"] == "8.8.8.8")
+nochange = p.plan_settings(("ip", "dns"), {"servers": "8.8.8.8"})
+check("no-op settings plan is empty", nochange.empty)
+
+
+# ---- 8. audit log records applies + failures -------------------------------
+print("audit log:")
+import tempfile
+from mikromon.push import AuditLog
+
+dbp = os.path.join(tempfile.mkdtemp(), "audit.db")
+audit = AuditLog(dbp)
+api = FakeApi({SEC: []})
+p = Pusher(cfg, api, dry_run=False, audit=audit, user="alice")
+p.apply(p.plan_managed_list(SEC, "comment",
+        [{"chain": "input", "action": "drop", "comment": "mikromon:sec:x"}],
+        owns=lambda r: True, label="sec"), feature="security")
+rows = audit.recent()
+check("apply was logged", len(rows) == 1 and rows[0]["status"] == "ok")
+check("log captured user + feature",
+      rows[0]["username"] == "alice" and rows[0]["feature"] == "security")
+# a failing apply logs an error with detail
+api.fail_desc = None
+bad = FakeApi({SEC: []})
+bad.fail_desc = "add sec comment=mikromon:sec:y"  # won't match; force via execute
+p2 = Pusher(cfg, bad, dry_run=False, audit=audit, user="bob")
+plan = p2.plan_managed_list(SEC, "comment",
+        [{"chain": "input", "action": "drop", "comment": "mikromon:sec:y"}],
+        owns=lambda r: True, label="sec")
+bad.fail_desc = plan.ops[0].desc
+err = False
+try:
+    p2.apply(plan, feature="security")
+except PushError:
+    err = True
+logged = audit.recent(limit=1)[0]
+check("failed apply raised", err)
+check("failure logged with error status + detail",
+      logged["status"] == "error" and "FAILED" in logged["detail"])
+check("recent() filters by device",
+      all(r["device"] == "R1" for r in audit.recent(device="R1")))
+
+
+# ---- 9. feature plan builders produce sane RouterOS rows -------------------
+print("feature builders:")
+import types as _t
+from mikromon.push import features as F
+
+devcfg = _t.SimpleNamespace(
+    name="R1", wan=_t.SimpleNamespace(
+        links=[_t.SimpleNamespace(interface="ether1", gateway="", name="ISP1",
+                                  label=lambda i=0: "ISP1")]))
+
+# security toggles -> firewall drop rules
+api = FakeApi({("ip", "firewall", "filter"): []})
+ps = Pusher(devcfg, api, dry_run=True)
+plan = F.security_plan(ps, devcfg, {}, {"opt": ["drop_invalid", "block_mgmt_wan"]})
+adds = [o for o in plan.ops if o.action == "add"]
+check("security builds tagged drop rules",
+      adds and all(o.params["comment"].startswith("mikromon:sec:") for o in adds)
+      and any(o.params.get("connection-state") == "invalid" for o in adds))
+
+# qos rows -> simple queues
+api = FakeApi({("queue", "simple"): []})
+pq = Pusher(devcfg, api, dry_run=True)
+plan = F.qos_plan(pq, devcfg, {},
+                  {"q__name": ["office"], "q__target": ["192.168.88.0/24"],
+                   "q__down": ["50"], "q__up": ["20"]})
+q = [o for o in plan.ops if o.action == "add"][0]
+check("qos builds a simple queue with up/down limit",
+      q.params["name"] == "mikromon-qos-office"
+      and q.params["max-limit"] == "20M/50M")
+
+# port-forward rows -> dst-nat
+api = FakeApi({("ip", "firewall", "nat"): []})
+pp = Pusher(devcfg, api, dry_run=True)
+plan = F.portfwd_plan(pp, devcfg, {},
+                      {"pf__name": ["web"], "pf__proto": ["tcp"],
+                       "pf__dport": ["8080"], "pf__toaddr": ["192.168.88.10"],
+                       "pf__toport": ["80"]})
+nat = [o for o in plan.ops if o.action == "add"][0]
+check("portfwd builds a dst-nat rule",
+      nat.params["action"] == "dst-nat" and nat.params["to-addresses"] == "192.168.88.10"
+      and nat.params["dst-port"] == "8080")
+
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

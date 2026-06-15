@@ -153,6 +153,7 @@ class AppConfig:
     web_secure_cookies: bool = False  # set True when serving behind HTTPS
     metrics_token: str | None = None  # bearer/query token for Prometheus scraping
     devices_db: str | None = None   # if set, devices are managed in the dashboard
+    push_log_db: str | None = None  # if set, config-push actions are logged here
     defaults: dict = field(default_factory=lambda: dict(DEFAULT_THRESHOLDS))
     devices: list = field(default_factory=list)
 
@@ -249,6 +250,7 @@ def load_config(path: str) -> AppConfig:
         metrics_token=(raw.get("web") or {}).get("metrics_token") or None,
         auth_db=raw.get("auth_db") or None,
         devices_db=devices_db,
+        push_log_db=raw.get("push_log_db") or None,
         defaults=defaults,
         devices=devices,
     )

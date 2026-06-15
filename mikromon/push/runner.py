@@ -12,7 +12,7 @@ import logging
 
 from .api import PushError
 from .plan import Operation, Plan
-from .reconcile import reconcile_list
+from .reconcile import _norm, reconcile_list
 
 log = logging.getLogger(__name__)
 
@@ -30,10 +30,12 @@ def rw_device(cfg):
 
 
 class Pusher:
-    def __init__(self, cfg, api, dry_run: bool = True):
+    def __init__(self, cfg, api, dry_run: bool = True, audit=None, user=""):
         self.cfg = cfg
         self.api = api          # PushApi-like (fetch/execute)
         self.dry_run = dry_run
+        self.audit = audit      # optional AuditLog
+        self.user = user        # who is driving this push (for the log)
 
     # ----- backups (the safest write: a single, reversible-by-nature save) --
     def list_backups(self) -> list:
@@ -56,18 +58,43 @@ class Pusher:
         return Plan(self.cfg.name, [op], summary="backup")
 
     # ----- generic managed-list reconcile (firewall, NAT, queues, …) --------
-    def plan_managed_list(self, path, key, desired, *, manage_tag,
-                          label="rule") -> Plan:
+    def plan_managed_list(self, path, key, desired, *, manage_tag=None,
+                          owns=None, label="rule") -> Plan:
         current = self.api.fetch(tuple(path))
         ops = reconcile_list(tuple(path), key, desired, current,
-                             manage_tag=manage_tag, label=label)
+                             manage_tag=manage_tag, owns=owns, label=label)
         return Plan(self.cfg.name, ops, summary=label + "s")
 
+    # ----- a singleton settings menu (e.g. /ip/dns) -------------------------
+    def plan_settings(self, path, desired, *, label="settings") -> Plan:
+        current = self.api.fetch(tuple(path))
+        row = current[0] if current else {}
+        changed = {f: v for f, v in desired.items()
+                   if _norm(row.get(f, "")) != _norm(v)}
+        ops = []
+        if changed:
+            params = dict(changed)
+            old = {f: row.get(f, "") for f in changed}
+            if ".id" in row:
+                params[".id"] = old[".id"] = row[".id"]
+            menu = "/" + "/".join(path)
+            ops.append(Operation(
+                "set", tuple(path), params,
+                desc=f"update {menu}: " +
+                     ", ".join(f"{f}={v}" for f, v in changed.items()),
+                inverse=Operation("set", tuple(path), old,
+                                  desc=f"revert {menu}")))
+        return Plan(self.cfg.name, ops, summary=label)
+
     # ----- preview / apply --------------------------------------------------
-    def apply(self, plan: Plan, rollback_on_error: bool = True) -> dict:
+    def apply(self, plan: Plan, rollback_on_error: bool = True,
+              feature: str = "") -> dict:
         """Dry-run by default. When committed, execute every op; if one fails,
-        undo the ones already done (in reverse) using their inverses."""
+        undo the ones already done (in reverse) using their inverses. Every
+        outcome (preview / ok / error) is written to the audit log."""
         if self.dry_run:
+            self._log(feature, "dry-run", "preview", plan.summary or "preview",
+                      plan.diff_text())
             return {"dry_run": True, "changes": len(plan.ops),
                     "diff": plan.diff_text()}
         done: list[Operation] = []
@@ -78,12 +105,23 @@ class Pusher:
                 if op.action == "add" and op.inverse is not None and result:
                     op.inverse.params[".id"] = result
                 done.append(op)
-        except PushError:
+        except PushError as exc:
             rolled = self._rollback(done) if rollback_on_error else 0
+            detail = (plan.diff_text() + f"\n\nFAILED after {len(done)} op(s): "
+                      f"{exc}\nRolled back {rolled} op(s).")
+            self._log(feature, "apply", "error",
+                      f"failed: {exc}", detail)
             raise PushError(
                 f"apply failed after {len(done)} op(s); "
-                f"rolled back {rolled}.") from None
+                f"rolled back {rolled}. {exc}") from None
+        self._log(feature, "apply", "ok",
+                  f"{len(done)} change(s) applied", plan.diff_text())
         return {"dry_run": False, "applied": len(done)}
+
+    def _log(self, feature, mode, status, summary, detail) -> None:
+        if self.audit is not None:
+            self.audit.append(self.cfg.name, self.user, feature, mode, status,
+                              summary, detail)
 
     def _rollback(self, done) -> int:
         undone = 0

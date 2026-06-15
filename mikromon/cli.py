@@ -111,7 +111,8 @@ def main(argv=None) -> int:
                   args.port or config.web_port, auth_db=config.auth_db,
                   secure_cookies=config.web_secure_cookies,
                   metrics_token=config.metrics_token,
-                  devices_db=config.devices_db, defaults=config.defaults)
+                  devices_db=config.devices_db, defaults=config.defaults,
+                  push_log_db=config.push_log_db)
         return 0
 
     if args.command == "list-checks":
@@ -299,7 +300,7 @@ def _cmd_demo(args) -> int:
 
     config = demo_config()
     for path in (config.state_file, config.metrics_db, config.auth_db,
-                 config.devices_db):
+                 config.devices_db, config.push_log_db):
         if path and os.path.exists(path):
             os.unlink(path)  # start the story (and accounts/devices) fresh
     devices = demo_devices(config)
@@ -347,7 +348,7 @@ def _cmd_demo(args) -> int:
         print("  Admin to create users and choose which devices each one sees.")
         web.serve(config.metrics_db, config.state_file, "127.0.0.1", port,
                   auth_db=config.auth_db, devices_db=config.devices_db,
-                  defaults=config.defaults)
+                  defaults=config.defaults, push_log_db=config.push_log_db)
     else:
         print("Tip: re-run with --serve to view this data in the web dashboard "
               "(with login + per-user device access).")
