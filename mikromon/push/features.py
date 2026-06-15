@@ -466,37 +466,53 @@ _WG_PEERS = ("interface", "wireguard", "peers")
 _WG_TAG = "mikromon:wg:"
 
 
-def _ros_major(api):
-    """RouterOS major version integer from /system/resource; 0 if undetectable."""
+def _ros_version(api):
+    """Return (major, minor, full_string) from /system/resource.
+
+    Returns (0, 0, "unknown") when the version cannot be read.
+    Examples: "7.14.3" → (7, 14, "7.14.3"), "6.49.8" → (6, 49, "6.49.8").
+    """
     try:
         res = api.fetch(("system", "resource"))
-        ver = str(res[0].get("version", "0")) if res else "0"
-        return int(ver.split(".")[0])
+        ver = str(res[0].get("version", "")) if res else ""
+        if not ver:
+            return (0, 0, "unknown")
+        parts = ver.split(".")
+        major = int(parts[0]) if parts[0].isdigit() else 0
+        minor = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        return (major, minor, ver)
     except Exception:
-        return 0
+        return (0, 0, "unknown")
+
+
+def _wg_supported(major, minor):
+    """WireGuard requires RouterOS 7.1+. Unknown version (0,0) → attempt anyway."""
+    if major == 0:
+        return True   # version undetectable; try and let error handling catch it
+    return (major, minor) >= (7, 1)
 
 
 def tunnel_read(pusher, cfg):
-    v = _ros_major(pusher.api)
-    if 0 < v < 7:
-        return {"version": v, "ifaces": [], "peers": [], "unsupported": True}
+    major, minor, ver_str = _ros_version(pusher.api)
+    if not _wg_supported(major, minor):
+        return {"version": ver_str, "ifaces": [], "peers": [], "unsupported": True}
     try:
         ifaces = pusher.api.fetch(_WG_IFACE)
         peers = pusher.api.fetch(_WG_PEERS)
-        return {"version": v, "ifaces": ifaces, "peers": peers}
+        return {"version": ver_str, "ifaces": ifaces, "peers": peers}
     except Exception as exc:
         msg = str(exc)
-        # API rejects the menu entirely on v6 even when version string was blank.
+        # API rejects the WireGuard menu on firmware that predates it.
         if any(kw in msg.lower()
                for kw in ("no such command", "bad command", "invalid command")):
-            return {"version": v, "ifaces": [], "peers": [], "unsupported": True}
-        return {"version": v, "ifaces": [], "peers": [], "error": msg}
+            return {"version": ver_str, "ifaces": [], "peers": [], "unsupported": True}
+        return {"version": ver_str, "ifaces": [], "peers": [], "error": msg}
 
 
 def tunnel_summary(current, cfg):
     if current.get("unsupported"):
-        v = current.get("version", "?")
-        return [f"WireGuard requires RouterOS 7.1+. This router runs v{v}."]
+        v = current.get("version", "unknown")
+        return [f"WireGuard requires RouterOS 7.1+. This router runs {v}."]
     error = current.get("error")
     if error:
         return [f"Could not read WireGuard data: {error}"]
@@ -516,8 +532,8 @@ def tunnel_summary(current, cfg):
 
 
 def tunnel_unmanaged(pusher, cfg):
-    v = _ros_major(pusher.api)
-    if 0 < v < 7:
+    major, minor, _ver = _ros_version(pusher.api)
+    if not _wg_supported(major, minor):
         return []
     try:
         peers = pusher.api.fetch(_WG_PEERS)
@@ -539,10 +555,10 @@ def tunnel_unmanaged(pusher, cfg):
 
 def tunnel_form(current, cfg):
     if current.get("unsupported"):
-        v = current.get("version", "?")
+        v = current.get("version", "unknown")
         return [{"type": "static", "label": "Not supported on this firmware",
                  "value": (f"WireGuard is available on RouterOS 7.1 and later. "
-                           f"This router is running v{v}. "
+                           f"This router is running {v}. "
                            f"Upgrade to 7.1+ to use the Tunnel tab.")}]
     ifaces = current.get("ifaces", [])
     managed_peers = [p for p in current.get("peers", [])
@@ -614,9 +630,10 @@ def _wg_adopt_name(row):
 
 
 def tunnel_plan(pusher, cfg, flat, multi):
-    v = _ros_major(pusher.api)
-    if 0 < v < 7:
-        return Plan(cfg.name, [], summary="wireguard not available (RouterOS v6)")
+    major, minor, ver_str = _ros_version(pusher.api)
+    if not _wg_supported(major, minor):
+        return Plan(cfg.name, [],
+                    summary=f"wireguard not available (RouterOS {ver_str}, requires 7.1+)")
     ops = []
     try:
         ifaces = pusher.api.fetch(_WG_IFACE)
