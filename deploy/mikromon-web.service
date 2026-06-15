@@ -1,0 +1,28 @@
+[Unit]
+Description=MikroTik Monitor — Web Dashboard
+Documentation=https://github.com/dadad132/Mikrotik-Monitor
+After=network-online.target mikromon.service
+Wants=network-online.target
+BindsTo=mikromon.service
+
+[Service]
+Type=simple
+User=mikromon
+Group=mikromon
+WorkingDirectory=/opt/mikromon
+ExecStart=/opt/mikromon/.venv/bin/python -m mikromon dashboard -c /opt/mikromon/config.yaml
+Restart=always
+RestartSec=10
+
+# --- hardening ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/opt/mikromon
+
+[Install]
+WantedBy=multi-user.target

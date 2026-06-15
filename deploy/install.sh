@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Install mikromon as a systemd service on Ubuntu 22.04 / 24.04 / 26.04+.
+# Install / upgrade mikromon as a systemd service on Ubuntu 22.04 / 24.04 / 26.04+.
+# Safe to re-run — idempotent at every step.
 # Run as root from the project root:  sudo bash deploy/install.sh
 #
 set -euo pipefail
@@ -12,6 +13,7 @@ APP_DIR=/opt/mikromon
 SERVICE_USER=mikromon
 SYSTEMD_UNIT=/etc/systemd/system/mikromon.service
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WEB_PORT=8080
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -27,7 +29,6 @@ step "Pre-flight checks"
 
 [[ "${EUID}" -eq 0 ]] || die "Must be run as root.  Use: sudo bash deploy/install.sh"
 
-# Confirm we are on a systemd system before doing any real work.
 if ! command -v systemctl &>/dev/null; then
     die "systemctl not found — systemd is required to register the service."
 fi
@@ -36,7 +37,7 @@ log "Source : ${SRC_DIR}"
 log "Install: ${APP_DIR}"
 
 # ---------------------------------------------------------------------------
-# 2. System packages
+# 2. System packages  (apt is idempotent by design)
 # ---------------------------------------------------------------------------
 step "Installing system packages (apt)"
 
@@ -62,7 +63,7 @@ PYTHON_VER="$("${PYTHON_BIN}" -c 'import sys; print(f"{sys.version_info.major}.{
 log "Python ${PYTHON_VER} at ${PYTHON_BIN}"
 
 # ---------------------------------------------------------------------------
-# 3. Dedicated unprivileged system user
+# 3. Dedicated unprivileged system user  (skip if already exists)
 # ---------------------------------------------------------------------------
 step "Creating service user"
 
@@ -80,21 +81,29 @@ step "Copying application files"
 
 mkdir -p "${APP_DIR}"
 
-# Copy the Python package, skipping compiled cache artefacts.
-rsync -a --delete \
-    --exclude='__pycache__/' \
-    --exclude='*.pyc' \
-    --exclude='*.pyo' \
-    "${SRC_DIR}/mikromon/" "${APP_DIR}/mikromon/"  || {
-    # rsync may not be installed on minimal images — fall back to cp + cleanup.
+# rsync with --delete keeps the destination in sync with the source and
+# removes stale files from previous installs.  Falls back to cp on minimal
+# images that don't have rsync.
+if command -v rsync &>/dev/null; then
+    rsync -a --delete \
+        --exclude='__pycache__/' \
+        --exclude='*.pyc' \
+        --exclude='*.pyo' \
+        "${SRC_DIR}/mikromon/" "${APP_DIR}/mikromon/"
+else
+    rm -rf "${APP_DIR}/mikromon"
     cp -r "${SRC_DIR}/mikromon" "${APP_DIR}/"
     find "${APP_DIR}/mikromon" -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
-    find "${APP_DIR}/mikromon" -name '*.pyc' -o -name '*.pyo' -delete 2>/dev/null || true
-}
+    find "${APP_DIR}/mikromon" \( -name '*.pyc' -o -name '*.pyo' \) -delete 2>/dev/null || true
+fi
 
+# Always overwrite requirements.txt so pip can detect changes on upgrade.
 cp "${SRC_DIR}/requirements.txt" "${APP_DIR}/"
-cp -n "${SRC_DIR}/config.example.yaml" "${APP_DIR}/config.example.yaml" 2>/dev/null || true
 
+# example config — overwrite so it stays current with the source.
+cp "${SRC_DIR}/config.example.yaml" "${APP_DIR}/config.example.yaml"
+
+# Live config — only create on first install; never overwrite user's edits.
 if [[ ! -f "${APP_DIR}/config.yaml" ]]; then
     cp "${SRC_DIR}/config.example.yaml" "${APP_DIR}/config.yaml"
     log "Created ${APP_DIR}/config.yaml  — EDIT THIS before starting the service!"
@@ -107,16 +116,22 @@ fi
 # ---------------------------------------------------------------------------
 step "Building Python virtual environment"
 
-"${PYTHON_BIN}" -m venv "${APP_DIR}/.venv"
+# Re-use existing venv if present; --upgrade-deps keeps pip current.
+if [[ -d "${APP_DIR}/.venv" ]]; then
+    log "Virtual environment already exists — reusing"
+else
+    "${PYTHON_BIN}" -m venv "${APP_DIR}/.venv"
+    log "Created new virtual environment"
+fi
+
 PIP="${APP_DIR}/.venv/bin/pip"
 
 log "Upgrading pip / setuptools / wheel..."
 "${PIP}" install --quiet --upgrade pip setuptools wheel
 
-log "Installing requirements.txt..."
+log "Installing / upgrading requirements.txt..."
 "${PIP}" install --quiet --upgrade -r "${APP_DIR}/requirements.txt"
 
-# Show what got installed so the log is auditable.
 echo
 "${PIP}" list --format=columns
 echo
@@ -127,63 +142,93 @@ echo
 step "Setting file permissions"
 
 chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}"
-# config.yaml may contain SMTP credentials — restrict reads to the service user.
 chmod 640 "${APP_DIR}/config.yaml"
-# The directory must be traversable by root (for journalctl / systemd).
 chmod 755 "${APP_DIR}"
 
 # ---------------------------------------------------------------------------
 # 7. Web dashboard network binding
 # ---------------------------------------------------------------------------
-step "Configuring web dashboard (host 0.0.0.0, port 8080)"
+step "Configuring web dashboard (host 0.0.0.0, port ${WEB_PORT})"
 
-WEB_PORT=8080
 CONFIG_FILE="${APP_DIR}/config.yaml"
 
-# Patch host and port in-place if the file already exists.
-# Uses Python so we don't need yq or any extra tool.
+# Idempotent: patches only the web: block's host/port lines.
+# Uses a state-machine so it never touches smtp.port or api_port.
 "${PYTHON_BIN}" - "${CONFIG_FILE}" "${WEB_PORT}" <<'PYEOF'
-import sys, re
+import sys
 
 config_path = sys.argv[1]
 port        = int(sys.argv[2])
 
 with open(config_path) as fh:
-    text = fh.read()
+    lines = fh.readlines()
 
-# Replace  host: <anything>  inside the web: block.
-text = re.sub(r'(?m)^(\s*host:\s*)127\.0\.0\.1(\s*)$', r'\g<1>0.0.0.0\2', text)
-# Replace  port: <anything>  inside the web: block (simple numeric replace).
-text = re.sub(r'(?m)^(\s*port:\s*)\d+(\s*)$', lambda m: f"{m.group(1)}{port}{m.group(2)}", text)
+original = list(lines)
+in_web   = False
 
-with open(config_path, 'w') as fh:
-    fh.write(text)
+for i, line in enumerate(lines):
+    stripped = line.lstrip()
+    indent   = len(line) - len(stripped)
 
-print(f"  web.host set to 0.0.0.0, web.port set to {port}")
+    # Detect entering / leaving the top-level "web:" block.
+    if line.startswith("web:"):
+        in_web = True
+        continue
+    if in_web and indent == 0 and not line.startswith(" ") and line.strip():
+        in_web = False
+
+    if in_web:
+        if stripped.startswith("host:"):
+            lines[i] = line.replace("127.0.0.1", "0.0.0.0")
+        elif stripped.startswith("port:"):
+            key = line[: line.index("port:") + 5]
+            rest = line[len(key):]
+            current = rest.strip().split()[0] if rest.strip() else ""
+            if current != str(port):
+                lines[i] = f"{key} {port}\n"
+
+if lines != original:
+    with open(config_path, "w") as fh:
+        fh.writelines(lines)
+    print(f"  web.host → 0.0.0.0, web.port → {port}")
+else:
+    print(f"  web binding already correct (0.0.0.0:{port}) — no change")
 PYEOF
 
 # ---------------------------------------------------------------------------
-# 8. Firewall — open the dashboard port
+# 8. Firewall — open the dashboard port  (ufw is idempotent)
 # ---------------------------------------------------------------------------
 step "Opening firewall port ${WEB_PORT}/tcp"
 
 if command -v ufw &>/dev/null; then
     ufw allow "${WEB_PORT}/tcp" comment "mikromon dashboard" || true
-    log "UFW rule added for port ${WEB_PORT}/tcp"
+    log "UFW rule present for port ${WEB_PORT}/tcp"
 else
-    log "ufw not found — skipping firewall rule (open port ${WEB_PORT} manually if needed)"
+    log "ufw not found — skipping (open port ${WEB_PORT} manually if needed)"
 fi
 
 # ---------------------------------------------------------------------------
-# 9. systemd service unit
+# 9. systemd service units (monitor + web dashboard)
 # ---------------------------------------------------------------------------
-step "Registering systemd service"
+step "Registering systemd services"
 
-cp "${SRC_DIR}/deploy/mikromon.service" "${SYSTEMD_UNIT}"
-chmod 644 "${SYSTEMD_UNIT}"
+WEB_UNIT=/etc/systemd/system/mikromon-web.service
+
+# Stop running services before replacing their unit files.
+for svc in mikromon-web mikromon; do
+    if systemctl is-active --quiet "${svc}" 2>/dev/null; then
+        systemctl stop "${svc}"
+        log "Stopped ${svc} for upgrade"
+    fi
+done
+
+cp "${SRC_DIR}/deploy/mikromon.service"     "${SYSTEMD_UNIT}"
+cp "${SRC_DIR}/deploy/mikromon-web.service" "${WEB_UNIT}"
+chmod 644 "${SYSTEMD_UNIT}" "${WEB_UNIT}"
 systemctl daemon-reload
 
-log "Service unit installed at ${SYSTEMD_UNIT}"
+log "Monitor unit : ${SYSTEMD_UNIT}"
+log "Web unit     : ${WEB_UNIT}"
 
 # Resolve the server's primary IP for the final message.
 SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
@@ -195,7 +240,7 @@ SERVER_IP="${SERVER_IP:-<your-server-ip>}"
 cat <<EOF
 
 ============================================================
-  mikromon installed successfully!
+  mikromon installed / upgraded successfully!
 ============================================================
 
 Dashboard will be available at:
@@ -216,11 +261,12 @@ Next steps:
          ${APP_DIR}/.venv/bin/python -m mikromon test-email \\
          -c ${APP_DIR}/config.yaml
 
-  4. Enable and start the service:
-       sudo systemctl enable --now mikromon
+  4. Enable and start both services:
+       sudo systemctl enable --now mikromon mikromon-web
 
   5. Watch the logs:
        journalctl -u mikromon -f
+       journalctl -u mikromon-web -f
 
 ============================================================
 EOF
