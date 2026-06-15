@@ -515,15 +515,15 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
 
 
 _DEVICE_TABS = ["Overview", "SD-WAN", "Security", "NextDNS", "QoS",
-                "Port forwarding", "Interfaces", "Remote access", "Backups"]
+                "Port forwarding", "Interfaces", "Remote access", "Tunnel", "Backups"]
 # label -> url slug (all tabs are wired to the engine now)
 _LIVE_TABS = {"Overview": "", "SD-WAN": "sdwan", "Security": "security",
               "NextDNS": "nextdns", "QoS": "qos", "Port forwarding": "portfwd",
               "Interfaces": "interfaces", "Remote access": "remote",
-              "Backups": "backups"}
+              "Tunnel": "tunnel", "Backups": "backups"}
 # tabs that WRITE to the router (admins only); Overview + Interfaces are read-only
 _ADMIN_TABS = {"sdwan", "security", "nextdns", "qos", "portfwd", "remote",
-               "backups"}
+               "tunnel", "backups"}
 
 
 def _device_tabbar(name, active, is_admin=True) -> str:
@@ -904,6 +904,8 @@ _TAB_INTRO = {
                "the router already has.",
     "interfaces": "A read-only view of the router's ports, VLANs and bridges.",
     "remote": "Grant a temporary firewall opening for Winbox/SSH/WebFig.",
+    "tunnel": ("Manage WireGuard VPN interfaces and peers. "
+               "Requires RouterOS 7.1+; shows a compatibility notice on older firmware."),
 }
 
 

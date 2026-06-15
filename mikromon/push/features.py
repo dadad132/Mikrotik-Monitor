@@ -459,6 +459,213 @@ def remote_plan(pusher, cfg, flat, multi):
 
 
 # ===========================================================================
+# Tunnel — WireGuard VPN (RouterOS 7.1+ only; graceful notice on v6/unknown)
+# ===========================================================================
+_WG_IFACE = ("interface", "wireguard")
+_WG_PEERS = ("interface", "wireguard", "peers")
+_WG_TAG = "mikromon:wg:"
+
+
+def _ros_major(api):
+    """RouterOS major version integer from /system/resource; 0 if undetectable."""
+    try:
+        res = api.fetch(("system", "resource"))
+        ver = str(res[0].get("version", "0")) if res else "0"
+        return int(ver.split(".")[0])
+    except Exception:
+        return 0
+
+
+def tunnel_read(pusher, cfg):
+    v = _ros_major(pusher.api)
+    if 0 < v < 7:
+        return {"version": v, "ifaces": [], "peers": [], "unsupported": True}
+    try:
+        ifaces = pusher.api.fetch(_WG_IFACE)
+        peers = pusher.api.fetch(_WG_PEERS)
+        return {"version": v, "ifaces": ifaces, "peers": peers}
+    except Exception as exc:
+        msg = str(exc)
+        # API rejects the menu entirely on v6 even when version string was blank.
+        if any(kw in msg.lower()
+               for kw in ("no such command", "bad command", "invalid command")):
+            return {"version": v, "ifaces": [], "peers": [], "unsupported": True}
+        return {"version": v, "ifaces": [], "peers": [], "error": msg}
+
+
+def tunnel_summary(current, cfg):
+    if current.get("unsupported"):
+        v = current.get("version", "?")
+        return [f"WireGuard requires RouterOS 7.1+. This router runs v{v}."]
+    error = current.get("error")
+    if error:
+        return [f"Could not read WireGuard data: {error}"]
+    ifaces = current.get("ifaces", [])
+    peers = current.get("peers", [])
+    if not ifaces:
+        return ["No WireGuard interfaces configured on this router yet."]
+    lines = []
+    for i in ifaces:
+        up = i.get("running") in ("true", True)
+        lines.append(f"{i.get('name', '?')} · port {i.get('listen-port', '?')}"
+                     f" · {'running' if up else 'down'}")
+    managed = sum(1 for p in peers
+                  if str(p.get("comment", "")).startswith(_WG_TAG))
+    lines.append(f"{len(peers)} peer(s) total, {managed} managed by mikromon")
+    return lines
+
+
+def tunnel_unmanaged(pusher, cfg):
+    v = _ros_major(pusher.api)
+    if 0 < v < 7:
+        return []
+    try:
+        peers = pusher.api.fetch(_WG_PEERS)
+    except Exception:
+        return []
+    out = []
+    for p in peers:
+        if not str(p.get("comment", "")).startswith(_WG_TAG):
+            ea = p.get("endpoint-address", "")
+            ep = p.get("endpoint-port", "")
+            ep_str = f"{ea}:{ep}" if ea and ep else ea or "(no endpoint)"
+            out.append({
+                "id": p.get(".id"),
+                "text": (f"…{p.get('public-key', '?')[-12:]} · {ep_str}"
+                         f" · {p.get('allowed-address', '?')}"),
+            })
+    return out
+
+
+def tunnel_form(current, cfg):
+    if current.get("unsupported"):
+        v = current.get("version", "?")
+        return [{"type": "static", "label": "Not supported on this firmware",
+                 "value": (f"WireGuard is available on RouterOS 7.1 and later. "
+                           f"This router is running v{v}. "
+                           f"Upgrade to 7.1+ to use the Tunnel tab.")}]
+    ifaces = current.get("ifaces", [])
+    managed_peers = [p for p in current.get("peers", [])
+                     if str(p.get("comment", "")).startswith(_WG_TAG)]
+    rows = []
+    for p in managed_peers:
+        lbl = p.get("comment", "")[len(_WG_TAG):]
+        ea = p.get("endpoint-address", "")
+        eport = p.get("endpoint-port", "")
+        endpoint = f"{ea}:{eport}" if ea and eport else ea
+        rows.append({
+            "name": lbl,
+            "iface": p.get("interface", ""),
+            "pubkey": p.get("public-key", ""),
+            "endpoint": endpoint,
+            "allowed": p.get("allowed-address", ""),
+            "keepalive": str(p.get("persistent-keepalive", "")),
+        })
+
+    fields = []
+    if not ifaces:
+        fields.append({
+            "type": "static", "label": "No WireGuard interfaces yet",
+            "value": ("Fill in a name and port below to create the first interface. "
+                      "The router generates the key pair automatically."),
+        })
+        fields.append({"type": "text", "name": "new_iface_name",
+                        "label": "Interface name", "placeholder": "wg0", "value": ""})
+        fields.append({"type": "text", "name": "new_iface_port",
+                        "label": "Listen port", "placeholder": "13231", "value": ""})
+    else:
+        iface_lines = []
+        for i in ifaces:
+            pk = i.get("public-key") or "(generating…)"
+            iface_lines.append(f"{i.get('name')}: port {i.get('listen-port', '?')}"
+                                f"  ·  public key: {pk}")
+        fields.append({
+            "type": "static", "label": "WireGuard interfaces (read-only)",
+            "value": "\n".join(iface_lines),
+        })
+        iface_opts = [(i.get("name", ""), i.get("name", "")) for i in ifaces]
+        fields.append({
+            "type": "select", "name": "peer_iface", "label": "Attach new peers to",
+            "options": iface_opts,
+            "value": iface_opts[0][0] if iface_opts else "",
+        })
+
+    fields.append({
+        "type": "rows", "name": "wgp", "label": "Peers",
+        "cols": [
+            ("name",      "name / label",            "site-a"),
+            ("pubkey",    "peer public key",          "abc123…"),
+            ("endpoint",  "endpoint  ip:port",        "203.0.113.1:51820"),
+            ("allowed",   "allowed addresses (CIDR)", "10.0.1.0/24"),
+            ("keepalive", "keepalive (s)",             "25"),
+        ],
+        "rows": rows,
+        "hint": ("Public key must match the remote peer's WireGuard public key. "
+                 "Leave endpoint blank for dial-in / road-warrior peers."),
+    })
+    return fields
+
+
+def _wg_adopt_name(row):
+    existing = row.get("comment", "")
+    if existing:
+        return _slug(existing, "peer")
+    return _slug(row.get("public-key", "")[:16], "peer")
+
+
+def tunnel_plan(pusher, cfg, flat, multi):
+    v = _ros_major(pusher.api)
+    if 0 < v < 7:
+        return Plan(cfg.name, [], summary="wireguard not available (RouterOS v6)")
+    ops = []
+    try:
+        ifaces = pusher.api.fetch(_WG_IFACE)
+    except Exception:
+        ifaces = []
+    if not ifaces:
+        new_name = (flat.get("new_iface_name", "") or "").strip()
+        new_port = (flat.get("new_iface_port", "") or "13231").strip()
+        if new_name:
+            ops.append(Operation(
+                "add", _WG_IFACE,
+                {"name": new_name, "listen-port": new_port},
+                desc=f"add WireGuard interface '{new_name}' on port {new_port}",
+                inverse=Operation(
+                    "remove", _WG_IFACE, {".id": ""},
+                    desc=f"remove WireGuard interface '{new_name}'")))
+            ifaces = [{"name": new_name}]
+    peer_iface = (flat.get("peer_iface", "").strip()
+                  or (ifaces[0].get("name", "wg0") if ifaces else "wg0"))
+    desired_peers = []
+    for r in _rows(multi, "wgp", ("name", "pubkey", "endpoint", "allowed", "keepalive")):
+        if not r["name"] or not r["pubkey"]:
+            continue
+        ep = r.get("endpoint", "").strip()
+        # rpartition handles "1.2.3.4:51820" correctly; bare IPs get ep_port=""
+        ep_addr, _, ep_port = ep.rpartition(":")
+        if not ep_addr:
+            ep_addr, ep_port = ep, ""
+        peer = {
+            "interface": peer_iface,
+            "public-key": r["pubkey"].strip(),
+            "allowed-address": (r["allowed"].strip() or "0.0.0.0/0,::/0"),
+            "comment": _WG_TAG + r["name"],
+        }
+        if ep_addr:
+            peer["endpoint-address"] = ep_addr
+        if ep_port:
+            peer["endpoint-port"] = ep_port
+        ka = r.get("keepalive", "").strip()
+        if ka:
+            peer["persistent-keepalive"] = ka
+        desired_peers.append(peer)
+    peer_plan = pusher.plan_managed_list(
+        _WG_PEERS, "public-key", desired_peers,
+        owns=_prefix_owner(_WG_TAG), label="wg-peer")
+    return Plan(cfg.name, ops + peer_plan.ops, summary="wireguard tunnel")
+
+
+# ===========================================================================
 # Adoption — bring an existing (unmanaged) row under management by stamping the
 # feature's ownership comment onto it. A single, reversible `set` (the inverse
 # restores the previous comment), so it round-trips into the editor without
@@ -515,9 +722,14 @@ FEATURES = {
     "remote": {"title": "Remote access", "write": True, "read": remote_read,
                "summary": remote_summary, "form": remote_form,
                "plan": remote_plan},
+    "tunnel": {"title": "WireGuard Tunnel", "write": True,
+               "read": tunnel_read, "summary": tunnel_summary, "form": tunnel_form,
+               "plan": tunnel_plan, "unmanaged": tunnel_unmanaged,
+               "adopt": True, "path": _WG_PEERS, "prefix": _WG_TAG,
+               "adopt_name": _wg_adopt_name},
 }
 
 # tab label -> url slug (Overview/Backups handled elsewhere)
 TAB_SLUGS = {"SD-WAN": "sdwan", "Security": "security", "NextDNS": "nextdns",
              "QoS": "qos", "Port forwarding": "portfwd", "Interfaces": "interfaces",
-             "Remote access": "remote"}
+             "Remote access": "remote", "Tunnel": "tunnel"}
