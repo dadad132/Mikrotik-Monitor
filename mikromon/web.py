@@ -819,6 +819,12 @@ def _render_devices(store, csrf, user, edit_name=None, msg="") -> str:
                 f'{" checked" if pre.get("use_ssl") else ""}> API-SSL</label> '
                 f'<label class="chk"><input type="checkbox" name="verify_ssl"'
                 f'{" checked" if pre.get("verify_ssl") else ""}> verify cert</label>')
+        + field("Push user <span class='muted'>(read-write, for config-push; "
+                "optional)</span>",
+                f'<input name="push_username" value="{v("push_username")}">')
+        + field("Push password",
+                f'<input name="push_password" type="password" '
+                f'placeholder="{"(unchanged)" if edit_name else ""}">')
         + field("WAN uplinks <span class='muted'>(top = highest priority; "
                 "add as many as the router has)</span>",
                 _wan_editor(wan.get("links") or []), full=True)
@@ -1171,6 +1177,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             orig = flat.get("original_name") or None
             if not pwd and orig:  # keep existing password when left blank on edit
                 pwd = (store.raw(orig) or {}).get("password", "")
+            push_pwd = flat.get("push_password", "")
+            if not push_pwd and orig:  # likewise keep the push password
+                push_pwd = (store.raw(orig) or {}).get("push_password", "")
             checks_sel = set(multi.get("checks", []))
             # WAN uplinks come as parallel arrays, one entry per editor row,
             # in priority order (top row = highest priority).
@@ -1188,6 +1197,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 "api_port": int(flat.get("api_port") or 8728),
                 "username": flat.get("username", ""),
                 "password": pwd,
+                "push_username": flat.get("push_username", "").strip(),
+                "push_password": push_pwd,
                 "use_ssl": "use_ssl" in flat,
                 "verify_ssl": "verify_ssl" in flat,
                 "timeout": int(flat.get("timeout") or 10),

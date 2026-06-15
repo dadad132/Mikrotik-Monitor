@@ -114,6 +114,11 @@ class DeviceConfig:
     use_ssl: bool = False
     verify_ssl: bool = False
     timeout: int = 10
+    # Optional SEPARATE read-write credentials for config-push (provisioning,
+    # backups, firewall/QoS). The monitor user above should stay read-only;
+    # pushes use these when set, otherwise fall back to the monitor user.
+    push_username: str = ""
+    push_password: str = ""
     lan_subnets: list = field(default_factory=list)
     wan: WanConfig = field(default_factory=WanConfig)
     monitor_interfaces: list = field(default_factory=list)
@@ -263,6 +268,8 @@ def build_device(d: dict, defaults: dict, where: str = "device") -> DeviceConfig
         use_ssl=bool(d.get("use_ssl", False)),
         verify_ssl=bool(d.get("verify_ssl", False)),
         timeout=int(d.get("timeout", 10) or 10),
+        push_username=str(d.get("push_username", "")),
+        push_password=str(d.get("push_password", "")),
         lan_subnets=list(d.get("lan_subnets") or []),
         wan=WanConfig(
             links=_wan_links(wan_raw),
@@ -283,6 +290,7 @@ def device_to_dict(cfg: DeviceConfig) -> dict:
     return {
         "name": cfg.name, "host": cfg.host, "api_port": cfg.api_port,
         "username": cfg.username, "password": cfg.password,
+        "push_username": cfg.push_username, "push_password": cfg.push_password,
         "use_ssl": cfg.use_ssl, "verify_ssl": cfg.verify_ssl,
         "timeout": cfg.timeout, "lan_subnets": list(cfg.lan_subnets),
         "wan": {

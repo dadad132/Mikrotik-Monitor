@@ -35,10 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["run", "once", "demo", "dashboard",
                             "test-connection", "test-email", "list-checks",
                             "useradd", "userlist", "userdel", "passwd",
-                            "set-devices"],
+                            "set-devices", "backup-list", "backup-now"],
                    help="run | once | demo | dashboard | test-connection | "
                         "test-email | list-checks | useradd | userlist | "
-                        "userdel | passwd | set-devices")
+                        "userdel | passwd | set-devices | backup-list | "
+                        "backup-now")
     p.add_argument("-c", "--config", default="config.yaml",
                    help="path to config file (default: config.yaml)")
     p.add_argument("--dry-run", action="store_true",
@@ -57,6 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--devices", default="",
                    help="comma-separated device names this user may see, or '*' "
                         "for all (useradd/set-devices)")
+    # config-push arguments
+    p.add_argument("--apply", action="store_true",
+                   help="actually apply a config-push (default is a safe dry-run)")
+    p.add_argument("--device",
+                   help="limit a push command (backup-*) to one device by name")
+    p.add_argument("--name", help="backup file name (backup-now)")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="enable DEBUG logging")
     p.add_argument("--version", action="version", version=f"mikromon {__version__}")
@@ -89,6 +96,9 @@ def main(argv=None) -> int:
     if args.command in ("useradd", "userlist", "userdel", "passwd",
                         "set-devices"):
         return _cmd_users(args, config)
+
+    if args.command in ("backup-list", "backup-now"):
+        return _cmd_push(args, config)
 
     if args.command == "dashboard":
         from . import web
@@ -216,6 +226,68 @@ def _cmd_users(args, config) -> int:
         return 1
     finally:
         store.close()
+
+
+def _push_device_cfgs(config):
+    """Device configs to push to: YAML devices, or the web-managed store."""
+    if config.devices:
+        return config.devices
+    if getattr(config, "devices_db", None):
+        from .devices_store import DevicesStore
+
+        store = DevicesStore(config.devices_db)
+        try:
+            return store.list_configs(config.defaults)
+        finally:
+            store.close()
+    return []
+
+
+def _cmd_push(args, config) -> int:
+    """Config-push (read-write) commands. Dry-run unless --apply is given."""
+    from .device import DeviceError
+    from .push import Pusher, PushError, rw_device
+    from .push.api import PushApi
+
+    cfgs = _push_device_cfgs(config)
+    if args.device:
+        cfgs = [c for c in cfgs if c.name == args.device]
+    if not cfgs:
+        print("No devices to push to.", file=sys.stderr)
+        return 2
+
+    rc = 0
+    for cfg in cfgs:
+        print(f"\n== {cfg.name} ({cfg.host}) ==")
+        if not cfg.push_username:
+            print("  note: no push_username set — using the monitor credentials. "
+                  "Use a dedicated read-write user for pushes.")
+        dev = rw_device(cfg)
+        api = PushApi(dev)
+        pusher = Pusher(cfg, api, dry_run=not args.apply)
+        try:
+            if args.command == "backup-list":
+                api.connect()
+                rows = pusher.list_backups()
+                if not rows:
+                    print("  (no .backup/.rsc files on the router)")
+                for r in rows:
+                    print(f"  {r['name']:42} {str(r['size']):>10}  {r['time']}")
+            elif args.command == "backup-now":
+                plan = pusher.plan_backup(args.name or None)
+                if pusher.dry_run:
+                    print(pusher.apply(plan)["diff"])
+                    print("  (dry-run — add --apply to actually create it)")
+                else:
+                    api.connect()
+                    res = pusher.apply(plan)
+                    print(f"  done: {res['applied']} operation(s) applied.")
+        except (DeviceError, PushError) as exc:
+            print(f"  ERROR: {exc}", file=sys.stderr)
+            rc = 1
+        finally:
+            dev.close()
+    return rc
 
 
 def _cmd_demo(args) -> int:

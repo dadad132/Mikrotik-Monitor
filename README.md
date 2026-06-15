@@ -389,6 +389,38 @@ An offline self-test drives every check with simulated RouterOS data:
 
 ---
 
+## Config-push engine (read-write) — opt-in, dry-run by default
+
+The monitoring side never changes a router. The **push engine**
+(`mikromon/push/`) is the deliberately separate write side that the SD-WAN
+features (provisioning, failover/load-balance, firewall/QoS, NextDNS, backups)
+are built on. Its design is safety-first:
+
+- **Separate credentials.** Pushes authenticate with `push_username` /
+  `push_password` on the device; the monitor user stays **read-only**. If no
+  push user is set it falls back to the monitor user (with a warning).
+- **Dry-run by default.** Every command renders a **plan** and prints the diff;
+  nothing is written until you add `--apply`.
+- **Idempotent + scoped.** Managed resources (firewall rules, address-lists,
+  queues…) are reconciled by a comment tag, so rules **you created by hand are
+  never modified or deleted** — the engine only owns what it created.
+- **Automatic rollback.** Each operation carries an inverse; if an apply fails
+  partway through, the completed operations are undone in reverse.
+
+First commands (CLI; the GUI tabs will call the same engine later):
+
+```bash
+mikromon backup-list  -c config.yaml                 # list .backup files on each router
+mikromon backup-now   -c config.yaml --name nightly  # DRY-RUN: show what would happen
+mikromon backup-now   -c config.yaml --name nightly --apply   # actually create it
+mikromon backup-now   -c config.yaml --device HQ-Router --apply
+```
+
+The risky logic (diff, ownership scoping, rollback) is fully covered offline by
+`tests/push_test.py` — no router required.
+
+---
+
 ## Roadmap (toward a centralized SD-WAN-style platform)
 
 mikromon today is the **observability core** — monitoring, alerting, bandwidth
@@ -398,9 +430,10 @@ management platform (à la commercial MikroTik SD-WAN offerings) is staged:
 | Phase | Capability | Status |
 |-------|-----------|--------|
 | 1 | Monitoring, alerting, anomaly detection, usage tracking | ✅ done |
-| 1 | Web dashboard + JSON API + Prometheus/Grafana | ✅ done |
-| 2 | Nightly config backups; active latency/jitter/loss probing | ⬜ planned (read-only) |
-| 3 | Config **push**: zero-touch provisioning, failover/load-balance, firewall/QoS templates with diff + rollback | ⬜ planned (read-write) |
+| 1 | Web dashboard (NOC view, inventory, per-device) + Prometheus/Grafana | ✅ done |
+| 3 | Config-**push engine**: dry-run diff, apply, auto-rollback; backups | ✅ core done (CLI) |
+| 2 | Active latency/jitter/loss/SLA probing | ⬜ planned (read-only) |
+| 3 | Push templates: provisioning, failover/load-balance, firewall/QoS, NextDNS | ⬜ next (build on the engine) |
 | 4 | Cloud controller: devices dial home over WireGuard (manage without public IPs); VPN mesh orchestration | ⬜ planned |
 | 4 | Multi-tenant portal + billing (only if sold as SaaS) | ⬜ optional |
 | 5 | AI assistant over config/telemetry (Claude API) | ⬜ optional |
