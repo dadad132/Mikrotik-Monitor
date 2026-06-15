@@ -825,9 +825,37 @@ def _recent_log_box(recent, device=None) -> str:
             f'<th>Summary</th></tr>{rows}</table></div>')
 
 
+def _adopt_box(name, slug, feature, csrf, unmanaged) -> str:
+    """List existing (unmanaged) rows on the router, with Adopt buttons."""
+    if not unmanaged:
+        return ""
+    can_adopt = bool(feature.get("adopt"))
+    rows = ""
+    for u in unmanaged:
+        if can_adopt:
+            action = (f'<form method="POST" action="/device/adopt" class="inline">'
+                      f'<input type="hidden" name="csrf" value="{csrf}">'
+                      f'<input type="hidden" name="device" value="{esc(name)}">'
+                      f'<input type="hidden" name="feature" value="{esc(slug)}">'
+                      f'<input type="hidden" name="adopt_id" value="{esc(u["id"])}">'
+                      f'<button class="btn ghost" type="submit">Adopt</button></form>')
+        else:
+            action = '<span class="muted">read-only</span>'
+        rows += f'<tr><td>{esc(u["text"])}</td><td>{action}</td></tr>'
+    note = ("Adopt = bring a rule under mikromon management (stamps a "
+            "<code>mikromon:…</code> comment) so it appears in the editor above. "
+            "Previewed and reversible." if can_adopt else
+            "Shown for reference. Adopting these into an editable policy is coming "
+            "next.")
+    return (f'<div class="box"><h2>Existing on the router (unmanaged)</h2>'
+            f'<p class="muted">{note}</p><table><tr><th>Rule</th><th></th></tr>'
+            f'{rows}</table></div>')
+
+
 def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                         fields=None, preview=None, submitted=None, error="",
-                        msg="", recent=None, facts=None) -> str:
+                        msg="", recent=None, facts=None, unmanaged=None,
+                        confirm_action="/device/push") -> str:
     tabbar = _device_tabbar(name, slug, AuthStore.is_admin(user or {}))
     q = quote(name)
     banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
@@ -842,7 +870,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
         body = (f'<div class="box"><h2>Dry run — nothing has been written yet</h2>'
                 f'<pre style="background:#f8fafc;padding:12px;border-radius:8px;'
                 f'white-space:pre-wrap">{esc(preview.diff_text())}</pre>'
-                f'<form method="POST" action="/device/push" class="actions">'
+                f'<form method="POST" action="{confirm_action}" class="actions">'
                 f'<input type="hidden" name="csrf" value="{csrf}">'
                 f'<input type="hidden" name="apply" value="1">'
                 f'{_hidden_from_multi(submitted or {})}'
@@ -854,8 +882,8 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
         body = ""
     else:
         sm = "".join(f'<li>{esc(s)}</li>' for s in (summary_lines or []))
-        state = (f'<div class="box"><h2>Current</h2><ul style="margin:0 0 0 18px">'
-                 f'{sm}</ul></div>')
+        state = (f'<div class="box"><h2>Current (managed by mikromon)</h2>'
+                 f'<ul style="margin:0 0 0 18px">{sm}</ul></div>')
         if fields is not None:
             ff = "".join(_field_html(d) for d in fields)
             preview_btn = ('<button class="btn" type="submit">Preview changes '
@@ -870,7 +898,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                     f'</div></form></div>')
         else:
             form = ""  # read-only feature (e.g. Interfaces)
-        body = state + form
+        body = state + form + _adopt_box(name, slug, feature, csrf, unmanaged)
 
     logbox = _recent_log_box(recent or [], device=name)
     inner = (f'<div class="wrap" style="max-width:1100px">'
@@ -1504,7 +1532,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return AuditLog(push_log_db)
 
         def _feature_tab_page(self, name, user, slug, preview=None,
-                              submitted=None, error="", msg=""):
+                              submitted=None, error="", msg="",
+                              confirm_action="/device/push"):
             from .push import FEATURES
 
             feature = FEATURES.get(slug)
@@ -1523,7 +1552,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             recent = audit.recent(device=name, limit=8) if audit else []
             if audit:
                 audit.close()
-            summary_lines = fields = None
+            summary_lines = fields = unmanaged = None
             if preview is None and not error:
                 from .config import build_device
                 from .device import DeviceError
@@ -1540,6 +1569,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     summary_lines = feature["summary"](current, cfg)
                     if "form" in feature:
                         fields = feature["form"](current, cfg)
+                    if "unmanaged" in feature:
+                        unmanaged = feature["unmanaged"](pusher, cfg)
                 except (DeviceError, PushError) as exc:
                     error = str(exc)
                 finally:
@@ -1547,8 +1578,59 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             page = _render_feature_tab(
                 name, user, slug, feature, csrf, summary_lines=summary_lines,
                 fields=fields, preview=preview, submitted=submitted, error=error,
-                msg=msg, recent=recent, facts=facts)
+                msg=msg, recent=recent, facts=facts, unmanaged=unmanaged,
+                confirm_action=confirm_action)
             return self._send(200, page, "text/html; charset=utf-8")
+
+        def _device_adopt_post(self, flat, user):
+            from .config import build_device
+            from .device import DeviceError
+            from .push import (FEATURES, Pusher, PushError, adopt_plan,
+                               rw_device)
+            from .push.api import PushApi
+
+            slug = flat.get("feature", "")
+            name = flat.get("device", "")
+            rid = flat.get("adopt_id", "")
+            feature = FEATURES.get(slug)
+            raw = self._device_raw(name)
+            if feature is None or raw is None or not feature.get("adopt"):
+                return self._send(404, "not found")
+            if not AuthStore.is_admin(user or {}):
+                return self._send(403, "forbidden")
+            cfg = build_device(raw, defaults)
+            commit = flat.get("apply") == "1"
+            uname = (user or {}).get("username", "")
+            audit = self._auditlog()
+            dev = rw_device(cfg)
+            api = PushApi(dev)
+            pusher = Pusher(cfg, api, dry_run=not commit, audit=audit, user=uname)
+            try:
+                try:
+                    api.connect()
+                    plan = adopt_plan(pusher, cfg, feature, rid)
+                except (DeviceError, PushError) as exc:
+                    if audit:
+                        audit.append(name, uname, slug + ":adopt",
+                                     "apply" if commit else "dry-run", "error",
+                                     f"could not read the router: {exc}", str(exc))
+                    return self._feature_tab_page(name, user, slug, error=str(exc))
+                try:
+                    pusher.apply(plan, feature=slug + ":adopt")
+                except PushError as exc:
+                    return self._feature_tab_page(name, user, slug, error=str(exc))
+                if not commit:
+                    return self._feature_tab_page(
+                        name, user, slug, preview=plan,
+                        submitted={"feature": [slug], "adopt_id": [rid]},
+                        confirm_action="/device/adopt")
+                return self._redirect(
+                    f"/device?name={quote(name)}&tab={slug}&msg=" +
+                    quote("Rule adopted — it's now under management above."))
+            finally:
+                dev.close()
+                if audit:
+                    audit.close()
 
         def _device_push_post(self, flat, multi, user):
             from .config import build_device
@@ -1724,6 +1806,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._device_backup_post(flat, user)
             if path == "/device/push":
                 return self._device_push_post(flat, multi, user)
+            if path == "/device/adopt":
+                return self._device_adopt_post(flat, user)
             try:
                 if path == "/admin/add":
                     auth.add_user(flat.get("username", ""), flat.get("password", ""),

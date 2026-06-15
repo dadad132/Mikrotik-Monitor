@@ -281,7 +281,7 @@ plan = F.qos_plan(pq, devcfg, {},
                    "q__down": ["50"], "q__up": ["20"]})
 q = [o for o in plan.ops if o.action == "add"][0]
 check("qos builds a simple queue with up/down limit",
-      q.params["name"] == "mikromon-qos-office"
+      q.params["name"] == "office" and q.params["comment"] == "mikromon:qos:office"
       and q.params["max-limit"] == "20M/50M")
 
 # port-forward rows -> dst-nat
@@ -295,6 +295,57 @@ nat = [o for o in plan.ops if o.action == "add"][0]
 check("portfwd builds a dst-nat rule",
       nat.params["action"] == "dst-nat" and nat.params["to-addresses"] == "192.168.88.10"
       and nat.params["dst-port"] == "8080")
+
+
+# ---- 10. adoption: import an existing rule into management -----------------
+print("adoption:")
+QUEUE = ("queue", "simple")
+api = FakeApi({QUEUE: [
+    {".id": "*1", "name": "office", "target": "192.168.88.0/24",
+     "max-limit": "20M/50M"},                                   # unmanaged
+    {".id": "*2", "name": "mm", "target": "10.0.0.0/24",
+     "max-limit": "5M/5M", "comment": "mikromon:qos:mm"},       # already managed
+]})
+qcfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[]))
+pa = Pusher(qcfg, api, dry_run=False)
+
+unmanaged = F.qos_unmanaged(pa, qcfg)
+check("qos_unmanaged lists only the unmanaged queue",
+      [u["id"] for u in unmanaged] == ["*1"])
+
+plan = F.adopt_plan(pa, qcfg, F.FEATURES["qos"], "*1")
+check("adopt is a single set op on the comment",
+      len(plan.ops) == 1 and plan.ops[0].action == "set"
+      and plan.ops[0].params.get("comment") == "mikromon:qos:office")
+check("adopt inverse restores the previous (empty) comment",
+      plan.ops[0].inverse.params.get("comment") == "")
+pa.apply(plan)
+check("after adopt the queue is owned by mikromon",
+      any(r.get("comment") == "mikromon:qos:office"
+          for r in api.state[QUEUE] if r[".id"] == "*1"))
+check("adopted queue now appears in the managed editor",
+      any(r["name"] == "office" for r in F.qos_read(pa, qcfg)))
+# round-trip: re-applying the editor's view makes NO changes (no churn)
+cur = F.qos_read(pa, qcfg)
+multi = {"q__name": [r.get("name", "") for r in cur],
+         "q__target": [r.get("target", "") for r in cur],
+         "q__down": [str(r.get("max-limit", "/")).split("/")[1].replace("M", "")
+                     for r in cur],
+         "q__up": [str(r.get("max-limit", "/")).split("/")[0].replace("M", "")
+                   for r in cur]}
+roundtrip = F.qos_plan(pa, qcfg, {}, multi)
+check("re-applying adopted+managed queues is a no-op (no churn)",
+      roundtrip.empty)
+
+# port-forward adoption only offers dst-nat rules
+napi = FakeApi({("ip", "firewall", "nat"): [
+    {".id": "*1", "chain": "dstnat", "action": "dst-nat", "protocol": "tcp",
+     "dst-port": "8080", "to-addresses": "192.168.88.10", "to-ports": "80"},
+    {".id": "*2", "chain": "srcnat", "action": "masquerade"}]})
+pf = Pusher(qcfg, napi, dry_run=False)
+um = F.portfwd_unmanaged(pf, qcfg)
+check("portfwd_unmanaged offers only dst-nat rules (not masquerade)",
+      [u["id"] for u in um] == ["*1"])
 
 
 print()

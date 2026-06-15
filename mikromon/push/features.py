@@ -16,10 +16,17 @@ see what a real router accepted or rejected.
 """
 from __future__ import annotations
 
+import re
+
 from .plan import Operation, Plan
 from .reconcile import _norm
 
 DNS_BYPASS_LIST = "mikromon-dns-bypass"
+
+
+def _slug(s, fallback="adopted"):
+    s = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(s or "").strip()).strip("-")
+    return s[:40] or fallback
 
 
 # ---- small parsing helpers -------------------------------------------------
@@ -115,6 +122,17 @@ _SEC_TAG = "mikromon:sec:"
 def security_read(pusher, cfg):
     return [r for r in pusher.api.fetch(_FILTER)
             if _prefix_owner(_SEC_TAG)(r)]
+
+
+def security_unmanaged(pusher, cfg):
+    """All firewall filter rules we don't own — shown read-only for now."""
+    out = []
+    for r in pusher.api.fetch(_FILTER):
+        if not _prefix_owner(_SEC_TAG)(r):
+            out.append({"id": r.get(".id"),
+                        "text": f"{r.get('chain', '?')}/{r.get('action', '?')}"
+                                f"{' · ' + r['comment'] if r.get('comment') else ''}"})
+    return out
 
 
 def security_summary(current, cfg):
@@ -229,17 +247,26 @@ def qos_read(pusher, cfg):
     return [r for r in pusher.api.fetch(_QUEUE) if _prefix_owner(_QOS_TAG)(r)]
 
 
+def qos_unmanaged(pusher, cfg):
+    out = []
+    for r in pusher.api.fetch(_QUEUE):
+        if not _prefix_owner(_QOS_TAG)(r):
+            out.append({"id": r.get(".id"),
+                        "text": f"{r.get('name')} → {r.get('target', '?')} "
+                                f"({r.get('max-limit', '?')})"})
+    return out
+
+
 def qos_summary(current, cfg):
     return [f"{r.get('name')} → {r.get('target')} ({r.get('max-limit')})"
-            for r in current] or ["No mikromon queues on the router yet."]
+            for r in current] or ["No mikromon-managed queues yet."]
 
 
 def qos_form(current, cfg):
     rows = []
     for r in current:
         up, _, down = str(r.get("max-limit", "/")).partition("/")
-        rows.append({"name": r.get("comment", "")[len(_QOS_TAG):],
-                     "target": r.get("target", ""),
+        rows.append({"name": r.get("name", ""), "target": r.get("target", ""),
                      "down": down.replace("M", ""), "up": up.replace("M", "")})
     return [{"type": "rows", "name": "q", "label": "Queues",
              "cols": [("name", "name", "office"),
@@ -251,13 +278,14 @@ def qos_form(current, cfg):
 
 
 def qos_plan(pusher, cfg, flat, multi):
+    # Keyed by the queue name (preserved as-is) so adopted queues round-trip.
     desired = []
     for r in _rows(multi, "q", ("name", "target", "down", "up")):
         if not r["name"] or not r["target"]:
             continue
         down = (r["down"] or "0") + "M"
         up = (r["up"] or "0") + "M"
-        desired.append({"name": "mikromon-qos-" + r["name"], "target": r["target"],
+        desired.append({"name": r["name"], "target": r["target"],
                         "max-limit": f"{up}/{down}",
                         "comment": _QOS_TAG + r["name"]})
     return pusher.plan_managed_list(_QUEUE, "name", desired,
@@ -273,6 +301,19 @@ _PF_TAG = "mikromon:pf:"
 
 def portfwd_read(pusher, cfg):
     return [r for r in pusher.api.fetch(_NAT) if _prefix_owner(_PF_TAG)(r)]
+
+
+def portfwd_unmanaged(pusher, cfg):
+    """Existing dst-nat rules we don't own yet (safe to adopt as port-forwards)."""
+    out = []
+    for r in pusher.api.fetch(_NAT):
+        if (not _prefix_owner(_PF_TAG)(r) and str(r.get("chain")) == "dstnat"
+                and str(r.get("action")) == "dst-nat"):
+            out.append({"id": r.get(".id"),
+                        "text": f"{r.get('protocol', '?')}/{r.get('dst-port', '?')}"
+                                f" → {r.get('to-addresses', '?')}:"
+                                f"{r.get('to-ports', '?')}"})
+    return out
 
 
 def portfwd_summary(current, cfg):
@@ -369,6 +410,36 @@ def remote_plan(pusher, cfg, flat, multi):
 
 
 # ===========================================================================
+# Adoption — bring an existing (unmanaged) row under management by stamping the
+# feature's ownership comment onto it. A single, reversible `set` (the inverse
+# restores the previous comment), so it round-trips into the editor without
+# touching any other field.
+# ===========================================================================
+def _qos_adopt_name(row):
+    return _slug(row.get("name"), "queue")
+
+
+def _pf_adopt_name(row):
+    base = row.get("comment") or f"port-{row.get('dst-port', '')}"
+    rid = _slug(row.get(".id", ""))
+    return _slug(base, "fwd") + (f"-{rid}" if rid else "")
+
+
+def adopt_plan(pusher, cfg, feature, row_id):
+    """Build the (single) op that adopts row `row_id` for `feature`."""
+    path, prefix = feature["path"], feature["prefix"]
+    row = next((r for r in pusher.api.fetch(path)
+                if r.get(".id") == row_id), None)
+    if row is None:
+        return Plan(cfg.name, [], summary="adopt (row not found)")
+    new_comment = prefix + feature["adopt_name"](row)
+    op = _set_field(path, row, "comment", new_comment, "rule")
+    op.desc = f"adopt {'/'.join(path)} row → manage it as '{new_comment}'"
+    op.inverse.desc = "release (restore previous comment)"
+    return Plan(cfg.name, [op], summary="adopt")
+
+
+# ===========================================================================
 # Registry — keyed by URL slug; order follows the device tab bar.
 # ===========================================================================
 FEATURES = {
@@ -377,15 +448,19 @@ FEATURES = {
               "plan": sdwan_plan},
     "security": {"title": "Security", "write": True, "read": security_read,
                  "summary": security_summary, "form": security_form,
-                 "plan": security_plan},
+                 "plan": security_plan, "unmanaged": security_unmanaged},
     "nextdns": {"title": "NextDNS / DNS filtering", "write": True,
                 "read": nextdns_read, "summary": nextdns_summary,
                 "form": nextdns_form, "plan": nextdns_plan},
     "qos": {"title": "QoS — bandwidth limits", "write": True, "read": qos_read,
-            "summary": qos_summary, "form": qos_form, "plan": qos_plan},
+            "summary": qos_summary, "form": qos_form, "plan": qos_plan,
+            "unmanaged": qos_unmanaged, "adopt": True, "path": _QUEUE,
+            "prefix": _QOS_TAG, "adopt_name": _qos_adopt_name},
     "portfwd": {"title": "Port forwarding", "write": True, "read": portfwd_read,
                 "summary": portfwd_summary, "form": portfwd_form,
-                "plan": portfwd_plan},
+                "plan": portfwd_plan, "unmanaged": portfwd_unmanaged,
+                "adopt": True, "path": _NAT, "prefix": _PF_TAG,
+                "adopt_name": _pf_adopt_name},
     "interfaces": {"title": "Interfaces", "write": False,
                    "read": interfaces_read, "summary": interfaces_summary},
     "remote": {"title": "Remote access", "write": True, "read": remote_read,

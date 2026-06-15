@@ -415,6 +415,13 @@ access** (temporary allow rule) and **Backups**. Each write tab is admin-only,
 shows the current state, previews the **dry-run diff**, and applies on confirm.
 Add the device's **read-write push user** on the Devices page — no YAML editing.
 
+**Adopt existing config:** each managed tab shows an **“Existing on the router
+(unmanaged)”** list. For **QoS** and **Port-forwarding** an **Adopt** button
+brings a live rule under management — a single, previewed, reversible change
+that just stamps the `mikromon:…` ownership comment, after which the rule shows
+up in the editor and round-trips with no churn. (Firewall-rule adoption is shown
+read-only for now.)
+
 **Activity log:** the **Activity** tab (and the bottom of every device tab)
 shows every push — preview, apply, success and failure — with the full diff and
 any error, so when a real router rejects something you can see exactly what and
