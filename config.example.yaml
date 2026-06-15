@@ -125,14 +125,26 @@ devices:
     # WAN failover detection. Leave `wan:` empty to AUTO-DETECT: the monitor
     # treats the lowest-distance default route as "primary" and alerts when a
     # higher-distance backup route is carrying traffic instead. Fill it in to
-    # get friendlier names in the alerts and to pin which uplink is primary.
+    # get friendlier names in the alerts and to pin link priority.
+    #
+    # List the uplinks in PRIORITY ORDER (highest first). Two, three, four or
+    # more links are all supported — add as many as the router has. A friendly
+    # `name:` (the ISP) shows up in alerts and on the dashboard.
     wan:
-      primary:
-        interface: ether1
-        gateway: ""          # optional: the primary next-hop IP
-      backup:
-        interface: lte1
-        gateway: ""
+      links:
+        - name: Vodacom          # highest priority (primary)
+          interface: ether1
+          gateway: ""            # optional: the next-hop IP for this link
+        - name: MTN              # first backup
+          interface: ether2
+          gateway: ""
+        - name: Telkom           # second backup
+          interface: ether3
+          gateway: ""
+        - name: LTE              # last-resort link
+          interface: lte1
+          gateway: ""
+      # The legacy `primary:`/`backup:` form is still accepted for back-compat.
       # Optional active probe: ping these from the router to confirm real
       # reachability (not just that a route exists). Empty = route-table only.
       ping_targets: []        # e.g. [8.8.8.8, 1.1.1.1]

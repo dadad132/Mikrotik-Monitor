@@ -66,6 +66,11 @@ class StateStore:
         """Return a (live, mutable) per-check scratch dict."""
         return self._device(device)["memory"].setdefault(namespace, {})
 
+    def facts(self, device: str) -> dict:
+        """Return a (live, mutable) dict of device inventory facts
+        (model, RouterOS version, serial, identity, host, uptime)."""
+        return self._device(device).setdefault("facts", {})
+
     def forget_device(self, name: str) -> None:
         self.data["devices"].pop(name, None)
 

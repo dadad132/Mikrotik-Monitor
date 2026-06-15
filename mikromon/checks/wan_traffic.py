@@ -20,7 +20,7 @@ _DIR_LABEL = {"rx": "inbound (download)", "tx": "outbound (upload)"}
 def _wan_interfaces(snap, dev) -> list:
     if dev.traffic_interfaces:
         return list(dev.traffic_interfaces)
-    wan = [e.interface for e in (dev.wan.primary, dev.wan.backup) if e.interface]
+    wan = [e.interface for e in dev.wan.links if e.interface]
     if wan:
         return wan
     if dev.monitor_interfaces:

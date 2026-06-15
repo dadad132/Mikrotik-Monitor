@@ -18,6 +18,8 @@ log = logging.getLogger(__name__)
 # Logical dataset name -> RouterOS menu path.
 DATASETS = {
     "resource": ("system", "resource"),
+    "identity": ("system", "identity"),
+    "routerboard": ("system", "routerboard"),
     "route": ("ip", "route"),
     "interface": ("interface",),
     "health": ("system", "health"),

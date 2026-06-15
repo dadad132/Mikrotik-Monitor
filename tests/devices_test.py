@@ -121,13 +121,17 @@ try:
     st, body = post(admin, "/devices/save", {
         "csrf": csrf, "original_name": "", "name": "WebR1", "host": "9.9.9.9",
         "api_port": "8728", "username": "monitor", "password": "secret",
-        "wan_primary": "ether1", "checks": ["resources", "interfaces"],
-        "sources": ["dhcp"]})
+        "link_name": ["Vodacom", "MTN", "LTE"],
+        "link_iface": ["ether1", "ether2", "lte1"],
+        "link_gw": ["", "", ""],
+        "checks": ["resources", "interfaces"], "sources": ["dhcp"]})
     saved = DevicesStore(wdb)
     raw = saved.raw("WebR1")
     check("device added via web", raw is not None and raw["host"] == "9.9.9.9")
     check("checks captured from form",
           raw["checks"]["resources"] and not raw["checks"]["security"])
+    check("3 WAN links captured in priority order",
+          [l["name"] for l in raw["wan"]["links"]] == ["Vodacom", "MTN", "LTE"])
     saved.close()
     # edit: change host, leave password blank -> keep existing
     st, _ = post(admin, "/devices/save", {

@@ -121,29 +121,42 @@ class WanCheck(Check):
             return
 
         current = min(active, key=by_distance)
-        if dev.wan.configured:
-            primary_routes = [r for r in defaults
-                              if _matches_endpoint(r, dev.wan.primary)]
+        links = dev.wan.links
+        if links:
+            # Preferred = the highest-priority configured uplink (links[0]).
+            primary_routes = [r for r in defaults if _matches_endpoint(r, links[0])]
             preferred = (min(primary_routes, key=by_distance)
                          if primary_routes else min(defaults, key=by_distance))
-            on_backup = not _matches_endpoint(current, dev.wan.primary)
+            on_backup = not _matches_endpoint(current, links[0])
+            # Which configured link is currently carrying traffic?
+            cur_idx = next((i for i, ep in enumerate(links)
+                            if _matches_endpoint(current, ep)), None)
+            cur_name = (links[cur_idx].label(cur_idx) if cur_idx is not None
+                        else (_iface_of(current) or current.get("gateway", "?")))
+            prim_name = links[0].label(0)
+            rank = (f" (priority {cur_idx + 1} of {len(links)})"
+                    if cur_idx is not None else "")
         else:
             preferred = min(defaults, key=by_distance)
             on_backup = by_distance(current) > by_distance(preferred)
+            cur_name = _iface_of(current) or current.get("gateway", "?")
+            prim_name = _iface_of(preferred) or preferred.get("gateway", "?")
+            rank = ""
 
         cause = ""
         if on_backup:
             prim_status = str(preferred.get("gateway-status", "")) or "inactive"
-            cause = (f"Primary uplink {_label(preferred)} is not carrying traffic "
-                     f"({prim_status}). Traffic is now flowing via backup "
-                     f"{_label(current)}.")
+            cause = (f"Primary uplink {prim_name} ({_label(preferred)}) is not "
+                     f"carrying traffic ({prim_status}). Traffic is now flowing via "
+                     f"{cur_name} ({_label(current)}).")
         ctx.transition(
             "wan_failover", healthy=not on_backup, severity=Severity.WARNING,
-            title=f"WAN failover — now on BACKUP uplink ({_iface_of(current) or current.get('gateway')})",
+            title=f"WAN failover — now on backup uplink {cur_name}{rank}",
             detail=f"Active default route: {_label(current)}.",
             cause=cause,
-            facts={"current": _label(current), "preferred": _label(preferred)},
-            recovery_title="WAN restored — back on PRIMARY uplink",
+            facts={"current": _label(current), "preferred": _label(preferred),
+                   "current_link": cur_name, "primary_link": prim_name},
+            recovery_title=f"WAN restored — back on primary uplink {prim_name}",
             recovery_detail=f"Traffic is flowing via {_label(current)} again.",
         )
 

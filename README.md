@@ -214,8 +214,10 @@ devices:
 
 **WAN failover detection** needs no config — by default the lowest-`distance`
 default route is treated as "primary" and an alert fires when a higher-distance
-backup is carrying traffic. Naming the uplinks under `wan:` just makes the
-messages friendlier and lets you pin which link is primary.
+backup is carrying traffic. Listing the uplinks under `wan.links:` (in priority
+order, **2, 3, 4 or more**) just makes the messages friendlier, lets you pin
+link priority, and names each ISP on the dashboard. The legacy
+`wan.primary:`/`wan.backup:` form still works.
 
 Thresholds (CPU %, free RAM/disk %, temperature, flapping) live under
 `defaults:` and can be overridden per device under `devices[].thresholds:`.
@@ -244,13 +246,30 @@ RAM, throughput per WAN, client count, up/down) to a SQLite file. Then:
 python -m mikromon dashboard -c config.yaml      # http://127.0.0.1:8080
 ```
 
-The built-in dashboard shows a status card per device (online/offline, key
-stats, sparklines, active problems) and auto-refreshes — no extra services
-needed. Endpoints:
+The built-in dashboard is a **NOC-style "single pane of glass"** and
+auto-refreshes — no extra services needed:
+
+- **Overview counters + donut charts**: Device Status (online/offline), Device
+  Health (normal/warning/error), FailOver Health (full WAN / on backup / no
+  WAN), plus a **RouterOS version breakdown** that flags pre-v7 boards for
+  upgrade.
+- **Status card per device** (key stats, sparklines, active problems), sorted
+  worst-first, with a search box + All/Problems/Offline filters.
+- **Device Inventory** (`/inventory`): a searchable table of Name, Model,
+  RouterOS version, Serial, Host/IP, WAN uplinks and status.
+- **Per-device page** (`/device?name=…`): CPU/memory/temperature gauges, the
+  device's WAN uplinks with live throughput, throughput graphs, facts
+  (model/version/serial/identity/uptime) and active problems. Tabs for SD-WAN,
+  Security, NextDNS, QoS, Port-forwarding, Interfaces, Remote-access and Backups
+  are shown as **“soon”** — they arrive with the read-write config-push phase.
+
+Everything is scoped to the logged-in user's allowed devices. Endpoints:
 
 | Path | Purpose |
 |------|---------|
-| `/` | HTML dashboard |
+| `/` | HTML NOC dashboard |
+| `/inventory` | Searchable device inventory table |
+| `/device?name=…` | Per-device overview (gauges, WAN, throughput, facts) |
 | `/api/devices` | JSON: latest metrics + active problems per device |
 | `/api/series?device=&metric=&label=&since=` | JSON time-series |
 | `/metrics` | **Prometheus** exposition — point Grafana's Prometheus at this |
@@ -364,7 +383,7 @@ An offline self-test drives every check with simulated RouterOS data:
 |---------|--------------|
 | `UNREACHABLE (no TCP response on the API port)` | API service disabled, wrong port, or firewall/`address=` list excludes the monitor host. |
 | `Authentication/permission error` | Wrong username/password, or the group lacks `api`/`read` policy. |
-| WAN failover never fires | Both default routes share the same `distance`; give the backup a higher distance, or define `wan.primary`. |
+| WAN failover never fires | Both default routes share the same `distance`; give the backup a higher distance, or list the uplinks under `wan.links:`. |
 | Temperature alerts never fire | The board doesn't expose `/system/health` (e.g. CHR / x86) — harmless. |
 | Too many security alerts on first start | Expected only if `confirmations`/seeding were bypassed; normal startup silently absorbs existing log history. |
 

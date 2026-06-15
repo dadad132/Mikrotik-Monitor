@@ -20,6 +20,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -63,7 +64,9 @@ def _problems(conditions: dict) -> list:
 
 def _device_view(store, state, name) -> dict:
     latest = store.latest(name)
-    conditions = state.get("devices", {}).get(name, {}).get("conditions", {})
+    dnode = state.get("devices", {}).get(name, {})
+    conditions = dnode.get("conditions", {})
+    facts = dnode.get("facts", {})
     metrics, throughput = {}, {}
     for (metric, label), rec in latest.items():
         if metric in ("rx_bps", "tx_bps"):
@@ -74,8 +77,17 @@ def _device_view(store, state, name) -> dict:
     if up is None:
         rc = conditions.get("reachability", {})
         up = 0 if rc.get("status") == "problem" else 1
+    problems = _problems(conditions)
+    keys = {p["key"] for p in problems}
+    if not up or "internet_down" in keys:
+        wan_health = "down"
+    elif "wan_failover" in keys:
+        wan_health = "partial"
+    else:
+        wan_health = "full"
     return {"device": name, "up": int(up), "metrics": metrics,
-            "throughput": throughput, "problems": _problems(conditions)}
+            "throughput": throughput, "problems": problems,
+            "facts": facts, "wan_health": wan_health}
 
 
 def _known_devices(store, state) -> list:
@@ -184,6 +196,12 @@ _PAGE_CSS = """
  .chips label:hover{background:#e2e8f0}
  .chips input{margin:0 5px 0 0;vertical-align:middle}
  .chk{margin-right:12px;font-size:13px}
+ .wanrow{display:flex;gap:8px;align-items:center;margin-bottom:7px}
+ .wanrow .prio{width:24px;height:24px;border-radius:50%;background:#2563eb;color:#fff;
+   display:flex;align-items:center;justify-content:center;font-size:12px;
+   font-weight:700;flex-shrink:0}
+ .wanrow input{flex:1;min-width:90px}
+ .wanrow .wandel{padding:4px 10px;line-height:1}
  .btn{background:#2563eb;color:#fff;border:0;padding:8px 15px;border-radius:7px;
    cursor:pointer;font:inherit;font-weight:600}.btn:hover{background:#1d4ed8}
  .btn.red{background:#dc2626}.btn.red:hover{background:#b91c1c}
@@ -192,13 +210,61 @@ _PAGE_CSS = """
  .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;
    font-weight:700;text-transform:uppercase;letter-spacing:.03em}
  .pill.admin{background:#ede9fe;color:#6d28d9}.pill.user{background:#e0f2fe;color:#0369a1}
+ /* NOC charts */
+ .charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+   gap:14px;padding:14px 20px 0}
+ .chart{background:#fff;border-radius:10px;padding:14px;box-shadow:0 1px 3px
+   rgba(0,0,0,.1);display:flex;flex-direction:column;align-items:center}
+ .chart.wide{align-items:stretch}
+ .chart .ct{font-size:12px;font-weight:700;color:#475569;text-transform:uppercase;
+   letter-spacing:.04em;margin-bottom:8px;align-self:flex-start}
+ .legend{margin-top:8px;width:100%}
+ .lg{display:flex;align-items:center;gap:6px;font-size:12px;color:#334155;
+   margin:2px 0}
+ .sw{width:10px;height:10px;border-radius:2px;display:inline-block}
+ .lg b{margin-left:auto}
+ .vlist{display:flex;flex-direction:column;gap:8px}
+ .vrow{display:flex;align-items:center;gap:10px;font-size:13px}
+ .vlabel{width:150px;flex-shrink:0}
+ .vbar{flex:1;height:10px;background:#eef2f6;border-radius:6px;overflow:hidden}
+ .vbar i{display:block;height:100%}
+ .vn{width:24px;text-align:right;font-weight:700}
+ .up{background:#fef3c7;color:#92400e;font-size:10px;font-weight:700;padding:1px 6px;
+   border-radius:999px;text-transform:uppercase}
+ /* gauges + device overview */
+ .gauge{margin:8px 0}
+ .gl{display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px}
+ .gl span{font-weight:700}
+ .gbar{height:12px;background:#eef2f6;border-radius:7px;overflow:hidden}
+ .gbar i{display:block;height:100%}
+ .factgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+   gap:12px}
+ .fact .k{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.03em}
+ .fact .val{font-size:15px;font-weight:600;margin-top:2px}
+ .tabs{display:flex;gap:4px;flex-wrap:wrap;border-bottom:2px solid #e2e8f0;
+   margin-bottom:16px}
+ .tabs a{padding:8px 13px;font-size:14px;color:#475569;text-decoration:none;
+   border-bottom:2px solid transparent;margin-bottom:-2px}
+ .tabs a.on{color:#2563eb;border-bottom-color:#2563eb;font-weight:600}
+ .tabs a.soon{color:#cbd5e1;cursor:not-allowed}
+ .tabs a.soon::after{content:" · soon";font-size:10px}
+ .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+ .badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;
+   font-weight:700}
+ .badge.ok{background:#dcfce7;color:#166534}.badge.warn{background:#fef3c7;color:#92400e}
+ .badge.crit{background:#fee2e2;color:#991b1b}
+ .linkrow{display:flex;align-items:center;gap:10px;padding:8px 0;
+   border-bottom:1px solid #eef2f6}
+ .linkrow .prio{width:22px;height:22px;border-radius:50%;background:#1e293b;
+   color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;
+   font-weight:700;flex-shrink:0}
 """
 
 
 def _nav(user, active) -> str:
     if not user:
         return ""
-    items = [("/", "Dashboard")]
+    items = [("/", "Dashboard"), ("/inventory", "Inventory")]
     if user.get("role") == "admin":
         items += [("/devices", "Devices"), ("/admin", "Users")]
     links = "".join(
@@ -250,6 +316,90 @@ def _tile(num, lbl, cls="", filt=None) -> str:
     click = ' click" onclick="setf(\'%s\')' % filt if filt else ""
     return (f'<div class="tile {cls}{click}"><div class="num">{num}</div>'
             f'<div class="lbl">{lbl}</div></div>')
+
+
+# ----- SVG charts (pure-stdlib, no JS libraries) ---------------------------
+def _donut(title, segments, size=128) -> str:
+    """A donut chart. `segments` = list of (label, value, color)."""
+    total = sum(v for _, v, _ in segments)
+    r, sw = size / 2 - 12, 13
+    cx = cy = size / 2
+    circ = 2 * math.pi * r
+    arcs, offset = [], 0.0
+    track = (f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" '
+             f'stroke="#e5e7eb" stroke-width="{sw}"/>')
+    for _label, val, color in segments:
+        if val <= 0:
+            continue
+        dash = (val / total) * circ if total else 0
+        arcs.append(
+            f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{color}" '
+            f'stroke-width="{sw}" stroke-dasharray="{dash:.2f} {circ - dash:.2f}" '
+            f'stroke-dashoffset="{-offset:.2f}" '
+            f'transform="rotate(-90 {cx} {cy})"/>')
+        offset += dash
+    center = (f'<text x="{cx}" y="{cy - 2}" text-anchor="middle" '
+              f'font-size="26" font-weight="700" fill="#0f172a">{total}</text>'
+              f'<text x="{cx}" y="{cy + 16}" text-anchor="middle" font-size="10" '
+              f'fill="#64748b">total</text>')
+    legend = "".join(
+        f'<div class="lg"><span class="sw" style="background:{color}"></span>'
+        f'{esc(lbl)} <b>{val}</b></div>' for lbl, val, color in segments)
+    return (f'<div class="chart"><div class="ct">{esc(title)}</div>'
+            f'<svg width="{size}" height="{size}" viewBox="0 0 {size} {size}">'
+            f'{track}{"".join(arcs)}{center}</svg>'
+            f'<div class="legend">{legend}</div></div>')
+
+
+def _gauge(label, pct, unit="%", good_high=False) -> str:
+    """A horizontal gauge bar, colored by how alarming the value is."""
+    pct = max(0, min(100, pct))
+    bad = (pct < 20) if good_high else (pct > 85)
+    warn = (pct < 40) if good_high else (pct > 65)
+    color = "#dc2626" if bad else ("#d97706" if warn else "#16a34a")
+    return (f'<div class="gauge"><div class="gl">{esc(label)}'
+            f'<span>{pct:.0f}{unit}</span></div>'
+            f'<div class="gbar"><i style="width:{pct:.0f}%;background:{color}"></i>'
+            f'</div></div>')
+
+
+def _version_panel(devs) -> str:
+    counts = {}
+    for d in devs:
+        ver = d["facts"].get("version") or "unknown"
+        counts[ver] = counts.get(ver, 0) + 1
+    total = sum(counts.values()) or 1
+    rows = []
+    for ver, n in sorted(counts.items(), key=lambda kv: kv[0], reverse=True):
+        old = ver[:1] in ("5", "6")  # pre-v7 → prompt upgrade
+        color = "#d97706" if old else "#2563eb"
+        tag = ' <span class="up">upgrade</span>' if old else ""
+        rows.append(
+            f'<div class="vrow"><div class="vlabel">RouterOS {esc(ver)}{tag}</div>'
+            f'<div class="vbar"><i style="width:{n / total * 100:.0f}%;'
+            f'background:{color}"></i></div><div class="vn">{n}</div></div>')
+    return (f'<div class="chart wide"><div class="ct">RouterOS versions</div>'
+            f'<div class="vlist">{"".join(rows) or "<p class=muted>No data yet</p>"}'
+            f'</div></div>')
+
+
+def _render_noc_charts(devs) -> str:
+    online = sum(1 for d in devs if d["up"])
+    status = [("Online", online, "#16a34a"), ("Offline", len(devs) - online, "#dc2626")]
+    sev = {"ok": 0, "warn": 0, "crit": 0}
+    wan = {"full": 0, "partial": 0, "down": 0}
+    for d in devs:
+        sev[_severity(d)] += 1
+        wan[d["wan_health"]] += 1
+    health = [("Normal", sev["ok"], "#16a34a"), ("Warning", sev["warn"], "#d97706"),
+              ("Error", sev["crit"], "#dc2626")]
+    failover = [("Full WAN", wan["full"], "#16a34a"),
+                ("On backup", wan["partial"], "#d97706"),
+                ("No WAN", wan["down"], "#dc2626")]
+    return (f'<div class="charts">{_donut("Device status", status)}'
+            f'{_donut("Device health", health)}'
+            f'{_donut("Failover health", failover)}'
+            f'{_version_panel(devs)}</div>')
 
 
 def _render_noc_bar(s) -> str:
@@ -334,9 +484,11 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
         probs_html = (f'<div class="probs"><b>Active problems:</b><ul>{probs}</ul>'
                       f'</div>' if probs else '<div class="ok">No active problems</div>')
         cls = "card" + ("" if sev == "ok" else f" {sev}")
+        link = f'/device?name={quote(d["device"])}'
         cards.append(f'<div class="{cls}" data-name="{html.escape(d["device"].lower())}"'
                      f' data-sev="{sev}"><h2><span class="dot" style="background:'
-                     f'{dot}"></span>{html.escape(d["device"])}<span class="state">'
+                     f'{dot}"></span><a href="{link}">{html.escape(d["device"])}</a>'
+                     f'<span class="state">'
                      f'{"ONLINE" if up else "OFFLINE"}</span></h2><table>'
                      f'{"".join(rows)}</table>{probs_html}</div>')
     grid = "".join(cards) or "<p style='padding:20px'>No devices to show.</p>"
@@ -348,11 +500,146 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
             'Offline</button></div>') if devs else ""
     empty = ('<p id="empty" class="muted" style="padding:0 20px;display:none">'
              'No devices match this filter.</p>')
+    charts = _render_noc_charts(devs) if devs else ""
     return (f'<!doctype html><html><head><meta charset="utf-8">'
             f'<meta http-equiv="refresh" content="10"><title>mikromon</title>'
             f'<style>{_PAGE_CSS}</style></head><body>{_header(user)}'
-            f'{_render_noc_bar(summary)}{fbar}'
+            f'{_render_noc_bar(summary)}{charts}{fbar}'
             f'<div class="grid">{grid}</div>{empty}{_DASH_JS}</body></html>')
+
+
+_DEVICE_TABS = ["Overview", "SD-WAN", "Security", "NextDNS", "QoS",
+                "Port forwarding", "Interfaces", "Remote access", "Backups"]
+
+
+def _render_inventory(store, state, user, allowed) -> str:
+    devs = sorted(_all_devices(store, state, allowed),
+                  key=lambda d: d["device"].lower())
+    rows = []
+    for d in devs:
+        f = d["facts"]
+        sev = _severity(d)
+        dot = {"ok": "#16a34a", "warn": "#d97706", "crit": "#dc2626"}[sev]
+        ver = f.get("version", "—")
+        old = ver[:1] in ("5", "6")
+        ver_html = (esc(ver) + (' <span class="up">upgrade</span>' if old else ""))
+        wl = f.get("wan_links") or []
+        links = ", ".join(esc(x) for x in wl) if wl else '<span class="muted">—</span>'
+        link = f'/device?name={quote(d["device"])}'
+        rows.append(
+            f'<tr><td><span class="dot" style="background:{dot}"></span> '
+            f'<a href="{link}"><b>{esc(d["device"])}</b></a></td>'
+            f'<td>{esc(f.get("model", "—"))}</td><td>{ver_html}</td>'
+            f'<td class="muted">{esc(f.get("serial", "—"))}</td>'
+            f'<td class="muted">{esc(f.get("host", "—"))}</td>'
+            f'<td>{links}</td>'
+            f'<td><span class="badge {sev}">{"online" if d["up"] else "offline"}'
+            f'</span></td></tr>')
+    body = "".join(rows) or ('<tr><td colspan="7" class="muted">No devices to '
+                             'show yet.</td></tr>')
+    inner = (
+        f'<div class="wrap" style="max-width:1100px"><h1>Device inventory</h1>'
+        f'<div class="box">'
+        f'<input id="iq" placeholder="Search by name, model, version, serial…" '
+        f'style="width:100%;margin-bottom:12px" '
+        f'onkeyup="invFilter()"><table id="invt">'
+        f'<tr><th>Name</th><th>Model</th><th>RouterOS</th><th>Serial</th>'
+        f'<th>Host / IP</th><th>WAN uplinks</th><th>Status</th></tr>{body}'
+        f'</table></div></div>'
+        '<script>function invFilter(){var t=document.getElementById("iq")'
+        '.value.toLowerCase();document.querySelectorAll("#invt tr").forEach('
+        'function(r,i){if(i===0)return;r.style.display='
+        'r.textContent.toLowerCase().indexOf(t)>=0?"":"none";});}</script>')
+    return _page("Inventory", _header(user, "/inventory") + inner)
+
+
+def _render_device(store, state, name, user) -> str:
+    d = _device_view(store, state, name)
+    f = d["facts"]
+    sev = _severity(d)
+    badge = {"ok": ("ok", "Healthy"), "warn": ("warn", "Warning"),
+             "crit": ("crit", "Offline / Error")}[sev]
+    m = d["metrics"]
+
+    tabs = ['<a class="on">Overview</a>'] + [
+        f'<a class="soon">{esc(t)}</a>' for t in _DEVICE_TABS[1:]]
+    tabbar = f'<div class="tabs">{"".join(tabs)}</div>'
+
+    # facts strip
+    fact_items = [("Model", f.get("model", "—")), ("RouterOS", f.get("version", "—")),
+                  ("Identity", f.get("identity", "—")), ("Serial", f.get("serial", "—")),
+                  ("Host / IP", f.get("host", "—")), ("Uptime", f.get("uptime", "—"))]
+    facts_html = "".join(f'<div class="fact"><div class="k">{esc(k)}</div>'
+                         f'<div class="val">{esc(str(v))}</div></div>'
+                         for k, v in fact_items)
+
+    # gauges (live latest values)
+    gauges = ""
+    if "cpu" in m:
+        gauges += _gauge("CPU load", m["cpu"])
+    if "mem_free_pct" in m:
+        gauges += _gauge("Memory used", 100 - m["mem_free_pct"])
+    if "temp_c" in m:
+        gauges += _gauge("Temperature", m["temp_c"], unit="°C")
+    if "client_count" in m:
+        gauges += (f'<div class="gauge"><div class="gl">Connected devices'
+                   f'<span>{m["client_count"]:.0f}</span></div></div>')
+    gauges = gauges or '<p class="muted">No telemetry collected yet.</p>'
+
+    # WAN uplinks with live throughput + role
+    wl = f.get("wan_links") or []
+    cur_link = next((p for p in d["problems"] if p["key"] == "wan_failover"), None)
+    link_rows = ""
+    for i, name_lbl in enumerate(wl):
+        role = "primary" if i == 0 else "backup"
+        tp = ""
+        # match throughput by interface label if present
+        for iface, t in d["throughput"].items():
+            if iface and (iface == name_lbl):
+                tp = (f' &nbsp;&darr;{human_bps(t.get("rx_bps", 0))} '
+                      f'&uarr;{human_bps(t.get("tx_bps", 0))}')
+        link_rows += (f'<div class="linkrow"><span class="prio">{i + 1}</span>'
+                      f'<b>{esc(name_lbl)}</b> <span class="muted">{role}</span>'
+                      f'{tp}</div>')
+    if not link_rows:
+        link_rows = '<p class="muted">No WAN uplinks configured for this device.</p>'
+    wan_note = ('<p class="muted" style="margin-top:10px">Per-link latency / jitter / '
+                'packet-loss graphs arrive with the SLA-probing phase.</p>')
+
+    # throughput sparklines
+    spark = ""
+    for iface, t in sorted(d["throughput"].items()):
+        sp = _sparkline(store.series(name, "rx_bps", label=iface,
+                                     since=time.time() - 3600), width=240, height=44)
+        spark += (f'<div style="margin:6px 0"><b>{esc(iface)}</b> '
+                  f'&darr;{human_bps(t.get("rx_bps", 0))} '
+                  f'&uarr;{human_bps(t.get("tx_bps", 0))}<br>{sp}</div>')
+
+    # active problems
+    if d["problems"]:
+        probs = "".join(f'<li><b>{esc(p["key"])}</b> ({esc(str(p["level"]))})</li>'
+                        for p in d["problems"])
+        probs_html = f'<ul style="margin:6px 0 0 18px;color:#b91c1c">{probs}</ul>'
+    else:
+        probs_html = '<p class="ok">No active problems.</p>'
+
+    inner = (
+        f'<div class="wrap" style="max-width:1100px">'
+        f'<h1 style="display:flex;align-items:center;gap:12px">{esc(name)}'
+        f'<span class="badge {badge[0]}">{badge[1]}</span></h1>{tabbar}'
+        f'<div class="box"><div class="factgrid">{facts_html}</div></div>'
+        f'<div class="cols">'
+        f'<div class="box"><h2>System</h2>{gauges}</div>'
+        f'<div class="box"><h2>WAN uplinks</h2>{link_rows}{wan_note}</div>'
+        f'</div>'
+        f'<div class="cols">'
+        f'<div class="box"><h2>Throughput (last hour)</h2>'
+        f'{spark or "<p class=muted>No throughput data yet.</p>"}</div>'
+        f'<div class="box"><h2>Active problems</h2>{probs_html}</div>'
+        f'</div>'
+        f'<p><a href="/">&larr; dashboard</a> &nbsp; '
+        f'<a href="/inventory">inventory</a></p></div>')
+    return _page(esc(name), _header(user, "/") + inner)
 
 
 _AUTH_BRAND = ('<div class="brand" style="justify-content:center;color:#0f172a;'
@@ -532,10 +819,9 @@ def _render_devices(store, csrf, user, edit_name=None, msg="") -> str:
                 f'{" checked" if pre.get("use_ssl") else ""}> API-SSL</label> '
                 f'<label class="chk"><input type="checkbox" name="verify_ssl"'
                 f'{" checked" if pre.get("verify_ssl") else ""}> verify cert</label>')
-        + field("WAN primary interface", f'<input name="wan_primary" '
-                f'value="{esc((wan.get("primary") or {}).get("interface", ""))}">')
-        + field("WAN backup interface", f'<input name="wan_backup" '
-                f'value="{esc((wan.get("backup") or {}).get("interface", ""))}">')
+        + field("WAN uplinks <span class='muted'>(top = highest priority; "
+                "add as many as the router has)</span>",
+                _wan_editor(wan.get("links") or []), full=True)
         + field("LAN subnets <span class='muted'>(comma-separated)</span>",
                 f'<input name="lan_subnets" '
                 f'value="{esc(",".join(pre.get("lan_subnets") or []))}">', full=True)
@@ -562,7 +848,43 @@ def _render_devices(store, csrf, user, edit_name=None, msg="") -> str:
              f'<th>Actions</th></tr>{trows}</table></div>'
              f'<div class="box"><h2>{"Edit device" if edit_name else "Add a device"}'
              f'</h2>{form}</div></div>')
-    return _page("Devices", _header(user, "/devices") + inner)
+    return _page("Devices", _header(user, "/devices") + inner + _WAN_JS)
+
+
+def _wan_link_row(idx, ep=None) -> str:
+    ep = ep or {}
+    return (f'<div class="wanrow"><span class="prio">{idx + 1}</span>'
+            f'<input name="link_name" placeholder="ISP name (e.g. Vodacom)" '
+            f'value="{esc(ep.get("name", ""))}">'
+            f'<input name="link_iface" placeholder="interface (ether1, lte1…)" '
+            f'value="{esc(ep.get("interface", ""))}">'
+            f'<input name="link_gw" placeholder="gateway IP (optional)" '
+            f'value="{esc(ep.get("gateway", ""))}">'
+            f'<button type="button" class="btn ghost wandel" '
+            f'onclick="this.parentNode.remove();wanReindex()">&times;</button></div>')
+
+
+def _wan_editor(links) -> str:
+    rows = list(links) or [{}, {}]  # start with two rows for a new device
+    body = "".join(_wan_link_row(i, ep) for i, ep in enumerate(rows))
+    return (f'<div id="wanlinks">{body}</div>'
+            f'<button type="button" class="btn ghost" onclick="wanAdd()" '
+            f'style="margin-top:4px">+ Add WAN link</button>'
+            f'<template id="wantmpl">{_wan_link_row(0, {})}</template>')
+
+
+_WAN_JS = """
+<script>
+ function wanReindex(){
+   var i=1; document.querySelectorAll('#wanlinks .wanrow .prio')
+     .forEach(function(p){p.textContent=i++;});
+ }
+ function wanAdd(){
+   var t=document.getElementById('wantmpl');
+   document.getElementById('wanlinks').appendChild(t.content.cloneNode(true));
+   wanReindex();
+ }
+</script>"""
 
 
 def _mini_form(action, csrf, name, label, cls, confirm=None) -> str:
@@ -740,6 +1062,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if path == "/":
                     return self._send(200, _render_dashboard(store, state, user,
                                       allowed), "text/html; charset=utf-8")
+                if path == "/inventory":
+                    return self._send(200, _render_inventory(store, state, user,
+                                      allowed), "text/html; charset=utf-8")
+                if path == "/device":
+                    dev = parse_qs(url.query).get("name", [""])[0]
+                    if dev not in _known_devices(store, state):
+                        return self._send(404, "no such device")
+                    if allowed is not None and dev not in allowed:
+                        return self._send(403, "forbidden")
+                    return self._send(200, _render_device(store, state, dev, user),
+                                      "text/html; charset=utf-8")
                 if path == "/api/devices":
                     return self._send(200, json.dumps(
                         _all_devices(store, state, allowed), indent=2),
@@ -839,6 +1172,16 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if not pwd and orig:  # keep existing password when left blank on edit
                 pwd = (store.raw(orig) or {}).get("password", "")
             checks_sel = set(multi.get("checks", []))
+            # WAN uplinks come as parallel arrays, one entry per editor row,
+            # in priority order (top row = highest priority).
+            names = multi.get("link_name", [])
+            ifaces = multi.get("link_iface", [])
+            gws = multi.get("link_gw", [])
+            links = []
+            for nm, ifc, gw in zip(names, ifaces, gws):
+                nm, ifc, gw = nm.strip(), ifc.strip(), gw.strip()
+                if nm or ifc or gw:
+                    links.append({"name": nm, "interface": ifc, "gateway": gw})
             return {
                 "name": flat.get("name", "").strip(),
                 "host": flat.get("host", "").strip(),
@@ -849,8 +1192,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 "verify_ssl": "verify_ssl" in flat,
                 "timeout": int(flat.get("timeout") or 10),
                 "lan_subnets": csv(flat.get("lan_subnets")),
-                "wan": {"primary": {"interface": flat.get("wan_primary", "").strip()},
-                        "backup": {"interface": flat.get("wan_backup", "").strip()}},
+                "wan": {"links": links},
                 "monitor_interfaces": csv(flat.get("monitor_interfaces")),
                 "client_count_sources": multi.get("sources") or ["dhcp", "wireless"],
                 "checks": {k: (k in checks_sel) for k in DEFAULT_CHECKS},

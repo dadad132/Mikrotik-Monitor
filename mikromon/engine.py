@@ -55,6 +55,31 @@ class Engine:
         return [Device(c) for c in
                 self.devices_store.list_configs(self.config.defaults)]
 
+    def _record_facts(self, cfg, snap, now) -> None:
+        """Persist a little inventory metadata (model, RouterOS version, serial,
+        identity) so the dashboard can show a device table + version stats."""
+        res = snap.resource
+        rb = snap.first("routerboard")
+        ident = snap.first("identity")
+        facts = self.state.facts(cfg.name)
+        model = rb.get("model") or rb.get("board-name") or res.get("board-name")
+        wanted = {
+            "model": model,
+            "version": res.get("version"),
+            "firmware": rb.get("current-firmware") or rb.get("upgrade-firmware"),
+            "serial": rb.get("serial-number"),
+            "identity": ident.get("name"),
+            "uptime": res.get("uptime"),
+            "arch": res.get("architecture-name"),
+            "host": cfg.host,
+            "wan_links": [ep.label(i) for i, ep in enumerate(cfg.wan.links)],
+        }
+        for key, val in wanted.items():
+            if val not in (None, "", []):
+                facts[key] = str(val) if isinstance(val, (str, int)) else val
+        if any(v not in (None, "", []) for v in wanted.values()):
+            facts["updated"] = now
+
     def _flush_metrics(self, ctx) -> None:
         if self.metrics and ctx.samples:
             self.metrics.record((ctx.now, ctx.device, m, lab, v)
@@ -117,8 +142,10 @@ class Engine:
                 self._flush_metrics(ctx)
                 return ctx.alerts
 
-        # 2) Connect + pull the datasets the enabled checks need.
-        datasets = required_datasets(cfg)
+        # 2) Connect + pull the datasets the enabled checks need (plus a little
+        #    inventory metadata for the dashboard's device list / version stats).
+        datasets = set(required_datasets(cfg)) | {"resource", "identity",
+                                                  "routerboard"}
         try:
             device.connect()
             snap = device.fetch(datasets)
@@ -141,6 +168,8 @@ class Engine:
             ctx.transition("api_error", healthy=True, severity=Severity.CRITICAL,
                            title="RouterOS API error",
                            recovery_title="RouterOS API reachable again")
+
+        self._record_facts(cfg, snap, ctx.now)
 
         # 3) Run each enabled check, isolating failures.
         for check in enabled_checks(cfg):

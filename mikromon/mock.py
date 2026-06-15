@@ -121,10 +121,13 @@ def build_frames(incident: bool = True):
 
 
 class MockDevice:
-    def __init__(self, cfg, frames):
+    def __init__(self, cfg, frames, board="RB5009", version="7.15.3", serial=""):
         self.cfg = cfg
         self.frames = frames
         self.tick = -1
+        self.board = board
+        self.version = version
+        self.serial = serial or ("MT" + format(abs(hash(cfg.name)) % 10**10, "010d"))
 
     @property
     def name(self):
@@ -148,7 +151,21 @@ class MockDevice:
         snap = Snapshot(handle=self)
         frame = self._frame()
         for name in datasets:
-            snap.data[name] = frame.get(name, [])
+            snap.data[name] = list(frame.get(name, []))
+        # Synthesize per-device inventory metadata so the demo populates the
+        # device table + RouterOS version stats with realistic variety.
+        if snap.data.get("resource"):
+            res = dict(snap.data["resource"][0])
+            res["version"] = self.version
+            res["board-name"] = self.board
+            res["architecture-name"] = "arm64"
+            snap.data["resource"] = [res]
+        if "identity" in datasets:
+            snap.data["identity"] = [{"name": self.cfg.name}]
+        if "routerboard" in datasets:
+            snap.data["routerboard"] = [{
+                "model": self.board, "serial-number": self.serial,
+                "current-firmware": self.version}]
         return snap
 
     def ping(self, address, count=3):
@@ -158,8 +175,8 @@ class MockDevice:
 def _demo_device(name: str) -> DeviceConfig:
     return DeviceConfig(
         name=name, host="mock", lan_subnets=["192.168.88.0/24"],
-        wan=WanConfig(primary=WanEndpoint(interface="ether1"),
-                      backup=WanEndpoint(interface="lte1")),
+        wan=WanConfig(links=[WanEndpoint(interface="ether1", name="Fibre"),
+                             WanEndpoint(interface="lte1", name="LTE")]),
         client_count_sources=["dhcp"], traffic_interfaces=["ether1"],
         checks={"reachability": True, "wan_failover": True, "internet_down": True,
                 "resources": True, "interfaces": True, "security": True,
@@ -192,12 +209,17 @@ def demo_config(outbox_dir: str = "outbox") -> AppConfig:
 
 
 def demo_devices(config):
-    # HQ gets the incident scenario; Branch stays calm.
+    # HQ gets the incident scenario; Branch stays calm. Different hardware +
+    # RouterOS versions so the inventory + version-breakdown look realistic
+    # (the Branch runs an older v6 that the UI flags for upgrade).
     incident = build_frames(incident=True)
     calm = build_frames(incident=False)
     out = []
     for cfg in config.devices:
-        out.append(MockDevice(cfg, incident if "HQ" in cfg.name else calm))
+        if "HQ" in cfg.name:
+            out.append(MockDevice(cfg, incident, board="RB5009", version="7.15.3"))
+        else:
+            out.append(MockDevice(cfg, calm, board="hAP ac2", version="6.49.10"))
     return out
 
 

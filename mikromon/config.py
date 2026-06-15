@@ -75,17 +75,33 @@ class SmtpConfig:
 class WanEndpoint:
     interface: str = ""
     gateway: str = ""
+    name: str = ""  # friendly ISP label, e.g. "Vodacom"
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.interface or self.gateway)
+
+    def label(self, idx: int = 0) -> str:
+        return self.name or self.interface or self.gateway or f"WAN{idx + 1}"
 
 
 @dataclass
 class WanConfig:
-    primary: WanEndpoint = field(default_factory=WanEndpoint)
-    backup: WanEndpoint = field(default_factory=WanEndpoint)
+    # Uplinks in priority order (highest priority first). Supports 2, 3, 4+.
+    links: list = field(default_factory=list)
     ping_targets: list = field(default_factory=list)
 
     @property
+    def primary(self) -> WanEndpoint:
+        return self.links[0] if self.links else WanEndpoint()
+
+    @property
+    def backup(self) -> WanEndpoint:
+        return self.links[1] if len(self.links) > 1 else WanEndpoint()
+
+    @property
     def configured(self) -> bool:
-        return bool(self.primary.interface or self.primary.gateway)
+        return any(ep.configured for ep in self.links)
 
 
 @dataclass
@@ -145,7 +161,22 @@ def _require(d: dict, key: str, where: str):
 def _endpoint(d) -> WanEndpoint:
     d = d or {}
     return WanEndpoint(interface=str(d.get("interface", "")),
-                       gateway=str(d.get("gateway", "")))
+                       gateway=str(d.get("gateway", "")),
+                       name=str(d.get("name", "")))
+
+
+def _wan_links(wan_raw: dict) -> list:
+    """Priority-ordered uplinks. Accepts the new `links:` list, or the legacy
+    `primary:`/`backup:` pair for back-compat."""
+    links_raw = wan_raw.get("links")
+    if links_raw:
+        return [_endpoint(x) for x in links_raw if x]
+    out = []
+    for key in ("primary", "backup"):
+        ep = _endpoint(wan_raw.get(key))
+        if ep.configured:
+            out.append(ep)
+    return out
 
 
 def load_config(path: str) -> AppConfig:
@@ -234,8 +265,7 @@ def build_device(d: dict, defaults: dict, where: str = "device") -> DeviceConfig
         timeout=int(d.get("timeout", 10) or 10),
         lan_subnets=list(d.get("lan_subnets") or []),
         wan=WanConfig(
-            primary=_endpoint(wan_raw.get("primary")),
-            backup=_endpoint(wan_raw.get("backup")),
+            links=_wan_links(wan_raw),
             ping_targets=[str(t) for t in (wan_raw.get("ping_targets") or [])],
         ),
         monitor_interfaces=[str(x) for x in (d.get("monitor_interfaces") or [])],
@@ -256,10 +286,8 @@ def device_to_dict(cfg: DeviceConfig) -> dict:
         "use_ssl": cfg.use_ssl, "verify_ssl": cfg.verify_ssl,
         "timeout": cfg.timeout, "lan_subnets": list(cfg.lan_subnets),
         "wan": {
-            "primary": {"interface": cfg.wan.primary.interface,
-                        "gateway": cfg.wan.primary.gateway},
-            "backup": {"interface": cfg.wan.backup.interface,
-                       "gateway": cfg.wan.backup.gateway},
+            "links": [{"name": ep.name, "interface": ep.interface,
+                       "gateway": ep.gateway} for ep in cfg.wan.links],
             "ping_targets": list(cfg.wan.ping_targets),
         },
         "monitor_interfaces": list(cfg.monitor_interfaces),
