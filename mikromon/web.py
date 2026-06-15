@@ -510,6 +510,33 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
 
 _DEVICE_TABS = ["Overview", "SD-WAN", "Security", "NextDNS", "QoS",
                 "Port forwarding", "Interfaces", "Remote access", "Backups"]
+# Tabs that are wired to the real engine today (the rest show as "soon").
+_LIVE_TABS = {"Overview": "", "Backups": "backups"}
+
+
+def _device_tabbar(name, active, is_admin=True) -> str:
+    q = quote(name)
+    out = []
+    for t in _DEVICE_TABS:
+        slug = _LIVE_TABS.get(t)
+        # Backups writes to the router → admins only; others are read-only.
+        live = slug is not None and (t != "Backups" or is_admin)
+        if live:
+            href = f"/device?name={q}" + (f"&tab={slug}" if slug else "")
+            cls = "on" if (slug or "overview") == active else ""
+            out.append(f'<a class="{cls}" href="{href}">{esc(t)}</a>')
+        else:
+            out.append(f'<a class="soon">{esc(t)}</a>')
+    return f'<div class="tabs">{"".join(out)}</div>'
+
+
+def _facts_strip(f) -> str:
+    items = [("Model", f.get("model", "—")), ("RouterOS", f.get("version", "—")),
+             ("Identity", f.get("identity", "—")), ("Serial", f.get("serial", "—")),
+             ("Host / IP", f.get("host", "—")), ("Uptime", f.get("uptime", "—"))]
+    cells = "".join(f'<div class="fact"><div class="k">{esc(k)}</div>'
+                    f'<div class="val">{esc(str(v))}</div></div>' for k, v in items)
+    return f'<div class="box"><div class="factgrid">{cells}</div></div>'
 
 
 def _render_inventory(store, state, user, allowed) -> str:
@@ -561,17 +588,8 @@ def _render_device(store, state, name, user) -> str:
              "crit": ("crit", "Offline / Error")}[sev]
     m = d["metrics"]
 
-    tabs = ['<a class="on">Overview</a>'] + [
-        f'<a class="soon">{esc(t)}</a>' for t in _DEVICE_TABS[1:]]
-    tabbar = f'<div class="tabs">{"".join(tabs)}</div>'
-
-    # facts strip
-    fact_items = [("Model", f.get("model", "—")), ("RouterOS", f.get("version", "—")),
-                  ("Identity", f.get("identity", "—")), ("Serial", f.get("serial", "—")),
-                  ("Host / IP", f.get("host", "—")), ("Uptime", f.get("uptime", "—"))]
-    facts_html = "".join(f'<div class="fact"><div class="k">{esc(k)}</div>'
-                         f'<div class="val">{esc(str(v))}</div></div>'
-                         for k, v in fact_items)
+    tabbar = _device_tabbar(name, "overview", AuthStore.is_admin(user or {}))
+    facts_html = _facts_strip(f)
 
     # gauges (live latest values)
     gauges = ""
@@ -627,7 +645,7 @@ def _render_device(store, state, name, user) -> str:
         f'<div class="wrap" style="max-width:1100px">'
         f'<h1 style="display:flex;align-items:center;gap:12px">{esc(name)}'
         f'<span class="badge {badge[0]}">{badge[1]}</span></h1>{tabbar}'
-        f'<div class="box"><div class="factgrid">{facts_html}</div></div>'
+        f'{facts_html}'
         f'<div class="cols">'
         f'<div class="box"><h2>System</h2>{gauges}</div>'
         f'<div class="box"><h2>WAN uplinks</h2>{link_rows}{wan_note}</div>'
@@ -640,6 +658,65 @@ def _render_device(store, state, name, user) -> str:
         f'<p><a href="/">&larr; dashboard</a> &nbsp; '
         f'<a href="/inventory">inventory</a></p></div>')
     return _page(esc(name), _header(user, "/") + inner)
+
+
+def _render_device_backups(name, user, facts, csrf, *, backups=None,
+                           error="", msg="", dry_plan=None) -> str:
+    """The Backups tab — wired to the real config-push engine (admin-only)."""
+    tabbar = _device_tabbar(name, "backups", True)
+    q = quote(name)
+    banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
+              f'</div>' if msg else "")
+    err = (f'<div class="box" style="border-left:4px solid #dc2626">'
+           f'<b>Could not reach the router:</b> {esc(error)}<br>'
+           f'<span class="muted">Check the host, that the API service is '
+           f'enabled, and the read-write push user/password on the Devices '
+           f'page.</span></div>' if error else "")
+
+    if dry_plan is not None:
+        # Step 2: show the dry-run plan and a confirm button.
+        resolved = dry_plan.ops[0].params.get("name", "") if dry_plan.ops else ""
+        action = (f'<div class="box"><h2>Dry run — nothing has been written yet</h2>'
+                  f'<pre style="background:#f8fafc;padding:12px;border-radius:8px;'
+                  f'white-space:pre-wrap">{esc(dry_plan.diff_text())}</pre>'
+                  f'<form method="POST" action="/device/backup" class="actions">'
+                  f'<input type="hidden" name="csrf" value="{csrf}">'
+                  f'<input type="hidden" name="device" value="{esc(name)}">'
+                  f'<input type="hidden" name="bkname" value="{esc(resolved)}">'
+                  f'<input type="hidden" name="apply" value="1">'
+                  f'<button class="btn" type="submit">Confirm &amp; create on the '
+                  f'router</button>'
+                  f'<a class="btn ghost" href="/device?name={q}&tab=backups">Cancel'
+                  f'</a></form></div>')
+    else:
+        # Step 1: list existing backups + a create form (which previews first).
+        rows = ""
+        for b in (backups or []):
+            rows += (f'<tr><td><b>{esc(b["name"])}</b></td>'
+                     f'<td class="muted">{esc(str(b.get("size", "")))}</td>'
+                     f'<td class="muted">{esc(str(b.get("time", "")))}</td></tr>')
+        if not rows and not error:
+            rows = '<tr><td colspan="3" class="muted">No backup files on the router yet.</td></tr>'
+        table = (f'<div class="box"><h2>Restore points on the router</h2>'
+                 f'<table><tr><th>File</th><th>Size</th><th>Created</th></tr>'
+                 f'{rows}</table></div>') if not error else ""
+        create = (f'<div class="box"><h2>Create a backup</h2>'
+                  f'<p class="muted">Creates a <code>.backup</code> file on the '
+                  f'router — a safe, additive write. You will see a dry-run '
+                  f'preview before anything is applied.</p>'
+                  f'<form method="POST" action="/device/backup" class="actions">'
+                  f'<input type="hidden" name="csrf" value="{csrf}">'
+                  f'<input type="hidden" name="device" value="{esc(name)}">'
+                  f'<input name="bkname" placeholder="backup name (optional)">'
+                  f'<button class="btn" type="submit">Preview backup (dry-run)'
+                  f'</button></form></div>')
+        action = table + create
+
+    inner = (f'<div class="wrap" style="max-width:1100px">'
+             f'<h1>{esc(name)} &middot; Backups</h1>{tabbar}'
+             f'{_facts_strip(facts)}{banner}{err}{action}'
+             f'<p><a href="/device?name={q}">&larr; overview</a></p></div>')
+    return _page(esc(name) + " · Backups", _header(user, "/") + inner)
 
 
 _AUTH_BRAND = ('<div class="brand" style="justify-content:center;color:#0f172a;'
@@ -780,6 +857,7 @@ def _render_devices(store, csrf, user, edit_name=None, msg="") -> str:
         trows += (
             f'<tr><td><b>{esc(n)}</b></td><td class="muted">{esc(host)}</td>'
             f'<td><div class="actions">'
+            f'<a class="btn ghost" href="/device?name={quote(n)}">Open</a>'
             f'<a class="btn ghost" href="/devices?edit={quote(n)}">Edit</a>'
             f'{_mini_form("/devices/test", csrf, n, "Test", "btn ghost")}'
             f'{_mini_form("/devices/delete", csrf, n, "Delete", "btn red", n)}'
@@ -1056,9 +1134,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._serve_devices(url, user)
 
             store = self._store()
-            allowed = AuthStore.allowed_devices(user, _known_devices(
-                store, _load_state(state_file)))
+            known = set(_known_devices(store, _load_state(state_file)))
             store.close()
+            ds = self._devstore()  # include web-managed devices not yet polled
+            if ds:
+                known |= set(ds.names())
+                ds.close()
+            allowed = AuthStore.allowed_devices(user, sorted(known))
             return self._serve_data(path, url, user=user, allowed=allowed)
 
         def _serve_data(self, path, url, user, allowed):
@@ -1072,11 +1154,22 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._send(200, _render_inventory(store, state, user,
                                       allowed), "text/html; charset=utf-8")
                 if path == "/device":
-                    dev = parse_qs(url.query).get("name", [""])[0]
-                    if dev not in _known_devices(store, state):
+                    q = parse_qs(url.query)
+                    dev = q.get("name", [""])[0]
+                    known = set(_known_devices(store, state))
+                    ds = self._devstore()
+                    if ds:
+                        known |= set(ds.names())
+                        ds.close()
+                    if dev not in known:
                         return self._send(404, "no such device")
                     if allowed is not None and dev not in allowed:
                         return self._send(403, "forbidden")
+                    if q.get("tab", [""])[0] == "backups":
+                        if user is not None and not AuthStore.is_admin(user):
+                            return self._send(403, "forbidden")
+                        return self._device_backups_page(
+                            dev, user, msg=q.get("msg", [""])[0])
                     return self._send(200, _render_device(store, state, dev, user),
                                       "text/html; charset=utf-8")
                 if path == "/api/devices":
@@ -1146,6 +1239,80 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return None
             from .devices_store import DevicesStore
             return DevicesStore(devices_db)
+
+        # ---- Backups tab (config-push engine, admin only) ----
+        def _device_raw(self, name):
+            store = self._devstore()
+            if store is None:
+                return None
+            try:
+                return store.raw(name)
+            finally:
+                store.close()
+
+        def _device_backups_page(self, name, user, dry_plan=None, error="",
+                                 msg=""):
+            raw = self._device_raw(name)
+            if raw is None:
+                return self._send(400, "This device is not managed in the "
+                                       "dashboard (set devices_db / add it on "
+                                       "the Devices page).")
+            facts = (_load_state(state_file).get("devices", {})
+                     .get(name, {}).get("facts", {}))
+            sess = self._session()
+            csrf = sess["csrf"] if sess else ""
+            backups = []
+            if dry_plan is None:  # live-read the router's restore points
+                from .config import build_device
+                from .device import DeviceError
+                from .push import Pusher, PushError, rw_device
+                from .push.api import PushApi
+
+                cfg = build_device(raw, defaults)
+                dev = rw_device(cfg)
+                api = PushApi(dev)
+                try:
+                    api.connect()
+                    backups = Pusher(cfg, api).list_backups()
+                except (DeviceError, PushError) as exc:
+                    error = error or str(exc)
+                finally:
+                    dev.close()
+            page = _render_device_backups(name, user, facts, csrf,
+                                          backups=backups, error=error, msg=msg,
+                                          dry_plan=dry_plan)
+            return self._send(200, page, "text/html; charset=utf-8")
+
+        def _device_backup_post(self, flat, user):
+            name = flat.get("device", "")
+            raw = self._device_raw(name)
+            if raw is None:
+                return self._send(400, "device not managed in the dashboard")
+            from .config import build_device
+            from .device import DeviceError
+            from .push import Pusher, PushError, rw_device
+            from .push.api import PushApi
+
+            cfg = build_device(raw, defaults)
+            bkname = (flat.get("bkname") or "").strip() or None
+            if flat.get("apply") != "1":
+                # Step 1: dry-run preview — connects to nothing.
+                plan = Pusher(cfg, None, dry_run=True).plan_backup(bkname)
+                return self._device_backups_page(name, user, dry_plan=plan)
+            # Step 2: actually create it on the router.
+            dev = rw_device(cfg)
+            api = PushApi(dev)
+            pusher = Pusher(cfg, api, dry_run=False)
+            try:
+                api.connect()
+                pusher.apply(pusher.plan_backup(bkname))
+                return self._redirect(
+                    f"/device?name={quote(name)}&tab=backups&msg=" +
+                    quote("Backup created on the router."))
+            except (DeviceError, PushError) as exc:
+                return self._device_backups_page(name, user, error=str(exc))
+            finally:
+                dev.close()
 
         def _devices_post(self, path, flat, multi, user):
             store = self._devstore()
@@ -1259,6 +1426,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(400, "bad csrf token")
             if path.startswith("/devices/"):
                 return self._devices_post(path, flat, multi, user)
+            if path == "/device/backup":
+                return self._device_backup_post(flat, user)
             try:
                 if path == "/admin/add":
                     auth.add_user(flat.get("username", ""), flat.get("password", ""),

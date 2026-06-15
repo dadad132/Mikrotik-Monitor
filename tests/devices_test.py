@@ -143,6 +143,20 @@ try:
     check("edit updates host, keeps password",
           raw["host"] == "8.8.8.8" and raw["password"] == "secret")
     saved.close()
+    # --- Backups tab (config-push engine) wired into the web UI ---
+    st, body = get(admin, "/device?name=WebR1")
+    check("admin can open a web-managed device page (before any poll)",
+          st == 200 and "Overview" in body and "tab=backups" in body)
+    st, body = post(admin, "/device/backup",
+                    {"csrf": csrf, "device": "WebR1", "bkname": "unittest"})
+    check("backup dry-run preview works without a router",
+          st == 200 and "Dry run" in body and "unittest" in body
+          and "Confirm" in body)
+    nobody = op_login("bob", "bob123")
+    st, _ = get(nobody, "/device?name=WebR1&tab=backups")
+    check("non-admin blocked from the Backups tab (403)", st == 403)
+    st, _ = post(nobody, "/device/backup", {"csrf": "x", "device": "WebR1"})
+    check("non-admin blocked from creating a backup (403)", st == 403)
     st, _ = post(admin, "/devices/delete", {"csrf": csrf, "name": "WebR1"})
     saved = DevicesStore(wdb)
     check("device deleted via web", saved.names() == [])

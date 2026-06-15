@@ -407,7 +407,12 @@ are built on. Its design is safety-first:
 - **Automatic rollback.** Each operation carries an inverse; if an apply fails
   partway through, the completed operations are undone in reverse.
 
-First commands (CLI; the GUI tabs will call the same engine later):
+**In the dashboard:** open a device → the **Backups** tab (admin only) lists the
+restore points on the router, and **Create backup** shows a dry-run preview
+before it writes anything. Add the device's **read-write push user** on the
+Devices page — no YAML editing.
+
+**From the CLI** (same engine):
 
 ```bash
 mikromon backup-list  -c config.yaml                 # list .backup files on each router
