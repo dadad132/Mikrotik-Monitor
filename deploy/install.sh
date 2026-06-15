@@ -133,7 +133,49 @@ chmod 640 "${APP_DIR}/config.yaml"
 chmod 755 "${APP_DIR}"
 
 # ---------------------------------------------------------------------------
-# 7. systemd service unit
+# 7. Web dashboard network binding
+# ---------------------------------------------------------------------------
+step "Configuring web dashboard (host 0.0.0.0, port 8080)"
+
+WEB_PORT=8080
+CONFIG_FILE="${APP_DIR}/config.yaml"
+
+# Patch host and port in-place if the file already exists.
+# Uses Python so we don't need yq or any extra tool.
+"${PYTHON_BIN}" - "${CONFIG_FILE}" "${WEB_PORT}" <<'PYEOF'
+import sys, re
+
+config_path = sys.argv[1]
+port        = int(sys.argv[2])
+
+with open(config_path) as fh:
+    text = fh.read()
+
+# Replace  host: <anything>  inside the web: block.
+text = re.sub(r'(?m)^(\s*host:\s*)127\.0\.0\.1(\s*)$', r'\g<1>0.0.0.0\2', text)
+# Replace  port: <anything>  inside the web: block (simple numeric replace).
+text = re.sub(r'(?m)^(\s*port:\s*)\d+(\s*)$', lambda m: f"{m.group(1)}{port}{m.group(2)}", text)
+
+with open(config_path, 'w') as fh:
+    fh.write(text)
+
+print(f"  web.host set to 0.0.0.0, web.port set to {port}")
+PYEOF
+
+# ---------------------------------------------------------------------------
+# 8. Firewall — open the dashboard port
+# ---------------------------------------------------------------------------
+step "Opening firewall port ${WEB_PORT}/tcp"
+
+if command -v ufw &>/dev/null; then
+    ufw allow "${WEB_PORT}/tcp" comment "mikromon dashboard" || true
+    log "UFW rule added for port ${WEB_PORT}/tcp"
+else
+    log "ufw not found — skipping firewall rule (open port ${WEB_PORT} manually if needed)"
+fi
+
+# ---------------------------------------------------------------------------
+# 9. systemd service unit
 # ---------------------------------------------------------------------------
 step "Registering systemd service"
 
@@ -143,6 +185,10 @@ systemctl daemon-reload
 
 log "Service unit installed at ${SYSTEMD_UNIT}"
 
+# Resolve the server's primary IP for the final message.
+SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+SERVER_IP="${SERVER_IP:-<your-server-ip>}"
+
 # ---------------------------------------------------------------------------
 # Done
 # ---------------------------------------------------------------------------
@@ -151,6 +197,9 @@ cat <<EOF
 ============================================================
   mikromon installed successfully!
 ============================================================
+
+Dashboard will be available at:
+  http://${SERVER_IP}:${WEB_PORT}
 
 Next steps:
 
@@ -172,11 +221,6 @@ Next steps:
 
   5. Watch the logs:
        journalctl -u mikromon -f
-
-  6. (Optional) launch the web dashboard:
-       sudo -u ${SERVICE_USER} \\
-         ${APP_DIR}/.venv/bin/python -m mikromon dashboard \\
-         -c ${APP_DIR}/config.yaml
 
 ============================================================
 EOF
