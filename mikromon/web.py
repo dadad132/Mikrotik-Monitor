@@ -1028,9 +1028,10 @@ def _render_setup(error: str = "") -> str:
 _ADMIN_JS = """
 <script>
  // When "All devices" is ticked, grey out + ignore the individual chips.
+ // Exclude .allbox itself so name="all" is still submitted with the form.
  function syncAll(box){
    var grp=box.closest('.devsel');
-   grp.querySelectorAll('.chips input').forEach(function(c){
+   grp.querySelectorAll('.chips input:not(.allbox)').forEach(function(c){
      c.disabled=box.checked; c.closest('label').style.opacity=box.checked?.45:1;});
  }
  document.querySelectorAll('.allbox').forEach(function(b){
