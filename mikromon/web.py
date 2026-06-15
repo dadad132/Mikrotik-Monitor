@@ -106,63 +106,116 @@ def _sparkline(points, width=160, height=36) -> str:
 
 
 _PAGE_CSS = """
- body{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f4f6;color:#111}
- header{background:#111827;color:#fff;padding:12px 20px;display:flex;
-   justify-content:space-between;align-items:center}
- header a{color:#93c5fd;text-decoration:none;margin-left:14px}
+ *{box-sizing:border-box}
+ body{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f1f5f9;color:#0f172a}
+ a{color:#2563eb}
+ h1{font-size:22px;margin:0 0 16px}
+ /* top nav */
+ header{background:#0f172a;color:#fff;padding:0 20px;display:flex;align-items:center;
+   gap:6px;height:54px;box-shadow:0 1px 4px rgba(0,0,0,.2)}
+ .brand{font-weight:700;font-size:17px;display:flex;align-items:center;gap:8px}
+ .brand .logo{color:#38bdf8;font-size:18px}
+ nav{display:flex;gap:4px;margin-left:20px}
+ nav a{color:#cbd5e1;text-decoration:none;padding:8px 13px;border-radius:7px;
+   font-size:14px}
+ nav a:hover{background:#1e293b;color:#fff}
+ nav a.on{background:#2563eb;color:#fff}
+ header .right{margin-left:auto;display:flex;align-items:center;gap:14px;font-size:13px}
+ .who{display:flex;flex-direction:column;line-height:1.15;text-align:right}
+ .who small{color:#94a3b8;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+ .logout{color:#93c5fd;text-decoration:none}.logout:hover{text-decoration:underline}
+ /* device card grid */
  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));
-   gap:16px;padding:20px}
+   gap:16px;padding:18px 20px}
  .card{background:#fff;border-radius:10px;padding:14px 18px;
-   box-shadow:0 1px 3px rgba(0,0,0,.1)}
+   box-shadow:0 1px 3px rgba(0,0,0,.1);border-left:4px solid #16a34a}
  .card h2{font-size:16px;margin:0 0 10px;display:flex;align-items:center;gap:8px}
- .card{border-left:4px solid #16a34a}
  .card.warn{border-left-color:#d97706}.card.crit{border-left-color:#dc2626}
- .dot{width:12px;height:12px;border-radius:50%;display:inline-block}
- .state{margin-left:auto;font-size:11px;color:#6b7280}
+ .dot{width:11px;height:11px;border-radius:50%;display:inline-block}
+ .state{margin-left:auto;font-size:11px;color:#64748b;font-weight:600}
  /* NOC summary bar */
  .noc{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));
    gap:12px;padding:18px 20px 0}
  .tile{background:#fff;border-radius:10px;padding:12px 14px;
-   box-shadow:0 1px 3px rgba(0,0,0,.1);border-top:3px solid #6b7280;cursor:default}
+   box-shadow:0 1px 3px rgba(0,0,0,.1);border-top:3px solid #94a3b8;cursor:default}
  .tile.click{cursor:pointer}.tile.click:hover{box-shadow:0 2px 8px rgba(0,0,0,.18)}
  .tile .num{font-size:28px;font-weight:700;line-height:1}
- .tile .lbl{font-size:11px;color:#6b7280;text-transform:uppercase;
+ .tile .lbl{font-size:11px;color:#64748b;text-transform:uppercase;
    letter-spacing:.04em;margin-top:6px}
  .tile.green{border-top-color:#16a34a}.tile.green .num{color:#16a34a}
  .tile.red{border-top-color:#dc2626}.tile.red .num{color:#dc2626}
  .tile.amber{border-top-color:#d97706}.tile.amber .num{color:#d97706}
- .tile.planned{border-top-color:#cbd5e1}.tile.planned .num{color:#9ca3af;font-size:20px}
- .tile.planned .lbl::after{content:" · soon";color:#9ca3af}
+ .tile.planned{border-top-color:#cbd5e1}.tile.planned .num{color:#94a3b8;font-size:20px}
+ .tile.planned .lbl::after{content:" · soon";color:#94a3b8}
  /* filter / search bar */
  .fbar{display:flex;gap:8px;align-items:center;padding:16px 20px 0;flex-wrap:wrap}
- .fbar input{flex:1;min-width:200px;padding:7px 10px;border:1px solid #d1d5db;
-   border-radius:6px}
- .fbtn{background:#e5e7eb;border:0;padding:6px 12px;border-radius:6px;cursor:pointer;
-   font-size:13px}.fbtn.on{background:#2563eb;color:#fff}
- .muted{color:#6b7280;font-size:12px}
+ .fbar input{flex:1;min-width:200px}
+ .fbtn{background:#e2e8f0;border:0;padding:7px 13px;border-radius:7px;cursor:pointer;
+   font-size:13px;color:#0f172a}.fbtn:hover{background:#cbd5e1}
+ .fbtn.on{background:#2563eb;color:#fff}
+ .muted{color:#64748b;font-size:12px}
+ /* tables */
  table{width:100%;border-collapse:collapse;font-size:13px}
- td,th{padding:4px 6px;border-bottom:1px solid #f0f0f0;text-align:left}
+ th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;
+   border-bottom:2px solid #e2e8f0}
+ td,th{padding:8px 8px;border-bottom:1px solid #eef2f6;text-align:left;
+   vertical-align:middle}
+ tr:last-child td{border-bottom:0}
  .probs{margin-top:8px;color:#b91c1c;font-size:13px}.probs ul{margin:4px 0 0 18px}
  .ok{margin-top:8px;color:#16a34a;font-size:13px}
- .wrap{max-width:900px;margin:30px auto;padding:0 20px}
- form.inline{display:inline} input,select{padding:5px;margin:2px 0}
- .btn{background:#2563eb;color:#fff;border:0;padding:6px 12px;border-radius:6px;
-   cursor:pointer}.btn.red{background:#dc2626}
- .box{background:#fff;border-radius:10px;padding:18px;margin:16px 0;
+ /* layout + forms */
+ .wrap{max-width:960px;margin:26px auto;padding:0 20px}
+ .box{background:#fff;border-radius:10px;padding:20px;margin:16px 0;
    box-shadow:0 1px 3px rgba(0,0,0,.1)}
+ .box h2{font-size:16px;margin:0 0 14px}
+ form.inline{display:inline}
+ input,select{font:inherit;padding:7px 9px;border:1px solid #cbd5e1;border-radius:7px;
+   background:#fff;color:#0f172a}
+ input:focus,select:focus{outline:2px solid #bfdbfe;border-color:#2563eb}
+ .fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));
+   gap:14px 16px}
+ .fields label.f{display:block;font-size:12px;color:#475569;font-weight:600;
+   margin-bottom:4px}
+ .fields .f input,.fields .f select{width:100%}
+ .full{grid-column:1/-1}
+ .chips{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0}
+ .chips label{background:#f1f5f9;border:1px solid #e2e8f0;border-radius:999px;
+   padding:4px 11px;font-size:12px;cursor:pointer;user-select:none}
+ .chips label:hover{background:#e2e8f0}
+ .chips input{margin:0 5px 0 0;vertical-align:middle}
+ .chk{margin-right:12px;font-size:13px}
+ .btn{background:#2563eb;color:#fff;border:0;padding:8px 15px;border-radius:7px;
+   cursor:pointer;font:inherit;font-weight:600}.btn:hover{background:#1d4ed8}
+ .btn.red{background:#dc2626}.btn.red:hover{background:#b91c1c}
+ .btn.ghost{background:#e2e8f0;color:#0f172a}.btn.ghost:hover{background:#cbd5e1}
+ .actions{display:flex;gap:8px;align-items:center}
+ .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;
+   font-weight:700;text-transform:uppercase;letter-spacing:.03em}
+ .pill.admin{background:#ede9fe;color:#6d28d9}.pill.user{background:#e0f2fe;color:#0369a1}
 """
 
 
-def _header(user) -> str:
-    right = '<div style="font-size:12px">auto-refresh 10s</div>'
-    if user:
-        links = (' <a href="/devices">Devices</a> <a href="/admin">Admin</a>'
-                 if user.get("role") == "admin" else "")
-        right = (f'<div style="font-size:12px">{html.escape(user["username"])}'
-                 f' ({html.escape(user["role"])}){links} '
-                 f'<a href="/logout">Log out</a></div>')
-    return (f'<header><div><b>mikromon</b> &middot; MikroTik fleet dashboard</div>'
-            f'{right}</header>')
+def _nav(user, active) -> str:
+    if not user:
+        return ""
+    items = [("/", "Dashboard")]
+    if user.get("role") == "admin":
+        items += [("/devices", "Devices"), ("/admin", "Users")]
+    links = "".join(
+        f'<a href="{href}" class="{"on" if href == active else ""}">{label}</a>'
+        for href, label in items)
+    return f"<nav>{links}</nav>"
+
+
+def _header(user, active="/") -> str:
+    brand = '<div class="brand"><span class="logo">&#9670;</span>mikromon</div>'
+    if not user:
+        return f"<header>{brand}</header>"
+    chip = (f'<span class="who">{esc(user["username"])}'
+            f'<small>{esc(user["role"])}</small></span>')
+    return (f"<header>{brand}{_nav(user, active)}"
+            f'<div class="right">{chip}<a class="logout" href="/logout">Log out</a>'
+            f"</div></header>")
 
 
 def _severity(d) -> str:
@@ -302,80 +355,122 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
             f'<div class="grid">{grid}</div>{empty}{_DASH_JS}</body></html>')
 
 
+_AUTH_BRAND = ('<div class="brand" style="justify-content:center;color:#0f172a;'
+               'font-size:22px;margin-bottom:6px">'
+               '<span class="logo" style="color:#2563eb">&#9670;</span>mikromon</div>')
+
+
+def _auth_page(title, body) -> str:
+    return (f'<!doctype html><html><head><meta charset="utf-8"><title>{esc(title)}'
+            f'</title><style>{_PAGE_CSS}</style></head><body>'
+            f'<div class="wrap" style="max-width:400px;margin-top:9vh">'
+            f'{_AUTH_BRAND}<div class="box">{body}</div></div></body></html>')
+
+
 def _render_login(error: str = "") -> str:
-    msg = f'<p style="color:#dc2626">{html.escape(error)}</p>' if error else ""
-    return (f'<!doctype html><html><head><meta charset="utf-8"><title>Sign in</title>'
-            f'<style>{_PAGE_CSS}</style></head><body><div class="wrap">'
-            f'<div class="box" style="max-width:360px;margin:80px auto">'
-            f'<h2>mikromon — sign in</h2>{msg}'
+    msg = (f'<p style="color:#dc2626;margin-top:0">{esc(error)}</p>'
+           if error else "")
+    return _auth_page("Sign in",
+            f'<h2 style="margin-top:0">Sign in</h2>{msg}'
             f'<form method="POST" action="/login">'
             f'<p><input name="username" placeholder="Username" autofocus '
             f'style="width:100%"></p>'
             f'<p><input name="password" type="password" placeholder="Password" '
             f'style="width:100%"></p>'
-            f'<button class="btn" type="submit">Sign in</button>'
-            f'</form></div></div></body></html>')
+            f'<button class="btn" type="submit" style="width:100%">Sign in</button>'
+            f'</form>')
 
 
 def _render_setup(error: str = "") -> str:
-    msg = f'<p style="color:#dc2626">{html.escape(error)}</p>' if error else ""
-    return (f'<!doctype html><html><head><meta charset="utf-8">'
-            f'<title>First-run setup</title><style>{_PAGE_CSS}</style></head><body>'
-            f'<div class="wrap"><div class="box" style="max-width:420px;'
-            f'margin:70px auto"><h2>Welcome to mikromon</h2>'
+    msg = (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
+    return _auth_page("First-run setup",
+            f'<h2 style="margin-top:0">Welcome</h2>'
             f'<p>Create the first <b>administrator</b> account to get started. '
             f'You can add more users (and limit which devices they see) from the '
-            f'Admin page afterwards.</p>{msg}'
+            f'Users page afterwards.</p>{msg}'
             f'<form method="POST" action="/setup">'
             f'<p><input name="username" placeholder="Admin username" autofocus '
             f'style="width:100%"></p>'
             f'<p><input name="password" type="password" '
             f'placeholder="Password (min 6 characters)" style="width:100%"></p>'
-            f'<button class="btn" type="submit">Create admin account</button>'
-            f'</form></div></div></body></html>')
+            f'<button class="btn" type="submit" style="width:100%">'
+            f'Create admin account</button></form>')
+
+
+_ADMIN_JS = """
+<script>
+ // When "All devices" is ticked, grey out + ignore the individual chips.
+ function syncAll(box){
+   var grp=box.closest('.devsel');
+   grp.querySelectorAll('.chips input').forEach(function(c){
+     c.disabled=box.checked; c.closest('label').style.opacity=box.checked?.45:1;});
+ }
+ document.querySelectorAll('.allbox').forEach(function(b){
+   syncAll(b); b.addEventListener('change',function(){syncAll(b);});});
+</script>"""
+
+
+def _device_chips(known_devices, selected, all_on) -> str:
+    """A wrapped set of device toggles + an 'All devices' master toggle."""
+    chips = "".join(
+        f'<label><input type="checkbox" name="devices" value="{esc(d)}"'
+        f'{" checked" if all_on or d in selected else ""}> {esc(d)}</label>'
+        for d in known_devices) or '<span class="muted">no devices yet</span>'
+    return (f'<div class="devsel"><div class="chips">'
+            f'<label style="background:#eef2ff"><input type="checkbox" name="all" '
+            f'class="allbox"{" checked" if all_on else ""}> <b>All devices</b></label>'
+            f'{chips}</div></div>')
 
 
 def _render_admin(auth: AuthStore, known_devices, csrf: str, user) -> str:
     rows = []
     for u in auth.list_users():
-        devs = "*" if u["devices"] == "*" else ", ".join(u["devices"]) or "(none)"
-        checks = "".join(
-            f'<label><input type="checkbox" name="devices" value="{html.escape(d)}"'
-            f'{" checked" if u["devices"] == "*" or d in u["devices"] else ""}> '
-            f'{html.escape(d)}</label> ' for d in known_devices)
-        rows.append(f"""<tr><td><b>{html.escape(u['username'])}</b></td>
-          <td>{html.escape(u['role'])}</td><td>{html.escape(devs)}</td>
-          <td><form class="inline" method="POST" action="/admin/update">
-            <input type="hidden" name="csrf" value="{csrf}">
-            <input type="hidden" name="username" value="{html.escape(u['username'])}">
-            <select name="role"><option{' selected' if u['role']=='user' else ''}>user</option>
-            <option{' selected' if u['role']=='admin' else ''}>admin</option></select>
-            <label><input type="checkbox" name="all"{' checked' if u['devices']=='*' else ''}> all</label>
-            {checks}
-            <button class="btn" type="submit">Save</button></form>
-            <form class="inline" method="POST" action="/admin/delete"
-              onsubmit="return confirm('Delete {html.escape(u['username'])}?')">
-            <input type="hidden" name="csrf" value="{csrf}">
-            <input type="hidden" name="username" value="{html.escape(u['username'])}">
-            <button class="btn red" type="submit">Delete</button></form></td></tr>""")
-    add_checks = "".join(
-        f'<label><input type="checkbox" name="devices" value="{html.escape(d)}"> '
-        f'{html.escape(d)}</label> ' for d in known_devices)
-    return (f'<!doctype html><html><head><meta charset="utf-8"><title>Users</title>'
-            f'<style>{_PAGE_CSS}</style></head><body>{_header(user)}'
-            f'<div class="wrap"><h1>User management</h1>'
-            f'<div class="box"><table><tr><th>User</th><th>Role</th>'
-            f'<th>Devices</th><th>Actions</th></tr>{"".join(rows)}</table></div>'
-            f'<div class="box"><h2>Add user</h2>'
-            f'<form method="POST" action="/admin/add">'
-            f'<input type="hidden" name="csrf" value="{csrf}">'
-            f'<input name="username" placeholder="username"> '
-            f'<input name="password" type="password" placeholder="password (min 6)"> '
-            f'<select name="role"><option>user</option><option>admin</option></select>'
-            f'<br><label><input type="checkbox" name="all"> all devices</label> '
-            f'{add_checks}<br><button class="btn" type="submit">Create user</button>'
-            f'</form></div>'
-            f'<p><a href="/">&larr; back to dashboard</a></p></div></body></html>')
+        is_all = u["devices"] == "*"
+        selected = set() if is_all else set(u["devices"])
+        rows.append(f"""<tr>
+          <td><b>{esc(u['username'])}</b></td>
+          <td><span class="pill {esc(u['role'])}">{esc(u['role'])}</span></td>
+          <td>
+            <form method="POST" action="/admin/update">
+              <input type="hidden" name="csrf" value="{csrf}">
+              <input type="hidden" name="username" value="{esc(u['username'])}">
+              <div class="actions" style="margin-bottom:8px">
+                <select name="role">
+                  <option{' selected' if u['role']=='user' else ''}>user</option>
+                  <option{' selected' if u['role']=='admin' else ''}>admin</option>
+                </select>
+                <button class="btn" type="submit">Save changes</button>
+              </div>
+              {_device_chips(known_devices, selected, is_all)}
+            </form>
+          </td>
+          <td>
+            <form method="POST" action="/admin/delete"
+              onsubmit="return confirm('Delete user {esc(u['username'])}?')">
+              <input type="hidden" name="csrf" value="{csrf}">
+              <input type="hidden" name="username" value="{esc(u['username'])}">
+              <button class="btn red" type="submit">Delete</button>
+            </form>
+          </td></tr>""")
+    inner = (
+        f'<div class="wrap"><h1>User management</h1>'
+        f'<div class="box"><table>'
+        f'<tr><th>User</th><th>Role</th><th>Allowed devices</th><th></th></tr>'
+        f'{"".join(rows)}</table></div>'
+        f'<div class="box"><h2>Add a user</h2>'
+        f'<form method="POST" action="/admin/add">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<div class="actions" style="margin-bottom:12px;flex-wrap:wrap">'
+        f'<input name="username" placeholder="username">'
+        f'<input name="password" type="password" placeholder="password (min 6)">'
+        f'<select name="role"><option>user</option><option>admin</option></select>'
+        f'</div>'
+        f'<p class="muted" style="margin:0 0 6px">Which devices may this user see?</p>'
+        f'{_device_chips(known_devices, set(), False)}'
+        f'<div style="margin-top:14px">'
+        f'<button class="btn" type="submit">Create user</button></div>'
+        f'</form></div></div>')
+    return _page("Users", _header(user, "/admin") + inner + _ADMIN_JS)
 
 
 def _page(title: str, body: str) -> str:
@@ -386,9 +481,9 @@ def _page(title: str, body: str) -> str:
 
 def _render_devices(store, csrf, user, edit_name=None, msg="") -> str:
     if store is None:
-        return _page("Devices", _header(user) + '<div class="wrap"><h1>Devices'
-                     '</h1><div class="box">Device management is not enabled. '
-                     'Set <code>devices_db:</code> in the config.</div></div>')
+        return _page("Devices", _header(user, "/devices") + '<div class="wrap">'
+                     '<h1>Devices</h1><div class="box">Device management is not '
+                     'enabled. Set <code>devices_db:</code> in the config.</div></div>')
     pre = (store.raw(edit_name) or {}) if edit_name else {}
     wan = pre.get("wan") or {}
 
@@ -396,62 +491,78 @@ def _render_devices(store, csrf, user, edit_name=None, msg="") -> str:
     for n in store.names():
         host = (store.raw(n) or {}).get("host", "")
         trows += (
-            f'<tr><td><b>{esc(n)}</b></td><td>{esc(host)}</td>'
-            f'<td><a href="/devices?edit={quote(n)}">edit</a></td>'
-            f'<td>{_mini_form("/devices/test", csrf, n, "test", "btn")}</td>'
-            f'<td>{_mini_form("/devices/delete", csrf, n, "delete", "btn red", n)}'
-            f'</td></tr>')
+            f'<tr><td><b>{esc(n)}</b></td><td class="muted">{esc(host)}</td>'
+            f'<td><div class="actions">'
+            f'<a class="btn ghost" href="/devices?edit={quote(n)}">Edit</a>'
+            f'{_mini_form("/devices/test", csrf, n, "Test", "btn ghost")}'
+            f'{_mini_form("/devices/delete", csrf, n, "Delete", "btn red", n)}'
+            f'</div></td></tr>')
     if not trows:
-        trows = '<tr><td colspan="5">No devices yet — add one below.</td></tr>'
+        trows = ('<tr><td colspan="3" class="muted">No devices yet — '
+                 'add your first one below.</td></tr>')
 
     sources_sel = set(pre.get("client_count_sources") or ["dhcp", "wireless"])
     src_boxes = "".join(
         f'<label><input type="checkbox" name="sources" value="{s}"'
-        f'{" checked" if s in sources_sel else ""}> {s}</label> '
+        f'{" checked" if s in sources_sel else ""}> {s}</label>'
         for s in _CLIENT_SOURCES)
     checks_pre = pre.get("checks") or {}
     chk_boxes = "".join(
         f'<label><input type="checkbox" name="checks" value="{k}"'
-        f'{" checked" if checks_pre.get(k, DEFAULT_CHECKS[k]) else ""}> {k}</label> '
+        f'{" checked" if checks_pre.get(k, DEFAULT_CHECKS[k]) else ""}> {k}</label>'
         for k in DEFAULT_CHECKS)
 
     def v(key, d=""):
         return esc(pre.get(key, d))
 
-    form = f"""<form method="POST" action="/devices/save">
-      <input type="hidden" name="csrf" value="{csrf}">
-      <input type="hidden" name="original_name" value="{esc(edit_name or '')}">
-      <p>Name <input name="name" value="{v('name')}">
-         Host / DDNS <input name="host" value="{v('host')}">
-         API port <input name="api_port" size="6" value="{esc(str(pre.get('api_port', 8728)))}"></p>
-      <p>Username <input name="username" value="{v('username')}">
-         Password <input name="password" type="password"
-           placeholder="{'(unchanged)' if edit_name else ''}">
-         <label><input type="checkbox" name="use_ssl"
-           {' checked' if pre.get('use_ssl') else ''}> API-SSL</label>
-         <label><input type="checkbox" name="verify_ssl"
-           {' checked' if pre.get('verify_ssl') else ''}> verify cert</label></p>
-      <p>LAN subnets <input name="lan_subnets" size="34"
-         value="{esc(','.join(pre.get('lan_subnets') or []))}"> (comma-separated)</p>
-      <p>WAN primary iface <input name="wan_primary"
-           value="{esc((wan.get('primary') or {}).get('interface', ''))}">
-         backup iface <input name="wan_backup"
-           value="{esc((wan.get('backup') or {}).get('interface', ''))}"></p>
-      <p>Monitor interfaces <input name="monitor_interfaces" size="34"
-         value="{esc(','.join(pre.get('monitor_interfaces') or []))}">
-         (comma; blank = auto)</p>
-      <p>Client-count sources: {src_boxes}</p>
-      <p>Checks: {chk_boxes}</p>
-      <button class="btn" type="submit">{'Save changes' if edit_name else 'Add device'}</button>
-      {'<a href="/devices" style="margin-left:8px">cancel</a>' if edit_name else ''}
-    </form>"""
+    def field(label, inner_html, full=False):
+        cls = "f full" if full else "f"
+        return f'<div class="{cls}"><label class="f">{label}</label>{inner_html}</div>'
+
+    fields = (
+        field("Name", f'<input name="name" value="{v("name")}">')
+        + field("Host / DDNS", f'<input name="host" value="{v("host")}">')
+        + field("API port", f'<input name="api_port" '
+                f'value="{esc(str(pre.get("api_port", 8728)))}">')
+        + field("Username", f'<input name="username" value="{v("username")}">')
+        + field("Password", f'<input name="password" type="password" '
+                f'placeholder="{"(unchanged)" if edit_name else ""}">')
+        + field("Security",
+                f'<label class="chk"><input type="checkbox" name="use_ssl"'
+                f'{" checked" if pre.get("use_ssl") else ""}> API-SSL</label> '
+                f'<label class="chk"><input type="checkbox" name="verify_ssl"'
+                f'{" checked" if pre.get("verify_ssl") else ""}> verify cert</label>')
+        + field("WAN primary interface", f'<input name="wan_primary" '
+                f'value="{esc((wan.get("primary") or {}).get("interface", ""))}">')
+        + field("WAN backup interface", f'<input name="wan_backup" '
+                f'value="{esc((wan.get("backup") or {}).get("interface", ""))}">')
+        + field("LAN subnets <span class='muted'>(comma-separated)</span>",
+                f'<input name="lan_subnets" '
+                f'value="{esc(",".join(pre.get("lan_subnets") or []))}">', full=True)
+        + field("Monitor interfaces <span class='muted'>(comma; blank = auto)</span>",
+                f'<input name="monitor_interfaces" '
+                f'value="{esc(",".join(pre.get("monitor_interfaces") or []))}">',
+                full=True)
+        + field("Client-count sources",
+                f'<div class="chips">{src_boxes}</div>', full=True)
+        + field("Enabled checks", f'<div class="chips">{chk_boxes}</div>', full=True))
+
+    save_lbl = "Save changes" if edit_name else "Add device"
+    cancel = ('<a class="btn ghost" href="/devices">Cancel</a>' if edit_name else "")
+    form = (f'<form method="POST" action="/devices/save">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            f'<input type="hidden" name="original_name" value="{esc(edit_name or "")}">'
+            f'<div class="fields">{fields}</div>'
+            f'<div class="actions" style="margin-top:16px">'
+            f'<button class="btn" type="submit">{save_lbl}</button>{cancel}</div>'
+            f'</form>')
     msg_html = f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else ""
     inner = (f'<div class="wrap"><h1>Devices</h1>{msg_html}'
-             f'<div class="box"><table><tr><th>Name</th><th>Host</th><th></th>'
-             f'<th></th><th></th></tr>{trows}</table></div>'
+             f'<div class="box"><table><tr><th>Name</th><th>Host</th>'
+             f'<th>Actions</th></tr>{trows}</table></div>'
              f'<div class="box"><h2>{"Edit device" if edit_name else "Add a device"}'
-             f'</h2>{form}</div><p><a href="/">&larr; dashboard</a></p></div>')
-    return _page("Devices", _header(user) + inner)
+             f'</h2>{form}</div></div>')
+    return _page("Devices", _header(user, "/devices") + inner)
 
 
 def _mini_form(action, csrf, name, label, cls, confirm=None) -> str:
@@ -469,7 +580,7 @@ def _render_test_result(name, ok, detail, user) -> str:
              f'<div class="box"><p style="color:{color};font-weight:700">'
              f'{"SUCCESS" if ok else "FAILED"}</p><pre>{esc(detail)}</pre></div>'
              f'<p><a href="/devices">&larr; back to devices</a></p></div>')
-    return _page("Test", _header(user) + inner)
+    return _page("Test", _header(user, "/devices") + inner)
 
 
 def _render_prometheus(store, allowed=None) -> str:
