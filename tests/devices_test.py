@@ -70,6 +70,23 @@ eng.devices = eng._devices_from_store()
 check("engine hot-reload sees new device",
       sorted(x.name for x in eng.devices) == ["E1", "E2"])
 
+print("Web render helpers (offline):")
+cfgwan = build_device({"name": "R", "host": "1.1.1.1", "wan": {"links": [
+    {"name": "Fibre", "interface": "ether1"},
+    {"name": "LTE", "interface": "lte1"}]}}, DEF)
+wed = web._wan_uplink_editor("R", cfgwan, "csrf")
+check("SD-WAN WAN editor has up/down reorder controls",
+      "pushMoveRow(this,-1)" in wed and "pushMoveRow(this,1)" in wed)
+check("reorder JS is defined on feature tabs", "function pushMoveRow" in web._FEATURE_JS)
+itab = web._interfaces_table({"ifaces": [
+    {"name": "ether1", "type": "ether", "running": "true",
+     "mac-address": "AA:BB", "mtu": "1500", "comment": "WAN"},
+    {"name": "bridge1", "type": "bridge", "running": "false", "disabled": "true"}],
+    "addrs": [{"interface": "ether1", "address": "192.168.88.1/24"}]})
+check("interfaces table shows type, status and IPs",
+      "ether1" in itab and "ether" in itab and "bridge" in itab
+      and "192.168.88.1/24" in itab and "disabled" in itab and "up" in itab)
+
 print("Web /devices flow (admin only):")
 mdb, sfile, adb, wdb = (os.path.join(tmp, x) for x in
                         ("m.db", "s.json", "a.db", "w.db"))

@@ -776,8 +776,8 @@ def _render_device_provision(name, user, raw, csrf, *, script=None, creds=None,
         f'<select name="transport"><option value="">None (just user + API)</option>'
         f'<option value="sstp">SSTP — TLS 443, no certs (older units)</option>'
         f'<option value="ovpn">OpenVPN (TCP)</option></select></div>'
-        f'<div class="f"><label class="f">Hub host (for the tunnel)</label>'
-        f'<input name="hub" placeholder="monitor.example.com"></div>'
+        f'<div class="f"><label class="f">Hub address (server IP, for the tunnel)'
+        f'</label><input name="hub" placeholder="102.36.140.219"></div>'
         f'<div class="f"><label class="f">Hub port</label>'
         f'<input name="hub_port" placeholder="443"></div>'
         f'<div class="f"><label class="chk"><input type="checkbox" name="harden" '
@@ -879,6 +879,13 @@ _FEATURE_JS = """
    var host=document.querySelector('#rows-'+name+' tbody')
             || document.getElementById('rows-'+name);
    host.appendChild(t.content.cloneNode(true));
+ }
+ // Move a table row up (dir<0) or down (dir>0). The form submits its inputs in
+ // DOM order, so reordering rows here changes the saved priority order.
+ function pushMoveRow(btn, dir){
+   var tr=btn.closest('tr'), p=tr.parentNode;
+   if(dir<0){ var prev=tr.previousElementSibling; if(prev) p.insertBefore(tr,prev); }
+   else { var next=tr.nextElementSibling; if(next) p.insertBefore(next,tr); }
  }
 </script>"""
 
@@ -1047,27 +1054,33 @@ def _hubtunnel_box(name, current) -> str:
     lines to paste; OpenVPN mode (older routers) shows the server-side guidance."""
     if current.get("mode") == "legacy":
         ver = esc(str(current.get("version", "")))
-        sstp = ("# Windows monitoring host — built-in SSTP server (RRAS):\n"
-                "#  1. Add Roles -> Remote Access -> DirectAccess and VPN (RAS)\n"
-                "#  2. Configure RRAS for VPN; enable SSTP (TCP 443) + a TLS cert\n"
-                "#  3. Add a VPN user; give this router a fixed IP in the pool\n"
-                "# (SSTP needs no client certificate — username/password is enough.)")
-        ovpn = ("# OpenVPN server.conf (hub):\n"
+        sstp = ("# Ubuntu hub — SSTP server via accel-ppp:\n"
+                "sudo apt install accel-ppp        # (or build; pkg name may vary)\n"
+                "# /etc/accel-ppp.conf:\n"
+                "[modules]\nsstp\n"
+                "[sstp]\nverbose=1\nport=443\nssl-pemfile=/etc/accel-ppp/cert.pem\n"
+                "accept=ssl\n"
+                "[ip-pool]\ngw-ip-address=10.10.0.1\n10.10.0.2-10.10.0.254\n"
+                "[chap-secrets]   # user  *  password  fixed-tunnel-ip\n"
+                "# router1  *  <vpn-pass>  10.10.0.2")
+        ovpn = ("# OpenVPN server.conf (Ubuntu hub):\n"
                 "port 1194\nproto tcp\ndev tun\nserver 10.10.0.0 255.255.255.0\n"
                 "# fixed IP per router:  client-config-dir ccd  +\n"
                 "#   ccd/<cn>: ifconfig-push 10.10.0.2 255.255.255.0\nverb 3")
         return (f'<div class="box"><h2>Hub (monitoring-server) setup</h2>'
                 f'<p class="muted">This router runs RouterOS {ver}, which has no '
                 f'WireGuard — so the Hub tunnel uses <b>SSTP</b> or <b>OpenVPN</b> '
-                f'(pick above). <b>SSTP is simplest</b>: TLS over 443, no client '
-                f'certificate, and your Windows monitoring host can be the server '
-                f'via built-in RRAS:</p>'
+                f'(pick above). You are self-hosting on <b>Ubuntu</b>, so point the '
+                f"router's <b>Hub address</b> at the server's <b>IP</b> and keep "
+                f'<b>verify-server-certificate off</b> (an IP won\'t match a cert '
+                f'name). <b>SSTP</b> on Ubuntu via <b>accel-ppp</b> (TLS 443, '
+                f'username/password — no client cert):</p>'
                 f'<pre style="{_PRE}">{esc(sstp)}</pre>'
-                f'<p class="muted">Or, if you prefer OpenVPN, run a server like:</p>'
+                f'<p class="muted">Or, if you prefer OpenVPN:</p>'
                 f'<pre style="{_PRE}">{esc(ovpn)}</pre>'
-                f'<p class="muted">Either way, give this router a <b>fixed</b> '
-                f'tunnel IP on the server. Then on the <b>Devices</b> page set this '
-                f"device's <b>Host</b> to that tunnel IP, and use <b>Restrict "
+                f'<p class="muted">Give this router a <b>fixed</b> tunnel IP on the '
+                f"server (chap-secrets / ccd). Then on the <b>Devices</b> page set "
+                f"this device's <b>Host</b> to that tunnel IP, and use <b>Restrict "
                 f'access</b> to lock the API to the tunnel subnet.</p></div>')
     iface = current.get("iface", {}) or {}
     pub = iface.get("public-key", "")
@@ -1143,6 +1156,52 @@ def _update_box(name, csrf, current) -> str:
             f'<div class="actions">{buttons}</div></div>{reboot}')
 
 
+def _interfaces_table(current) -> str:
+    """A detailed read-only table: each interface's type, status, MAC, MTU, the
+    IP(s) on it and its comment — so you can see what every port is and doing."""
+    if not isinstance(current, dict):
+        current = {"ifaces": current or [], "addrs": []}
+    ifaces = current.get("ifaces", [])
+    if not ifaces:
+        return ('<div class="box"><h2>Interfaces</h2>'
+                '<p class="muted">No interfaces read from the router.</p></div>')
+    # map interface name -> list of IP addresses configured on it
+    ips = {}
+    for a in current.get("addrs", []):
+        ifc = a.get("interface") or a.get("actual-interface")
+        if ifc:
+            ips.setdefault(ifc, []).append(a.get("address", ""))
+    rows = ""
+    for r in ifaces:
+        nm = r.get("name", "?")
+        disabled = _norm_html(r.get("disabled", "")) == "true"
+        running = _norm_html(r.get("running", "")) == "true"
+        if disabled:
+            state = '<span class="badge warn">disabled</span>'
+        elif running:
+            state = '<span class="badge ok">up</span>'
+        else:
+            state = '<span class="badge crit">down</span>'
+        addr = ", ".join(x for x in ips.get(nm, []) if x) or "—"
+        rows += (f'<tr><td><b>{esc(nm)}</b></td>'
+                 f'<td>{esc(str(r.get("type", "?")))}</td>'
+                 f'<td>{state}</td>'
+                 f'<td class="muted">{esc(str(r.get("mac-address", "—")))}</td>'
+                 f'<td class="muted">{esc(str(r.get("mtu", "—")))}</td>'
+                 f'<td>{esc(addr)}</td>'
+                 f'<td class="muted">{esc(str(r.get("comment", "")))}</td></tr>')
+    return (f'<div class="box"><h2>Interfaces ({len(ifaces)})</h2>'
+            f'<table><tr><th>Name</th><th>Type</th><th>Status</th><th>MAC</th>'
+            f'<th>MTU</th><th>IP address</th><th>Comment</th></tr>{rows}</table>'
+            f'<p class="muted">Read-only inventory: physical ports, VLANs, '
+            f'bridges, tunnels, etc. — their type, link state and the IPs they '
+            f'carry.</p></div>')
+
+
+def _norm_html(v) -> str:
+    return "true" if v in (True, "true") else str(v)
+
+
 def _wan_uplink_editor(name, cfg, csrf) -> str:
     """Editable WAN uplink list (saved to the device record, not pushed)."""
     def row(link):
@@ -1154,19 +1213,25 @@ def _wan_uplink_editor(name, cfg, csrf) -> str:
                 f'</td>'
                 f'<td><input name="link_gw" placeholder="gateway IP (optional)" '
                 f'value="{esc(link.gateway if link else "")}" style="width:100%">'
-                f'</td><td><button type="button" class="btn ghost" '
+                f'</td><td style="white-space:nowrap">'
+                f'<button type="button" class="btn ghost" title="move up (higher '
+                f'priority)" onclick="pushMoveRow(this,-1)">&uarr;</button>'
+                f'<button type="button" class="btn ghost" title="move down" '
+                f'onclick="pushMoveRow(this,1)">&darr;</button>'
+                f'<button type="button" class="btn ghost" title="remove" '
                 f'onclick="this.closest(\'tr\').remove()">&times;</button></td></tr>')
     links = list(getattr(cfg.wan, "links", [])) if cfg else []
     body = "".join(row(link) for link in links) + row(None)
     return (f'<div class="box"><h2>WAN uplinks</h2>'
-            f'<p class="muted">List your internet links in <b>priority order</b> '
-            f'(top = primary). Failover and load-balancing below use this order. '
-            f'Saved on the device — no router change.</p>'
+            f'<p class="muted">List your internet links in <b>priority order</b> — '
+            f'<b>top = primary</b>, 2nd = first backup, and so on. Use the '
+            f'&uarr;/&darr; buttons to reorder; failover/load-balancing below uses '
+            f'this order. Saved on the device — no router change.</p>'
             f'<form method="POST" action="/device/wan">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="device" value="{esc(name)}">'
             f'<table class="rowtbl" id="rows-wl"><thead><tr><th>Name</th>'
-            f'<th>Interface</th><th>Gateway</th><th></th></tr></thead>'
+            f'<th>Interface</th><th>Gateway</th><th>Order</th></tr></thead>'
             f'<tbody>{body}</tbody></table>'
             f'<button type="button" class="btn ghost" onclick="pushAddRow(\'wl\')" '
             f'style="margin-top:6px">+ Add uplink</button>'
@@ -1992,6 +2057,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         extra_html = _hubtunnel_box(name, current)
                     elif slug == "update":
                         extra_html = _update_box(name, csrf, current)
+                    elif slug == "interfaces":
+                        extra_html = _interfaces_table(current)
                 except (DeviceError, PushError) as exc:
                     error = str(exc)
                 finally:

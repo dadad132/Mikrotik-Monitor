@@ -492,12 +492,23 @@ def portfwd_plan(pusher, cfg, flat, multi):
 # Interfaces — read-only inventory of ports / VLANs / bridges
 # ===========================================================================
 def interfaces_read(pusher, cfg):
-    return pusher.api.fetch(("interface",))
+    ifaces = pusher.api.fetch(("interface",))
+    try:
+        addrs = pusher.api.fetch(("ip", "address"))
+    except Exception:  # noqa: BLE001 — keep working if /ip/address is unreadable
+        addrs = []
+    return {"ifaces": ifaces, "addrs": addrs}
 
 
 def interfaces_summary(current, cfg):
-    up = sum(1 for r in current if _norm(r.get("running", "")) == "true")
-    return [f"{len(current)} interfaces, {up} running"]
+    ifaces = current.get("ifaces", []) if isinstance(current, dict) else current
+    up = sum(1 for r in ifaces if _norm(r.get("running", "")) == "true")
+    by_type = {}
+    for r in ifaces:
+        t = str(r.get("type", "?"))
+        by_type[t] = by_type.get(t, 0) + 1
+    kinds = ", ".join(f"{n}× {t}" for t, n in sorted(by_type.items()))
+    return [f"{len(ifaces)} interfaces, {up} running", f"types: {kinds}"]
 
 
 # ===========================================================================
@@ -1131,8 +1142,10 @@ def _hub_legacy_form(current):
                      ("ovpn", "OpenVPN — TCP, may need the hub's CA imported")],
          "value": t},
         {"type": "text", "name": "connect_to",
-         "label": "Hub host — your monitoring server (host / DDNS)",
-         "value": row.get("connect-to", ""), "placeholder": "monitor.example.com"},
+         "label": "Hub address — your monitoring server's IP",
+         "value": row.get("connect-to", ""), "placeholder": "102.36.140.219",
+         "hint": "Use the server's IP for now (a DNS name can be added later). "
+                 "Connecting by IP means leaving 'verify server certificate' off."},
         {"type": "text", "name": "port", "label": "Hub port",
          "value": row.get("port", "") or "443",
          "hint": "SSTP: 443. OpenVPN: 1194 (TCP)."},
