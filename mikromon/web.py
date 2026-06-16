@@ -798,9 +798,9 @@ def _render_device_provision(name, user, raw, csrf, *, script=None, creds=None,
         f'<div class="f"><label class="f">Management username</label>'
         f'<input name="pwuser" value="{esc(pwuser)}"></div>'
         f'<div class="f"><label class="f">Dial-home tunnel</label>'
-        f'<select name="transport"><option value="">None (just user + API)</option>'
-        f'<option value="sstp">SSTP — TLS 443, no certs (older units)</option>'
-        f'<option value="ovpn">OpenVPN (TCP)</option></select></div>'
+        f'<select name="transport">'
+        f'<option value="sstp" selected>SSTP — TLS 443, no certs (all units)</option>'
+        f'<option value="">None (just user + API)</option></select></div>'
         f'<div class="f"><label class="f">Hub address (server IP, for the tunnel)'
         f'</label><input name="hub" placeholder="102.36.140.219"></div>'
         f'<div class="f"><label class="f">Hub port</label>'
@@ -1078,68 +1078,31 @@ _PRE = ('white-space:pre-wrap;background:#f8fafc;padding:10px;border-radius:6px;
 
 
 def _hubtunnel_box(name, current) -> str:
-    """Hub-side setup help. WireGuard mode shows the router's public key + the
-    lines to paste; OpenVPN mode (older routers) shows the server-side guidance."""
-    if current.get("mode") == "legacy":
-        ver = esc(str(current.get("version", "")))
-        sstp = ("# Ubuntu hub — SSTP server via accel-ppp:\n"
-                "sudo apt install accel-ppp        # (or build; pkg name may vary)\n"
-                "# /etc/accel-ppp.conf:\n"
-                "[modules]\nsstp\n"
-                "[sstp]\nverbose=1\nport=443\nssl-pemfile=/etc/accel-ppp/cert.pem\n"
-                "accept=ssl\n"
-                "[ip-pool]\ngw-ip-address=10.10.0.1\n10.10.0.2-10.10.0.254\n"
-                "[chap-secrets]   # user  *  password  fixed-tunnel-ip\n"
-                "# router1  *  <vpn-pass>  10.10.0.2")
-        ovpn = ("# OpenVPN server.conf (Ubuntu hub):\n"
-                "port 1194\nproto tcp\ndev tun\nserver 10.10.0.0 255.255.255.0\n"
-                "# fixed IP per router:  client-config-dir ccd  +\n"
-                "#   ccd/<cn>: ifconfig-push 10.10.0.2 255.255.255.0\nverb 3")
-        return (f'<div class="box"><h2>Hub (monitoring-server) setup</h2>'
-                f'<p class="muted">This router runs RouterOS {ver}, which has no '
-                f'WireGuard — so the Hub tunnel uses <b>SSTP</b> or <b>OpenVPN</b> '
-                f'(pick above). You are self-hosting on <b>Ubuntu</b>, so point the '
-                f"router's <b>Hub address</b> at the server's <b>IP</b> and keep "
-                f'<b>verify-server-certificate off</b> (an IP won\'t match a cert '
-                f'name). <b>SSTP</b> on Ubuntu via <b>accel-ppp</b> (TLS 443, '
-                f'username/password — no client cert):</p>'
-                f'<pre style="{_PRE}">{esc(sstp)}</pre>'
-                f'<p class="muted">Or, if you prefer OpenVPN:</p>'
-                f'<pre style="{_PRE}">{esc(ovpn)}</pre>'
-                f'<p class="muted">Give this router a <b>fixed</b> tunnel IP on the '
-                f"server (chap-secrets / ccd). Then on the <b>Devices</b> page set "
-                f"this device's <b>Host</b> to that tunnel IP, and use <b>Restrict "
-                f'access</b> to lock the API to the tunnel subnet.</p></div>')
-    iface = current.get("iface", {}) or {}
-    pub = iface.get("public-key", "")
-    addr = (current.get("address", {}) or {}).get("address", "")
-    ip = addr.split("/")[0] if addr else ""
-    if not pub:
-        return ('<div class="box"><h2>Hub (monitoring-server) setup</h2>'
-                '<p class="muted">Create the tunnel on the router first (fill the '
-                "form above and apply). Afterwards this box shows the router's "
-                'public key and the exact WireGuard lines to paste on your '
-                'monitoring server.</p></div>')
-    hub_snip = ("[Interface]\nPrivateKey = <your hub private key>\n"
-                "Address = 10.10.0.1/24\nListenPort = 13231")
-    peer_snip = (f"[Peer]\n# {name}\nPublicKey = {pub}\n"
-                 f"AllowedIPs = {ip + '/32' if ip else '10.10.0.2/32'}")
-    return (f'<div class="box"><h2>Hub (monitoring-server) setup</h2>'
-            f'<p class="muted">On your monitoring server (or a small VPS), install '
-            f'WireGuard and create <b>one</b> hub interface. Generate its keypair '
-            f'once — <code>wg genkey | tee privatekey | wg pubkey</code> — paste '
-            f'the <b>public</b> key into the form above, and keep the private key '
-            f'in the hub config:</p>'
-            f'<pre style="{_PRE}">{esc(hub_snip)}</pre>'
-            f'<p class="muted">Then add <b>this router</b> as a peer on the hub '
-            f'(one such block per device):</p>'
-            f'<pre style="{_PRE}">{esc(peer_snip)}</pre>'
-            f'<p class="muted">Bring the hub tunnel up. Then on the <b>Devices</b> '
-            f'page set this device\'s <b>Host</b> to its tunnel IP '
-            f'<code>{esc(ip)}</code> so monitoring and pushes ride the tunnel. '
-            f'Finally use <b>Restrict access</b> to lock the API to '
-            f'<code>10.10.0.0/24</code> and close the public port — the brute-force '
-            f'exposure goes away entirely.</p></div>')
+    """Hub-side (Ubuntu SSTP server) setup help. SSTP is used on every unit so
+    the connection method is identical across the fleet."""
+    sstp = ("# Ubuntu hub - SSTP server via accel-ppp:\n"
+            "sudo apt install accel-ppp        # (or build; pkg name may vary)\n"
+            "# /etc/accel-ppp.conf:\n"
+            "[modules]\nsstp\n"
+            "[sstp]\nverbose=1\nport=443\nssl-pemfile=/etc/accel-ppp/cert.pem\n"
+            "accept=ssl\n"
+            "[ip-pool]\ngw-ip-address=10.10.0.1\n10.10.0.2-10.10.0.254\n"
+            "[chap-secrets]   # user  *  password  fixed-tunnel-ip\n"
+            "# router1  *  <vpn-pass>  10.10.0.2")
+    return (f'<div class="box"><h2>Hub (Ubuntu SSTP server) setup</h2>'
+            f'<p class="muted">Every device dials home with <b>SSTP</b> (TLS 443) '
+            f'— the same method on v6 and v7. On your Ubuntu monitoring host '
+            f'run an SSTP server with <b>accel-ppp</b> (no client certificate '
+            f'needed — username/password). Point each router\'s <b>Hub '
+            f"address</b> at the server's <b>IP</b> and keep "
+            f'<b>verify-server-certificate off</b> (an IP won\'t match a cert '
+            f'name):</p>'
+            f'<pre style="{_PRE}">{esc(sstp)}</pre>'
+            f'<p class="muted">Give each router a <b>fixed</b> tunnel IP on the '
+            f'server (the chap-secrets line above). Then on the <b>Devices</b> page '
+            f"set the device's <b>Host</b> to that tunnel IP so monitoring and "
+            f'pushes ride the tunnel, and use <b>Restrict access</b> to lock the '
+            f'API to <code>10.10.0.0/24</code> and close the public port.</p></div>')
 
 
 def _update_box(name, csrf, current) -> str:
@@ -1286,9 +1249,9 @@ _TAB_INTRO = {
     "tunnel": ("Manage WireGuard VPN interfaces and peers. "
                "Requires RouterOS 7.1+; shows a compatibility notice on older firmware."),
     "hubtunnel": "Connect a router with no public / a changing IP. It dials out to "
-                 "your monitoring server and is reachable at a constant private IP "
-                 "— works through CGNAT. Uses WireGuard on RouterOS 7.1+ and "
-                 "OpenVPN on older firmware automatically.",
+                 "your monitoring server over SSTP (TLS 443) and is reachable at a "
+                 "constant private IP — works through CGNAT, and is the same method "
+                 "on every unit (RouterOS v6 and v7).",
     "scripts": "Paste any RouterOS script for things the other tabs don't cover. "
                "Save adds it (tagged), Run executes it, Remove deletes it — all "
                "previewed first and logged.",

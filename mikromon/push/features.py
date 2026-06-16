@@ -1010,247 +1010,75 @@ def harden_plan(pusher, cfg, flat, multi):
 
 
 # ===========================================================================
-# Hub tunnel (dial-home) — the router dials OUT to the monitoring hub so it is
-# reachable at a CONSTANT private IP with no public IP / through CGNAT. It is
-# VERSION-ADAPTIVE: WireGuard on RouterOS 7.1+ (the router makes its own keys;
-# we read the public key back), and OpenVPN (ovpn-client) on older firmware that
-# has no WireGuard. The tab shows the right form/engine for the box automatically.
+# Hub tunnel (dial-home) â the router dials OUT to the monitoring hub over SSTP
+# (TLS / 443) so it is reachable at a CONSTANT private IP with no public IP and
+# through CGNAT. SSTP is used on EVERY unit (RouterOS v6 and v7) so the
+# connection method is identical across the whole fleet. The hub (Ubuntu) runs
+# the SSTP server (accel-ppp) and assigns each router a fixed tunnel IP.
 # ===========================================================================
-_HUB_WG = ("interface", "wireguard")
-_HUB_PEERS = ("interface", "wireguard", "peers")
-_HUB_ADDR = ("ip", "address")
-_HUB_OVPN = ("interface", "ovpn-client")
+_HUB_SSTP = ("interface", "sstp-client")
 _HUB_TAG = "mikromon:tunnel:"
 _HUB_NAME = "mikromon"
 
 
-def _hub_mode(api):
-    """'wg' on RouterOS 7.1+ (WireGuard); else 'legacy' (SSTP/OpenVPN, works on
-    v6). Returns (mode, version_string)."""
-    major, minor, ver = _ros_version(api)
-    return ("wg" if _wg_supported(major, minor) else "legacy"), ver
+def hubtunnel_read(pusher, cfg):
+    rows = [r for r in pusher.api.fetch(_HUB_SSTP)
+            if str(r.get("comment", "")).startswith(_HUB_TAG)]
+    return {"sstp": rows[0] if rows else {}}
 
 
-def _no_wg_menu(exc):
-    return any(k in str(exc).lower()
-               for k in ("no such command", "bad command", "invalid command"))
-
-
-# ---- WireGuard transport (RouterOS 7.1+) ----------------------------------
-def _hub_wg_read(pusher, cfg):
-    ifaces = [r for r in pusher.api.fetch(_HUB_WG) if r.get("name") == _HUB_NAME]
-    addrs = [r for r in pusher.api.fetch(_HUB_ADDR)
-             if r.get("interface") == _HUB_NAME]
-    peers = [r for r in pusher.api.fetch(_HUB_PEERS)
-             if str(r.get("comment", "")).startswith(_HUB_TAG)]
-    return {"iface": ifaces[0] if ifaces else {},
-            "address": addrs[0] if addrs else {},
-            "peer": peers[0] if peers else {}}
-
-
-def _hub_wg_summary(current):
-    iface = current.get("iface", {})
-    if not iface:
-        return ["No WireGuard tunnel yet. Fill the form and Preview to create one "
-                "that dials your monitoring hub (RouterOS 7.1+)."]
-    addr = current.get("address", {}).get("address", "(no address)")
-    peer = current.get("peer", {})
-    out = [f"WireGuard '{_HUB_NAME}' present · tunnel IP {addr}",
-           f"router public key: {iface.get('public-key', '(appears after apply)')}"]
-    if peer:
-        out.append(f"dials hub {peer.get('endpoint-address', '?')}:"
-                   f"{peer.get('endpoint-port', '?')} · keepalive "
-                   f"{peer.get('persistent-keepalive', '?')}")
-    return out
-
-
-def _hub_wg_form(current):
-    peer = current.get("peer", {})
-    addr = current.get("address", {})
-    return [
-        {"type": "text", "name": "endpoint",
-         "label": "Hub endpoint — your monitoring server's public host / DDNS",
-         "value": peer.get("endpoint-address", ""),
-         "placeholder": "monitor.example.com  or  102.36.140.219"},
-        {"type": "text", "name": "port", "label": "Hub UDP port",
-         "value": peer.get("endpoint-port", "") or "13231"},
-        {"type": "text", "name": "hub_pubkey",
-         "label": "Hub WireGuard public key",
-         "value": peer.get("public-key", ""),
-         "placeholder": "paste the monitoring server's WireGuard public key"},
-        {"type": "text", "name": "tunnel_ip",
-         "label": "This device's tunnel IP (with mask)",
-         "value": addr.get("address", ""), "placeholder": "10.10.0.2/24",
-         "hint": "Each device gets a unique address in the tunnel subnet "
-                 "(hub is 10.10.0.1)."},
-        {"type": "text", "name": "allowed",
-         "label": "Route to the hub (allowed-address)",
-         "value": peer.get("allowed-address", "") or "10.10.0.0/24"},
-        {"type": "text", "name": "keepalive", "label": "Persistent keepalive",
-         "value": peer.get("persistent-keepalive", "") or "25s",
-         "hint": "Keeps the NAT mapping open so the hub can reach back — essential "
-                 "behind CGNAT. Leave at 25s."},
-    ]
-
-
-def _hub_wg_plan(pusher, cfg, flat, multi):
-    endpoint = flat.get("endpoint", "").strip()
-    port = (flat.get("port", "") or "13231").strip()
-    hub_pubkey = flat.get("hub_pubkey", "").strip()
-    tunnel_ip = flat.get("tunnel_ip", "").strip()
-    allowed = (flat.get("allowed", "") or "10.10.0.0/24").strip()
-    if not (endpoint and hub_pubkey and tunnel_ip):
-        return Plan(cfg.name, [],
-                    summary="tunnel (need hub endpoint, hub key and tunnel IP)")
-    peer_cur = _hub_wg_read(pusher, cfg).get("peer", {})
-    # preserve the keepalive RouterOS already stored (avoids format-churn diffs)
-    ka = ((peer_cur.get("persistent-keepalive") if peer_cur
-           else flat.get("keepalive")) or "25s").strip() or "25s"
-    iface_plan = pusher.plan_managed_list(
-        _HUB_WG, "name", [{"name": _HUB_NAME, "comment": _HUB_TAG + "if"}],
-        owns=lambda r: r.get("name") == _HUB_NAME, label="wg interface")
-    addr_plan = pusher.plan_managed_list(
-        _HUB_ADDR, "address",
-        [{"address": tunnel_ip, "interface": _HUB_NAME,
-          "comment": _HUB_TAG + "addr"}],
-        owns=lambda r: r.get("interface") == _HUB_NAME, label="tunnel address")
-    peer_plan = pusher.plan_managed_list(
-        _HUB_PEERS, "comment",
-        [{"interface": _HUB_NAME, "public-key": hub_pubkey,
-          "endpoint-address": endpoint, "endpoint-port": port,
-          "allowed-address": allowed, "persistent-keepalive": ka,
-          "comment": _HUB_TAG + "hub"}],
-        owns=_prefix_owner(_HUB_TAG + "hub"), label="hub peer")
-    # interface must exist before the address/peer that reference it
-    return Plan(cfg.name, iface_plan.ops + addr_plan.ops + peer_plan.ops,
-                summary="hub tunnel (wireguard)")
-
-
-# ---- Legacy transports for older firmware: SSTP (default) or OpenVPN ------
-# SSTP is preferred for older units: TLS over 443, NAT/firewall-friendly, and it
-# works with username/password only (no certificate import needed). OpenVPN is
-# offered too. Both dial OUT to the hub and the hub assigns the tunnel IP.
-_HUB_SSTP = ("interface", "sstp-client")
-_LEGACY_PATH = {"sstp": _HUB_SSTP, "ovpn": _HUB_OVPN}
-
-
-def _hub_legacy_read(pusher, cfg):
-    def owned(path):
-        rows = [r for r in pusher.api.fetch(path)
-                if str(r.get("comment", "")).startswith(_HUB_TAG)]
-        return rows[0] if rows else {}
-    return {"sstp": owned(_HUB_SSTP), "ovpn": owned(_HUB_OVPN)}
-
-
-def _hub_legacy_active(current):
-    """The transport currently configured (sstp wins), and its row."""
-    if current.get("sstp"):
-        return "sstp", current["sstp"]
-    if current.get("ovpn"):
-        return "ovpn", current["ovpn"]
-    return "sstp", {}
-
-
-def _hub_legacy_summary(current):
-    t, row = _hub_legacy_active(current)
-    if not row:
-        return ["No dial-home tunnel yet. Pick SSTP (simplest — TLS 443, no "
-                "certificates) or OpenVPN, set the hub host and Preview. Works on "
-                "RouterOS v6 and v7."]
-    up = _norm(row.get("running", "")) == "true"
-    label = "SSTP" if t == "sstp" else "OpenVPN"
-    return [f"{label} client '{row.get('name')}' → {row.get('connect-to', '?')}:"
-            f"{row.get('port', '?')} · {'connected' if up else 'down / connecting'}",
+def hubtunnel_summary(current, cfg):
+    o = current.get("sstp", {})
+    if not o:
+        return ["No SSTP dial-home tunnel yet. Set the hub IP and Preview. SSTP "
+                "(TLS 443) is used on every unit â v6 and v7 alike."]
+    up = _norm(o.get("running", "")) == "true"
+    return [f"SSTP client '{o.get('name')}' -> {o.get('connect-to', '?')}:"
+            f"{o.get('port', '?')} Â· {'connected' if up else 'down / connecting'}",
             "The hub assigns this router's tunnel IP."]
 
 
-def _hub_legacy_form(current):
-    t, row = _hub_legacy_active(current)
+def hubtunnel_form(current, cfg):
+    o = current.get("sstp", {})
     return [
-        {"type": "select", "name": "transport",
-         "label": "Tunnel type (this RouterOS is too old for WireGuard)",
-         "options": [("sstp", "SSTP — TLS over 443, no certificate setup "
-                              "(recommended)"),
-                     ("ovpn", "OpenVPN — TCP, may need the hub's CA imported")],
-         "value": t},
         {"type": "text", "name": "connect_to",
-         "label": "Hub address — your monitoring server's IP",
-         "value": row.get("connect-to", ""), "placeholder": "102.36.140.219",
+         "label": "Hub address â your monitoring server's IP",
+         "value": o.get("connect-to", ""), "placeholder": "102.36.140.219",
          "hint": "Use the server's IP for now (a DNS name can be added later). "
                  "Connecting by IP means leaving 'verify server certificate' off."},
-        {"type": "text", "name": "port", "label": "Hub port",
-         "value": row.get("port", "") or "443",
-         "hint": "SSTP: 443. OpenVPN: 1194 (TCP)."},
+        {"type": "text", "name": "port", "label": "Hub port (SSTP)",
+         "value": o.get("port", "") or "443"},
         {"type": "text", "name": "user", "label": "VPN username",
-         "value": row.get("user", "")},
+         "value": o.get("user", "")},
         {"type": "text", "name": "password", "label": "VPN password", "value": "",
-         "placeholder": "(unchanged)" if row else ""},
+         "placeholder": "(unchanged)" if o else ""},
         {"type": "toggle", "name": "opt", "value": "verify",
          "label": "Verify the hub's server certificate",
-         "on": _norm(row.get("verify-server-certificate", "")) == "true",
-         "desc": "Off is simplest (username/password only)."},
+         "on": _norm(o.get("verify-server-certificate", "")) == "true",
+         "desc": "Off is simplest (username/password only; required when "
+                 "connecting by IP)."},
     ]
 
 
-def _hub_legacy_plan(pusher, cfg, flat, multi):
-    transport = (flat.get("transport", "") or "sstp").strip()
-    path = _LEGACY_PATH.get(transport, _HUB_SSTP)
+def hubtunnel_plan(pusher, cfg, flat, multi):
     connect_to = flat.get("connect_to", "").strip()
     if not connect_to:
-        return Plan(cfg.name, [], summary=f"{transport} tunnel (need the hub host)")
-    default_port = "443" if transport == "sstp" else "1194"
+        return Plan(cfg.name, [], summary="sstp tunnel (need the hub IP)")
     desired = {
         "name": _HUB_NAME, "connect-to": connect_to,
-        "port": (flat.get("port", "") or default_port).strip(),
+        "port": (flat.get("port", "") or "443").strip(),
         "user": flat.get("user", "").strip(),
         "verify-server-certificate": "true" if "verify"
         in set(multi.get("opt", [])) else "false",
         "add-default-route": "false", "disabled": "false",
-        "comment": _HUB_TAG + transport,
+        "comment": _HUB_TAG + "sstp",
     }
-    if transport == "ovpn":
-        desired["certificate"] = (flat.get("certificate", "") or "none").strip()
     pwd = flat.get("password", "")
-    if pwd:  # RouterOS never returns the password — only set it when given
+    if pwd:  # RouterOS never returns the password â only set it when given
         desired["password"] = pwd
-    return pusher.plan_managed_list(path, "name", [desired],
+    return pusher.plan_managed_list(_HUB_SSTP, "name", [desired],
                                     owns=_prefix_owner(_HUB_TAG),
-                                    label=f"{transport} client")
-
-
-# ---- version-adaptive dispatch --------------------------------------------
-def hubtunnel_read(pusher, cfg):
-    mode, ver = _hub_mode(pusher.api)
-    if mode == "wg":
-        try:
-            data = _hub_wg_read(pusher, cfg)
-        except Exception as exc:  # noqa: BLE001 — older box without WG menu
-            if not _no_wg_menu(exc):
-                raise
-            data, mode = _hub_legacy_read(pusher, cfg), "legacy"
-    else:
-        data = _hub_legacy_read(pusher, cfg)
-    data["mode"], data["version"] = mode, ver
-    return data
-
-
-def hubtunnel_summary(current, cfg):
-    if current.get("mode") == "legacy":
-        return _hub_legacy_summary(current)
-    return _hub_wg_summary(current)
-
-
-def hubtunnel_form(current, cfg):
-    if current.get("mode") == "legacy":
-        return _hub_legacy_form(current)
-    return _hub_wg_form(current)
-
-
-def hubtunnel_plan(pusher, cfg, flat, multi):
-    mode, _ver = _hub_mode(pusher.api)
-    if mode == "legacy":
-        return _hub_legacy_plan(pusher, cfg, flat, multi)
-    return _hub_wg_plan(pusher, cfg, flat, multi)
+                                    label="sstp client")
 
 
 # ===========================================================================
