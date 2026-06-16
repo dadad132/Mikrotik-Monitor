@@ -508,7 +508,9 @@ print("remote tunnel:")
 WG = ("interface", "wireguard")
 WGP = ("interface", "wireguard", "peers")
 IPA = ("ip", "address")
-t_api = FakeApi({WG: [], WGP: [], IPA: []})
+RES = ("system", "resource")
+OVPN = ("interface", "ovpn-client")
+t_api = FakeApi({RES: [{"version": "7.14.3"}], WG: [], WGP: [], IPA: []})
 pt = Pusher(qcfg, t_api, dry_run=True)
 plan = F.hubtunnel_plan(pt, qcfg,
                      {"endpoint": "monitor.example.com", "port": "13231",
@@ -534,6 +536,7 @@ check("missing required fields yields an empty (safe) plan",
       F.hubtunnel_plan(pt, qcfg, {"endpoint": "x"}, {}).empty)
 # idempotent: a fully-configured router produces no changes
 cfgd = FakeApi({
+    RES: [{"version": "7.14.3"}],
     WG: [{".id": "*1", "name": "mikromon", "public-key": "ROUTERPUB=",
           "comment": "mikromon:tunnel:if"}],
     IPA: [{".id": "*2", "address": "10.10.0.2/24", "interface": "mikromon",
@@ -547,6 +550,24 @@ plan2 = F.hubtunnel_plan(Pusher(qcfg, cfgd, dry_run=True), qcfg,
                        "hub_pubkey": "HUBKEY==", "tunnel_ip": "10.10.0.2/24",
                        "allowed": "10.10.0.0/24", "keepalive": "25s"}, {})
 check("re-applying an already-configured tunnel is a no-op", plan2.empty)
+
+# v6 router (no WireGuard) -> the hub tunnel falls back to OpenVPN automatically
+v6 = FakeApi({RES: [{"version": "6.49.8"}], OVPN: []})
+pv6 = Pusher(qcfg, v6, dry_run=True)
+cur6 = F.hubtunnel_read(pv6, qcfg)
+check("v6 router selects the OpenVPN transport", cur6.get("mode") == "ovpn")
+oplan = F.hubtunnel_plan(pv6, qcfg,
+                         {"connect_to": "monitor.example.com", "port": "1194",
+                          "user": "router1", "password": "s3cret"}, {})
+ov_add = next((o for o in oplan.ops if o.path == OVPN and o.action == "add"), None)
+check("v6 hub tunnel creates a tagged ovpn-client dialing the hub",
+      ov_add is not None
+      and ov_add.params.get("connect-to") == "monitor.example.com"
+      and ov_add.params.get("user") == "router1"
+      and ov_add.params.get("password") == "s3cret"
+      and ov_add.params.get("comment", "").startswith("mikromon:tunnel:"))
+check("v6 with no hub host is a safe no-op",
+      F.hubtunnel_plan(pv6, qcfg, {"connect_to": ""}, {}).empty)
 
 
 # ---- 16. update RouterOS (check / install+reboot / firmware) ---------------

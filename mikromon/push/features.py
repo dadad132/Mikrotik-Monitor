@@ -967,21 +967,34 @@ def harden_plan(pusher, cfg, flat, multi):
 
 
 # ===========================================================================
-# Hub tunnel (dial-home) — WireGuard from the router OUT to the monitoring hub.
-# "no public IP / dynamic IP / CGNAT": the router dials home and keeps the NAT
-# hole open (persistent-keepalive), so the hub reaches it at a CONSTANT private
-# tunnel IP regardless of either side's public address. The router generates its
-# own keys (RouterOS v7); we read its public key back and hand the operator the
-# hub-side peer line to paste. Requires RouterOS v7 (WireGuard).
+# Hub tunnel (dial-home) — the router dials OUT to the monitoring hub so it is
+# reachable at a CONSTANT private IP with no public IP / through CGNAT. It is
+# VERSION-ADAPTIVE: WireGuard on RouterOS 7.1+ (the router makes its own keys;
+# we read the public key back), and OpenVPN (ovpn-client) on older firmware that
+# has no WireGuard. The tab shows the right form/engine for the box automatically.
 # ===========================================================================
 _HUB_WG = ("interface", "wireguard")
 _HUB_PEERS = ("interface", "wireguard", "peers")
 _HUB_ADDR = ("ip", "address")
+_HUB_OVPN = ("interface", "ovpn-client")
 _HUB_TAG = "mikromon:tunnel:"
 _HUB_NAME = "mikromon"
 
 
-def hubtunnel_read(pusher, cfg):
+def _hub_mode(api):
+    """'wg' on RouterOS 7.1+ (WireGuard); else 'ovpn' (works on v6). Returns
+    (mode, version_string)."""
+    major, minor, ver = _ros_version(api)
+    return ("wg" if _wg_supported(major, minor) else "ovpn"), ver
+
+
+def _no_wg_menu(exc):
+    return any(k in str(exc).lower()
+               for k in ("no such command", "bad command", "invalid command"))
+
+
+# ---- WireGuard transport (RouterOS 7.1+) ----------------------------------
+def _hub_wg_read(pusher, cfg):
     ifaces = [r for r in pusher.api.fetch(_HUB_WG) if r.get("name") == _HUB_NAME]
     addrs = [r for r in pusher.api.fetch(_HUB_ADDR)
              if r.get("interface") == _HUB_NAME]
@@ -992,11 +1005,11 @@ def hubtunnel_read(pusher, cfg):
             "peer": peers[0] if peers else {}}
 
 
-def hubtunnel_summary(current, cfg):
+def _hub_wg_summary(current):
     iface = current.get("iface", {})
     if not iface:
-        return ["No mikromon tunnel yet. Fill the form and Preview to create a "
-                "WireGuard tunnel that dials your monitoring hub (RouterOS v7)."]
+        return ["No WireGuard tunnel yet. Fill the form and Preview to create one "
+                "that dials your monitoring hub (RouterOS 7.1+)."]
     addr = current.get("address", {}).get("address", "(no address)")
     peer = current.get("peer", {})
     out = [f"WireGuard '{_HUB_NAME}' present · tunnel IP {addr}",
@@ -1008,7 +1021,7 @@ def hubtunnel_summary(current, cfg):
     return out
 
 
-def hubtunnel_form(current, cfg):
+def _hub_wg_form(current):
     peer = current.get("peer", {})
     addr = current.get("address", {})
     return [
@@ -1037,7 +1050,7 @@ def hubtunnel_form(current, cfg):
     ]
 
 
-def hubtunnel_plan(pusher, cfg, flat, multi):
+def _hub_wg_plan(pusher, cfg, flat, multi):
     endpoint = flat.get("endpoint", "").strip()
     port = (flat.get("port", "") or "13231").strip()
     hub_pubkey = flat.get("hub_pubkey", "").strip()
@@ -1046,7 +1059,7 @@ def hubtunnel_plan(pusher, cfg, flat, multi):
     if not (endpoint and hub_pubkey and tunnel_ip):
         return Plan(cfg.name, [],
                     summary="tunnel (need hub endpoint, hub key and tunnel IP)")
-    peer_cur = hubtunnel_read(pusher, cfg).get("peer", {})
+    peer_cur = _hub_wg_read(pusher, cfg).get("peer", {})
     # preserve the keepalive RouterOS already stored (avoids format-churn diffs)
     ka = ((peer_cur.get("persistent-keepalive") if peer_cur
            else flat.get("keepalive")) or "25s").strip() or "25s"
@@ -1067,7 +1080,109 @@ def hubtunnel_plan(pusher, cfg, flat, multi):
         owns=_prefix_owner(_HUB_TAG + "hub"), label="hub peer")
     # interface must exist before the address/peer that reference it
     return Plan(cfg.name, iface_plan.ops + addr_plan.ops + peer_plan.ops,
-                summary="remote tunnel (wireguard)")
+                summary="hub tunnel (wireguard)")
+
+
+# ---- OpenVPN transport (RouterOS v6 and v7) -------------------------------
+def _hub_ovpn_read(pusher, cfg):
+    rows = [r for r in pusher.api.fetch(_HUB_OVPN)
+            if str(r.get("comment", "")).startswith(_HUB_TAG)]
+    return {"ovpn": rows[0] if rows else {}}
+
+
+def _hub_ovpn_summary(current):
+    o = current.get("ovpn", {})
+    if not o:
+        return ["No OpenVPN dial-home client yet. Fill the form and Preview to "
+                "create one (works on RouterOS v6 and v7). The hub (your "
+                "monitoring server) runs the OpenVPN server."]
+    up = _norm(o.get("running", "")) == "true"
+    return [f"OpenVPN client '{o.get('name')}' → {o.get('connect-to', '?')}:"
+            f"{o.get('port', '?')} · {'connected' if up else 'down / connecting'}",
+            "The hub assigns this router's tunnel IP (set a static one per client "
+            "in the OpenVPN server config)."]
+
+
+def _hub_ovpn_form(current):
+    o = current.get("ovpn", {})
+    return [
+        {"type": "text", "name": "connect_to",
+         "label": "Hub host — your monitoring server's OpenVPN server (host / DDNS)",
+         "value": o.get("connect-to", ""), "placeholder": "monitor.example.com"},
+        {"type": "text", "name": "port", "label": "Hub TCP port",
+         "value": o.get("port", "") or "1194",
+         "hint": "RouterOS v6 OpenVPN is TCP-only."},
+        {"type": "text", "name": "user", "label": "VPN username",
+         "value": o.get("user", "")},
+        {"type": "text", "name": "password", "label": "VPN password", "value": "",
+         "placeholder": "(unchanged)" if o else ""},
+        {"type": "text", "name": "certificate",
+         "label": "Client certificate name (imported on the router; 'none' for "
+                  "username/password only)",
+         "value": o.get("certificate", "") or "none"},
+        {"type": "toggle", "name": "opt", "value": "verify",
+         "label": "Verify the hub's server certificate",
+         "on": _norm(o.get("verify-server-certificate", "")) == "true",
+         "desc": "Off is simplest (user/pass only). On requires importing the "
+                 "hub's CA certificate on the router first."},
+    ]
+
+
+def _hub_ovpn_plan(pusher, cfg, flat, multi):
+    connect_to = flat.get("connect_to", "").strip()
+    if not connect_to:
+        return Plan(cfg.name, [], summary="ovpn tunnel (need the hub host)")
+    desired = {
+        "name": _HUB_NAME, "connect-to": connect_to,
+        "port": (flat.get("port", "") or "1194").strip(),
+        "user": flat.get("user", "").strip(),
+        "certificate": (flat.get("certificate", "") or "none").strip(),
+        "verify-server-certificate": "true" if "verify"
+        in set(multi.get("opt", [])) else "false",
+        "add-default-route": "false", "disabled": "false",
+        "comment": _HUB_TAG + "ovpn",
+    }
+    pwd = flat.get("password", "")
+    if pwd:  # RouterOS never returns the password, so only set it when given
+        desired["password"] = pwd
+    return pusher.plan_managed_list(_HUB_OVPN, "name", [desired],
+                                    owns=_prefix_owner(_HUB_TAG),
+                                    label="ovpn client")
+
+
+# ---- version-adaptive dispatch --------------------------------------------
+def hubtunnel_read(pusher, cfg):
+    mode, ver = _hub_mode(pusher.api)
+    if mode == "wg":
+        try:
+            data = _hub_wg_read(pusher, cfg)
+        except Exception as exc:  # noqa: BLE001 — older box without WG menu
+            if not _no_wg_menu(exc):
+                raise
+            data, mode = _hub_ovpn_read(pusher, cfg), "ovpn"
+    else:
+        data = _hub_ovpn_read(pusher, cfg)
+    data["mode"], data["version"] = mode, ver
+    return data
+
+
+def hubtunnel_summary(current, cfg):
+    if current.get("mode") == "ovpn":
+        return _hub_ovpn_summary(current)
+    return _hub_wg_summary(current)
+
+
+def hubtunnel_form(current, cfg):
+    if current.get("mode") == "ovpn":
+        return _hub_ovpn_form(current)
+    return _hub_wg_form(current)
+
+
+def hubtunnel_plan(pusher, cfg, flat, multi):
+    mode, _ver = _hub_mode(pusher.api)
+    if mode == "ovpn":
+        return _hub_ovpn_plan(pusher, cfg, flat, multi)
+    return _hub_wg_plan(pusher, cfg, flat, multi)
 
 
 # ===========================================================================

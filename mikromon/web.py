@@ -466,37 +466,15 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
         up = d["up"]
         sev = _severity(d)
         dot = "#16a34a" if up else "#dc2626"
-        m = d["metrics"]
-        rows = []
-        if "cpu" in m:
-            sp = _sparkline(store.series(d["device"], "cpu", since=time.time() - 3600))
-            rows.append(f"<tr><td>CPU</td><td>{m['cpu']:.0f}%</td><td>{sp}</td></tr>")
-        if "mem_free_pct" in m:
-            rows.append(f"<tr><td>Free RAM</td><td>{m['mem_free_pct']:.0f}%</td>"
-                        f"<td></td></tr>")
-        if "client_count" in m:
-            sp = _sparkline(store.series(d["device"], "client_count",
-                                         since=time.time() - 3600))
-            rows.append(f"<tr><td>Devices</td><td>{m['client_count']:.0f}</td>"
-                        f"<td>{sp}</td></tr>")
-        for iface, t in sorted(d["throughput"].items()):
-            sp = _sparkline(store.series(d["device"], "rx_bps", label=iface,
-                                         since=time.time() - 3600))
-            rows.append(f"<tr><td>{html.escape(iface)}</td><td>"
-                        f"&darr;{human_bps(t.get('rx_bps', 0))} "
-                        f"&uarr;{human_bps(t.get('tx_bps', 0))}</td><td>{sp}</td></tr>")
-        probs = "".join(f'<li><b>{html.escape(p["key"])}</b> '
-                        f'({html.escape(str(p["level"]))})</li>' for p in d["problems"])
-        probs_html = (f'<div class="probs"><b>Active problems:</b><ul>{probs}</ul>'
-                      f'</div>' if probs else '<div class="ok">No active problems</div>')
-        cls = "card" + ("" if sev == "ok" else f" {sev}")
+        # Compact dashboard: just the device name + an online/offline dot. The
+        # full telemetry (CPU/RAM/throughput/problems) lives on the device page.
+        cls = "card name-only" + ("" if sev == "ok" else f" {sev}")
         link = f'/device?name={quote(d["device"])}'
         cards.append(f'<div class="{cls}" data-name="{html.escape(d["device"].lower())}"'
                      f' data-sev="{sev}"><h2><span class="dot" style="background:'
                      f'{dot}"></span><a href="{link}">{html.escape(d["device"])}</a>'
                      f'<span class="state">'
-                     f'{"ONLINE" if up else "OFFLINE"}</span></h2><table>'
-                     f'{"".join(rows)}</table>{probs_html}</div>')
+                     f'{"ONLINE" if up else "OFFLINE"}</span></h2></div>')
     grid = "".join(cards) or "<p style='padding:20px'>No devices to show.</p>"
     fbar = ('<div class="fbar"><input id="q" placeholder="Filter devices by name…">'
             '<button class="fbtn" data-f="all" onclick="setf(\'all\')">All</button>'
@@ -907,7 +885,31 @@ _PRE = ('white-space:pre-wrap;background:#f8fafc;padding:10px;border-radius:6px;
 
 
 def _hubtunnel_box(name, current) -> str:
-    """Show the router's public key + the exact lines to paste on the hub."""
+    """Hub-side setup help. WireGuard mode shows the router's public key + the
+    lines to paste; OpenVPN mode (older routers) shows the server-side guidance."""
+    if current.get("mode") == "ovpn":
+        srv = ("# /etc/openvpn/server.conf (hub)\n"
+               "port 1194\nproto tcp\ndev tun\n"
+               "server 10.10.0.0 255.255.255.0\n"
+               "# give THIS router a fixed tunnel IP:\n"
+               "#   client-config-dir ccd  +  ccd/<cn>: ifconfig-push 10.10.0.2 ...\n"
+               "verb 3")
+        ver = esc(str(current.get("version", "")))
+        return (f'<div class="box"><h2>Hub (OpenVPN server) setup</h2>'
+                f'<p class="muted">This router runs RouterOS {ver}, which has no '
+                f'WireGuard — so the Hub tunnel uses <b>OpenVPN</b> here. Run an '
+                f'OpenVPN <b>server</b> on your monitoring host (Windows: OpenVPN '
+                f'Community; or a small Linux VPS) and create a user for this '
+                f'router. Outline of the server config:</p>'
+                f'<pre style="{_PRE}">{esc(srv)}</pre>'
+                f'<p class="muted">Assign this router a <b>fixed</b> tunnel IP on '
+                f'the server (per-client <code>ccd</code> / ifconfig-push). Then on '
+                f'the <b>Devices</b> page set this device\'s <b>Host</b> to that '
+                f'tunnel IP so monitoring and pushes ride the tunnel, and use '
+                f'<b>Restrict access</b> to lock the API to the tunnel subnet. '
+                f'Note: RouterOS v6 OpenVPN is TCP-only and usually needs the hub\'s '
+                f'CA certificate imported on the router (Files → /certificate '
+                f'import) unless you allow username/password only.</p></div>')
     iface = current.get("iface", {}) or {}
     pub = iface.get("public-key", "")
     addr = (current.get("address", {}) or {}).get("address", "")
@@ -1031,9 +1033,10 @@ _TAB_INTRO = {
     "remote": "Grant a temporary firewall opening for Winbox/SSH/WebFig.",
     "tunnel": ("Manage WireGuard VPN interfaces and peers. "
                "Requires RouterOS 7.1+; shows a compatibility notice on older firmware."),
-    "hubtunnel": "Connect a router with no public / a changing IP. It dials a "
-                 "WireGuard tunnel out to your monitoring server and is reachable "
-                 "at a constant private IP — works through CGNAT. RouterOS v7 only.",
+    "hubtunnel": "Connect a router with no public / a changing IP. It dials out to "
+                 "your monitoring server and is reachable at a constant private IP "
+                 "— works through CGNAT. Uses WireGuard on RouterOS 7.1+ and "
+                 "OpenVPN on older firmware automatically.",
     "scripts": "Paste any RouterOS script for things the other tabs don't cover. "
                "Save adds it (tagged), Run executes it, Remove deletes it — all "
                "previewed first and logged.",
