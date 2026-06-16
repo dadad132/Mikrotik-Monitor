@@ -4,6 +4,8 @@ state.json
 *-state.json
 outbox/
 backups/
+hub.json
+sstp-secrets
 *.db
 *.db-wal
 *.db-shm

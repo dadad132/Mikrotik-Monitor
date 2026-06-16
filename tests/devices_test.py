@@ -81,6 +81,18 @@ check("reorder JS is defined on feature tabs", "function pushMoveRow" in web._FE
 check("toggles render as on/off sliders",
       'class="switch"' in web._field_html(
           {"type": "toggle", "name": "opt", "value": "x", "label": "L"}))
+# hub SSTP-secret registry: stable per-device tunnel IPs + chap-secrets writing
+hub = {}
+ip1 = web._alloc_tunnel_ip(hub, "A")
+ip2 = web._alloc_tunnel_ip(hub, "B")
+check("tunnel IPs are unique and stable per device",
+      ip1 != ip2 and web._alloc_tunnel_ip(hub, "A") == ip1)
+secp = os.path.join(tmp, "sstp-secrets")
+ok1, _ = web._write_sstp_secret(secp, "branch7", "pw123", "10.10.0.2")
+ok2, _ = web._write_sstp_secret(secp, "branch7", "pwNEW", "10.10.0.2")
+seclines = open(secp).read().strip().splitlines()
+check("SSTP secret is written and updated (one chap-secrets line per user)",
+      ok1 and ok2 and seclines == ["branch7 * pwNEW 10.10.0.2"])
 itab = web._interfaces_table({"ifaces": [
     {"name": "ether1", "type": "ether", "running": "true",
      "mac-address": "AA:BB", "mtu": "1500", "comment": "WAN"},
