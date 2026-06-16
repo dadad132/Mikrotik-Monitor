@@ -78,6 +78,9 @@ wed = web._wan_uplink_editor("R", cfgwan, "csrf")
 check("SD-WAN WAN editor has up/down reorder controls",
       "pushMoveRow(this,-1)" in wed and "pushMoveRow(this,1)" in wed)
 check("reorder JS is defined on feature tabs", "function pushMoveRow" in web._FEATURE_JS)
+check("toggles render as on/off sliders",
+      'class="switch"' in web._field_html(
+          {"type": "toggle", "name": "opt", "value": "x", "label": "L"}))
 itab = web._interfaces_table({"ifaces": [
     {"name": "ether1", "type": "ether", "running": "true",
      "mac-address": "AA:BB", "mtu": "1500", "comment": "WAN"},
@@ -226,6 +229,8 @@ try:
     # --- Provision tab: generate a bootstrap script + save strong creds ---
     st, body = get(admin, "/device?name=WebR1&tab=provision")
     check("admin can open the Provision tab", st == 200 and "Connect (WinBox)" in body)
+    check("credentials are hidden until revealed (masked + Show toggle)",
+          'type="password"' in body and "mmReveal" in body)
     st, body = post(admin, "/device/provision",
                     {"csrf": csrf, "device": "WebR1", "pwuser": "mikromon",
                      "transport": "sstp", "hub": "monitor.example.com",

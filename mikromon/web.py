@@ -196,6 +196,14 @@ _PAGE_CSS = """
  .chips label:hover{background:#e2e8f0}
  .chips input{margin:0 5px 0 0;vertical-align:middle}
  .chk{margin-right:12px;font-size:13px}
+ input.switch{appearance:none;-webkit-appearance:none;width:38px;height:20px;
+   background:#cbd5e1;border-radius:999px;position:relative;cursor:pointer;
+   vertical-align:middle;transition:.15s;flex:none}
+ input.switch:checked{background:#2563eb}
+ input.switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;
+   height:16px;background:#fff;border-radius:50%;transition:.15s}
+ input.switch:checked::after{left:20px}
+ .chk:has(.switch){display:inline-flex;align-items:center;gap:8px}
  .wanrow{display:flex;gap:8px;align-items:center;margin-bottom:7px}
  .wanrow .prio{width:24px;height:24px;border-radius:50%;background:#2563eb;color:#fff;
    display:flex;align-items:center;justify-content:center;font-size:12px;
@@ -720,9 +728,31 @@ def _provision_script(name, raw, pwuser, pwd, *, transport="sstp",
     return "\n".join(L)
 
 
+_REVEAL_JS = ("<script>function mmReveal(b,id){var i=document.getElementById(id);"
+              "if(i.type==='password'){i.type='text';b.textContent='Hide';}"
+              "else{i.type='password';b.textContent='Show';}}</script>")
+
+
+def _plain_field(lbl, val):
+    return (f'<div class="f"><label class="f">{esc(lbl)}</label>'
+            f'<input readonly value="{esc(val or "")}" onclick="this.select()" '
+            f'style="width:100%;font-family:ui-monospace,monospace"></div>')
+
+
+def _secret_field(lbl, val, fid):
+    """A read-only credential field that is masked until you click Show."""
+    return (f'<div class="f"><label class="f">{esc(lbl)}</label>'
+            f'<div style="display:flex;gap:6px">'
+            f'<input id="{fid}" type="password" readonly value="{esc(val or "")}" '
+            f'onclick="this.select()" '
+            f'style="flex:1;font-family:ui-monospace,monospace">'
+            f'<button type="button" class="btn ghost" '
+            f'onclick="mmReveal(this,\'{fid}\')">Show</button></div></div>')
+
+
 def _connect_box(name, raw) -> str:
-    """WinBox connect helper: a winbox:// launch link + the saved credentials
-    with one-click copy. Admin-only (the caller gates it)."""
+    """WinBox connect helper: a winbox:// launch link + the saved credentials.
+    Username and password are HIDDEN until Show is clicked. Admin-only."""
     if not raw:
         return ""
     host = raw.get("host", "")
@@ -731,23 +761,18 @@ def _connect_box(name, raw) -> str:
     if not host:
         return ""
     wb = f"winbox://{esc(host)}"
-
-    def field(lbl, val):
-        v = esc(val or "")
-        return (f'<div class="f"><label class="f">{lbl}</label>'
-                f'<input readonly value="{v}" onclick="this.select()" '
-                f'style="width:100%;font-family:ui-monospace,monospace"></div>')
-    creds = (field("Host", host) + field("WinBox port", "8291")
-             + field("Username", user) + field("Password", pwd))
+    creds = (_plain_field("Host", host) + _plain_field("WinBox port", "8291")
+             + _secret_field("Username", user, "cu")
+             + _secret_field("Password", pwd, "cp"))
     return (f'<div class="box"><h2>Connect (WinBox)</h2>'
             f'<p><a class="btn" href="{wb}">Open in WinBox</a> '
             f'<span class="muted">launches WinBox at this router (needs WinBox '
             f'installed with the <code>winbox://</code> handler)</span></p>'
             f'<div class="fields">{creds}</div>'
-            f'<p class="muted">Click a field to select, then copy. WinBox can\'t be '
+            f'<p class="muted">Username and password are hidden — click <b>Show</b> '
+            f'to reveal, then click the field to select and copy. WinBox can\'t be '
             f'auto-filled with the password from a browser link, so paste it after '
-            f'WinBox opens. These are the credentials mikromon stores for this '
-            f'unit.</p></div>')
+            f'WinBox opens.</p></div>')
 
 
 def _render_device_provision(name, user, raw, csrf, *, script=None, creds=None,
@@ -797,18 +822,20 @@ def _render_device_provision(name, user, raw, csrf, *, script=None, creds=None,
                f'Terminal</b>, paste this, press Enter. mikromon has saved the '
                f'username/password below and will use them.</p>'
                f'<pre style="{_PRE}">{esc(script)}</pre>'
+               f'<p class="muted">The script contains the password in plain text '
+               f'(it has to, to set it on the router) — paste it, then clear your '
+               f'clipboard. The saved credentials below stay hidden until you '
+               f'reveal them.</p>'
                f'<div class="fields">'
-               f'<div class="f"><label class="f">Saved username</label>'
-               f'<input readonly value="{esc(c.get("user", ""))}" '
-               f'onclick="this.select()"></div>'
-               f'<div class="f"><label class="f">Saved password</label>'
-               f'<input readonly value="{esc(c.get("pwd", ""))}" '
-               f'onclick="this.select()"></div></div></div>')
+               f'{_secret_field("Saved username", c.get("user", ""), "su")}'
+               f'{_secret_field("Saved password", c.get("pwd", ""), "sp")}'
+               f'</div></div>')
     connect = _connect_box(name, raw)
     inner = (f'<div class="wrap" style="max-width:1100px">'
              f'<h1>{esc(name)} &middot; Provision &amp; connect</h1>{tabbar}{intro}'
              f'{banner}{err}{connect}{form}{out}'
-             f'<p><a href="/device?name={q}">&larr; overview</a></p></div>')
+             f'<p><a href="/device?name={q}">&larr; overview</a></p></div>'
+             f'{_REVEAL_JS}')
     return _page(esc(name) + " · Provision", _header(user, "/") + inner)
 
 
@@ -900,7 +927,8 @@ def _field_html(desc) -> str:
         d = (f'<div class="muted">{esc(desc["desc"])}</div>'
              if desc.get("desc") else "")
         return (f'<div class="f"><label class="chk"><input type="checkbox" '
-                f'name="{desc["name"]}" value="{esc(desc["value"])}"{ck}> '
+                f'class="switch" name="{desc["name"]}" '
+                f'value="{esc(desc["value"])}"{ck}> '
                 f'<b>{esc(label)}</b></label>{d}</div>')
     if t == "text":
         return (f'<div class="f"><label class="f">{esc(label)}</label>'

@@ -273,6 +273,24 @@ check("security builds tagged drop rules",
       adds and all(o.params["comment"].startswith("mikromon:sec:") for o in adds)
       and any(o.params.get("connection-state") == "invalid" for o in adds))
 
+# attack-protection toggles -> tagged drop rules (added when on, removed when off)
+plan = F.security_plan(ps, devcfg, {},
+                       {"opt": ["synflood", "ddos", "ssh_bruteforce", "port_scan"]})
+prot = {o.params.get("comment"): o.params for o in plan.ops if o.action == "add"}
+check("security adds SYN/DDoS/SSH/port-scan protections as tagged rules",
+      {"mikromon:sec:synflood", "mikromon:sec:ddos", "mikromon:sec:ssh_bruteforce",
+       "mikromon:sec:port_scan"} <= set(prot))
+check("protection rules use real RouterOS matchers (connection-limit / psd)",
+      prot["mikromon:sec:synflood"].get("connection-limit") == "30,32"
+      and prot["mikromon:sec:port_scan"].get("psd")
+      and prot["mikromon:sec:ddos"].get("chain") == "forward")
+off_api = FakeApi({("ip", "firewall", "filter"): [
+    {".id": "*1", "chain": "input", "action": "drop",
+     "comment": "mikromon:sec:synflood"}]})
+off = F.security_plan(Pusher(devcfg, off_api, dry_run=True), devcfg, {}, {"opt": []})
+check("turning a protection off removes its rule (reconcile)",
+      any(o.action == "remove" and o.params.get(".id") == "*1" for o in off.ops))
+
 # qos rows -> simple queues
 api = FakeApi({("queue", "simple"): []})
 pq = Pusher(devcfg, api, dry_run=True)

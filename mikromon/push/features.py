@@ -203,7 +203,22 @@ def security_form(current, cfg):
              "desc": f"Drop new FTP/SSH/Telnet/Winbox from {wan} (anti-brute-force)."},
             {"type": "toggle", "name": "opt", "value": "block_icmp_wan",
              "label": "Block ping from WAN", "on": on("block_icmp_wan"),
-             "desc": f"Drop ICMP arriving on {wan}."}]
+             "desc": f"Drop ICMP arriving on {wan}."},
+            {"type": "toggle", "name": "opt", "value": "synflood",
+             "label": "SYN-flood protection", "on": on("synflood"),
+             "desc": "Drop a source opening too many half-open TCP (SYN) "
+                     "connections (connection-limit 30/src)."},
+            {"type": "toggle", "name": "opt", "value": "ddos",
+             "label": "DDoS / connection-flood protection", "on": on("ddos"),
+             "desc": "Limit concurrent forwarded connections per source IP "
+                     "(connection-limit 100/src) and drop the excess."},
+            {"type": "toggle", "name": "opt", "value": "ssh_bruteforce",
+             "label": "Block SSH/Telnet brute-force", "on": on("ssh_bruteforce"),
+             "desc": "Drop new SSH/Telnet sessions once a source exceeds "
+                     "10 concurrent (connection-limit)."},
+            {"type": "toggle", "name": "opt", "value": "port_scan",
+             "label": "Port-scanner protection", "on": on("port_scan"),
+             "desc": "Drop hosts detected port-scanning the router (PSD)."}]
 
 
 def security_plan(pusher, cfg, flat, multi):
@@ -226,6 +241,23 @@ def security_plan(pusher, cfg, flat, multi):
             desired.append({"chain": "input", "protocol": "icmp",
                             "in-interface": ifc, "action": "drop",
                             "comment": _SEC_TAG + f"block_icmp_wan-{ifc or 'wan'}"})
+    if "synflood" in opts:
+        desired.append({"chain": "input", "protocol": "tcp", "tcp-flags": "syn",
+                        "connection-state": "new", "connection-limit": "30,32",
+                        "action": "drop", "comment": _SEC_TAG + "synflood"})
+    if "ddos" in opts:
+        desired.append({"chain": "forward", "protocol": "tcp",
+                        "connection-state": "new", "connection-limit": "100,32",
+                        "action": "drop", "comment": _SEC_TAG + "ddos"})
+    if "ssh_bruteforce" in opts:
+        desired.append({"chain": "input", "protocol": "tcp",
+                        "dst-port": "22,23", "connection-state": "new",
+                        "connection-limit": "10,32", "action": "drop",
+                        "comment": _SEC_TAG + "ssh_bruteforce"})
+    if "port_scan" in opts:
+        desired.append({"chain": "input", "protocol": "tcp",
+                        "psd": "21,3s,3,1", "action": "drop",
+                        "comment": _SEC_TAG + "port_scan"})
     return pusher.plan_managed_list(_FILTER, "comment", desired,
                                     owns=_prefix_owner(_SEC_TAG), label="security rule")
 
