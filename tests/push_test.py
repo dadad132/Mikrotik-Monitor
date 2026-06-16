@@ -551,21 +551,28 @@ plan2 = F.hubtunnel_plan(Pusher(qcfg, cfgd, dry_run=True), qcfg,
                        "allowed": "10.10.0.0/24", "keepalive": "25s"}, {})
 check("re-applying an already-configured tunnel is a no-op", plan2.empty)
 
-# v6 router (no WireGuard) -> the hub tunnel falls back to OpenVPN automatically
-v6 = FakeApi({RES: [{"version": "6.49.8"}], OVPN: []})
+# v6 router (no WireGuard) -> legacy transports; SSTP is the default
+SSTP = ("interface", "sstp-client")
+v6 = FakeApi({RES: [{"version": "6.49.8"}], OVPN: [], SSTP: []})
 pv6 = Pusher(qcfg, v6, dry_run=True)
 cur6 = F.hubtunnel_read(pv6, qcfg)
-check("v6 router selects the OpenVPN transport", cur6.get("mode") == "ovpn")
-oplan = F.hubtunnel_plan(pv6, qcfg,
-                         {"connect_to": "monitor.example.com", "port": "1194",
+check("v6 router selects the legacy (SSTP/OpenVPN) transport",
+      cur6.get("mode") == "legacy")
+splan = F.hubtunnel_plan(pv6, qcfg,
+                         {"connect_to": "monitor.example.com",
                           "user": "router1", "password": "s3cret"}, {})
+ss_add = next((o for o in splan.ops if o.path == SSTP and o.action == "add"), None)
+check("v6 defaults to a tagged SSTP client on port 443",
+      ss_add is not None and ss_add.params.get("connect-to") == "monitor.example.com"
+      and ss_add.params.get("port") == "443"
+      and ss_add.params.get("password") == "s3cret"
+      and ss_add.params.get("comment", "").startswith("mikromon:tunnel:"))
+oplan = F.hubtunnel_plan(pv6, qcfg,
+                         {"transport": "ovpn", "connect_to": "monitor.example.com",
+                          "port": "1194", "user": "router1"}, {})
 ov_add = next((o for o in oplan.ops if o.path == OVPN and o.action == "add"), None)
-check("v6 hub tunnel creates a tagged ovpn-client dialing the hub",
-      ov_add is not None
-      and ov_add.params.get("connect-to") == "monitor.example.com"
-      and ov_add.params.get("user") == "router1"
-      and ov_add.params.get("password") == "s3cret"
-      and ov_add.params.get("comment", "").startswith("mikromon:tunnel:"))
+check("choosing OpenVPN creates an ovpn-client instead",
+      ov_add is not None and ov_add.params.get("port") == "1194")
 check("v6 with no hub host is a safe no-op",
       F.hubtunnel_plan(pv6, qcfg, {"connect_to": ""}, {}).empty)
 

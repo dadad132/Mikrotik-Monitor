@@ -183,7 +183,8 @@ try:
           all(s in body for s in ("tab=sdwan", "tab=security", "tab=qos",
                                   "tab=portfwd", "tab=nextdns", "tab=remote",
                                   "tab=interfaces", "tab=scripts", "tab=harden",
-                                  "tab=tunnel", "tab=hubtunnel", "tab=update")))
+                                  "tab=tunnel", "tab=hubtunnel", "tab=update",
+                                  "tab=provision")))
     st, body = get(admin, "/logs")
     check("admin can open the activity log", st == 200 and "activity log" in body.lower())
     st, _ = get(nobody, "/logs")
@@ -205,6 +206,24 @@ try:
     st = post_status(nobody, "/device/wan",
                      {"csrf": "x", "device": "WebR1", "link_iface": ["x"]})
     check("non-admin blocked from editing WAN (403)", st == 403)
+    # --- Provision tab: generate a bootstrap script + save strong creds ---
+    st, body = get(admin, "/device?name=WebR1&tab=provision")
+    check("admin can open the Provision tab", st == 200 and "Connect (WinBox)" in body)
+    st, body = post(admin, "/device/provision",
+                    {"csrf": csrf, "device": "WebR1", "pwuser": "mikromon",
+                     "transport": "sstp", "hub": "monitor.example.com",
+                     "hub_port": "443", "harden": "1"})
+    check("provision generates a bootstrap script (user + API + SSTP)",
+          st == 200 and "/user add name=mikromon" in body
+          and "/ip service set api disabled=no" in body and "sstp-client" in body)
+    saved = DevicesStore(wdb)
+    raw = saved.raw("WebR1")
+    check("provision saved a strong generated password as the push creds",
+          raw["push_username"] == "mikromon" and len(raw.get("push_password", "")) >= 16)
+    saved.close()
+    st = post_status(nobody, "/device/provision",
+                     {"csrf": "x", "device": "WebR1"})
+    check("non-admin blocked from provisioning (403)", st == 403)
     st, _ = post(admin, "/devices/delete", {"csrf": csrf, "name": "WebR1"})
     saved = DevicesStore(wdb)
     check("device deleted via web", saved.names() == [])
