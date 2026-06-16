@@ -982,10 +982,10 @@ _HUB_NAME = "mikromon"
 
 
 def _hub_mode(api):
-    """'wg' on RouterOS 7.1+ (WireGuard); else 'ovpn' (works on v6). Returns
-    (mode, version_string)."""
+    """'wg' on RouterOS 7.1+ (WireGuard); else 'legacy' (SSTP/OpenVPN, works on
+    v6). Returns (mode, version_string)."""
     major, minor, ver = _ros_version(api)
-    return ("wg" if _wg_supported(major, minor) else "ovpn"), ver
+    return ("wg" if _wg_supported(major, minor) else "legacy"), ver
 
 
 def _no_wg_menu(exc):
@@ -1083,71 +1083,94 @@ def _hub_wg_plan(pusher, cfg, flat, multi):
                 summary="hub tunnel (wireguard)")
 
 
-# ---- OpenVPN transport (RouterOS v6 and v7) -------------------------------
-def _hub_ovpn_read(pusher, cfg):
-    rows = [r for r in pusher.api.fetch(_HUB_OVPN)
-            if str(r.get("comment", "")).startswith(_HUB_TAG)]
-    return {"ovpn": rows[0] if rows else {}}
+# ---- Legacy transports for older firmware: SSTP (default) or OpenVPN ------
+# SSTP is preferred for older units: TLS over 443, NAT/firewall-friendly, and it
+# works with username/password only (no certificate import needed). OpenVPN is
+# offered too. Both dial OUT to the hub and the hub assigns the tunnel IP.
+_HUB_SSTP = ("interface", "sstp-client")
+_LEGACY_PATH = {"sstp": _HUB_SSTP, "ovpn": _HUB_OVPN}
 
 
-def _hub_ovpn_summary(current):
-    o = current.get("ovpn", {})
-    if not o:
-        return ["No OpenVPN dial-home client yet. Fill the form and Preview to "
-                "create one (works on RouterOS v6 and v7). The hub (your "
-                "monitoring server) runs the OpenVPN server."]
-    up = _norm(o.get("running", "")) == "true"
-    return [f"OpenVPN client '{o.get('name')}' → {o.get('connect-to', '?')}:"
-            f"{o.get('port', '?')} · {'connected' if up else 'down / connecting'}",
-            "The hub assigns this router's tunnel IP (set a static one per client "
-            "in the OpenVPN server config)."]
+def _hub_legacy_read(pusher, cfg):
+    def owned(path):
+        rows = [r for r in pusher.api.fetch(path)
+                if str(r.get("comment", "")).startswith(_HUB_TAG)]
+        return rows[0] if rows else {}
+    return {"sstp": owned(_HUB_SSTP), "ovpn": owned(_HUB_OVPN)}
 
 
-def _hub_ovpn_form(current):
-    o = current.get("ovpn", {})
+def _hub_legacy_active(current):
+    """The transport currently configured (sstp wins), and its row."""
+    if current.get("sstp"):
+        return "sstp", current["sstp"]
+    if current.get("ovpn"):
+        return "ovpn", current["ovpn"]
+    return "sstp", {}
+
+
+def _hub_legacy_summary(current):
+    t, row = _hub_legacy_active(current)
+    if not row:
+        return ["No dial-home tunnel yet. Pick SSTP (simplest — TLS 443, no "
+                "certificates) or OpenVPN, set the hub host and Preview. Works on "
+                "RouterOS v6 and v7."]
+    up = _norm(row.get("running", "")) == "true"
+    label = "SSTP" if t == "sstp" else "OpenVPN"
+    return [f"{label} client '{row.get('name')}' → {row.get('connect-to', '?')}:"
+            f"{row.get('port', '?')} · {'connected' if up else 'down / connecting'}",
+            "The hub assigns this router's tunnel IP."]
+
+
+def _hub_legacy_form(current):
+    t, row = _hub_legacy_active(current)
     return [
+        {"type": "select", "name": "transport",
+         "label": "Tunnel type (this RouterOS is too old for WireGuard)",
+         "options": [("sstp", "SSTP — TLS over 443, no certificate setup "
+                              "(recommended)"),
+                     ("ovpn", "OpenVPN — TCP, may need the hub's CA imported")],
+         "value": t},
         {"type": "text", "name": "connect_to",
-         "label": "Hub host — your monitoring server's OpenVPN server (host / DDNS)",
-         "value": o.get("connect-to", ""), "placeholder": "monitor.example.com"},
-        {"type": "text", "name": "port", "label": "Hub TCP port",
-         "value": o.get("port", "") or "1194",
-         "hint": "RouterOS v6 OpenVPN is TCP-only."},
+         "label": "Hub host — your monitoring server (host / DDNS)",
+         "value": row.get("connect-to", ""), "placeholder": "monitor.example.com"},
+        {"type": "text", "name": "port", "label": "Hub port",
+         "value": row.get("port", "") or "443",
+         "hint": "SSTP: 443. OpenVPN: 1194 (TCP)."},
         {"type": "text", "name": "user", "label": "VPN username",
-         "value": o.get("user", "")},
+         "value": row.get("user", "")},
         {"type": "text", "name": "password", "label": "VPN password", "value": "",
-         "placeholder": "(unchanged)" if o else ""},
-        {"type": "text", "name": "certificate",
-         "label": "Client certificate name (imported on the router; 'none' for "
-                  "username/password only)",
-         "value": o.get("certificate", "") or "none"},
+         "placeholder": "(unchanged)" if row else ""},
         {"type": "toggle", "name": "opt", "value": "verify",
          "label": "Verify the hub's server certificate",
-         "on": _norm(o.get("verify-server-certificate", "")) == "true",
-         "desc": "Off is simplest (user/pass only). On requires importing the "
-                 "hub's CA certificate on the router first."},
+         "on": _norm(row.get("verify-server-certificate", "")) == "true",
+         "desc": "Off is simplest (username/password only)."},
     ]
 
 
-def _hub_ovpn_plan(pusher, cfg, flat, multi):
+def _hub_legacy_plan(pusher, cfg, flat, multi):
+    transport = (flat.get("transport", "") or "sstp").strip()
+    path = _LEGACY_PATH.get(transport, _HUB_SSTP)
     connect_to = flat.get("connect_to", "").strip()
     if not connect_to:
-        return Plan(cfg.name, [], summary="ovpn tunnel (need the hub host)")
+        return Plan(cfg.name, [], summary=f"{transport} tunnel (need the hub host)")
+    default_port = "443" if transport == "sstp" else "1194"
     desired = {
         "name": _HUB_NAME, "connect-to": connect_to,
-        "port": (flat.get("port", "") or "1194").strip(),
+        "port": (flat.get("port", "") or default_port).strip(),
         "user": flat.get("user", "").strip(),
-        "certificate": (flat.get("certificate", "") or "none").strip(),
         "verify-server-certificate": "true" if "verify"
         in set(multi.get("opt", [])) else "false",
         "add-default-route": "false", "disabled": "false",
-        "comment": _HUB_TAG + "ovpn",
+        "comment": _HUB_TAG + transport,
     }
+    if transport == "ovpn":
+        desired["certificate"] = (flat.get("certificate", "") or "none").strip()
     pwd = flat.get("password", "")
-    if pwd:  # RouterOS never returns the password, so only set it when given
+    if pwd:  # RouterOS never returns the password — only set it when given
         desired["password"] = pwd
-    return pusher.plan_managed_list(_HUB_OVPN, "name", [desired],
+    return pusher.plan_managed_list(path, "name", [desired],
                                     owns=_prefix_owner(_HUB_TAG),
-                                    label="ovpn client")
+                                    label=f"{transport} client")
 
 
 # ---- version-adaptive dispatch --------------------------------------------
@@ -1159,29 +1182,29 @@ def hubtunnel_read(pusher, cfg):
         except Exception as exc:  # noqa: BLE001 — older box without WG menu
             if not _no_wg_menu(exc):
                 raise
-            data, mode = _hub_ovpn_read(pusher, cfg), "ovpn"
+            data, mode = _hub_legacy_read(pusher, cfg), "legacy"
     else:
-        data = _hub_ovpn_read(pusher, cfg)
+        data = _hub_legacy_read(pusher, cfg)
     data["mode"], data["version"] = mode, ver
     return data
 
 
 def hubtunnel_summary(current, cfg):
-    if current.get("mode") == "ovpn":
-        return _hub_ovpn_summary(current)
+    if current.get("mode") == "legacy":
+        return _hub_legacy_summary(current)
     return _hub_wg_summary(current)
 
 
 def hubtunnel_form(current, cfg):
-    if current.get("mode") == "ovpn":
-        return _hub_ovpn_form(current)
+    if current.get("mode") == "legacy":
+        return _hub_legacy_form(current)
     return _hub_wg_form(current)
 
 
 def hubtunnel_plan(pusher, cfg, flat, multi):
     mode, _ver = _hub_mode(pusher.api)
-    if mode == "ovpn":
-        return _hub_ovpn_plan(pusher, cfg, flat, multi)
+    if mode == "legacy":
+        return _hub_legacy_plan(pusher, cfg, flat, multi)
     return _hub_wg_plan(pusher, cfg, flat, multi)
 
 

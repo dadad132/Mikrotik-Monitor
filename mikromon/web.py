@@ -492,19 +492,20 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
             f'<div class="grid">{grid}</div>{empty}{_DASH_JS}</body></html>')
 
 
-_DEVICE_TABS = ["Overview", "SD-WAN", "Security", "Restrict access", "NextDNS",
-                "QoS", "Port forwarding", "Interfaces", "Remote access",
+_DEVICE_TABS = ["Overview", "Provision", "SD-WAN", "Security", "Restrict access",
+                "NextDNS", "QoS", "Port forwarding", "Interfaces", "Remote access",
                 "Tunnel", "Hub tunnel", "Scripts", "Update", "Backups"]
 # label -> url slug (all tabs are wired to the engine now)
-_LIVE_TABS = {"Overview": "", "SD-WAN": "sdwan", "Security": "security",
-              "Restrict access": "harden", "NextDNS": "nextdns", "QoS": "qos",
-              "Port forwarding": "portfwd", "Interfaces": "interfaces",
-              "Remote access": "remote", "Tunnel": "tunnel",
-              "Hub tunnel": "hubtunnel", "Scripts": "scripts",
+_LIVE_TABS = {"Overview": "", "Provision": "provision", "SD-WAN": "sdwan",
+              "Security": "security", "Restrict access": "harden",
+              "NextDNS": "nextdns", "QoS": "qos", "Port forwarding": "portfwd",
+              "Interfaces": "interfaces", "Remote access": "remote",
+              "Tunnel": "tunnel", "Hub tunnel": "hubtunnel", "Scripts": "scripts",
               "Update": "update", "Backups": "backups"}
 # tabs that WRITE to the router (admins only); Overview + Interfaces are read-only
-_ADMIN_TABS = {"sdwan", "security", "harden", "nextdns", "qos", "portfwd",
-               "remote", "tunnel", "hubtunnel", "scripts", "update", "backups"}
+_ADMIN_TABS = {"provision", "sdwan", "security", "harden", "nextdns", "qos",
+               "portfwd", "remote", "tunnel", "hubtunnel", "scripts", "update",
+               "backups"}
 
 
 def _device_tabbar(name, active, is_admin=True) -> str:
@@ -652,6 +653,142 @@ def _render_device(store, state, name, user) -> str:
         f'<p><a href="/">&larr; dashboard</a> &nbsp; '
         f'<a href="/inventory">inventory</a></p></div>')
     return _page(esc(name), _header(user, "/") + inner)
+
+
+_PWALPHABET = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def _gen_password(n=20) -> str:
+    """A strong password using only RouterOS-script-safe characters (no quotes,
+    spaces or backslashes, so it pastes cleanly into a terminal script)."""
+    return "".join(secrets.choice(_PWALPHABET) for _ in range(n))
+
+
+def _provision_script(name, raw, pwuser, pwd, *, transport="sstp",
+                      hub="", hub_port="", vpn_user="", vpn_pass="",
+                      harden=True) -> str:
+    """A one-paste RouterOS bootstrap script for a brand-new unit: create the
+    mikromon management user with a strong password, enable the API, optional
+    hardening, and (optionally) a dial-home tunnel to the monitoring hub."""
+    L = [f"# === mikromon provisioning for {name} ===",
+         "# Paste this ONCE into the router terminal (Winbox/WebFig -> New "
+         "Terminal).",
+         "# It creates the management user mikromon uses + enables the API.",
+         "",
+         "# 1) management user (full access)",
+         f'/user add name={pwuser} password="{pwd}" group=full '
+         f'comment="mikromon-managed"',
+         "",
+         "# 2) make sure the API is reachable for mikromon",
+         "/ip service set api disabled=no"]
+    if harden:
+        L += ["",
+              "# 3) basic hardening — turn off legacy plaintext services",
+              "/ip service set telnet disabled=yes",
+              "/ip service set ftp disabled=yes"]
+    if transport in ("sstp", "ovpn") and hub:
+        port = hub_port or ("443" if transport == "sstp" else "1194")
+        iface = "sstp-client" if transport == "sstp" else "ovpn-client"
+        L += ["",
+              f"# 4) dial-home tunnel ({transport.upper()}) to the monitoring hub",
+              f'/interface {iface} add name=mikromon connect-to={hub} port={port} '
+              f'user={vpn_user or pwuser} password="{vpn_pass or pwd}" '
+              f'verify-server-certificate=no add-default-route=no '
+              f'comment="mikromon:tunnel:{transport}" disabled=no']
+    L += ["", '/log info "mikromon provisioning done"']
+    return "\n".join(L)
+
+
+def _connect_box(name, raw) -> str:
+    """WinBox connect helper: a winbox:// launch link + the saved credentials
+    with one-click copy. Admin-only (the caller gates it)."""
+    if not raw:
+        return ""
+    host = raw.get("host", "")
+    user = raw.get("push_username") or raw.get("username", "")
+    pwd = raw.get("push_password") or raw.get("password", "")
+    if not host:
+        return ""
+    wb = f"winbox://{esc(host)}"
+
+    def field(lbl, val):
+        v = esc(val or "")
+        return (f'<div class="f"><label class="f">{lbl}</label>'
+                f'<input readonly value="{v}" onclick="this.select()" '
+                f'style="width:100%;font-family:ui-monospace,monospace"></div>')
+    creds = (field("Host", host) + field("WinBox port", "8291")
+             + field("Username", user) + field("Password", pwd))
+    return (f'<div class="box"><h2>Connect (WinBox)</h2>'
+            f'<p><a class="btn" href="{wb}">Open in WinBox</a> '
+            f'<span class="muted">launches WinBox at this router (needs WinBox '
+            f'installed with the <code>winbox://</code> handler)</span></p>'
+            f'<div class="fields">{creds}</div>'
+            f'<p class="muted">Click a field to select, then copy. WinBox can\'t be '
+            f'auto-filled with the password from a browser link, so paste it after '
+            f'WinBox opens. These are the credentials mikromon stores for this '
+            f'unit.</p></div>')
+
+
+def _render_device_provision(name, user, raw, csrf, *, script=None, creds=None,
+                             msg="", error="") -> str:
+    tabbar = _device_tabbar(name, "provision", True)
+    q = quote(name)
+    banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
+              f'</div>' if msg else "")
+    err = (f'<div class="box" style="border-left:4px solid #dc2626">{esc(error)}'
+           f'</div>' if error else "")
+    pwuser = (raw or {}).get("push_username") or "mikromon"
+    intro = ('<p class="muted" style="margin:-6px 0 14px">Generate a one-paste '
+             'script for a brand-new router: it creates a management user with a '
+             'strong password (which mikromon then stores and uses), enables the '
+             'API, and can add a dial-home tunnel. Connect launches WinBox with '
+             'the saved details.</p>')
+    form = (
+        f'<div class="box"><h2>Generate provisioning script</h2>'
+        f'<form method="POST" action="/device/provision">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="device" value="{esc(name)}">'
+        f'<div class="fields">'
+        f'<div class="f"><label class="f">Management username</label>'
+        f'<input name="pwuser" value="{esc(pwuser)}"></div>'
+        f'<div class="f"><label class="f">Dial-home tunnel</label>'
+        f'<select name="transport"><option value="">None (just user + API)</option>'
+        f'<option value="sstp">SSTP — TLS 443, no certs (older units)</option>'
+        f'<option value="ovpn">OpenVPN (TCP)</option></select></div>'
+        f'<div class="f"><label class="f">Hub host (for the tunnel)</label>'
+        f'<input name="hub" placeholder="monitor.example.com"></div>'
+        f'<div class="f"><label class="f">Hub port</label>'
+        f'<input name="hub_port" placeholder="443"></div>'
+        f'<div class="f"><label class="chk"><input type="checkbox" name="harden" '
+        f'value="1" checked> Disable Telnet/FTP (basic hardening)</label></div>'
+        f'</div>'
+        f'<div class="actions" style="margin-top:12px">'
+        f'<button class="btn" type="submit">Generate strong password &amp; script'
+        f'</button></div></form>'
+        f'<p class="muted">Regenerating makes a NEW password and overwrites the '
+        f'one mikromon stores for this device.</p></div>')
+    out = ""
+    if script is not None:
+        c = creds or {}
+        out = (f'<div class="box" style="border-left:4px solid #16a34a">'
+               f'<h2>Provisioning script — paste into the new router</h2>'
+               f'<p class="muted">Open the router in WinBox/WebFig → <b>New '
+               f'Terminal</b>, paste this, press Enter. mikromon has saved the '
+               f'username/password below and will use them.</p>'
+               f'<pre style="{_PRE}">{esc(script)}</pre>'
+               f'<div class="fields">'
+               f'<div class="f"><label class="f">Saved username</label>'
+               f'<input readonly value="{esc(c.get("user", ""))}" '
+               f'onclick="this.select()"></div>'
+               f'<div class="f"><label class="f">Saved password</label>'
+               f'<input readonly value="{esc(c.get("pwd", ""))}" '
+               f'onclick="this.select()"></div></div></div>')
+    connect = _connect_box(name, raw)
+    inner = (f'<div class="wrap" style="max-width:1100px">'
+             f'<h1>{esc(name)} &middot; Provision &amp; connect</h1>{tabbar}{intro}'
+             f'{banner}{err}{connect}{form}{out}'
+             f'<p><a href="/device?name={q}">&larr; overview</a></p></div>')
+    return _page(esc(name) + " · Provision", _header(user, "/") + inner)
 
 
 def _render_device_backups(name, user, facts, csrf, *, backups=None,
@@ -887,29 +1024,30 @@ _PRE = ('white-space:pre-wrap;background:#f8fafc;padding:10px;border-radius:6px;
 def _hubtunnel_box(name, current) -> str:
     """Hub-side setup help. WireGuard mode shows the router's public key + the
     lines to paste; OpenVPN mode (older routers) shows the server-side guidance."""
-    if current.get("mode") == "ovpn":
-        srv = ("# /etc/openvpn/server.conf (hub)\n"
-               "port 1194\nproto tcp\ndev tun\n"
-               "server 10.10.0.0 255.255.255.0\n"
-               "# give THIS router a fixed tunnel IP:\n"
-               "#   client-config-dir ccd  +  ccd/<cn>: ifconfig-push 10.10.0.2 ...\n"
-               "verb 3")
+    if current.get("mode") == "legacy":
         ver = esc(str(current.get("version", "")))
-        return (f'<div class="box"><h2>Hub (OpenVPN server) setup</h2>'
+        sstp = ("# Windows monitoring host — built-in SSTP server (RRAS):\n"
+                "#  1. Add Roles -> Remote Access -> DirectAccess and VPN (RAS)\n"
+                "#  2. Configure RRAS for VPN; enable SSTP (TCP 443) + a TLS cert\n"
+                "#  3. Add a VPN user; give this router a fixed IP in the pool\n"
+                "# (SSTP needs no client certificate — username/password is enough.)")
+        ovpn = ("# OpenVPN server.conf (hub):\n"
+                "port 1194\nproto tcp\ndev tun\nserver 10.10.0.0 255.255.255.0\n"
+                "# fixed IP per router:  client-config-dir ccd  +\n"
+                "#   ccd/<cn>: ifconfig-push 10.10.0.2 255.255.255.0\nverb 3")
+        return (f'<div class="box"><h2>Hub (monitoring-server) setup</h2>'
                 f'<p class="muted">This router runs RouterOS {ver}, which has no '
-                f'WireGuard — so the Hub tunnel uses <b>OpenVPN</b> here. Run an '
-                f'OpenVPN <b>server</b> on your monitoring host (Windows: OpenVPN '
-                f'Community; or a small Linux VPS) and create a user for this '
-                f'router. Outline of the server config:</p>'
-                f'<pre style="{_PRE}">{esc(srv)}</pre>'
-                f'<p class="muted">Assign this router a <b>fixed</b> tunnel IP on '
-                f'the server (per-client <code>ccd</code> / ifconfig-push). Then on '
-                f'the <b>Devices</b> page set this device\'s <b>Host</b> to that '
-                f'tunnel IP so monitoring and pushes ride the tunnel, and use '
-                f'<b>Restrict access</b> to lock the API to the tunnel subnet. '
-                f'Note: RouterOS v6 OpenVPN is TCP-only and usually needs the hub\'s '
-                f'CA certificate imported on the router (Files → /certificate '
-                f'import) unless you allow username/password only.</p></div>')
+                f'WireGuard — so the Hub tunnel uses <b>SSTP</b> or <b>OpenVPN</b> '
+                f'(pick above). <b>SSTP is simplest</b>: TLS over 443, no client '
+                f'certificate, and your Windows monitoring host can be the server '
+                f'via built-in RRAS:</p>'
+                f'<pre style="{_PRE}">{esc(sstp)}</pre>'
+                f'<p class="muted">Or, if you prefer OpenVPN, run a server like:</p>'
+                f'<pre style="{_PRE}">{esc(ovpn)}</pre>'
+                f'<p class="muted">Either way, give this router a <b>fixed</b> '
+                f'tunnel IP on the server. Then on the <b>Devices</b> page set this '
+                f"device's <b>Host</b> to that tunnel IP, and use <b>Restrict "
+                f'access</b> to lock the API to the tunnel subnet.</p></div>')
     iface = current.get("iface", {}) or {}
     pub = iface.get("public-key", "")
     addr = (current.get("address", {}) or {}).get("address", "")
@@ -1580,6 +1718,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                             return self._send(403, "forbidden")
                         return self._device_backups_page(
                             dev, user, msg=q.get("msg", [""])[0])
+                    if tab == "provision":
+                        if user is not None and not AuthStore.is_admin(user):
+                            return self._send(403, "forbidden")
+                        return self._device_provision_page(
+                            dev, user, msg=q.get("msg", [""])[0])
                     if tab:
                         from .push import FEATURES
                         if tab in FEATURES:
@@ -1697,6 +1840,50 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                           backups=backups, error=error, msg=msg,
                                           dry_plan=dry_plan)
             return self._send(200, page, "text/html; charset=utf-8")
+
+        def _device_provision_page(self, name, user, msg="", script=None,
+                                   creds=None, error=""):
+            raw = self._device_raw(name)
+            if raw is None:
+                return self._send(400, "This device is not managed in the "
+                                       "dashboard (add it on the Devices page).")
+            sess = self._session()
+            csrf = sess["csrf"] if sess else ""
+            page = _render_device_provision(name, user, raw, csrf, script=script,
+                                            creds=creds, msg=msg, error=error)
+            return self._send(200, page, "text/html; charset=utf-8")
+
+        def _device_provision_post(self, flat, user):
+            if not AuthStore.is_admin(user or {}):
+                return self._send(403, "forbidden")
+            name = flat.get("device", "")
+            store = self._devstore()
+            if store is None:
+                return self._send(400, "device management not enabled")
+            raw = store.raw(name)
+            if raw is None:
+                store.close()
+                return self._send(404, "no such device")
+            pwuser = (flat.get("pwuser", "").strip() or "mikromon")
+            pwd = _gen_password()
+            # save the generated read-write creds so mikromon (and Connect) use them
+            raw["push_username"] = pwuser
+            raw["push_password"] = pwd
+            try:
+                store.upsert(raw, defaults, original_name=name)
+            except Exception as exc:  # noqa: BLE001 — surface validation errors
+                store.close()
+                return self._send(400, f"Error: {exc}")
+            store.close()
+            script = _provision_script(
+                name, raw, pwuser, pwd,
+                transport=flat.get("transport", "").strip(),
+                hub=flat.get("hub", "").strip(),
+                hub_port=flat.get("hub_port", "").strip(),
+                harden=flat.get("harden") == "1")
+            return self._device_provision_page(
+                name, user, script=script, creds={"user": pwuser, "pwd": pwd},
+                msg="Generated a strong password and saved it for this device.")
 
         def _device_backup_post(self, flat, user):
             name = flat.get("device", "")
@@ -2046,6 +2233,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._devices_post(path, flat, multi, user)
             if path == "/device/backup":
                 return self._device_backup_post(flat, user)
+            if path == "/device/provision":
+                return self._device_provision_post(flat, user)
             if path == "/device/push":
                 return self._device_push_post(flat, multi, user)
             if path == "/device/adopt":
