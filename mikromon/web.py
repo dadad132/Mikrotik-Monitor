@@ -466,37 +466,15 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
         up = d["up"]
         sev = _severity(d)
         dot = "#16a34a" if up else "#dc2626"
-        m = d["metrics"]
-        rows = []
-        if "cpu" in m:
-            sp = _sparkline(store.series(d["device"], "cpu", since=time.time() - 3600))
-            rows.append(f"<tr><td>CPU</td><td>{m['cpu']:.0f}%</td><td>{sp}</td></tr>")
-        if "mem_free_pct" in m:
-            rows.append(f"<tr><td>Free RAM</td><td>{m['mem_free_pct']:.0f}%</td>"
-                        f"<td></td></tr>")
-        if "client_count" in m:
-            sp = _sparkline(store.series(d["device"], "client_count",
-                                         since=time.time() - 3600))
-            rows.append(f"<tr><td>Devices</td><td>{m['client_count']:.0f}</td>"
-                        f"<td>{sp}</td></tr>")
-        for iface, t in sorted(d["throughput"].items()):
-            sp = _sparkline(store.series(d["device"], "rx_bps", label=iface,
-                                         since=time.time() - 3600))
-            rows.append(f"<tr><td>{html.escape(iface)}</td><td>"
-                        f"&darr;{human_bps(t.get('rx_bps', 0))} "
-                        f"&uarr;{human_bps(t.get('tx_bps', 0))}</td><td>{sp}</td></tr>")
-        probs = "".join(f'<li><b>{html.escape(p["key"])}</b> '
-                        f'({html.escape(str(p["level"]))})</li>' for p in d["problems"])
-        probs_html = (f'<div class="probs"><b>Active problems:</b><ul>{probs}</ul>'
-                      f'</div>' if probs else '<div class="ok">No active problems</div>')
-        cls = "card" + ("" if sev == "ok" else f" {sev}")
+        # Compact dashboard: just the device name + an online/offline dot. The
+        # full telemetry (CPU/RAM/throughput/problems) lives on the device page.
+        cls = "card name-only" + ("" if sev == "ok" else f" {sev}")
         link = f'/device?name={quote(d["device"])}'
         cards.append(f'<div class="{cls}" data-name="{html.escape(d["device"].lower())}"'
                      f' data-sev="{sev}"><h2><span class="dot" style="background:'
                      f'{dot}"></span><a href="{link}">{html.escape(d["device"])}</a>'
                      f'<span class="state">'
-                     f'{"ONLINE" if up else "OFFLINE"}</span></h2><table>'
-                     f'{"".join(rows)}</table>{probs_html}</div>')
+                     f'{"ONLINE" if up else "OFFLINE"}</span></h2></div>')
     grid = "".join(cards) or "<p style='padding:20px'>No devices to show.</p>"
     fbar = ('<div class="fbar"><input id="q" placeholder="Filter devices by name…">'
             '<button class="fbtn" data-f="all" onclick="setf(\'all\')">All</button>'
@@ -514,16 +492,19 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
             f'<div class="grid">{grid}</div>{empty}{_DASH_JS}</body></html>')
 
 
-_DEVICE_TABS = ["Overview", "SD-WAN", "Security", "NextDNS", "QoS",
-                "Port forwarding", "Interfaces", "Remote access", "Tunnel", "Backups"]
+_DEVICE_TABS = ["Overview", "SD-WAN", "Security", "Restrict access", "NextDNS",
+                "QoS", "Port forwarding", "Interfaces", "Remote access",
+                "Tunnel", "Hub tunnel", "Scripts", "Update", "Backups"]
 # label -> url slug (all tabs are wired to the engine now)
 _LIVE_TABS = {"Overview": "", "SD-WAN": "sdwan", "Security": "security",
-              "NextDNS": "nextdns", "QoS": "qos", "Port forwarding": "portfwd",
-              "Interfaces": "interfaces", "Remote access": "remote",
-              "Tunnel": "tunnel", "Backups": "backups"}
+              "Restrict access": "harden", "NextDNS": "nextdns", "QoS": "qos",
+              "Port forwarding": "portfwd", "Interfaces": "interfaces",
+              "Remote access": "remote", "Tunnel": "tunnel",
+              "Hub tunnel": "hubtunnel", "Scripts": "scripts",
+              "Update": "update", "Backups": "backups"}
 # tabs that WRITE to the router (admins only); Overview + Interfaces are read-only
-_ADMIN_TABS = {"sdwan", "security", "nextdns", "qos", "portfwd", "remote",
-               "tunnel", "backups"}
+_ADMIN_TABS = {"sdwan", "security", "harden", "nextdns", "qos", "portfwd",
+               "remote", "tunnel", "hubtunnel", "scripts", "update", "backups"}
 
 
 def _device_tabbar(name, active, is_admin=True) -> str:
@@ -560,7 +541,9 @@ def _render_inventory(store, state, user, allowed) -> str:
         dot = {"ok": "#16a34a", "warn": "#d97706", "crit": "#dc2626"}[sev]
         ver = f.get("version", "—")
         old = ver[:1] in ("5", "6")
-        ver_html = (esc(ver) + (' <span class="up">upgrade</span>' if old else ""))
+        ver_html = (esc(ver) + (
+            f' <a class="up" href="/device?name={quote(d["device"])}&tab=update">'
+            f'upgrade</a>' if old else ""))
         wl = f.get("wan_links") or []
         links = ", ".join(esc(x) for x in wl) if wl else '<span class="muted">—</span>'
         link = f'/device?name={quote(d["device"])}'
@@ -860,6 +843,147 @@ def _adopt_box(name, slug, feature, csrf, unmanaged) -> str:
             f'{rows}</table></div>')
 
 
+def _scripts_box(name, csrf, scripts) -> str:
+    """List mikromon-managed /system scripts with Run and Remove buttons.
+
+    Both actions POST to /device/push (so they get the dry-run -> confirm ->
+    apply -> log pipeline) with a script_action + script_name."""
+    q = esc(name)
+    rows = ""
+    for s in scripts:
+        sn = esc(s.get("name", ""))
+        src = s.get("source", "") or ""
+        last = s.get("last-started", "")
+        meta = (f'<span class="muted"> · last run {esc(last)}</span>' if last else "")
+
+        def act(action, label, cls):
+            return (f'<form method="POST" action="/device/push" class="inline">'
+                    f'<input type="hidden" name="csrf" value="{csrf}">'
+                    f'<input type="hidden" name="device" value="{q}">'
+                    f'<input type="hidden" name="feature" value="scripts">'
+                    f'<input type="hidden" name="script_action" value="{action}">'
+                    f'<input type="hidden" name="script_name" value="{sn}">'
+                    f'<button class="btn {cls}" type="submit">{label}</button></form>')
+        rows += (f'<tr><td><b>{sn}</b>{meta}'
+                 f'<details><summary class="muted">source</summary>'
+                 f'<pre style="white-space:pre-wrap;background:#f8fafc;padding:8px;'
+                 f'border-radius:6px">{esc(src)}</pre></details></td>'
+                 f'<td style="white-space:nowrap">{act("run", "Run", "ghost")} '
+                 f'{act("remove", "Remove", "ghost")}</td></tr>')
+    if not rows:
+        return ""
+    return (f'<div class="box"><h2>Saved scripts on the router</h2>'
+            f'<p class="muted">Run executes the script now; Remove deletes the '
+            f'script entry. Both are previewed before anything happens. Note: '
+            f'removing a script does not undo changes it already made — add an '
+            f'undo script for that, or use the typed tabs for reversible rules.'
+            f'</p><table><tr><th>Script</th><th></th></tr>{rows}</table></div>')
+
+
+_PRE = ('white-space:pre-wrap;background:#f8fafc;padding:10px;border-radius:6px;'
+        'font-family:ui-monospace,Consolas,monospace')
+
+
+def _hubtunnel_box(name, current) -> str:
+    """Hub-side setup help. WireGuard mode shows the router's public key + the
+    lines to paste; OpenVPN mode (older routers) shows the server-side guidance."""
+    if current.get("mode") == "ovpn":
+        srv = ("# /etc/openvpn/server.conf (hub)\n"
+               "port 1194\nproto tcp\ndev tun\n"
+               "server 10.10.0.0 255.255.255.0\n"
+               "# give THIS router a fixed tunnel IP:\n"
+               "#   client-config-dir ccd  +  ccd/<cn>: ifconfig-push 10.10.0.2 ...\n"
+               "verb 3")
+        ver = esc(str(current.get("version", "")))
+        return (f'<div class="box"><h2>Hub (OpenVPN server) setup</h2>'
+                f'<p class="muted">This router runs RouterOS {ver}, which has no '
+                f'WireGuard — so the Hub tunnel uses <b>OpenVPN</b> here. Run an '
+                f'OpenVPN <b>server</b> on your monitoring host (Windows: OpenVPN '
+                f'Community; or a small Linux VPS) and create a user for this '
+                f'router. Outline of the server config:</p>'
+                f'<pre style="{_PRE}">{esc(srv)}</pre>'
+                f'<p class="muted">Assign this router a <b>fixed</b> tunnel IP on '
+                f'the server (per-client <code>ccd</code> / ifconfig-push). Then on '
+                f'the <b>Devices</b> page set this device\'s <b>Host</b> to that '
+                f'tunnel IP so monitoring and pushes ride the tunnel, and use '
+                f'<b>Restrict access</b> to lock the API to the tunnel subnet. '
+                f'Note: RouterOS v6 OpenVPN is TCP-only and usually needs the hub\'s '
+                f'CA certificate imported on the router (Files → /certificate '
+                f'import) unless you allow username/password only.</p></div>')
+    iface = current.get("iface", {}) or {}
+    pub = iface.get("public-key", "")
+    addr = (current.get("address", {}) or {}).get("address", "")
+    ip = addr.split("/")[0] if addr else ""
+    if not pub:
+        return ('<div class="box"><h2>Hub (monitoring-server) setup</h2>'
+                '<p class="muted">Create the tunnel on the router first (fill the '
+                "form above and apply). Afterwards this box shows the router's "
+                'public key and the exact WireGuard lines to paste on your '
+                'monitoring server.</p></div>')
+    hub_snip = ("[Interface]\nPrivateKey = <your hub private key>\n"
+                "Address = 10.10.0.1/24\nListenPort = 13231")
+    peer_snip = (f"[Peer]\n# {name}\nPublicKey = {pub}\n"
+                 f"AllowedIPs = {ip + '/32' if ip else '10.10.0.2/32'}")
+    return (f'<div class="box"><h2>Hub (monitoring-server) setup</h2>'
+            f'<p class="muted">On your monitoring server (or a small VPS), install '
+            f'WireGuard and create <b>one</b> hub interface. Generate its keypair '
+            f'once — <code>wg genkey | tee privatekey | wg pubkey</code> — paste '
+            f'the <b>public</b> key into the form above, and keep the private key '
+            f'in the hub config:</p>'
+            f'<pre style="{_PRE}">{esc(hub_snip)}</pre>'
+            f'<p class="muted">Then add <b>this router</b> as a peer on the hub '
+            f'(one such block per device):</p>'
+            f'<pre style="{_PRE}">{esc(peer_snip)}</pre>'
+            f'<p class="muted">Bring the hub tunnel up. Then on the <b>Devices</b> '
+            f'page set this device\'s <b>Host</b> to its tunnel IP '
+            f'<code>{esc(ip)}</code> so monitoring and pushes ride the tunnel. '
+            f'Finally use <b>Restrict access</b> to lock the API to '
+            f'<code>10.10.0.0/24</code> and close the public port — the brute-force '
+            f'exposure goes away entirely.</p></div>')
+
+
+def _update_box(name, csrf, current) -> str:
+    """Check-for-updates / Install (+reboot) / RouterBOOT firmware buttons."""
+    from .push.features import firmware_available, update_available
+
+    q = esc(name)
+
+    def act(action, label, cls, confirm=""):
+        oc = (f' onclick="return confirm(\'{confirm}\')"' if confirm else "")
+        return (f'<form method="POST" action="/device/push" class="inline">'
+                f'<input type="hidden" name="csrf" value="{csrf}">'
+                f'<input type="hidden" name="device" value="{q}">'
+                f'<input type="hidden" name="feature" value="update">'
+                f'<input type="hidden" name="update_action" value="{action}">'
+                f'<button class="btn {cls}" type="submit"{oc}>{label}</button>'
+                f'</form>')
+    avail = update_available(current)
+    install_cls = "" if avail else "ghost"
+    note = ('<p class="muted" style="border-left:3px solid #d97706;padding-left:8px">'
+            '⚠ <b>Install</b> downloads the new RouterOS and <b>reboots</b> to apply '
+            'it — the router goes offline ~1–2 min and briefly shows as down. '
+            '<b>Install only reboots when an update is actually available</b>; if the '
+            "box is already current it does nothing. Run <b>Check for updates</b> "
+            'first to be sure. You get a dry-run preview and a confirm step before '
+            'anything happens.</p>')
+    buttons = (act("check", "Check for updates", "ghost") + " "
+               + act("install", "Download &amp; install + reboot", install_cls,
+                     confirm="This reboots the router now. Continue?"))
+    if firmware_available(current):
+        buttons += " " + act("firmware", "Upgrade RouterBOOT firmware", "ghost",
+                             confirm="Schedules a firmware upgrade. Continue?")
+    avail_line = ('<p><span class="badge warn">update available</span></p>'
+                  if avail else "")
+    reboot = ('<div class="box"><h2>Reboot</h2><p class="muted">Manually reboot '
+              'this router now — it will be offline ~1–2 minutes. Previewed and '
+              'confirmed first.</p><div class="actions">'
+              + act("reboot", "Reboot router now", "ghost",
+                    confirm="Reboot the router now? It will go offline ~1–2 min.")
+              + '</div></div>')
+    return (f'<div class="box"><h2>Run an update</h2>{avail_line}{note}'
+            f'<div class="actions">{buttons}</div></div>{reboot}')
+
+
 def _wan_uplink_editor(name, cfg, csrf) -> str:
     """Editable WAN uplink list (saved to the device record, not pushed)."""
     def row(link):
@@ -897,6 +1021,9 @@ _TAB_INTRO = {
              "and choose which LANs go out which WAN.",
     "security": "Toggle common firewall protections. Existing rules below can be "
                 "viewed; mikromon only manages the ones it creates.",
+    "harden": "Stop brute-force attacks: lock API/Winbox/SSH to your trusted IPs, "
+              "disable insecure services, and block attacker IPs. ⚠ Include this "
+              "server's IP in the allowed list so you don't lock mikromon out.",
     "nextdns": "Point DNS at a filtering service and list any IPs that bypass it.",
     "qos": "Cap upload/download speed for a subnet or interface (simple queues). "
            "Add a row, then Preview.",
@@ -906,13 +1033,23 @@ _TAB_INTRO = {
     "remote": "Grant a temporary firewall opening for Winbox/SSH/WebFig.",
     "tunnel": ("Manage WireGuard VPN interfaces and peers. "
                "Requires RouterOS 7.1+; shows a compatibility notice on older firmware."),
+    "hubtunnel": "Connect a router with no public / a changing IP. It dials out to "
+                 "your monitoring server and is reachable at a constant private IP "
+                 "— works through CGNAT. Uses WireGuard on RouterOS 7.1+ and "
+                 "OpenVPN on older firmware automatically.",
+    "scripts": "Paste any RouterOS script for things the other tabs don't cover. "
+               "Save adds it (tagged), Run executes it, Remove deletes it — all "
+               "previewed first and logged.",
+    "update": "Check for and install RouterOS upgrades. ⚠ Installing reboots the "
+              "router (1–2 min offline) — it's previewed and you must confirm.",
 }
 
 
 def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                         fields=None, preview=None, submitted=None, error="",
                         msg="", recent=None, facts=None, unmanaged=None,
-                        confirm_action="/device/push", cfg=None) -> str:
+                        confirm_action="/device/push", cfg=None,
+                        extra_html="") -> str:
     tabbar = _device_tabbar(name, slug, AuthStore.is_admin(user or {}))
     q = quote(name)
     banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
@@ -955,7 +1092,8 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                     f'</div></form></div>')
         else:
             form = ""  # read-only feature (e.g. Interfaces)
-        body = state + form + _adopt_box(name, slug, feature, csrf, unmanaged)
+        body = (state + form + extra_html
+                + _adopt_box(name, slug, feature, csrf, unmanaged))
 
     # The SD-WAN tab gets an inline WAN-uplink editor (device metadata, so it
     # works even when the router is unreachable). Hidden during the confirm step.
@@ -1154,6 +1292,9 @@ def _render_devices(store, csrf, user, edit_name=None, msg="") -> str:
         + field("Host / DDNS", f'<input name="host" value="{v("host")}">')
         + field("API port", f'<input name="api_port" '
                 f'value="{esc(str(pre.get("api_port", 8728)))}">')
+        + field("API timeout <span class='muted'>(seconds; raise for slow boxes "
+                "/ long scripts)</span>", f'<input name="timeout" '
+                f'value="{esc(str(pre.get("timeout", 10)))}">')
         + field("Username", f'<input name="username" value="{v("username")}">')
         + field("Password", f'<input name="password" type="password" '
                 f'placeholder="{"(unchanged)" if edit_name else ""}">')
@@ -1620,6 +1761,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
             cfg = build_device(raw, defaults)  # device metadata (no router needed)
             summary_lines = fields = unmanaged = None
+            extra_html = ""
             if preview is None and not error:
                 from .device import DeviceError
                 from .push import Pusher, PushError, rw_device
@@ -1636,6 +1778,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         fields = feature["form"](current, cfg)
                     if "unmanaged" in feature:
                         unmanaged = feature["unmanaged"](pusher, cfg)
+                    if slug == "scripts":
+                        extra_html = _scripts_box(name, csrf, current)
+                    elif slug == "hubtunnel":
+                        extra_html = _hubtunnel_box(name, current)
+                    elif slug == "update":
+                        extra_html = _update_box(name, csrf, current)
                 except (DeviceError, PushError) as exc:
                     error = str(exc)
                 finally:
@@ -1644,7 +1792,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 name, user, slug, feature, csrf, summary_lines=summary_lines,
                 fields=fields, preview=preview, submitted=submitted, error=error,
                 msg=msg, recent=recent, facts=facts, unmanaged=unmanaged,
-                confirm_action=confirm_action, cfg=cfg)
+                confirm_action=confirm_action, cfg=cfg, extra_html=extra_html)
             return self._send(200, page, "text/html; charset=utf-8")
 
         def _device_wan_post(self, flat, multi, user):

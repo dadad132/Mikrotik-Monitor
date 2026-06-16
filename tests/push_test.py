@@ -370,6 +370,313 @@ check("policy adds a marked default route",
           and o.params.get("dst-address") == "0.0.0.0/0" for o in plan.ops))
 
 
+# ---- 12. custom scripts: add / run / remove, ownership-scoped --------------
+print("custom scripts:")
+SCR = ("system", "script")
+sc_api = FakeApi({SCR: [
+    {".id": "*1", "name": "block-bad", "source": ":log info hi",
+     "comment": "mikromon:script:block-bad"},          # managed
+    {".id": "*2", "name": "vendor-thing", "source": ":log info x"},  # hand-made
+]})
+psc = Pusher(qcfg, sc_api, dry_run=True)
+
+managed = F.scripts_read(psc, qcfg)
+check("scripts_read lists only mikromon-owned scripts",
+      [s["name"] for s in managed] == ["block-bad"])
+
+# add a brand-new script via the form
+add = F.scripts_plan(psc, qcfg, {"new_name": "harden", "new_source": "/ip service ..."}, {})
+add_ops = [o for o in add.ops if o.action == "add"]
+check("save adds a tagged script with its source",
+      len(add_ops) == 1 and add_ops[0].params["name"] == "harden"
+      and add_ops[0].params["comment"] == "mikromon:script:harden"
+      and add_ops[0].params["source"] == "/ip service ...")
+check("saving does not disturb the hand-made script",
+      not any(o.params.get(".id") == "*2" for o in add.ops))
+check("re-saving the existing managed script unchanged is a no-op",
+      F.scripts_plan(psc, qcfg,
+                     {"new_name": "block-bad", "new_source": ":log info hi"},
+                     {}).empty)
+
+# run an existing managed script
+run = F.scripts_plan(psc, qcfg,
+                     {"script_action": "run", "script_name": "block-bad"}, {})
+check("run produces a single run op against the script id",
+      len(run.ops) == 1 and run.ops[0].action == "run"
+      and run.ops[0].params.get(".id") == "*1")
+
+# remove an existing managed script
+rm = F.scripts_plan(psc, qcfg,
+                    {"script_action": "remove", "script_name": "block-bad"}, {})
+check("remove produces a single reversible remove op",
+      len(rm.ops) == 1 and rm.ops[0].action == "remove"
+      and rm.ops[0].params.get(".id") == "*1"
+      and rm.ops[0].inverse.action == "add")
+check("remove never targets the hand-made script",
+      not any(o.params.get(".id") == "*2" for o in rm.ops))
+
+
+# ---- 13. restrict management access (the brute-force fix) ------------------
+print("restrict management access:")
+SVC = ("ip", "service")
+h_api = FakeApi({
+    SVC: [
+        {".id": "*1", "name": "api", "port": "8728", "address": "",
+         "disabled": "false"},
+        {".id": "*2", "name": "winbox", "port": "8291", "address": "",
+         "disabled": "false"},
+        {".id": "*3", "name": "telnet", "port": "23", "address": "",
+         "disabled": "false"},
+        {".id": "*4", "name": "ssh", "port": "22", "address": "",
+         "disabled": "false"}],
+    ("ip", "firewall", "address-list"): [],
+    ("ip", "firewall", "filter"): []})
+ph = Pusher(qcfg, h_api, dry_run=True)
+plan = F.harden_plan(ph, qcfg,
+                     {"allowed": "102.36.140.219/32", "block": "45.198.224.18"},
+                     {"svc": ["api", "winbox", "ssh"], "disable": ["telnet"]})
+set_api = next((o for o in plan.ops
+                if o.params.get(".id") == "*1" and "address" in o.params), None)
+check("restrict locks the API service to the trusted IP",
+      set_api is not None and set_api.params.get("address") == "102.36.140.219/32")
+check("service restrict is reversible (inverse restores old address)",
+      set_api.inverse.params.get("address") == "")
+check("restrict disables telnet",
+      any(o.action == "set" and o.params.get(".id") == "*3"
+          and o.params.get("disabled") == "yes" for o in plan.ops))
+check("attacker IP added to the block address-list",
+      any(o.path == ("ip", "firewall", "address-list") and o.action == "add"
+          and o.params.get("address") == "45.198.224.18" for o in plan.ops))
+check("a drop rule for the block list is added (own tag)",
+      any(o.path == ("ip", "firewall", "filter")
+          and o.params.get("src-address-list") == "mikromon-blocked"
+          and o.params.get("comment", "").startswith("mikromon:harden:")
+          for o in plan.ops))
+# idempotent: re-applying when already locked makes no service change
+h_api2 = FakeApi({SVC: [
+    {".id": "*1", "name": "api", "port": "8728",
+     "address": "102.36.140.219/32", "disabled": "false"}],
+    ("ip", "firewall", "address-list"): [], ("ip", "firewall", "filter"): []})
+plan2 = F.harden_plan(Pusher(qcfg, h_api2, dry_run=True), qcfg,
+                      {"allowed": "102.36.140.219/32"}, {"svc": ["api"]})
+check("re-restricting an already-locked service is a no-op", plan2.empty)
+
+
+# ---- 14. NextDNS content blocking grid (DNS sinkhole) ----------------------
+print("nextdns content blocking grid:")
+nd_api = FakeApi({
+    ("ip", "dns"): [{".id": "*0", "servers": "1.1.1.1",
+                     "allow-remote-requests": "true"}],
+    ("ip", "firewall", "address-list"): [],
+    ("ip", "dns", "static"): []})
+pn = Pusher(qcfg, nd_api, dry_run=True)
+plan = F.nextdns_plan(pn, qcfg, {"servers": "1.1.1.1", "bypass": ""},
+                      {"opt": ["allow_remote"], "block": ["app_tiktok", "social"]})
+static_adds = [o for o in plan.ops
+               if o.path == ("ip", "dns", "static") and o.action == "add"]
+check("enabling block groups adds tagged sinkhole entries (valid A address)",
+      static_adds and all(o.params.get("address") == "127.0.0.1"
+          and o.params.get("comment", "").startswith("mikromon:dnsblock:")
+          for o in static_adds))
+check("a custom sinkhole IP is honored",
+      all(o.params.get("address") == "192.0.2.1" for o in F.nextdns_plan(
+          pn, qcfg, {"servers": "1.1.1.1", "bypass": "", "block_ip": "192.0.2.1"},
+          {"block": ["app_facebook"]}).ops
+          if o.path == ("ip", "dns", "static") and o.action == "add"))
+check("the TikTok app block creates a regexp matching tiktok.com",
+      any("tiktok" in o.params.get("regexp", "") for o in static_adds))
+# disabling a group removes its sinkhole entries (reversible)
+nd_api2 = FakeApi({
+    ("ip", "dns"): [{".id": "*0", "servers": "1.1.1.1",
+                     "allow-remote-requests": "true"}],
+    ("ip", "firewall", "address-list"): [],
+    ("ip", "dns", "static"): [
+        {".id": "*9", "regexp": r".*tiktok\.com$", "address": "0.0.0.0",
+         "comment": "mikromon:dnsblock:app_tiktok"}]})
+plan2 = F.nextdns_plan(Pusher(qcfg, nd_api2, dry_run=True), qcfg,
+                       {"servers": "1.1.1.1", "bypass": ""},
+                       {"opt": ["allow_remote"], "block": []})
+rm = next((o for o in plan2.ops if o.path == ("ip", "dns", "static")
+           and o.action == "remove"), None)
+check("disabling a block group removes its dns-static entries",
+      rm is not None and rm.params.get(".id") == "*9"
+      and rm.inverse.action == "add")
+
+
+# ---- 15. remote tunnel (WireGuard, dials out from the router) --------------
+print("remote tunnel:")
+WG = ("interface", "wireguard")
+WGP = ("interface", "wireguard", "peers")
+IPA = ("ip", "address")
+RES = ("system", "resource")
+OVPN = ("interface", "ovpn-client")
+t_api = FakeApi({RES: [{"version": "7.14.3"}], WG: [], WGP: [], IPA: []})
+pt = Pusher(qcfg, t_api, dry_run=True)
+plan = F.hubtunnel_plan(pt, qcfg,
+                     {"endpoint": "monitor.example.com", "port": "13231",
+                      "hub_pubkey": "HUBKEY==", "tunnel_ip": "10.10.0.2/24",
+                      "allowed": "10.10.0.0/24", "keepalive": "25s"}, {})
+iface_add = next((o for o in plan.ops if o.path == WG and o.action == "add"), None)
+addr_add = next((o for o in plan.ops if o.path == IPA and o.action == "add"), None)
+peer_add = next((o for o in plan.ops if o.path == WGP and o.action == "add"), None)
+check("tunnel creates the mikromon wireguard interface",
+      iface_add is not None and iface_add.params.get("name") == "mikromon")
+check("interface is created before the address/peer that reference it",
+      plan.ops.index(iface_add) < plan.ops.index(addr_add)
+      and plan.ops.index(iface_add) < plan.ops.index(peer_add))
+check("tunnel address is bound to the interface",
+      addr_add.params.get("address") == "10.10.0.2/24"
+      and addr_add.params.get("interface") == "mikromon")
+check("peer dials the hub with key, endpoint and keepalive",
+      peer_add.params.get("public-key") == "HUBKEY=="
+      and peer_add.params.get("endpoint-address") == "monitor.example.com"
+      and peer_add.params.get("persistent-keepalive") == "25s"
+      and peer_add.params.get("comment", "").startswith("mikromon:tunnel:"))
+check("missing required fields yields an empty (safe) plan",
+      F.hubtunnel_plan(pt, qcfg, {"endpoint": "x"}, {}).empty)
+# idempotent: a fully-configured router produces no changes
+cfgd = FakeApi({
+    RES: [{"version": "7.14.3"}],
+    WG: [{".id": "*1", "name": "mikromon", "public-key": "ROUTERPUB=",
+          "comment": "mikromon:tunnel:if"}],
+    IPA: [{".id": "*2", "address": "10.10.0.2/24", "interface": "mikromon",
+           "comment": "mikromon:tunnel:addr"}],
+    WGP: [{".id": "*3", "interface": "mikromon", "public-key": "HUBKEY==",
+           "endpoint-address": "monitor.example.com", "endpoint-port": "13231",
+           "allowed-address": "10.10.0.0/24", "persistent-keepalive": "25s",
+           "comment": "mikromon:tunnel:hub"}]})
+plan2 = F.hubtunnel_plan(Pusher(qcfg, cfgd, dry_run=True), qcfg,
+                      {"endpoint": "monitor.example.com", "port": "13231",
+                       "hub_pubkey": "HUBKEY==", "tunnel_ip": "10.10.0.2/24",
+                       "allowed": "10.10.0.0/24", "keepalive": "25s"}, {})
+check("re-applying an already-configured tunnel is a no-op", plan2.empty)
+
+# v6 router (no WireGuard) -> the hub tunnel falls back to OpenVPN automatically
+v6 = FakeApi({RES: [{"version": "6.49.8"}], OVPN: []})
+pv6 = Pusher(qcfg, v6, dry_run=True)
+cur6 = F.hubtunnel_read(pv6, qcfg)
+check("v6 router selects the OpenVPN transport", cur6.get("mode") == "ovpn")
+oplan = F.hubtunnel_plan(pv6, qcfg,
+                         {"connect_to": "monitor.example.com", "port": "1194",
+                          "user": "router1", "password": "s3cret"}, {})
+ov_add = next((o for o in oplan.ops if o.path == OVPN and o.action == "add"), None)
+check("v6 hub tunnel creates a tagged ovpn-client dialing the hub",
+      ov_add is not None
+      and ov_add.params.get("connect-to") == "monitor.example.com"
+      and ov_add.params.get("user") == "router1"
+      and ov_add.params.get("password") == "s3cret"
+      and ov_add.params.get("comment", "").startswith("mikromon:tunnel:"))
+check("v6 with no hub host is a safe no-op",
+      F.hubtunnel_plan(pv6, qcfg, {"connect_to": ""}, {}).empty)
+
+
+# ---- 16. update RouterOS (check / install+reboot / firmware) ---------------
+print("update RouterOS:")
+PKG = ("system", "package", "update")
+RB = ("system", "routerboard")
+u_api = FakeApi({
+    PKG: [{".id": "*0", "channel": "stable", "installed-version": "7.14",
+           "latest-version": "7.15", "status": "New version is available"}],
+    RB: [{".id": "*0", "current-firmware": "7.14", "upgrade-firmware": "7.15"}]})
+pu = Pusher(qcfg, u_api, dry_run=True)
+cur = F.update_read(pu, qcfg)
+check("update_read reports installed vs latest version",
+      cur["update"]["installed-version"] == "7.14"
+      and cur["update"]["latest-version"] == "7.15")
+check("update_available detects a newer version", F.update_available(cur) is True)
+check("firmware_available detects newer RouterBOOT", F.firmware_available(cur) is True)
+chk = F.update_plan(pu, qcfg, {"update_action": "check"}, {})
+check("check is a single non-reboot run op",
+      len(chk.ops) == 1 and chk.ops[0].action == "run"
+      and chk.ops[0].params.get("_cmd") == "check-for-updates")
+inst = F.update_plan(pu, qcfg, {"update_action": "install"}, {})
+check("install runs the install command and warns about reboot",
+      inst.ops[0].params.get("_cmd") == "install"
+      and "REBOOT" in inst.ops[0].desc.upper())
+fw = F.update_plan(pu, qcfg, {"update_action": "firmware"}, {})
+check("firmware upgrade runs routerboard upgrade",
+      fw.ops[0].path == RB and fw.ops[0].params.get("_cmd") == "upgrade")
+ch = F.update_plan(pu, qcfg, {"channel": "long-term"}, {})
+check("changing channel produces a settings set",
+      len(ch.ops) == 1 and ch.ops[0].action == "set"
+      and ch.ops[0].params.get("channel") == "long-term")
+# up-to-date device: nothing to do
+u2 = FakeApi({PKG: [{".id": "*0", "channel": "stable",
+                     "installed-version": "7.15", "latest-version": "7.15",
+                     "status": "System is already up to date"}],
+              RB: [{".id": "*0", "current-firmware": "7.15",
+                    "upgrade-firmware": "7.15"}]})
+cur2 = F.update_read(Pusher(qcfg, u2, dry_run=True), qcfg)
+check("update_available false when current == latest",
+      F.update_available(cur2) is False)
+check("no action + unchanged channel is a no-op",
+      F.update_plan(Pusher(qcfg, u2, dry_run=True), qcfg,
+                    {"channel": "stable"}, {}).empty)
+
+
+# ---- 17. detach: background run / reboot / install survive disconnect ------
+print("detach (background run / reboot):")
+import socket as _socket
+from mikromon.push.api import PushApi
+from mikromon.push.plan import Operation
+
+
+class _FakePath:
+    def __init__(self, exc):
+        self.exc = exc
+
+    def __call__(self, cmd, **kw):
+        raise self.exc
+
+
+class _FakeRouterApi:
+    def __init__(self, exc):
+        self.exc = exc
+
+    def path(self, *p):
+        return _FakePath(self.exc)
+
+
+class _FakeDev:
+    def __init__(self, exc):
+        self.api = _FakeRouterApi(exc)
+
+
+pa = PushApi(_FakeDev(_socket.timeout("timed out")))
+res = pa.execute(Operation("run", ("system",), {"_cmd": "reboot"}, detach=True))
+check("detached run swallows a post-send timeout (treated as submitted)",
+      isinstance(res, dict) and res.get("detached") is True)
+raised = False
+try:
+    pa.execute(Operation("run", ("system",), {"_cmd": "reboot"}))  # not detached
+except PushError:
+    raised = True
+check("a non-detached run still surfaces the timeout as an error", raised)
+raised2 = False
+try:
+    pa2 = PushApi(_FakeDev(ValueError("failure: no such item")))
+    pa2.execute(Operation("run", ("system",), {"_cmd": "x"}, detach=True))
+except PushError:
+    raised2 = True
+check("detached run still raises on a real command error (not a disconnect)",
+      raised2)
+
+# feature ops are marked detach where they should be
+sr = F.scripts_plan(
+    Pusher(qcfg, FakeApi({("system", "script"): [
+        {".id": "*1", "name": "x", "comment": "mikromon:script:x"}]}),
+        dry_run=True),
+    qcfg, {"script_action": "run", "script_name": "x"}, {})
+check("script Run is a detached (background) op", sr.ops[0].detach is True)
+rb = F.update_plan(Pusher(qcfg, u_api, dry_run=True), qcfg,
+                   {"update_action": "reboot"}, {})
+check("reboot is a detached run on /system",
+      rb.ops[0].path == ("system",) and rb.ops[0].params.get("_cmd") == "reboot"
+      and rb.ops[0].detach is True)
+check("install is detached too (survives the reboot disconnect)",
+      inst.ops[0].detach is True)
+
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

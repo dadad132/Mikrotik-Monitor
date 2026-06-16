@@ -7,12 +7,25 @@ fetch()/execute() shape can stand in for this — the tests inject a fake.
 from __future__ import annotations
 
 import logging
+import socket
 
 log = logging.getLogger(__name__)
 
 
 class PushError(Exception):
     """Raised when a read-write operation cannot be carried out."""
+
+
+def _is_disconnect(exc) -> bool:
+    """True when an exception looks like the session dropping / a read timeout
+    (as opposed to the router actively rejecting the command). Used so that a
+    `detach` command — reboot / install / a backgrounded script — counts as
+    'submitted' instead of failing when the router stops replying."""
+    if isinstance(exc, (socket.timeout, ConnectionError, BrokenPipeError, EOFError)):
+        return True
+    msg = str(exc).lower()
+    return any(s in msg for s in ("timed out", "timeout", "connection",
+                                  "closed", "reset", "broken pipe", "eof"))
 
 
 class PushApi:
@@ -48,7 +61,16 @@ class PushApi:
             if op.action == "run":
                 params = dict(op.params)
                 cmd = params.pop("_cmd", "")
-                return list(api.path(*op.path)(cmd, **params))
+                try:
+                    return list(api.path(*op.path)(cmd, **params))
+                except Exception as exc:  # noqa: BLE001
+                    # reboot/install/background run: the router stops replying —
+                    # that's expected, treat the command as submitted.
+                    if op.detach and _is_disconnect(exc):
+                        log.info("detached run %s: %s (treated as submitted)",
+                                 op.menu(), exc)
+                        return {"detached": True, "note": str(exc)}
+                    raise
         except Exception as exc:  # noqa: BLE001 — normalize to PushError
             raise PushError(f"{op.action} {op.menu()} failed: {exc}") from exc
         raise PushError(f"unknown action {op.action!r}")

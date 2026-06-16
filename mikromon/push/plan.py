@@ -24,6 +24,9 @@ class Operation:
     params: dict = field(default_factory=dict)
     desc: str = ""                    # human-readable one-liner
     inverse: "Operation | None" = None  # how to undo this op (for rollback)
+    detach: bool = False              # run cmd that won't reply (reboot/install)
+                                      # or shouldn't be waited on (background run);
+                                      # a post-send timeout/disconnect = success
 
     def menu(self) -> str:
         return "/" + "/".join(self.path)
