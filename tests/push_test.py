@@ -566,6 +566,46 @@ plan2 = F.hubtunnel_plan(Pusher(qcfg, cfgd, dry_run=True), qcfg,
                           "allowed": "10.10.0.0/24", "keepalive": "25s"}, {})
 check("re-applying an already-configured WireGuard tunnel is a no-op", plan2.empty)
 
+# zero-touch: provision_apply drives the router over the API (no script paste)
+pa_api = FakeApi({
+    ("user",): [],
+    ("ip", "service"): [
+        {".id": "*s1", "name": "api", "disabled": "true"},
+        {".id": "*s2", "name": "telnet", "disabled": "false"}],
+    WG: [], WGP: [], IPA: []})
+res = F.provision_apply(pa_api, "Branch9", "mikromon", "pw1234567890", harden=True,
+                        hub_pubkey="HUBKEY==", hub_ip="102.36.140.219",
+                        port="51820", subnet="10.10.0.0/24", tunnel_ip="10.10.0.2")
+ex = pa_api.executed
+check("provision_apply creates the management user over the API",
+      any(o.action == "add" and o.path == ("user",)
+          and o.params.get("name") == "mikromon" for o in ex))
+check("provision_apply enables the API service",
+      any(o.action == "set" and o.path == ("ip", "service")
+          and o.params.get(".id") == "*s1" and o.params.get("disabled") == "no"
+          for o in ex))
+check("provision_apply hardens (disables telnet)",
+      any(o.path == ("ip", "service") and o.params.get(".id") == "*s2"
+          and o.params.get("disabled") == "yes" for o in ex))
+check("provision_apply creates the WG interface, address and hub peer",
+      any(o.action == "add" and o.path == WG for o in ex)
+      and any(o.action == "add" and o.path == IPA
+              and o.params.get("address") == "10.10.0.2/24" for o in ex)
+      and any(o.action == "add" and o.path == WGP
+              and o.params.get("public-key") == "HUBKEY==" for o in ex))
+check("provision_apply returns a result dict (router pubkey key present)",
+      isinstance(res, dict) and "router_pubkey" in res)
+# idempotent: running again against the now-configured router adds nothing new
+pa_api.executed = []
+F.provision_apply(pa_api, "Branch9", "mikromon", "pwNEWNEW12345", harden=True,
+                  hub_pubkey="HUBKEY==", hub_ip="102.36.140.219", port="51820",
+                  subnet="10.10.0.0/24", tunnel_ip="10.10.0.2")
+check("provision_apply is idempotent (user set, no duplicate WG/peer adds)",
+      not any(o.action == "add" and o.path in (WG, IPA, WGP)
+              for o in pa_api.executed)
+      and any(o.action == "set" and o.path == ("user",)
+              for o in pa_api.executed))
+
 
 # ---- 16. update RouterOS (check / install+reboot / firmware) ---------------
 print("update RouterOS:")

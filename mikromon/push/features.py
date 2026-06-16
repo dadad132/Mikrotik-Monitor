@@ -1109,6 +1109,77 @@ def hubtunnel_plan(pusher, cfg, flat, multi):
 
 
 # ===========================================================================
+# Zero-touch provisioning over the API — mikromon connects to the router and
+# applies everything itself (no script to paste). Idempotent: each step checks
+# what's already there. Returns the router's WireGuard public key so the caller
+# can register it as a peer on the hub.
+# ===========================================================================
+def provision_apply(api, name, pwuser, pwd, *, harden=True, hub_pubkey="",
+                    hub_ip="", port="51820", subnet="10.10.0.0/24",
+                    tunnel_ip=""):
+    steps = []
+
+    def do(op):
+        api.execute(op)
+        steps.append(op.desc)
+
+    # 1) management user — create if missing, else (re)set its password
+    users = api.fetch(("user",))
+    existing = next((u for u in users if u.get("name") == pwuser), None)
+    if existing is None:
+        do(Operation("add", ("user",),
+                     {"name": pwuser, "password": pwd, "group": "full",
+                      "comment": "mikromon-managed"}, desc=f"add user {pwuser}"))
+    else:
+        do(Operation("set", ("user",),
+                     {".id": existing[".id"], "password": pwd, "group": "full"},
+                     desc=f"reset password for user {pwuser}"))
+
+    # 2) make sure the API is enabled
+    svc = next((s for s in api.fetch(("ip", "service"))
+                if s.get("name") == "api"), None)
+    if svc is not None and _norm(svc.get("disabled", "")) == "true":
+        do(Operation("set", ("ip", "service"),
+                     {".id": svc[".id"], "disabled": "no"}, desc="enable API"))
+
+    # 3) basic hardening
+    if harden:
+        for s in api.fetch(("ip", "service")):
+            if s.get("name") in ("telnet", "ftp") and \
+                    _norm(s.get("disabled", "")) != "true":
+                do(Operation("set", ("ip", "service"),
+                             {".id": s[".id"], "disabled": "yes"},
+                             desc=f"disable {s.get('name')}"))
+
+    # 4) WireGuard dial-home tunnel (RouterOS 7.1+) — only if the hub is ready
+    router_pub = ""
+    if hub_pubkey and tunnel_ip:
+        wg = next((w for w in api.fetch(_HUB_WG)
+                   if w.get("name") == _HUB_NAME), None)
+        if wg is None:
+            do(Operation("add", _HUB_WG,
+                         {"name": _HUB_NAME, "listen-port": "13231",
+                          "comment": _HUB_TAG + "if"},
+                         desc="add WireGuard interface mikromon"))
+            wg = next((w for w in api.fetch(_HUB_WG)
+                       if w.get("name") == _HUB_NAME), None)
+        router_pub = (wg or {}).get("public-key", "")
+        if not any(a.get("interface") == _HUB_NAME
+                   for a in api.fetch(_HUB_ADDR)):
+            do(Operation("add", _HUB_ADDR,
+                         {"address": tunnel_ip + "/24", "interface": _HUB_NAME,
+                          "comment": _HUB_TAG + "addr"}, desc="add tunnel address"))
+        if not any(str(p.get("comment", "")).startswith(_HUB_TAG)
+                   for p in api.fetch(_HUB_PEERS)):
+            do(Operation("add", _HUB_PEERS,
+                         {"interface": _HUB_NAME, "public-key": hub_pubkey,
+                          "endpoint-address": hub_ip, "endpoint-port": port,
+                          "allowed-address": subnet, "persistent-keepalive": "25s",
+                          "comment": _HUB_TAG + "hub"}, desc="add hub peer"))
+    return {"router_pubkey": router_pub, "steps": steps}
+
+
+# ===========================================================================
 # Update — check/install RouterOS upgrades + RouterBOOT firmware. Install
 # REBOOTS the router, so it is a `run` command (no inverse) gated behind the
 # normal dry-run -> explicit-confirm step with a loud warning.

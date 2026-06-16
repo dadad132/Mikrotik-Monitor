@@ -913,14 +913,20 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
         f'</label></div>'
         f'</div>'
         f'<div class="actions" style="margin-top:12px">'
-        f'<button class="btn" type="submit">Generate strong password &amp; script'
-        f'</button></div></form>'
-        f'<p class="muted">Regenerating makes a NEW key + password, re-registers '
-        f'the peer on the server, and overwrites what mikromon stores.</p>'
-        f'</div>')
+        f'<button class="btn" type="submit" name="auto" value="1">Provision now '
+        f'(connect &amp; apply)</button> '
+        f'<button class="btn ghost" type="submit" name="auto" value="0">Generate '
+        f'script instead</button></div></form>'
+        f'<p class="muted"><b>Provision now</b> connects to the router over its '
+        f'API (using the Host + login from the Devices page) and sets everything '
+        f'up automatically — no terminal, nothing to paste. Use it for a router '
+        f'you can reach now (e.g. on the LAN with its default login). <b>Generate '
+        f'script</b> is the fallback when you can\'t reach it directly. Either way '
+        f'a NEW key + password is created and the peer registered on the '
+        f'server.</p></div>')
     out = ""
-    if script is not None:
-        c = creds or {}
+    c = creds or {}
+    if script is not None or c.get("applied"):
         ip = c.get("ip", "")
         if ip and c.get("reg_ok"):
             srv = (f'<p class="ok">✓ Registered as a WireGuard peer on this server '
@@ -930,7 +936,7 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
         elif c.get("no_hub_key"):
             srv = ('<p style="color:#b91c1c">⚠ The WireGuard hub isn\'t set up on '
                    'this server yet (no hub key). Run <code>sudo bash '
-                   'deploy/install.sh</code> on the server, then regenerate.</p>')
+                   'deploy/install.sh</code> on the server, then re-run.</p>')
         elif ip:
             srv = (f'<p style="color:#b91c1c">⚠ Could not write the hub peers file '
                    f'(<code>{esc(c.get("peers_path", ""))}</code>: '
@@ -939,15 +945,19 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
                    f'{esc(c.get("pubkey", ""))}\nAllowedIPs = {esc(ip)}/32</pre>')
         else:
             srv = ""
-        out = (f'<div class="box" style="border-left:4px solid #16a34a">'
-               f'<h2>Provisioning script — paste into the new router</h2>'
-               f'<p class="muted">Open the router in WinBox/WebFig → <b>New '
-               f'Terminal</b>, paste this, press Enter.</p>'
-               f'<pre style="{_PRE}">{esc(script)}</pre>{srv}'
-               f'<p class="muted">The script contains the password in plain text '
-               f'(it has to, to set it on the router) — paste it, then clear your '
-               f'clipboard. The saved credentials below stay hidden until you '
-               f'reveal them.</p>'
+        if c.get("applied"):
+            head = ('<h2>Provisioned over the API ✓</h2>'
+                    '<p class="muted">mikromon connected to the router and applied '
+                    'everything — nothing to paste. The saved login is below.</p>')
+            body = srv
+        else:
+            head = ('<h2>Provisioning script — paste into the new router</h2>'
+                    '<p class="muted">Open the router in WinBox/WebFig → <b>New '
+                    'Terminal</b>, paste this, press Enter.</p>')
+            body = (f'<pre style="{_PRE}">{esc(script)}</pre>{srv}'
+                    f'<p class="muted">The script sets the password in plain text — '
+                    f'paste it, then clear your clipboard.</p>')
+        out = (f'<div class="box" style="border-left:4px solid #16a34a">{head}{body}'
                f'<div class="fields">'
                f'{_secret_field("Saved username", c.get("user", ""), "su")}'
                f'{_secret_field("Saved password", c.get("pwd", ""), "sp")}'
@@ -2055,6 +2065,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
         def _device_provision_post(self, flat, user):
             if not AuthStore.is_admin(user or {}):
                 return self._send(403, "forbidden")
+            if flat.get("auto") == "1":
+                return self._device_provision_apply(flat, user)
             name = flat.get("device", "")
             store = self._devstore()
             if store is None:
@@ -2127,6 +2139,102 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 msg = "Generated a strong password and script for this device."
             return self._device_provision_page(name, user, script=script,
                                                 creds=creds, msg=msg)
+
+        def _device_provision_apply(self, flat, user):
+            """Zero-touch: connect to the router over the API and apply everything
+            (user, API, WireGuard tunnel) — no script to paste."""
+            from .config import build_device
+            from .device import DeviceError
+            from .push import Pusher, PushError, provision_apply, rw_device
+            from .push.api import PushApi
+
+            name = flat.get("device", "")
+            store = self._devstore()
+            if store is None:
+                return self._send(400, "device management not enabled")
+            raw = store.raw(name)
+            if raw is None:
+                store.close()
+                return self._send(404, "no such device")
+            hub_file = _hub_path(devices_db)
+            hub = _hub_load(hub_file)
+            hub_ip = (flat.get("hub", "").strip() or hub.get("hub_ip")
+                      or _detect_server_ip())
+            hub["hub_ip"] = hub_ip
+            hub.setdefault("subnet", _HUB_SUBNET_DEFAULT)
+            hub_pubkey = hub.get("hub_pubkey", "")
+            hub_port = hub.get("listen_port", _WG_PORT_DEFAULT)
+            peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
+            uname = flat.get("pwuser", "").strip() or _user_slug(name)
+            pwd = _gen_password()
+            want_tunnel = flat.get("transport", "wg").strip() == "wg"
+            tunnel_ip = _alloc_tunnel_ip(hub, name) if (want_tunnel and hub_pubkey) \
+                else ""
+            cfg = build_device(raw, defaults)
+            audit = self._auditlog()
+            actor = (user or {}).get("username", "")
+            dev = rw_device(cfg)
+            api = PushApi(dev)
+            result, err = None, None
+            try:
+                api.connect()
+                result = provision_apply(
+                    api, name, uname, pwd,
+                    harden=flat.get("harden") == "1", hub_pubkey=hub_pubkey,
+                    hub_ip=hub_ip, port=hub_port, subnet=hub.get("subnet"),
+                    tunnel_ip=tunnel_ip)
+            except (DeviceError, PushError) as exc:
+                err = str(exc)
+            finally:
+                dev.close()
+            if err is not None:
+                if audit:
+                    audit.append(name, actor, "provision", "apply", "error",
+                                 f"could not provision over the API: {err}", err)
+                    audit.close()
+                store.close()
+                return self._device_provision_page(
+                    name, user, error=f"Could not connect to the router to "
+                    f"provision it ({err}). Check the device's Host and login on "
+                    f"the Devices page, or use the paste-script fallback below.")
+            if audit:
+                audit.append(name, actor, "provision", "apply", "ok",
+                             f"provisioned {uname}"
+                             + (f" + WG tunnel {tunnel_ip}" if tunnel_ip else ""),
+                             "\n".join(result.get("steps", [])))
+                audit.close()
+            # register the router's WireGuard peer on the hub
+            reg_ok, reg_err, router_pub = True, "", result.get("router_pubkey", "")
+            if tunnel_ip and router_pub:
+                hub.setdefault("leases_meta", {})[name] = {
+                    "ip": tunnel_ip, "pubkey": router_pub}
+                leases = {n: {"ip": hub["leases"].get(n), "pubkey": m.get("pubkey")}
+                          for n, m in hub["leases_meta"].items()}
+                reg_ok, reg_err = _write_wg_peers(peers_path, leases)
+            _hub_save(hub_file, hub)
+            # save the new creds; reach the device at the tunnel IP from now on
+            raw["push_username"] = uname
+            raw["push_password"] = pwd
+            if tunnel_ip and router_pub:
+                raw["host"] = tunnel_ip
+            try:
+                store.upsert(raw, defaults, original_name=name)
+            finally:
+                store.close()
+            creds = {"user": uname, "pwd": pwd, "ip": tunnel_ip if router_pub else "",
+                     "hub": hub_ip, "pubkey": router_pub, "reg_ok": reg_ok,
+                     "reg_err": reg_err, "peers_path": peers_path,
+                     "no_hub_key": want_tunnel and not hub_pubkey, "applied": True}
+            if tunnel_ip and router_pub and reg_ok:
+                msg = (f"✓ Provisioned over the API and registered the WireGuard "
+                       f"peer. The device is reachable at {tunnel_ip}.")
+            elif want_tunnel and not hub_pubkey:
+                msg = ("Created the user + API over the API, but the WireGuard hub "
+                       "isn't set up — run deploy/install.sh on the server, then "
+                       "re-run Provision now.")
+            else:
+                msg = "Provisioned the user + API over the API."
+            return self._device_provision_page(name, user, creds=creds, msg=msg)
 
         def _device_backup_post(self, flat, user):
             name = flat.get("device", "")
