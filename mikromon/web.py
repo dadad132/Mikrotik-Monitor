@@ -667,35 +667,56 @@ def _gen_password(n=20) -> str:
 def _provision_script(name, raw, pwuser, pwd, *, transport="sstp",
                       hub="", hub_port="", vpn_user="", vpn_pass="",
                       harden=True) -> str:
-    """A one-paste RouterOS bootstrap script for a brand-new unit: create the
-    mikromon management user with a strong password, enable the API, optional
-    hardening, and (optionally) a dial-home tunnel to the monitoring hub."""
-    L = [f"# === mikromon provisioning for {name} ===",
-         "# Paste this ONCE into the router terminal (Winbox/WebFig -> New "
-         "Terminal).",
-         "# It creates the management user mikromon uses + enables the API.",
-         "",
-         "# 1) management user (full access)",
-         f'/user add name={pwuser} password="{pwd}" group=full '
-         f'comment="mikromon-managed"',
-         "",
-         "# 2) make sure the API is reachable for mikromon",
-         "/ip service set api disabled=no"]
+    """A one-paste RouterOS bootstrap script that is SAFE on an already-configured
+    router: every step is guarded so it only ADDS what is missing and never
+    resets existing config. Baseline defaults (identity, …) apply only on a
+    factory-fresh unit (identity still "MikroTik")."""
+    u = pwuser
+    L = []
+
+    def a(s=""):
+        L.append(s)
+
+    a(f"# === mikromon provisioning for {name} ===")
+    a("# Safe to paste on a NEW *or* an already-configured router: it only ADDS")
+    a("# what is missing and never resets your existing config. The baseline-")
+    a("# defaults block runs only on a factory-fresh unit (identity MikroTik).")
+    a("")
+    a("# 1) management user - create if missing, else just (re)set its password")
+    a(":if ([:len [/user find name=" + u + "]] = 0) do={")
+    a('  /user add name=' + u + ' password="' + pwd + '" group=full '
+      'comment="mikromon-managed"')
+    a("} else={")
+    a('  /user set [/user find name=' + u + '] password="' + pwd + '" group=full')
+    a("}")
+    a("")
+    a("# 2) make sure the API is reachable for mikromon (idempotent)")
+    a("/ip service set api disabled=no")
+    a("")
+    a("# 3) baseline defaults - ONLY on an unconfigured (factory) unit")
+    a(':if ([/system identity get name] = "MikroTik") do={')
+    a('  /system identity set name="' + name + '"')
+    a("  # add any other fresh-unit defaults you want here (NTP, DNS, etc.)")
+    a("}")
     if harden:
-        L += ["",
-              "# 3) basic hardening — turn off legacy plaintext services",
-              "/ip service set telnet disabled=yes",
-              "/ip service set ftp disabled=yes"]
+        a("")
+        a("# 4) hardening - turn off legacy plaintext services (idempotent)")
+        a("/ip service set telnet disabled=yes")
+        a("/ip service set ftp disabled=yes")
     if transport in ("sstp", "ovpn") and hub:
         port = hub_port or ("443" if transport == "sstp" else "1194")
         iface = "sstp-client" if transport == "sstp" else "ovpn-client"
-        L += ["",
-              f"# 4) dial-home tunnel ({transport.upper()}) to the monitoring hub",
-              f'/interface {iface} add name=mikromon connect-to={hub} port={port} '
-              f'user={vpn_user or pwuser} password="{vpn_pass or pwd}" '
-              f'verify-server-certificate=no add-default-route=no '
-              f'comment="mikromon:tunnel:{transport}" disabled=no']
-    L += ["", '/log info "mikromon provisioning done"']
+        a("")
+        a("# 5) dial-home tunnel (" + transport.upper() + ") - add only if absent")
+        a(":if ([:len [/interface " + iface + " find name=mikromon]] = 0) do={")
+        a("  /interface " + iface + " add name=mikromon connect-to=" + hub
+          + " port=" + port + " user=" + (vpn_user or u)
+          + ' password="' + (vpn_pass or pwd) + '" verify-server-certificate=no'
+          + ' add-default-route=no comment="mikromon:tunnel:' + transport
+          + '" disabled=no')
+        a("}")
+    a("")
+    a('/log info "mikromon provisioning done"')
     return "\n".join(L)
 
 

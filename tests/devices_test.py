@@ -216,6 +216,10 @@ try:
     check("provision generates a bootstrap script (user + API + SSTP)",
           st == 200 and "/user add name=mikromon" in body
           and "/ip service set api disabled=no" in body and "sstp-client" in body)
+    check("provision script is guarded/idempotent (safe on configured units)",
+          ":if ([:len [/user find name=mikromon]] = 0)" in body
+          and '[/system identity get name] = &quot;MikroTik&quot;' in body
+          and ":if ([:len [/interface sstp-client find name=mikromon]] = 0)" in body)
     saved = DevicesStore(wdb)
     raw = saved.raw("WebR1")
     check("provision saved a strong generated password as the push creds",
