@@ -267,6 +267,8 @@ def security_plan(pusher, cfg, flat, multi):
 # ===========================================================================
 _DNS = ("ip", "dns")
 _ADDR_LIST = ("ip", "firewall", "address-list")
+_NAT = ("ip", "firewall", "nat")
+_DNSFORCE_TAG = "mikromon:dnsforce:"
 
 
 def nextdns_read(pusher, cfg):
@@ -275,7 +277,10 @@ def nextdns_read(pusher, cfg):
               if str(r.get("list", "")) == DNS_BYPASS_LIST]
     static = [r for r in pusher.api.fetch(_DNS_STATIC)
               if str(r.get("comment", "")).startswith(_DNSBLOCK_TAG)]
-    return {"dns": dns[0] if dns else {}, "bypass": bypass, "static": static}
+    forced = [r for r in pusher.api.fetch(_NAT)
+              if str(r.get("comment", "")).startswith(_DNSFORCE_TAG)]
+    return {"dns": dns[0] if dns else {}, "bypass": bypass,
+            "static": static, "forced": forced}
 
 
 def nextdns_summary(current, cfg):
@@ -283,6 +288,8 @@ def nextdns_summary(current, cfg):
     out = [f"DNS servers: {dns.get('servers', '(none)')}",
            f"allow-remote-requests: {dns.get('allow-remote-requests', '?')}"]
     out.append(f"{len(current.get('bypass', []))} bypass address(es)")
+    out.append("Force client DNS: " +
+               ("on" if current.get("forced") else "off"))
     groups = sorted({str(r.get("comment", ""))[len(_DNSBLOCK_TAG):]
                      for r in current.get("static", [])})
     if groups:
@@ -347,13 +354,22 @@ def nextdns_form(current, cfg):
                for r in current.get("static", [])}
     cur_ip = next((r.get("address") for r in current.get("static", [])
                    if r.get("address")), "") or "127.0.0.1"
+    forced_on = bool(current.get("forced"))
     fields = [
         {"type": "text", "name": "servers", "label": "DNS servers (comma-separated)",
          "value": dns.get("servers", ""),
          "placeholder": "45.90.28.0, 45.90.30.0  (e.g. your NextDNS endpoints)"},
         {"type": "toggle", "name": "opt", "value": "allow_remote",
          "label": "Allow remote DNS requests",
-         "on": _norm(dns.get("allow-remote-requests", "")) == "true"},
+         "on": _norm(dns.get("allow-remote-requests", "")) == "true",
+         "hint": "Must be ON for the router to answer client DNS — blocking does "
+                 "nothing without it. (Turned on automatically when you force "
+                 "client DNS below.)"},
+        {"type": "toggle", "name": "opt", "value": "force_dns",
+         "label": "Force all client DNS through this router", "on": forced_on,
+         "hint": "Redirects every client's port-53 traffic to the router (NAT) so "
+                 "a device hard-coded to 8.8.8.8 can't bypass the blocks. Needed "
+                 "for the filtering to actually take effect."},
         {"type": "textarea", "name": "bypass", "label": "Bypass IPs (one per line)",
          "value": ips, "hint": "Hosts allowed to skip the filter."},
         {"type": "text", "name": "block_ip",
@@ -373,13 +389,16 @@ def nextdns_form(current, cfg):
 
 
 def nextdns_plan(pusher, cfg, flat, multi):
+    opts = set(multi.get("opt", []))
+    force_dns = "force_dns" in opts
     servers = ",".join(x.strip() for x in flat.get("servers", "").split(",")
                        if x.strip())
     # RouterOS returns true/false here, so send true/false (not yes/no) to avoid
-    # a perpetual no-op diff.
+    # a perpetual no-op diff. Forcing client DNS only works if the router answers
+    # DNS, so allow-remote-requests is implied on when force_dns is on.
     desired_dns = {"servers": servers,
-                   "allow-remote-requests": "true" if "allow_remote"
-                   in set(multi.get("opt", [])) else "false"}
+                   "allow-remote-requests": "true" if ("allow_remote" in opts
+                   or force_dns) else "false"}
     plan = pusher.plan_settings(_DNS, desired_dns, label="dns")
     ips = [x.strip() for x in (flat.get("bypass", "") or "").splitlines()
            if x.strip()]
@@ -403,7 +422,21 @@ def nextdns_plan(pusher, cfg, flat, multi):
     static_plan = pusher.plan_managed_list(
         _DNS_STATIC, "regexp", static_desired,
         owns=_prefix_owner(_DNSBLOCK_TAG), label="dns block")
-    return Plan(cfg.name, plan.ops + list_plan.ops + static_plan.ops,
+    # Force-DNS: redirect client port-53 traffic to the router so hard-coded
+    # resolvers can't slip past the sinkhole. dstnat/redirect only sees client
+    # (forwarded) traffic in prerouting, so the router's own DNS is untouched.
+    force_desired = []
+    if force_dns:
+        for proto in ("udp", "tcp"):
+            force_desired.append({
+                "chain": "dstnat", "protocol": proto, "dst-port": "53",
+                "action": "redirect", "to-ports": "53",
+                "comment": _DNSFORCE_TAG + proto})
+    force_plan = pusher.plan_managed_list(
+        _NAT, "comment", force_desired,
+        owns=_prefix_owner(_DNSFORCE_TAG), label="dns redirect")
+    return Plan(cfg.name,
+                plan.ops + list_plan.ops + static_plan.ops + force_plan.ops,
                 summary="nextdns / dns filter")
 
 
@@ -823,6 +856,9 @@ def tunnel_plan(pusher, cfg, flat, multi):
 # ===========================================================================
 _SCRIPT = ("system", "script")
 _SCRIPT_TAG = "mikromon:script:"
+# Full RouterOS policy set so a Run actually has rights to change config.
+_SCRIPT_POLICY = ("ftp,reboot,read,write,policy,test,password,sniff,"
+                  "sensitive,romon")
 
 
 def scripts_read(pusher, cfg):
@@ -878,9 +914,20 @@ def scripts_plan(pusher, cfg, flat, multi):
     # default: add / update from the form
     nm = _slug(flat.get("new_name", ""), "")
     src = flat.get("new_source", "")
+    is_new = nm not in {d["name"] for d in _managed_desired(existing)}
     desired = [d for d in _managed_desired(existing) if d["name"] != nm]
     if nm and src.strip():
-        desired.append({"name": nm, "source": src, "comment": _SCRIPT_TAG + nm})
+        row = {"name": nm, "source": src, "comment": _SCRIPT_TAG + nm}
+        if is_new:
+            # A script created over the API inherits a *restricted* policy, so
+            # when Run fires it later it silently can't touch /ip, /interface,
+            # etc. Stamp the full policy + dont-require-permissions on creation
+            # so the script actually executes. Only on the initial add — these
+            # are read-back in a different form, so we never re-compare them
+            # (no perpetual diff when re-saving).
+            row["policy"] = _SCRIPT_POLICY
+            row["dont-require-permissions"] = "yes"
+        desired.append(row)
     return pusher.plan_managed_list(_SCRIPT, "name", desired,
                                     owns=_prefix_owner(_SCRIPT_TAG), label="script")
 
