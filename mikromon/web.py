@@ -677,14 +677,15 @@ def _user_slug(s) -> str:
     return out[:32] or "mikromon"
 
 
-# --- hub (SSTP server) settings + per-device VPN secret registry ------------
+# --- hub (WireGuard server) settings + per-device peer registry -------------
 # The dashboard runs ON the Ubuntu server, so it can auto-detect the server's
-# own IP and write each device's SSTP credentials into a secrets file that the
-# accel-ppp SSTP server reads (set up by deploy/install.sh). That way the
-# provisioning script is filled with the SERVER's real details and the server
-# already accepts the user — no manual entry, no mismatch.
+# own IP, generate each device's WireGuard keypair, and write the device's peer
+# into a peers file that the hub's wg0 reads (set up by deploy/install.sh). That
+# way the provisioning script is filled with the SERVER's real details and the
+# hub already accepts the peer — no manual entry, no mismatch.
 _HUB_SUBNET_DEFAULT = "10.10.0.0/24"
-_SSTP_SECRETS_DEFAULT = "/opt/mikromon/sstp-secrets"
+_WG_PEERS_DEFAULT = "/opt/mikromon/wg-peers.conf"
+_WG_PORT_DEFAULT = "51820"
 
 
 def _detect_server_ip() -> str:
@@ -735,31 +736,43 @@ def _alloc_tunnel_ip(hub, name) -> str:
     return f"{base}.2"
 
 
-def _write_sstp_secret(path, user, pwd, ip):
-    """Write/replace this user's line in the accel-ppp chap-secrets file
-    (`user * password ip`). Returns (ok, error)."""
-    line = f"{user} * {pwd} {ip}"
+def _wg_keypair():
+    """Generate a WireGuard keypair via the `wg` CLI (wireguard-tools on the
+    Ubuntu hub). Returns (private, public) or (None, error)."""
+    import subprocess
     try:
-        existing = []
-        if os.path.exists(path):
-            with open(path, encoding="utf-8") as f:
-                existing = [ln.rstrip("\n") for ln in f]
-        kept = [ln for ln in existing if ln.strip() and ln.split()[0] != user]
-        kept.append(line)
+        priv = subprocess.run(["wg", "genkey"], capture_output=True, text=True,
+                              check=True).stdout.strip()
+        pub = subprocess.run(["wg", "pubkey"], input=priv, capture_output=True,
+                             text=True, check=True).stdout.strip()
+        return priv, pub
+    except Exception as exc:  # noqa: BLE001 — wg missing / failed
+        return None, str(exc)
+
+
+def _write_wg_peers(path, leases):
+    """Rebuild the hub's WireGuard peers file from every device lease
+    ({name: {ip, pubkey}}). The hub's wg0 includes this file. Returns (ok, err)."""
+    blocks = []
+    for nm, lease in sorted(leases.items()):
+        pub, ip = lease.get("pubkey"), lease.get("ip")
+        if pub and ip:
+            blocks.append(f"[Peer]\n# {nm}\nPublicKey = {pub}\n"
+                          f"AllowedIPs = {ip}/32")
+    try:
         with open(path, "w", encoding="utf-8") as f:
-            f.write("\n".join(kept) + "\n")
+            f.write("\n\n".join(blocks) + ("\n" if blocks else ""))
         return True, ""
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
 
 
-def _provision_script(name, raw, pwuser, pwd, *, transport="sstp",
-                      hub="", hub_port="", vpn_user="", vpn_pass="",
+def _provision_script(name, raw, pwuser, pwd, *, hub_ip="", hub_port="51820",
+                      hub_pubkey="", wg_priv="", tunnel_ip="", subnet="",
                       harden=True) -> str:
     """A one-paste RouterOS bootstrap script that is SAFE on an already-configured
     router: every step is guarded so it only ADDS what is missing and never
-    resets existing config. Baseline defaults (identity, …) apply only on a
-    factory-fresh unit (identity still "MikroTik")."""
+    resets existing config. The WireGuard dial-home tunnel needs RouterOS 7.1+."""
     u = pwuser
     L = []
 
@@ -768,8 +781,8 @@ def _provision_script(name, raw, pwuser, pwd, *, transport="sstp",
 
     a(f"# === mikromon provisioning for {name} ===")
     a("# Safe to paste on a NEW *or* an already-configured router: it only ADDS")
-    a("# what is missing and never resets your existing config. The baseline-")
-    a("# defaults block runs only on a factory-fresh unit (identity MikroTik).")
+    a("# what is missing and never resets your existing config. The WireGuard")
+    a("# tunnel block needs RouterOS 7.1+.")
     a("")
     a("# 1) management user - create if missing, else just (re)set its password")
     a(":if ([:len [/user find name=" + u + "]] = 0) do={")
@@ -792,17 +805,25 @@ def _provision_script(name, raw, pwuser, pwd, *, transport="sstp",
         a("# 4) hardening - turn off legacy plaintext services (idempotent)")
         a("/ip service set telnet disabled=yes")
         a("/ip service set ftp disabled=yes")
-    if transport in ("sstp", "ovpn") and hub:
-        port = hub_port or ("443" if transport == "sstp" else "1194")
-        iface = "sstp-client" if transport == "sstp" else "ovpn-client"
+    if hub_ip and hub_pubkey and wg_priv and tunnel_ip:
+        port = hub_port or "51820"
+        net = subnet or "10.10.0.0/24"
         a("")
-        a("# 5) dial-home tunnel (" + transport.upper() + ") - add only if absent")
-        a(":if ([:len [/interface " + iface + " find name=mikromon]] = 0) do={")
-        a("  /interface " + iface + " add name=mikromon connect-to=" + hub
-          + " port=" + port + " user=" + (vpn_user or u)
-          + ' password="' + (vpn_pass or pwd) + '" verify-server-certificate=no'
-          + ' add-default-route=no comment="mikromon:tunnel:' + transport
-          + '" disabled=no')
+        a("# 5) WireGuard dial-home tunnel (RouterOS 7.1+) - add only if absent")
+        a(":if ([:len [/interface wireguard find name=mikromon]] = 0) do={")
+        a('  /interface wireguard add name=mikromon listen-port=13231 '
+          'private-key="' + wg_priv + '" comment="mikromon:tunnel:if"')
+        a("}")
+        a(":if ([:len [/ip address find interface=mikromon]] = 0) do={")
+        a("  /ip address add address=" + tunnel_ip + "/24 interface=mikromon "
+          'comment="mikromon:tunnel:addr"')
+        a("}")
+        a(":if ([:len [/interface wireguard peers find "
+          "interface=mikromon]] = 0) do={")
+        a('  /interface wireguard peers add interface=mikromon public-key="'
+          + hub_pubkey + '" endpoint-address=' + hub_ip + " endpoint-port="
+          + port + " allowed-address=" + net
+          + ' persistent-keepalive=25s comment="mikromon:tunnel:hub"')
         a("}")
     a("")
     a('/log info "mikromon provisioning done"')
@@ -867,27 +888,26 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
     pwuser = (raw or {}).get("push_username") or _user_slug(name)
     intro = ('<p class="muted" style="margin:-6px 0 14px">Generate a one-paste '
              'script for a new router. It creates a management user with a strong '
-             'password (saved here), enables the API, and adds an SSTP dial-home '
-             'tunnel. The hub IP and credentials are filled from <b>this</b> '
-             'server, and the SSTP user is registered on the server so it accepts '
-             'the connection — no manual entry.</p>')
+             'password (saved here), enables the API, and adds a <b>WireGuard</b> '
+             'dial-home tunnel. The hub IP + keys are filled from <b>this</b> '
+             'server, and the device is registered as a WireGuard peer on the hub '
+             'automatically — no manual entry. (WireGuard tunnel needs RouterOS '
+             '7.1+.)</p>')
     form = (
         f'<div class="box"><h2>Generate provisioning script</h2>'
         f'<form method="POST" action="/device/provision">'
         f'<input type="hidden" name="csrf" value="{csrf}">'
         f'<input type="hidden" name="device" value="{esc(name)}">'
         f'<div class="fields">'
-        f'<div class="f"><label class="f">Management / VPN username (unique per '
+        f'<div class="f"><label class="f">Management username (unique per '
         f'device)</label><input name="pwuser" value="{esc(pwuser)}"></div>'
         f'<div class="f"><label class="f">Dial-home tunnel</label>'
         f'<select name="transport">'
-        f'<option value="sstp" selected>SSTP — TLS 443, no certs (all units)</option>'
+        f'<option value="wg" selected>WireGuard (RouterOS 7.1+)</option>'
         f'<option value="">None (just user + API)</option></select></div>'
         f'<div class="f"><label class="f">Hub address (this server\'s IP)</label>'
         f'<input name="hub" value="{esc(hub_ip)}" placeholder="102.36.140.219">'
         f'</div>'
-        f'<div class="f"><label class="f">Hub port</label>'
-        f'<input name="hub_port" value="443"></div>'
         f'<div class="f"><label class="chk"><input type="checkbox" name="harden" '
         f'value="1" class="switch" checked> Disable Telnet/FTP (basic hardening)'
         f'</label></div>'
@@ -895,24 +915,28 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
         f'<div class="actions" style="margin-top:12px">'
         f'<button class="btn" type="submit">Generate strong password &amp; script'
         f'</button></div></form>'
-        f'<p class="muted">Regenerating makes a NEW password, re-registers it on '
-        f'the server, and overwrites the one mikromon stores for this device.</p>'
+        f'<p class="muted">Regenerating makes a NEW key + password, re-registers '
+        f'the peer on the server, and overwrites what mikromon stores.</p>'
         f'</div>')
     out = ""
     if script is not None:
         c = creds or {}
         ip = c.get("ip", "")
-        if ip and c.get("sec_ok"):
-            srv = (f'<p class="ok">✓ Registered on this server\'s SSTP server — '
-                   f'the router will connect to <code>{esc(c.get("hub", ""))}</code> '
-                   f'and get tunnel IP <code>{esc(ip)}</code>. The device Host was '
+        if ip and c.get("reg_ok"):
+            srv = (f'<p class="ok">✓ Registered as a WireGuard peer on this server '
+                   f'— the router connects to <code>{esc(c.get("hub", ""))}</code> '
+                   f'and gets tunnel IP <code>{esc(ip)}</code>. The device Host was '
                    f'set to <code>{esc(ip)}</code>.</p>')
+        elif c.get("no_hub_key"):
+            srv = ('<p style="color:#b91c1c">⚠ The WireGuard hub isn\'t set up on '
+                   'this server yet (no hub key). Run <code>sudo bash '
+                   'deploy/install.sh</code> on the server, then regenerate.</p>')
         elif ip:
-            srv = (f'<p style="color:#b91c1c">⚠ Could not write the server secrets '
-                   f'file (<code>{esc(c.get("secrets_path", ""))}</code>: '
-                   f'{esc(c.get("sec_err", ""))}). Add this line to it on the '
-                   f'server, then reload accel-ppp:</p>'
-                   f'<pre style="{_PRE}">{esc(c.get("secret_line", ""))}</pre>')
+            srv = (f'<p style="color:#b91c1c">⚠ Could not write the hub peers file '
+                   f'(<code>{esc(c.get("peers_path", ""))}</code>: '
+                   f'{esc(c.get("reg_err", ""))}). Add this peer on the server:</p>'
+                   f'<pre style="{_PRE}">[Peer]\n# {esc(name)}\nPublicKey = '
+                   f'{esc(c.get("pubkey", ""))}\nAllowedIPs = {esc(ip)}/32</pre>')
         else:
             srv = ""
         out = (f'<div class="box" style="border-left:4px solid #16a34a">'
@@ -1176,31 +1200,28 @@ _PRE = ('white-space:pre-wrap;background:#f8fafc;padding:10px;border-radius:6px;
 
 
 def _hubtunnel_box(name, current) -> str:
-    """Hub-side (Ubuntu SSTP server) setup help. SSTP is used on every unit so
-    the connection method is identical across the fleet."""
-    sstp = ("# Ubuntu hub - SSTP server via accel-ppp:\n"
-            "sudo apt install accel-ppp        # (or build; pkg name may vary)\n"
-            "# /etc/accel-ppp.conf:\n"
-            "[modules]\nsstp\n"
-            "[sstp]\nverbose=1\nport=443\nssl-pemfile=/etc/accel-ppp/cert.pem\n"
-            "accept=ssl\n"
-            "[ip-pool]\ngw-ip-address=10.10.0.1\n10.10.0.2-10.10.0.254\n"
-            "[chap-secrets]   # user  *  password  fixed-tunnel-ip\n"
-            "# router1  *  <vpn-pass>  10.10.0.2")
-    return (f'<div class="box"><h2>Hub (Ubuntu SSTP server) setup</h2>'
-            f'<p class="muted">Every device dials home with <b>SSTP</b> (TLS 443) '
-            f'— the same method on v6 and v7. On your Ubuntu monitoring host '
-            f'run an SSTP server with <b>accel-ppp</b> (no client certificate '
-            f'needed — username/password). Point each router\'s <b>Hub '
-            f"address</b> at the server's <b>IP</b> and keep "
-            f'<b>verify-server-certificate off</b> (an IP won\'t match a cert '
-            f'name):</p>'
-            f'<pre style="{_PRE}">{esc(sstp)}</pre>'
-            f'<p class="muted">Give each router a <b>fixed</b> tunnel IP on the '
-            f'server (the chap-secrets line above). Then on the <b>Devices</b> page '
-            f"set the device's <b>Host</b> to that tunnel IP so monitoring and "
-            f'pushes ride the tunnel, and use <b>Restrict access</b> to lock the '
-            f'API to <code>10.10.0.0/24</code> and close the public port.</p></div>')
+    """Hub-side (Ubuntu WireGuard server) setup help. deploy/install.sh sets this
+    up automatically; the Provision tab registers each device as a peer."""
+    wg = ("# Ubuntu hub - WireGuard server (deploy/install.sh does this for you):\n"
+          "sudo apt install wireguard\n"
+          "# /etc/wireguard/wg0.conf (interface only; peers are managed by\n"
+          "#   mikromon in /opt/mikromon/wg-peers.conf):\n"
+          "[Interface]\nPrivateKey = <hub private key>\nAddress = 10.10.0.1/24\n"
+          "ListenPort = 51820\n"
+          "PostUp = wg syncconf wg0 <(cat /etc/wireguard/wg0.conf "
+          "/opt/mikromon/wg-peers.conf)")
+    return (f'<div class="box"><h2>Hub (Ubuntu WireGuard server) setup</h2>'
+            f'<p class="muted">Every device dials home with <b>WireGuard</b> '
+            f'(needs RouterOS 7.1+). Run <code>sudo bash deploy/install.sh</code> '
+            f"on your Ubuntu host — it installs WireGuard, makes the hub key, and "
+            f'writes the hub\'s public key + IP where mikromon reads them. The '
+            f'<b>Provision</b> tab then generates each router\'s keypair, registers '
+            f'it as a peer on the hub, and fills the script automatically — no '
+            f'manual steps. For reference, the hub interface looks like:</p>'
+            f'<pre style="{_PRE}">{esc(wg)}</pre>'
+            f'<p class="muted">After a device is up, set its <b>Host</b> (Devices '
+            f'page) to its tunnel IP and use <b>Restrict access</b> to lock the API '
+            f'to <code>10.10.0.0/24</code> and close the public port.</p></div>')
 
 
 def _update_box(name, csrf, current) -> str:
@@ -1347,9 +1368,9 @@ _TAB_INTRO = {
     "tunnel": ("Manage WireGuard VPN interfaces and peers. "
                "Requires RouterOS 7.1+; shows a compatibility notice on older firmware."),
     "hubtunnel": "Connect a router with no public / a changing IP. It dials out to "
-                 "your monitoring server over SSTP (TLS 443) and is reachable at a "
-                 "constant private IP — works through CGNAT, and is the same method "
-                 "on every unit (RouterOS v6 and v7).",
+                 "your monitoring server over WireGuard and is reachable at a "
+                 "constant private IP — works through CGNAT. Requires RouterOS "
+                 "7.1+. Provisioning sets up the hub side automatically.",
     "scripts": "Paste any RouterOS script for things the other tabs don't cover. "
                "Save adds it (tagged), Run executes it, Remove deletes it — all "
                "previewed first and logged.",
@@ -2042,25 +2063,36 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if raw is None:
                 store.close()
                 return self._send(404, "no such device")
-            # hub (SSTP server) details — auto-detected, overridable in the form
+            # hub (WireGuard server) details — auto-detected, overridable in form
             hub_file = _hub_path(devices_db)
             hub = _hub_load(hub_file)
             hub_ip = (flat.get("hub", "").strip() or hub.get("hub_ip")
                       or _detect_server_ip())
             hub["hub_ip"] = hub_ip
             hub.setdefault("subnet", _HUB_SUBNET_DEFAULT)
-            secrets_path = hub.get("secrets") or _SSTP_SECRETS_DEFAULT
+            hub_pubkey = hub.get("hub_pubkey", "")
+            hub_port = hub.get("listen_port", _WG_PORT_DEFAULT)
+            peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
             uname = flat.get("pwuser", "").strip() or _user_slug(name)
             pwd = _gen_password()
-            transport = flat.get("transport", "").strip()
-            tunnel_ip, sec_ok, sec_err = "", True, ""
-            if transport == "sstp":
-                tunnel_ip = _alloc_tunnel_ip(hub, name)
-                # register the SSTP user on the server so it ACCEPTS the router
-                sec_ok, sec_err = _write_sstp_secret(secrets_path, uname, pwd,
-                                                     tunnel_ip)
+            want_tunnel = flat.get("transport", "wg").strip() == "wg"
+            tunnel_ip = dev_pub = wg_priv = ""
+            reg_ok, reg_err = True, ""
+            if want_tunnel and hub_pubkey:
+                wg_priv, dev_pub = _wg_keypair()
+                if wg_priv is None:
+                    reg_ok, reg_err = False, f"wg keygen failed: {dev_pub}"
+                    dev_pub = ""
+                else:
+                    tunnel_ip = _alloc_tunnel_ip(hub, name)
+                    hub.setdefault("leases_meta", {})[name] = {
+                        "ip": tunnel_ip, "pubkey": dev_pub}
+                    # rebuild the hub peers file from every device's pubkey+ip
+                    leases = {n: {"ip": hub["leases"].get(n),
+                                  "pubkey": m.get("pubkey")}
+                              for n, m in hub["leases_meta"].items()}
+                    reg_ok, reg_err = _write_wg_peers(peers_path, leases)
             _hub_save(hub_file, hub)
-            # save creds; once the tunnel is up the device is reached at tunnel IP
             raw["push_username"] = uname
             raw["push_password"] = pwd
             if tunnel_ip:
@@ -2072,21 +2104,25 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(400, f"Error: {exc}")
             store.close()
             script = _provision_script(
-                name, raw, uname, pwd, transport=transport or "sstp",
-                hub=hub_ip, hub_port=flat.get("hub_port", "").strip(),
-                vpn_user=uname, vpn_pass=pwd, harden=flat.get("harden") == "1")
+                name, raw, uname, pwd, hub_ip=hub_ip, hub_port=hub_port,
+                hub_pubkey=hub_pubkey if tunnel_ip else "", wg_priv=wg_priv,
+                tunnel_ip=tunnel_ip, subnet=hub.get("subnet"),
+                harden=flat.get("harden") == "1")
             creds = {"user": uname, "pwd": pwd, "ip": tunnel_ip, "hub": hub_ip,
-                     "secret_line": (f"{uname} * {pwd} {tunnel_ip}"
-                                     if tunnel_ip else ""),
-                     "sec_ok": sec_ok, "sec_err": sec_err,
-                     "secrets_path": secrets_path}
-            if tunnel_ip and sec_ok:
-                msg = ("Generated credentials, registered the SSTP user on this "
-                       "server, and filled the script with the server's IP "
+                     "pubkey": dev_pub, "reg_ok": reg_ok, "reg_err": reg_err,
+                     "peers_path": peers_path,
+                     "no_hub_key": want_tunnel and not hub_pubkey}
+            if tunnel_ip and reg_ok:
+                msg = (f"Generated keys, registered the WireGuard peer on this "
+                       f"server, and filled the script with the server's IP "
                        f"({hub_ip}). The device will be reachable at {tunnel_ip}.")
+            elif want_tunnel and not hub_pubkey:
+                msg = ("Generated the user + API script, but the WireGuard HUB "
+                       "isn't set up yet — run deploy/install.sh on the server "
+                       "(it creates the hub key). Then regenerate.")
             elif tunnel_ip:
-                msg = ("Generated the script, but could NOT write the server "
-                       "secrets file — add the line shown below on the server.")
+                msg = ("Generated the script, but could NOT write the hub peers "
+                       "file — add the peer shown below on the server.")
             else:
                 msg = "Generated a strong password and script for this device."
             return self._device_provision_page(name, user, script=script,

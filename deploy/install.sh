@@ -231,91 +231,87 @@ log "Monitor unit : ${SYSTEMD_UNIT}"
 log "Web unit     : ${WEB_UNIT}"
 
 # ---------------------------------------------------------------------------
-# SSTP dial-home server (accel-ppp) — lets routers connect BACK to this box.
-# mikromon writes each device's credentials to ${SSTP_SECRETS}; accel-ppp reads
-# that file, and a path-unit reloads accel-ppp whenever it changes. Best-effort:
-# if accel-ppp isn't available the core install still succeeds.
+# WireGuard dial-home hub — lets routers connect BACK to this box. The hub key
+# is generated here; mikromon (Provision tab) generates each device's keypair,
+# writes the peers into ${WG_PEERS}, and a path-unit applies them with
+# `wg syncconf`. The hub public key + IP are written to ${APP_DIR}/hub.json so
+# the dashboard fills the router script automatically. Best-effort/guarded.
 # ---------------------------------------------------------------------------
-step "Setting up the SSTP dial-home server (accel-ppp)"
-SSTP_SECRETS="${APP_DIR}/sstp-secrets"
+step "Setting up the WireGuard dial-home hub"
+WG_PEERS="${APP_DIR}/wg-peers.conf"
+WG_PORT=51820
+WG_SUBNET="10.10.0.0/24"
 set +e
 (
   set -e
-  # secrets file lives under APP_DIR so the (hardened) web service can write it
-  [ -f "${SSTP_SECRETS}" ] || install -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
-      -m 640 /dev/null "${SSTP_SECRETS}"
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      accel-ppp openssl
-  mkdir -p /etc/accel-ppp /var/log/accel-ppp
-  if [ ! -f /etc/accel-ppp/sstp.pem ]; then
-    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-      -subj "/CN=mikromon-sstp" \
-      -keyout /etc/accel-ppp/sstp.key -out /etc/accel-ppp/sstp.crt
-    cat /etc/accel-ppp/sstp.crt /etc/accel-ppp/sstp.key > /etc/accel-ppp/sstp.pem
-    chmod 600 /etc/accel-ppp/sstp.pem
+      wireguard wireguard-tools
+  mkdir -p /etc/wireguard
+  # peers file lives under APP_DIR so the (hardened) web service can write it
+  [ -f "${WG_PEERS}" ] || install -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
+      -m 640 /dev/null "${WG_PEERS}"
+  if [ ! -f /etc/wireguard/wg0.key ]; then
+    umask 077
+    wg genkey | tee /etc/wireguard/wg0.key | wg pubkey > /etc/wireguard/wg0.pub
   fi
-  cat > /etc/accel-ppp.conf <<CONF
-[modules]
-log_file
-sstp
-chap-secrets
-ippool
-
-[core]
-thread-count=2
-
-[sstp]
-verbose=1
-accept=ssl
-ssl-pemfile=/etc/accel-ppp/sstp.pem
-port=443
-
-[ppp]
-verbose=1
-mtu=1400
-ipv4=require
-
-[ip-pool]
-gw-ip-address=10.10.0.1
-10.10.0.2-10.10.0.254
-
-[chap-secrets]
-chap-secrets=${SSTP_SECRETS}
-
-[log]
-log-file=/var/log/accel-ppp/accel-ppp.log
-level=3
+  HUB_PRIV="$(cat /etc/wireguard/wg0.key)"
+  HUB_PUB="$(cat /etc/wireguard/wg0.pub)"
+  cat > /etc/wireguard/wg0.conf <<CONF
+[Interface]
+PrivateKey = ${HUB_PRIV}
+Address = 10.10.0.1/24
+ListenPort = ${WG_PORT}
+# device peers are managed by mikromon in ${WG_PEERS} and merged on up/change
+PostUp = wg syncconf wg0 <(cat /etc/wireguard/wg0.conf ${WG_PEERS})
 CONF
-  # reload accel-ppp whenever mikromon rewrites the secrets file
-  cat > /etc/systemd/system/mikromon-sstp-reload.service <<UNIT
+  chmod 600 /etc/wireguard/wg0.conf
+  # apply the peers file whenever mikromon rewrites it
+  cat > /etc/systemd/system/mikromon-wg-reload.service <<UNIT
 [Unit]
-Description=Reload accel-ppp after mikromon updates SSTP secrets
+Description=Apply mikromon WireGuard peers to wg0
 [Service]
 Type=oneshot
-ExecStart=/bin/systemctl reload-or-restart accel-ppp
+ExecStart=/usr/bin/bash -c 'wg syncconf wg0 <(cat /etc/wireguard/wg0.conf ${WG_PEERS})'
 UNIT
-  cat > /etc/systemd/system/mikromon-sstp-reload.path <<UNIT
+  cat > /etc/systemd/system/mikromon-wg-reload.path <<UNIT
 [Unit]
-Description=Watch the mikromon SSTP secrets file
+Description=Watch the mikromon WireGuard peers file
 [Path]
-PathModified=${SSTP_SECRETS}
-Unit=mikromon-sstp-reload.service
+PathModified=${WG_PEERS}
+Unit=mikromon-wg-reload.service
 [Install]
 WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
-  systemctl enable --now accel-ppp
-  systemctl enable --now mikromon-sstp-reload.path
-  command -v ufw >/dev/null 2>&1 && ufw allow 443/tcp || true
+  systemctl enable --now wg-quick@wg0
+  systemctl enable --now mikromon-wg-reload.path
+  command -v ufw >/dev/null 2>&1 && ufw allow ${WG_PORT}/udp || true
+  # publish the hub's public key + IP so the dashboard fills the router script
+  HUB_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  "${APP_DIR}/.venv/bin/python" - "${APP_DIR}/hub.json" "${HUB_PUB}" \
+      "${WG_PORT}" "${WG_PEERS}" "${WG_SUBNET}" "${HUB_IP}" <<'PY'
+import json, sys
+path, pub, port, peers, subnet, ip = sys.argv[1:7]
+try:
+    with open(path) as f: data = json.load(f)
+except Exception:
+    data = {}
+data.update({"hub_pubkey": pub, "listen_port": port, "wg_peers": peers,
+             "subnet": subnet})
+data.setdefault("hub_ip", ip)
+with open(path, "w") as f: json.dump(data, f, indent=2)
+PY
+  chown "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}/hub.json"
 )
-SSTP_OK=$?
+WG_OK=$?
 set -e
-if [ "${SSTP_OK}" -eq 0 ]; then
-  log "SSTP server up (accel-ppp on :443); secrets: ${SSTP_SECRETS}"
+if [ "${WG_OK}" -eq 0 ]; then
+  log "WireGuard hub up (wg0 on :${WG_PORT}/udp); peers: ${WG_PEERS}"
+  log "Hub public key: $(cat /etc/wireguard/wg0.pub 2>/dev/null)"
 else
-  log "WARN: SSTP server step failed/skipped (accel-ppp may be unavailable here)."
-  log "      The dashboard still generates router scripts; set up an SSTP server"
-  log "      manually and point its chap-secrets at ${SSTP_SECRETS}."
+  log "WARN: WireGuard hub step failed/skipped. The dashboard still generates"
+  log "      router scripts; set up WireGuard manually and put the hub public"
+  log "      key + IP into ${APP_DIR}/hub.json."
 fi
 
 # Resolve the server's primary IP for the final message.
