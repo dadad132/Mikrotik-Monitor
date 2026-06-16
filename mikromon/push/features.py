@@ -177,7 +177,7 @@ def security_unmanaged(pusher, cfg):
     """All firewall filter rules we don't own — shown read-only for now."""
     out = []
     for r in pusher.api.fetch(_FILTER):
-        if not _prefix_owner(_SEC_TAG)(r):
+        if not str(r.get("comment", "")).startswith("mikromon:"):
             out.append({"id": r.get(".id"),
                         "text": f"{r.get('chain', '?')}/{r.get('action', '?')}"
                                 f"{' · ' + r['comment'] if r.get('comment') else ''}"})
@@ -241,7 +241,9 @@ def nextdns_read(pusher, cfg):
     dns = pusher.api.fetch(_DNS)
     bypass = [r for r in pusher.api.fetch(_ADDR_LIST)
               if str(r.get("list", "")) == DNS_BYPASS_LIST]
-    return {"dns": dns[0] if dns else {}, "bypass": bypass}
+    static = [r for r in pusher.api.fetch(_DNS_STATIC)
+              if str(r.get("comment", "")).startswith(_DNSBLOCK_TAG)]
+    return {"dns": dns[0] if dns else {}, "bypass": bypass, "static": static}
 
 
 def nextdns_summary(current, cfg):
@@ -249,13 +251,71 @@ def nextdns_summary(current, cfg):
     out = [f"DNS servers: {dns.get('servers', '(none)')}",
            f"allow-remote-requests: {dns.get('allow-remote-requests', '?')}"]
     out.append(f"{len(current.get('bypass', []))} bypass address(es)")
+    groups = sorted({str(r.get("comment", ""))[len(_DNSBLOCK_TAG):]
+                     for r in current.get("static", [])})
+    if groups:
+        labels = [_BLOCK_BY_KEY.get(g, (g, []))[0] for g in groups]
+        out.append("Blocking: " + ", ".join(labels))
     return out
+
+
+# DNS-static "sinkhole" blocking: each toggle maps to a curated set of domains
+# answered as 0.0.0.0 on the router. Starter lists — extend per site as needed.
+_DNS_STATIC = ("ip", "dns", "static")
+_DNSBLOCK_TAG = "mikromon:dnsblock:"
+_BLOCK_GROUPS = [
+    ("Categories", [
+        ("ads", "Advertisements & trackers",
+         ["doubleclick.net", "googlesyndication.com", "googleadservices.com",
+          "adservice.google.com", "g.doubleclick.net", "ads.yahoo.com",
+          "advertising.com", "adnxs.com", "scorecardresearch.com"]),
+        ("porn", "Pornography",
+         ["pornhub.com", "xvideos.com", "xnxx.com", "xhamster.com",
+          "redtube.com", "youporn.com"]),
+        ("gambling", "Gambling",
+         ["bet365.com", "pokerstars.com", "888casino.com", "betway.com",
+          "williamhill.com"]),
+        ("social", "Social networks",
+         ["facebook.com", "fbcdn.net", "instagram.com", "cdninstagram.com",
+          "twitter.com", "x.com", "tiktok.com", "tiktokcdn.com",
+          "snapchat.com", "reddit.com", "pinterest.com"]),
+        ("streaming", "Video streaming",
+         ["netflix.com", "nflxvideo.net", "youtube.com", "googlevideo.com",
+          "ytimg.com", "hulu.com", "twitch.tv", "primevideo.com"]),
+        ("gaming", "Online gaming",
+         ["steampowered.com", "epicgames.com", "roblox.com", "ea.com",
+          "battle.net", "leagueoflegends.com"]),
+    ]),
+    ("Apps", [
+        ("app_tiktok", "TikTok", ["tiktok.com", "tiktokcdn.com", "tiktokv.com"]),
+        ("app_facebook", "Facebook", ["facebook.com", "fbcdn.net", "fb.com"]),
+        ("app_instagram", "Instagram", ["instagram.com", "cdninstagram.com"]),
+        ("app_whatsapp", "WhatsApp", ["whatsapp.com", "whatsapp.net"]),
+        ("app_youtube", "YouTube",
+         ["youtube.com", "googlevideo.com", "ytimg.com", "youtu.be"]),
+        ("app_netflix", "Netflix", ["netflix.com", "nflxvideo.net", "nflximg.net"]),
+        ("app_snapchat", "Snapchat", ["snapchat.com", "sc-cdn.net"]),
+        ("app_discord", "Discord", ["discord.com", "discordapp.com", "discord.gg"]),
+        ("app_telegram", "Telegram", ["telegram.org", "telegram.me", "t.me"]),
+    ]),
+]
+_BLOCK_BY_KEY = {k: (label, doms) for _g, items in _BLOCK_GROUPS
+                 for k, label, doms in items}
+
+
+def _domain_regexp(domain):
+    """Match the domain and any subdomain (RouterOS POSIX regexp)."""
+    return r".*" + domain.replace(".", r"\.") + "$"
 
 
 def nextdns_form(current, cfg):
     dns = current.get("dns", {})
     ips = "\n".join(r.get("address", "") for r in current.get("bypass", []))
-    return [
+    blocked = {str(r.get("comment", ""))[len(_DNSBLOCK_TAG):]
+               for r in current.get("static", [])}
+    cur_ip = next((r.get("address") for r in current.get("static", [])
+                   if r.get("address")), "") or "127.0.0.1"
+    fields = [
         {"type": "text", "name": "servers", "label": "DNS servers (comma-separated)",
          "value": dns.get("servers", ""),
          "placeholder": "45.90.28.0, 45.90.30.0  (e.g. your NextDNS endpoints)"},
@@ -264,15 +324,30 @@ def nextdns_form(current, cfg):
          "on": _norm(dns.get("allow-remote-requests", "")) == "true"},
         {"type": "textarea", "name": "bypass", "label": "Bypass IPs (one per line)",
          "value": ips, "hint": "Hosts allowed to skip the filter."},
+        {"type": "text", "name": "block_ip",
+         "label": "Blocked domains resolve to (sinkhole IP)", "value": cur_ip,
+         "hint": "Where blocked names point. RouterOS rejects 0.0.0.0 here; "
+                 "127.0.0.1 is a safe blackhole. Use a block-page IP if you have "
+                 "one."},
     ]
+    for group, items in _BLOCK_GROUPS:
+        fields.append({"type": "static", "label": f"Block {group.lower()}",
+                       "value": "Answers these domains as 0.0.0.0 on the router "
+                                "(DNS sinkhole). Starter lists — extendable."})
+        for key, label, _doms in items:
+            fields.append({"type": "toggle", "name": "block", "value": key,
+                           "label": label, "on": key in blocked})
+    return fields
 
 
 def nextdns_plan(pusher, cfg, flat, multi):
     servers = ",".join(x.strip() for x in flat.get("servers", "").split(",")
                        if x.strip())
+    # RouterOS returns true/false here, so send true/false (not yes/no) to avoid
+    # a perpetual no-op diff.
     desired_dns = {"servers": servers,
-                   "allow-remote-requests": "yes" if "allow_remote"
-                   in set(multi.get("opt", [])) else "no"}
+                   "allow-remote-requests": "true" if "allow_remote"
+                   in set(multi.get("opt", [])) else "false"}
     plan = pusher.plan_settings(_DNS, desired_dns, label="dns")
     ips = [x.strip() for x in (flat.get("bypass", "") or "").splitlines()
            if x.strip()]
@@ -282,7 +357,22 @@ def nextdns_plan(pusher, cfg, flat, multi):
         manage_tag="mikromon:dns-bypass",
         owns=lambda r: str(r.get("list", "")) == DNS_BYPASS_LIST,
         label="bypass")
-    return Plan(cfg.name, plan.ops + list_plan.ops, summary="nextdns / dns filter")
+    # category / app DNS-sinkhole entries (0.0.0.0 is rejected by RouterOS as an
+    # A record, so use a real blackhole IP — 127.0.0.1 by default).
+    block_ip = (flat.get("block_ip", "") or "").strip() or "127.0.0.1"
+    enabled = set(multi.get("block", []))
+    static_desired = []
+    for key in enabled:
+        _label, doms = _BLOCK_BY_KEY.get(key, ("", []))
+        for d in doms:
+            static_desired.append({"regexp": _domain_regexp(d),
+                                   "address": block_ip,
+                                   "comment": _DNSBLOCK_TAG + key})
+    static_plan = pusher.plan_managed_list(
+        _DNS_STATIC, "regexp", static_desired,
+        owns=_prefix_owner(_DNSBLOCK_TAG), label="dns block")
+    return Plan(cfg.name, plan.ops + list_plan.ops + static_plan.ops,
+                summary="nextdns / dns filter")
 
 
 # ===========================================================================
@@ -683,6 +773,391 @@ def tunnel_plan(pusher, cfg, flat, multi):
 
 
 # ===========================================================================
+# Custom scripts — the universal escape hatch: paste any RouterOS script, add
+# it to /system/script (tagged so we own it), Run it on demand, Remove it later.
+# Anything the typed tabs don't cover can be done here, still dry-run-first,
+# logged and (for add/remove) reversible.
+# ===========================================================================
+_SCRIPT = ("system", "script")
+_SCRIPT_TAG = "mikromon:script:"
+
+
+def scripts_read(pusher, cfg):
+    return [r for r in pusher.api.fetch(_SCRIPT) if _prefix_owner(_SCRIPT_TAG)(r)]
+
+
+def scripts_summary(current, cfg):
+    return [f"{r.get('name')} — {len((r.get('source') or ''))} chars"
+            + (f" · last run {r['last-started']}" if r.get("last-started") else "")
+            for r in current] or ["No mikromon-managed scripts on the router yet."]
+
+
+def scripts_form(current, cfg):
+    return [
+        {"type": "text", "name": "new_name", "label": "Script name",
+         "placeholder": "block-badnet"},
+        {"type": "textarea", "name": "new_source",
+         "label": "Script source (RouterOS commands)", "value": "",
+         "hint": "Paste a RouterOS script. Saving adds it to /system script "
+                 "(tagged so mikromon owns it) — it does not run yet. Use the "
+                 "Run button on a saved script to execute it. Re-saving with the "
+                 "same name updates the source."},
+    ]
+
+
+def _managed_desired(existing):
+    """Reconstruct the current managed scripts as a desired list (preserve)."""
+    return [{"name": r.get("name"), "source": r.get("source", ""),
+             "comment": r.get("comment") or (_SCRIPT_TAG + str(r.get("name")))}
+            for r in existing]
+
+
+def scripts_plan(pusher, cfg, flat, multi):
+    existing = scripts_read(pusher, cfg)
+    action = flat.get("script_action", "")
+    target = flat.get("script_name", "")
+
+    if action == "run":
+        row = next((r for r in existing if r.get("name") == target), None)
+        if row is None:
+            return Plan(cfg.name, [], summary="run script (not found)")
+        op = Operation("run", _SCRIPT, {"_cmd": "run", ".id": row[".id"]},
+                       desc=f"run script '{target}' on the router (background)",
+                       detach=True)
+        return Plan(cfg.name, [op], summary=f"run script {target}")
+
+    if action == "remove":
+        desired = [d for d in _managed_desired(existing) if d["name"] != target]
+        return pusher.plan_managed_list(_SCRIPT, "name", desired,
+                                        owns=_prefix_owner(_SCRIPT_TAG),
+                                        label="script")
+
+    # default: add / update from the form
+    nm = _slug(flat.get("new_name", ""), "")
+    src = flat.get("new_source", "")
+    desired = [d for d in _managed_desired(existing) if d["name"] != nm]
+    if nm and src.strip():
+        desired.append({"name": nm, "source": src, "comment": _SCRIPT_TAG + nm})
+    return pusher.plan_managed_list(_SCRIPT, "name", desired,
+                                    owns=_prefix_owner(_SCRIPT_TAG), label="script")
+
+
+# ===========================================================================
+# Restrict management access — the brute-force fix. Locks the management
+# services (API / Winbox / SSH / WebFig) to trusted source IPs via /ip service,
+# disables insecure services, and drops known attacker IPs. Per-row `set`s with
+# inverses (fully reversible) plus a tagged block-list + drop rule.
+# ===========================================================================
+_SERVICE = ("ip", "service")
+_HARDEN_TAG = "mikromon:harden:"
+_BLOCK_LIST = "mikromon-blocked"
+# service name -> (label, default-restrict?)
+_MGMT_SVC = [("api", "API (8728)", True), ("api-ssl", "API-SSL (8729)", True),
+             ("winbox", "Winbox (8291)", True), ("ssh", "SSH (22)", True),
+             ("www", "WebFig HTTP (80)", False),
+             ("www-ssl", "WebFig HTTPS (443)", False)]
+_INSECURE_SVC = [("telnet", "Telnet (23)"), ("ftp", "FTP (21)")]
+
+
+def harden_read(pusher, cfg):
+    return pusher.api.fetch(_SERVICE)
+
+
+def harden_summary(current, cfg):
+    by = {s.get("name"): s for s in current}
+    out = []
+    for name, label, _d in _MGMT_SVC + [(n, l, False) for n, l in _INSECURE_SVC]:
+        s = by.get(name)
+        if s is None:
+            continue
+        if _norm(s.get("disabled", "")) == "true":
+            out.append(f"{label}: disabled")
+        else:
+            addr = s.get("address") or "ANY (open to the internet!)"
+            out.append(f"{label}: allowed from {addr}")
+    return out or ["No /ip service rows found."]
+
+
+def harden_form(current, cfg):
+    by = {s.get("name"): s for s in current}
+    cur_addr = ((by.get("api") or {}).get("address")
+                or (by.get("winbox") or {}).get("address") or "")
+    fields = [
+        {"type": "text", "name": "allowed",
+         "label": "Allow management ONLY from these IPs/subnets (comma-separated)",
+         "value": cur_addr,
+         "placeholder": "102.36.140.219/32, 192.168.88.0/24",
+         "hint": "Applied to the services ticked below. ⚠ Include this monitoring "
+                 "server's public IP (and your own admin IP) or you will lock "
+                 "mikromon — and yourself — out. Leave blank to skip service "
+                 "restriction and only block attackers below."},
+        {"type": "static", "label": "Restrict these management services",
+         "value": ""},
+    ]
+    for name, label, default in _MGMT_SVC:
+        s = by.get(name)
+        if s is None:
+            continue
+        addr = s.get("address") or "anywhere"
+        fields.append({"type": "toggle", "name": "svc", "value": name,
+                       "label": f"Restrict {label}", "on": default,
+                       "desc": f"currently allowed from: {addr}"})
+    fields.append({"type": "static", "label": "Disable insecure services",
+                   "value": ""})
+    for name, label in _INSECURE_SVC:
+        s = by.get(name)
+        disabled = s is not None and _norm(s.get("disabled", "")) == "true"
+        fields.append({"type": "toggle", "name": "disable", "value": name,
+                       "label": f"Disable {label}", "on": disabled,
+                       "desc": "already disabled" if disabled else
+                               "plaintext / legacy — safe to turn off"})
+    fields.append({"type": "text", "name": "block",
+                   "label": "Block these attacker IPs (comma-separated)",
+                   "placeholder": "45.198.224.18",
+                   "hint": "Added to a drop list at the top of the input chain."})
+    return fields
+
+
+def _service_set(row, field, value, label):
+    """A reversible set on one /ip service row."""
+    return _set_field(_SERVICE, row, field, value, label)
+
+
+def harden_plan(pusher, cfg, flat, multi):
+    services = pusher.api.fetch(_SERVICE)
+    by = {s.get("name"): s for s in services}
+    allowed = ",".join(x.strip() for x in flat.get("allowed", "").split(",")
+                       if x.strip())
+    svc = set(multi.get("svc", []))
+    disable = set(multi.get("disable", []))
+    ops = []
+    if allowed:
+        for name in svc:
+            row = by.get(name)
+            if row is None:
+                continue
+            if _norm(row.get("address", "")) != _norm(allowed):
+                ops.append(_service_set(row, "address", allowed, f"service {name}"))
+            if _norm(row.get("disabled", "")) == "true":
+                ops.append(_service_set(row, "disabled", "no", f"service {name}"))
+    for name in disable:
+        row = by.get(name)
+        if row is None or _norm(row.get("disabled", "")) == "true":
+            continue
+        ops.append(_service_set(row, "disabled", "yes", f"service {name}"))
+    # block attacker IPs: a managed address-list + one drop rule (own tag)
+    block = [x.strip() for x in (flat.get("block", "") or "").split(",")
+             if x.strip()]
+    extra = []
+    if block:
+        desired_list = [{"list": _BLOCK_LIST, "address": ip} for ip in block]
+        list_plan = pusher.plan_managed_list(
+            _ADDR_LIST, "address", desired_list,
+            owns=lambda r: str(r.get("list", "")) == _BLOCK_LIST,
+            label="blocked IP")
+        drop = [{"chain": "input", "action": "drop",
+                 "src-address-list": _BLOCK_LIST,
+                 "comment": _HARDEN_TAG + "block-attackers"}]
+        drop_plan = pusher.plan_managed_list(
+            _FILTER, "comment", drop,
+            owns=_prefix_owner(_HARDEN_TAG + "block-attackers"),
+            label="block rule")
+        extra = list_plan.ops + drop_plan.ops
+    return Plan(cfg.name, ops + extra, summary="restrict management access")
+
+
+# ===========================================================================
+# Hub tunnel (dial-home) — WireGuard from the router OUT to the monitoring hub.
+# "no public IP / dynamic IP / CGNAT": the router dials home and keeps the NAT
+# hole open (persistent-keepalive), so the hub reaches it at a CONSTANT private
+# tunnel IP regardless of either side's public address. The router generates its
+# own keys (RouterOS v7); we read its public key back and hand the operator the
+# hub-side peer line to paste. Requires RouterOS v7 (WireGuard).
+# ===========================================================================
+_HUB_WG = ("interface", "wireguard")
+_HUB_PEERS = ("interface", "wireguard", "peers")
+_HUB_ADDR = ("ip", "address")
+_HUB_TAG = "mikromon:tunnel:"
+_HUB_NAME = "mikromon"
+
+
+def hubtunnel_read(pusher, cfg):
+    ifaces = [r for r in pusher.api.fetch(_HUB_WG) if r.get("name") == _HUB_NAME]
+    addrs = [r for r in pusher.api.fetch(_HUB_ADDR)
+             if r.get("interface") == _HUB_NAME]
+    peers = [r for r in pusher.api.fetch(_HUB_PEERS)
+             if str(r.get("comment", "")).startswith(_HUB_TAG)]
+    return {"iface": ifaces[0] if ifaces else {},
+            "address": addrs[0] if addrs else {},
+            "peer": peers[0] if peers else {}}
+
+
+def hubtunnel_summary(current, cfg):
+    iface = current.get("iface", {})
+    if not iface:
+        return ["No mikromon tunnel yet. Fill the form and Preview to create a "
+                "WireGuard tunnel that dials your monitoring hub (RouterOS v7)."]
+    addr = current.get("address", {}).get("address", "(no address)")
+    peer = current.get("peer", {})
+    out = [f"WireGuard '{_HUB_NAME}' present · tunnel IP {addr}",
+           f"router public key: {iface.get('public-key', '(appears after apply)')}"]
+    if peer:
+        out.append(f"dials hub {peer.get('endpoint-address', '?')}:"
+                   f"{peer.get('endpoint-port', '?')} · keepalive "
+                   f"{peer.get('persistent-keepalive', '?')}")
+    return out
+
+
+def hubtunnel_form(current, cfg):
+    peer = current.get("peer", {})
+    addr = current.get("address", {})
+    return [
+        {"type": "text", "name": "endpoint",
+         "label": "Hub endpoint — your monitoring server's public host / DDNS",
+         "value": peer.get("endpoint-address", ""),
+         "placeholder": "monitor.example.com  or  102.36.140.219"},
+        {"type": "text", "name": "port", "label": "Hub UDP port",
+         "value": peer.get("endpoint-port", "") or "13231"},
+        {"type": "text", "name": "hub_pubkey",
+         "label": "Hub WireGuard public key",
+         "value": peer.get("public-key", ""),
+         "placeholder": "paste the monitoring server's WireGuard public key"},
+        {"type": "text", "name": "tunnel_ip",
+         "label": "This device's tunnel IP (with mask)",
+         "value": addr.get("address", ""), "placeholder": "10.10.0.2/24",
+         "hint": "Each device gets a unique address in the tunnel subnet "
+                 "(hub is 10.10.0.1)."},
+        {"type": "text", "name": "allowed",
+         "label": "Route to the hub (allowed-address)",
+         "value": peer.get("allowed-address", "") or "10.10.0.0/24"},
+        {"type": "text", "name": "keepalive", "label": "Persistent keepalive",
+         "value": peer.get("persistent-keepalive", "") or "25s",
+         "hint": "Keeps the NAT mapping open so the hub can reach back — essential "
+                 "behind CGNAT. Leave at 25s."},
+    ]
+
+
+def hubtunnel_plan(pusher, cfg, flat, multi):
+    endpoint = flat.get("endpoint", "").strip()
+    port = (flat.get("port", "") or "13231").strip()
+    hub_pubkey = flat.get("hub_pubkey", "").strip()
+    tunnel_ip = flat.get("tunnel_ip", "").strip()
+    allowed = (flat.get("allowed", "") or "10.10.0.0/24").strip()
+    if not (endpoint and hub_pubkey and tunnel_ip):
+        return Plan(cfg.name, [],
+                    summary="tunnel (need hub endpoint, hub key and tunnel IP)")
+    peer_cur = hubtunnel_read(pusher, cfg).get("peer", {})
+    # preserve the keepalive RouterOS already stored (avoids format-churn diffs)
+    ka = ((peer_cur.get("persistent-keepalive") if peer_cur
+           else flat.get("keepalive")) or "25s").strip() or "25s"
+    iface_plan = pusher.plan_managed_list(
+        _HUB_WG, "name", [{"name": _HUB_NAME, "comment": _HUB_TAG + "if"}],
+        owns=lambda r: r.get("name") == _HUB_NAME, label="wg interface")
+    addr_plan = pusher.plan_managed_list(
+        _HUB_ADDR, "address",
+        [{"address": tunnel_ip, "interface": _HUB_NAME,
+          "comment": _HUB_TAG + "addr"}],
+        owns=lambda r: r.get("interface") == _HUB_NAME, label="tunnel address")
+    peer_plan = pusher.plan_managed_list(
+        _HUB_PEERS, "comment",
+        [{"interface": _HUB_NAME, "public-key": hub_pubkey,
+          "endpoint-address": endpoint, "endpoint-port": port,
+          "allowed-address": allowed, "persistent-keepalive": ka,
+          "comment": _HUB_TAG + "hub"}],
+        owns=_prefix_owner(_HUB_TAG + "hub"), label="hub peer")
+    # interface must exist before the address/peer that reference it
+    return Plan(cfg.name, iface_plan.ops + addr_plan.ops + peer_plan.ops,
+                summary="remote tunnel (wireguard)")
+
+
+# ===========================================================================
+# Update — check/install RouterOS upgrades + RouterBOOT firmware. Install
+# REBOOTS the router, so it is a `run` command (no inverse) gated behind the
+# normal dry-run -> explicit-confirm step with a loud warning.
+# ===========================================================================
+_PKG_UPDATE = ("system", "package", "update")
+_ROUTERBOARD = ("system", "routerboard")
+
+
+def update_read(pusher, cfg):
+    upd = pusher.api.fetch(_PKG_UPDATE)
+    rb = pusher.api.fetch(_ROUTERBOARD)
+    return {"update": upd[0] if upd else {}, "routerboard": rb[0] if rb else {}}
+
+
+def update_available(current):
+    u = current.get("update", {})
+    latest = str(u.get("latest-version", "")).strip()
+    installed = str(u.get("installed-version", "")).strip()
+    return bool(latest) and latest != installed
+
+
+def firmware_available(current):
+    rb = current.get("routerboard", {})
+    cur = str(rb.get("current-firmware", "")).strip()
+    up = str(rb.get("upgrade-firmware", "")).strip()
+    return bool(up) and bool(cur) and up != cur
+
+
+def update_summary(current, cfg):
+    u = current.get("update", {})
+    rb = current.get("routerboard", {})
+    out = [f"Channel: {u.get('channel', '?')}",
+           f"Installed RouterOS: {u.get('installed-version', '?')}",
+           f"Latest available: {u.get('latest-version', '(run a check)')}",
+           f"Status: {u.get('status', '?')}"]
+    if update_available(current):
+        out.append("⬆ An update is available — use the buttons below to install.")
+    if rb.get("current-firmware") or rb.get("upgrade-firmware"):
+        out.append(f"RouterBOOT firmware: {rb.get('current-firmware', '?')} "
+                   f"(available {rb.get('upgrade-firmware', '?')})")
+    return out
+
+
+def update_form(current, cfg):
+    u = current.get("update", {})
+    return [{"type": "select", "name": "channel", "label": "Update channel",
+             "options": [("stable", "Stable (recommended)"),
+                         ("long-term", "Long-term (most conservative)"),
+                         ("testing", "Testing")],
+             "value": u.get("channel", "stable") or "stable",
+             "hint": "Preview to change the channel. Then use the buttons below "
+                     "to check for and install updates."}]
+
+
+def update_plan(pusher, cfg, flat, multi):
+    action = flat.get("update_action", "")
+    if action == "check":
+        op = Operation("run", _PKG_UPDATE, {"_cmd": "check-for-updates"},
+                       desc="check for RouterOS updates (no reboot)")
+        return Plan(cfg.name, [op], summary="check for updates")
+    if action == "install":
+        cur = update_read(pusher, cfg).get("update", {})
+        latest = cur.get("latest-version", "") or "latest"
+        installed = cur.get("installed-version", "?")
+        op = Operation("run", _PKG_UPDATE, {"_cmd": "install"},
+                       desc=f"download & INSTALL RouterOS {latest} (currently "
+                            f"{installed}) — THE ROUTER WILL REBOOT now",
+                       detach=True)
+        return Plan(cfg.name, [op], summary="install RouterOS update + reboot")
+    if action == "firmware":
+        op = Operation("run", _ROUTERBOARD, {"_cmd": "upgrade"},
+                       desc="upgrade RouterBOOT firmware — applies on next reboot")
+        return Plan(cfg.name, [op], summary="routerboard firmware upgrade")
+    if action == "reboot":
+        op = Operation("run", ("system",), {"_cmd": "reboot"},
+                       desc="reboot the router now — it will go offline ~1–2 min",
+                       detach=True)
+        return Plan(cfg.name, [op], summary="reboot")
+    channel = flat.get("channel", "").strip()
+    if channel:
+        return pusher.plan_settings(_PKG_UPDATE, {"channel": channel},
+                                    label="update channel")
+    return Plan(cfg.name, [], summary="no update action")
+
+
+
+# ===========================================================================
 # Adoption — bring an existing (unmanaged) row under management by stamping the
 # feature's ownership comment onto it. A single, reversible `set` (the inverse
 # restores the previous comment), so it round-trips into the editor without
@@ -722,6 +1197,9 @@ FEATURES = {
     "security": {"title": "Security", "write": True, "read": security_read,
                  "summary": security_summary, "form": security_form,
                  "plan": security_plan, "unmanaged": security_unmanaged},
+    "harden": {"title": "Restrict management access", "write": True,
+               "read": harden_read, "summary": harden_summary,
+               "form": harden_form, "plan": harden_plan},
     "nextdns": {"title": "NextDNS / DNS filtering", "write": True,
                 "read": nextdns_read, "summary": nextdns_summary,
                 "form": nextdns_form, "plan": nextdns_plan},
@@ -744,9 +1222,20 @@ FEATURES = {
                "plan": tunnel_plan, "unmanaged": tunnel_unmanaged,
                "adopt": True, "path": _WG_PEERS, "prefix": _WG_TAG,
                "adopt_name": _wg_adopt_name},
+    "scripts": {"title": "Custom scripts", "write": True, "read": scripts_read,
+                "summary": scripts_summary, "form": scripts_form,
+                "plan": scripts_plan},
+    "hubtunnel": {"title": "Hub tunnel (dial-home)", "write": True,
+                  "read": hubtunnel_read, "summary": hubtunnel_summary,
+                  "form": hubtunnel_form, "plan": hubtunnel_plan},
+    "update": {"title": "Update RouterOS", "write": True, "read": update_read,
+               "summary": update_summary, "form": update_form,
+               "plan": update_plan},
 }
 
 # tab label -> url slug (Overview/Backups handled elsewhere)
-TAB_SLUGS = {"SD-WAN": "sdwan", "Security": "security", "NextDNS": "nextdns",
+TAB_SLUGS = {"SD-WAN": "sdwan", "Security": "security",
+             "Restrict access": "harden", "NextDNS": "nextdns",
              "QoS": "qos", "Port forwarding": "portfwd", "Interfaces": "interfaces",
-             "Remote access": "remote", "Tunnel": "tunnel"}
+             "Remote access": "remote", "Tunnel": "tunnel",
+             "Hub tunnel": "hubtunnel", "Scripts": "scripts", "Update": "update"}

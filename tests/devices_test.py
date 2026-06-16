@@ -138,7 +138,8 @@ try:
     csrf = re.search(r'name="csrf" value="([^"]+)"', body).group(1)
     st, body = post(admin, "/devices/save", {
         "csrf": csrf, "original_name": "", "name": "WebR1", "host": "9.9.9.9",
-        "api_port": "8728", "username": "monitor", "password": "secret",
+        "api_port": "8728", "timeout": "25", "username": "monitor",
+        "password": "secret",
         "link_name": ["Vodacom", "MTN", "LTE"],
         "link_iface": ["ether1", "ether2", "lte1"],
         "link_gw": ["", "", ""],
@@ -146,6 +147,7 @@ try:
     saved = DevicesStore(wdb)
     raw = saved.raw("WebR1")
     check("device added via web", raw is not None and raw["host"] == "9.9.9.9")
+    check("API timeout captured from form", raw.get("timeout") == 25)
     check("checks captured from form",
           raw["checks"]["resources"] and not raw["checks"]["security"])
     check("3 WAN links captured in priority order",
@@ -180,7 +182,8 @@ try:
     check("device tab bar links every engine (sd-wan/security/qos/portfwd)",
           all(s in body for s in ("tab=sdwan", "tab=security", "tab=qos",
                                   "tab=portfwd", "tab=nextdns", "tab=remote",
-                                  "tab=interfaces")))
+                                  "tab=interfaces", "tab=scripts", "tab=harden",
+                                  "tab=tunnel", "tab=hubtunnel", "tab=update")))
     st, body = get(admin, "/logs")
     check("admin can open the activity log", st == 200 and "activity log" in body.lower())
     st, _ = get(nobody, "/logs")
