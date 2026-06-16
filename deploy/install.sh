@@ -230,6 +230,94 @@ systemctl daemon-reload
 log "Monitor unit : ${SYSTEMD_UNIT}"
 log "Web unit     : ${WEB_UNIT}"
 
+# ---------------------------------------------------------------------------
+# SSTP dial-home server (accel-ppp) — lets routers connect BACK to this box.
+# mikromon writes each device's credentials to ${SSTP_SECRETS}; accel-ppp reads
+# that file, and a path-unit reloads accel-ppp whenever it changes. Best-effort:
+# if accel-ppp isn't available the core install still succeeds.
+# ---------------------------------------------------------------------------
+step "Setting up the SSTP dial-home server (accel-ppp)"
+SSTP_SECRETS="${APP_DIR}/sstp-secrets"
+set +e
+(
+  set -e
+  # secrets file lives under APP_DIR so the (hardened) web service can write it
+  [ -f "${SSTP_SECRETS}" ] || install -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
+      -m 640 /dev/null "${SSTP_SECRETS}"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      accel-ppp openssl
+  mkdir -p /etc/accel-ppp /var/log/accel-ppp
+  if [ ! -f /etc/accel-ppp/sstp.pem ]; then
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+      -subj "/CN=mikromon-sstp" \
+      -keyout /etc/accel-ppp/sstp.key -out /etc/accel-ppp/sstp.crt
+    cat /etc/accel-ppp/sstp.crt /etc/accel-ppp/sstp.key > /etc/accel-ppp/sstp.pem
+    chmod 600 /etc/accel-ppp/sstp.pem
+  fi
+  cat > /etc/accel-ppp.conf <<CONF
+[modules]
+log_file
+sstp
+chap-secrets
+ippool
+
+[core]
+thread-count=2
+
+[sstp]
+verbose=1
+accept=ssl
+ssl-pemfile=/etc/accel-ppp/sstp.pem
+port=443
+
+[ppp]
+verbose=1
+mtu=1400
+ipv4=require
+
+[ip-pool]
+gw-ip-address=10.10.0.1
+10.10.0.2-10.10.0.254
+
+[chap-secrets]
+chap-secrets=${SSTP_SECRETS}
+
+[log]
+log-file=/var/log/accel-ppp/accel-ppp.log
+level=3
+CONF
+  # reload accel-ppp whenever mikromon rewrites the secrets file
+  cat > /etc/systemd/system/mikromon-sstp-reload.service <<UNIT
+[Unit]
+Description=Reload accel-ppp after mikromon updates SSTP secrets
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl reload-or-restart accel-ppp
+UNIT
+  cat > /etc/systemd/system/mikromon-sstp-reload.path <<UNIT
+[Unit]
+Description=Watch the mikromon SSTP secrets file
+[Path]
+PathModified=${SSTP_SECRETS}
+Unit=mikromon-sstp-reload.service
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now accel-ppp
+  systemctl enable --now mikromon-sstp-reload.path
+  command -v ufw >/dev/null 2>&1 && ufw allow 443/tcp || true
+)
+SSTP_OK=$?
+set -e
+if [ "${SSTP_OK}" -eq 0 ]; then
+  log "SSTP server up (accel-ppp on :443); secrets: ${SSTP_SECRETS}"
+else
+  log "WARN: SSTP server step failed/skipped (accel-ppp may be unavailable here)."
+  log "      The dashboard still generates router scripts; set up an SSTP server"
+  log "      manually and point its chap-secrets at ${SSTP_SECRETS}."
+fi
+
 # Resolve the server's primary IP for the final message.
 SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 SERVER_IP="${SERVER_IP:-<your-server-ip>}"

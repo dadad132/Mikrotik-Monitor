@@ -672,6 +672,87 @@ def _gen_password(n=20) -> str:
     return "".join(secrets.choice(_PWALPHABET) for _ in range(n))
 
 
+def _user_slug(s) -> str:
+    out = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(s or "").strip()).strip("-")
+    return out[:32] or "mikromon"
+
+
+# --- hub (SSTP server) settings + per-device VPN secret registry ------------
+# The dashboard runs ON the Ubuntu server, so it can auto-detect the server's
+# own IP and write each device's SSTP credentials into a secrets file that the
+# accel-ppp SSTP server reads (set up by deploy/install.sh). That way the
+# provisioning script is filled with the SERVER's real details and the server
+# already accepts the user — no manual entry, no mismatch.
+_HUB_SUBNET_DEFAULT = "10.10.0.0/24"
+_SSTP_SECRETS_DEFAULT = "/opt/mikromon/sstp-secrets"
+
+
+def _detect_server_ip() -> str:
+    import socket as _socket
+    try:
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _hub_path(devices_db) -> str:
+    d = (os.path.dirname(devices_db) if devices_db else "") or "."
+    return os.path.join(d, "hub.json")
+
+
+def _hub_load(path) -> dict:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001 — missing/invalid -> fresh
+        return {}
+
+
+def _hub_save(path, data) -> None:
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:  # noqa: BLE001 — best effort
+        log.warning("could not save hub settings to %s", path)
+
+
+def _alloc_tunnel_ip(hub, name) -> str:
+    """A stable per-device tunnel IP from the hub subnet (.2-.254)."""
+    leases = hub.setdefault("leases", {})
+    if name in leases:
+        return leases[name]
+    base = hub.get("subnet", _HUB_SUBNET_DEFAULT).split("/")[0].rsplit(".", 1)[0]
+    used = set(leases.values())
+    for i in range(2, 255):
+        ip = f"{base}.{i}"
+        if ip not in used:
+            leases[name] = ip
+            return ip
+    return f"{base}.2"
+
+
+def _write_sstp_secret(path, user, pwd, ip):
+    """Write/replace this user's line in the accel-ppp chap-secrets file
+    (`user * password ip`). Returns (ok, error)."""
+    line = f"{user} * {pwd} {ip}"
+    try:
+        existing = []
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                existing = [ln.rstrip("\n") for ln in f]
+        kept = [ln for ln in existing if ln.strip() and ln.split()[0] != user]
+        kept.append(line)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(kept) + "\n")
+        return True, ""
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
 def _provision_script(name, raw, pwuser, pwd, *, transport="sstp",
                       hub="", hub_port="", vpn_user="", vpn_pass="",
                       harden=True) -> str:
@@ -775,53 +856,70 @@ def _connect_box(name, raw) -> str:
             f'WinBox opens.</p></div>')
 
 
-def _render_device_provision(name, user, raw, csrf, *, script=None, creds=None,
-                             msg="", error="") -> str:
+def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
+                             creds=None, msg="", error="") -> str:
     tabbar = _device_tabbar(name, "provision", True)
     q = quote(name)
     banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
               f'</div>' if msg else "")
     err = (f'<div class="box" style="border-left:4px solid #dc2626">{esc(error)}'
            f'</div>' if error else "")
-    pwuser = (raw or {}).get("push_username") or "mikromon"
+    pwuser = (raw or {}).get("push_username") or _user_slug(name)
     intro = ('<p class="muted" style="margin:-6px 0 14px">Generate a one-paste '
-             'script for a brand-new router: it creates a management user with a '
-             'strong password (which mikromon then stores and uses), enables the '
-             'API, and can add a dial-home tunnel. Connect launches WinBox with '
-             'the saved details.</p>')
+             'script for a new router. It creates a management user with a strong '
+             'password (saved here), enables the API, and adds an SSTP dial-home '
+             'tunnel. The hub IP and credentials are filled from <b>this</b> '
+             'server, and the SSTP user is registered on the server so it accepts '
+             'the connection — no manual entry.</p>')
     form = (
         f'<div class="box"><h2>Generate provisioning script</h2>'
         f'<form method="POST" action="/device/provision">'
         f'<input type="hidden" name="csrf" value="{csrf}">'
         f'<input type="hidden" name="device" value="{esc(name)}">'
         f'<div class="fields">'
-        f'<div class="f"><label class="f">Management username</label>'
-        f'<input name="pwuser" value="{esc(pwuser)}"></div>'
+        f'<div class="f"><label class="f">Management / VPN username (unique per '
+        f'device)</label><input name="pwuser" value="{esc(pwuser)}"></div>'
         f'<div class="f"><label class="f">Dial-home tunnel</label>'
         f'<select name="transport">'
         f'<option value="sstp" selected>SSTP — TLS 443, no certs (all units)</option>'
         f'<option value="">None (just user + API)</option></select></div>'
-        f'<div class="f"><label class="f">Hub address (server IP, for the tunnel)'
-        f'</label><input name="hub" placeholder="102.36.140.219"></div>'
+        f'<div class="f"><label class="f">Hub address (this server\'s IP)</label>'
+        f'<input name="hub" value="{esc(hub_ip)}" placeholder="102.36.140.219">'
+        f'</div>'
         f'<div class="f"><label class="f">Hub port</label>'
-        f'<input name="hub_port" placeholder="443"></div>'
+        f'<input name="hub_port" value="443"></div>'
         f'<div class="f"><label class="chk"><input type="checkbox" name="harden" '
-        f'value="1" checked> Disable Telnet/FTP (basic hardening)</label></div>'
+        f'value="1" class="switch" checked> Disable Telnet/FTP (basic hardening)'
+        f'</label></div>'
         f'</div>'
         f'<div class="actions" style="margin-top:12px">'
         f'<button class="btn" type="submit">Generate strong password &amp; script'
         f'</button></div></form>'
-        f'<p class="muted">Regenerating makes a NEW password and overwrites the '
-        f'one mikromon stores for this device.</p></div>')
+        f'<p class="muted">Regenerating makes a NEW password, re-registers it on '
+        f'the server, and overwrites the one mikromon stores for this device.</p>'
+        f'</div>')
     out = ""
     if script is not None:
         c = creds or {}
+        ip = c.get("ip", "")
+        if ip and c.get("sec_ok"):
+            srv = (f'<p class="ok">✓ Registered on this server\'s SSTP server — '
+                   f'the router will connect to <code>{esc(c.get("hub", ""))}</code> '
+                   f'and get tunnel IP <code>{esc(ip)}</code>. The device Host was '
+                   f'set to <code>{esc(ip)}</code>.</p>')
+        elif ip:
+            srv = (f'<p style="color:#b91c1c">⚠ Could not write the server secrets '
+                   f'file (<code>{esc(c.get("secrets_path", ""))}</code>: '
+                   f'{esc(c.get("sec_err", ""))}). Add this line to it on the '
+                   f'server, then reload accel-ppp:</p>'
+                   f'<pre style="{_PRE}">{esc(c.get("secret_line", ""))}</pre>')
+        else:
+            srv = ""
         out = (f'<div class="box" style="border-left:4px solid #16a34a">'
                f'<h2>Provisioning script — paste into the new router</h2>'
                f'<p class="muted">Open the router in WinBox/WebFig → <b>New '
-               f'Terminal</b>, paste this, press Enter. mikromon has saved the '
-               f'username/password below and will use them.</p>'
-               f'<pre style="{_PRE}">{esc(script)}</pre>'
+               f'Terminal</b>, paste this, press Enter.</p>'
+               f'<pre style="{_PRE}">{esc(script)}</pre>{srv}'
                f'<p class="muted">The script contains the password in plain text '
                f'(it has to, to set it on the router) — paste it, then clear your '
                f'clipboard. The saved credentials below stay hidden until you '
@@ -1926,8 +2024,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                        "dashboard (add it on the Devices page).")
             sess = self._session()
             csrf = sess["csrf"] if sess else ""
-            page = _render_device_provision(name, user, raw, csrf, script=script,
-                                            creds=creds, msg=msg, error=error)
+            hub = _hub_load(_hub_path(devices_db))
+            hub_ip = hub.get("hub_ip") or _detect_server_ip()
+            page = _render_device_provision(name, user, raw, csrf, hub_ip=hub_ip,
+                                            script=script, creds=creds, msg=msg,
+                                            error=error)
             return self._send(200, page, "text/html; charset=utf-8")
 
         def _device_provision_post(self, flat, user):
@@ -1941,11 +2042,29 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if raw is None:
                 store.close()
                 return self._send(404, "no such device")
-            pwuser = (flat.get("pwuser", "").strip() or "mikromon")
+            # hub (SSTP server) details — auto-detected, overridable in the form
+            hub_file = _hub_path(devices_db)
+            hub = _hub_load(hub_file)
+            hub_ip = (flat.get("hub", "").strip() or hub.get("hub_ip")
+                      or _detect_server_ip())
+            hub["hub_ip"] = hub_ip
+            hub.setdefault("subnet", _HUB_SUBNET_DEFAULT)
+            secrets_path = hub.get("secrets") or _SSTP_SECRETS_DEFAULT
+            uname = flat.get("pwuser", "").strip() or _user_slug(name)
             pwd = _gen_password()
-            # save the generated read-write creds so mikromon (and Connect) use them
-            raw["push_username"] = pwuser
+            transport = flat.get("transport", "").strip()
+            tunnel_ip, sec_ok, sec_err = "", True, ""
+            if transport == "sstp":
+                tunnel_ip = _alloc_tunnel_ip(hub, name)
+                # register the SSTP user on the server so it ACCEPTS the router
+                sec_ok, sec_err = _write_sstp_secret(secrets_path, uname, pwd,
+                                                     tunnel_ip)
+            _hub_save(hub_file, hub)
+            # save creds; once the tunnel is up the device is reached at tunnel IP
+            raw["push_username"] = uname
             raw["push_password"] = pwd
+            if tunnel_ip:
+                raw["host"] = tunnel_ip
             try:
                 store.upsert(raw, defaults, original_name=name)
             except Exception as exc:  # noqa: BLE001 — surface validation errors
@@ -1953,14 +2072,25 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(400, f"Error: {exc}")
             store.close()
             script = _provision_script(
-                name, raw, pwuser, pwd,
-                transport=flat.get("transport", "").strip(),
-                hub=flat.get("hub", "").strip(),
-                hub_port=flat.get("hub_port", "").strip(),
-                harden=flat.get("harden") == "1")
-            return self._device_provision_page(
-                name, user, script=script, creds={"user": pwuser, "pwd": pwd},
-                msg="Generated a strong password and saved it for this device.")
+                name, raw, uname, pwd, transport=transport or "sstp",
+                hub=hub_ip, hub_port=flat.get("hub_port", "").strip(),
+                vpn_user=uname, vpn_pass=pwd, harden=flat.get("harden") == "1")
+            creds = {"user": uname, "pwd": pwd, "ip": tunnel_ip, "hub": hub_ip,
+                     "secret_line": (f"{uname} * {pwd} {tunnel_ip}"
+                                     if tunnel_ip else ""),
+                     "sec_ok": sec_ok, "sec_err": sec_err,
+                     "secrets_path": secrets_path}
+            if tunnel_ip and sec_ok:
+                msg = ("Generated credentials, registered the SSTP user on this "
+                       "server, and filled the script with the server's IP "
+                       f"({hub_ip}). The device will be reachable at {tunnel_ip}.")
+            elif tunnel_ip:
+                msg = ("Generated the script, but could NOT write the server "
+                       "secrets file — add the line shown below on the server.")
+            else:
+                msg = "Generated a strong password and script for this device."
+            return self._device_provision_page(name, user, script=script,
+                                                creds=creds, msg=msg)
 
         def _device_backup_post(self, flat, user):
             name = flat.get("device", "")
