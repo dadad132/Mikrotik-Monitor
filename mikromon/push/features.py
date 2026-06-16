@@ -1010,75 +1010,102 @@ def harden_plan(pusher, cfg, flat, multi):
 
 
 # ===========================================================================
-# Hub tunnel (dial-home) â the router dials OUT to the monitoring hub over SSTP
-# (TLS / 443) so it is reachable at a CONSTANT private IP with no public IP and
-# through CGNAT. SSTP is used on EVERY unit (RouterOS v6 and v7) so the
-# connection method is identical across the whole fleet. The hub (Ubuntu) runs
-# the SSTP server (accel-ppp) and assigns each router a fixed tunnel IP.
+# Hub tunnel (dial-home) - the router dials OUT to the monitoring hub over
+# WireGuard so it is reachable at a CONSTANT private IP with no public IP and
+# through CGNAT (persistent-keepalive holds the NAT hole open). Requires
+# RouterOS 7.1+ (WireGuard). The router generates its own keypair; we read the
+# public key back so it can be added as a peer on the hub. Provisioning (the
+# Provision tab) automates the hub side end-to-end.
 # ===========================================================================
-_HUB_SSTP = ("interface", "sstp-client")
+_HUB_WG = ("interface", "wireguard")
+_HUB_PEERS = ("interface", "wireguard", "peers")
+_HUB_ADDR = ("ip", "address")
 _HUB_TAG = "mikromon:tunnel:"
 _HUB_NAME = "mikromon"
 
 
 def hubtunnel_read(pusher, cfg):
-    rows = [r for r in pusher.api.fetch(_HUB_SSTP)
-            if str(r.get("comment", "")).startswith(_HUB_TAG)]
-    return {"sstp": rows[0] if rows else {}}
+    ifaces = [r for r in pusher.api.fetch(_HUB_WG) if r.get("name") == _HUB_NAME]
+    addrs = [r for r in pusher.api.fetch(_HUB_ADDR)
+             if r.get("interface") == _HUB_NAME]
+    peers = [r for r in pusher.api.fetch(_HUB_PEERS)
+             if str(r.get("comment", "")).startswith(_HUB_TAG)]
+    return {"iface": ifaces[0] if ifaces else {},
+            "address": addrs[0] if addrs else {},
+            "peer": peers[0] if peers else {}}
 
 
 def hubtunnel_summary(current, cfg):
-    o = current.get("sstp", {})
-    if not o:
-        return ["No SSTP dial-home tunnel yet. Set the hub IP and Preview. SSTP "
-                "(TLS 443) is used on every unit â v6 and v7 alike."]
-    up = _norm(o.get("running", "")) == "true"
-    return [f"SSTP client '{o.get('name')}' -> {o.get('connect-to', '?')}:"
-            f"{o.get('port', '?')} Â· {'connected' if up else 'down / connecting'}",
-            "The hub assigns this router's tunnel IP."]
+    iface = current.get("iface", {})
+    if not iface:
+        return ["No WireGuard tunnel yet. Set the hub details and Preview to "
+                "create one that dials your monitoring hub (RouterOS 7.1+)."]
+    addr = current.get("address", {}).get("address", "(no address)")
+    peer = current.get("peer", {})
+    out = [f"WireGuard '{_HUB_NAME}' present - tunnel IP {addr}",
+           f"router public key: {iface.get('public-key', '(appears after apply)')}"]
+    if peer:
+        out.append(f"dials hub {peer.get('endpoint-address', '?')}:"
+                   f"{peer.get('endpoint-port', '?')} - keepalive "
+                   f"{peer.get('persistent-keepalive', '?')}")
+    return out
 
 
 def hubtunnel_form(current, cfg):
-    o = current.get("sstp", {})
+    peer = current.get("peer", {})
+    addr = current.get("address", {})
     return [
-        {"type": "text", "name": "connect_to",
-         "label": "Hub address â your monitoring server's IP",
-         "value": o.get("connect-to", ""), "placeholder": "102.36.140.219",
-         "hint": "Use the server's IP for now (a DNS name can be added later). "
-                 "Connecting by IP means leaving 'verify server certificate' off."},
-        {"type": "text", "name": "port", "label": "Hub port (SSTP)",
-         "value": o.get("port", "") or "443"},
-        {"type": "text", "name": "user", "label": "VPN username",
-         "value": o.get("user", "")},
-        {"type": "text", "name": "password", "label": "VPN password", "value": "",
-         "placeholder": "(unchanged)" if o else ""},
-        {"type": "toggle", "name": "opt", "value": "verify",
-         "label": "Verify the hub's server certificate",
-         "on": _norm(o.get("verify-server-certificate", "")) == "true",
-         "desc": "Off is simplest (username/password only; required when "
-                 "connecting by IP)."},
+        {"type": "text", "name": "endpoint",
+         "label": "Hub address - your monitoring server's IP",
+         "value": peer.get("endpoint-address", ""),
+         "placeholder": "102.36.140.219"},
+        {"type": "text", "name": "port", "label": "Hub UDP port (WireGuard)",
+         "value": peer.get("endpoint-port", "") or "51820"},
+        {"type": "text", "name": "hub_pubkey",
+         "label": "Hub WireGuard public key",
+         "value": peer.get("public-key", ""),
+         "placeholder": "the monitoring server's WireGuard public key"},
+        {"type": "text", "name": "tunnel_ip",
+         "label": "This device's tunnel IP (with mask)",
+         "value": addr.get("address", ""), "placeholder": "10.10.0.2/24"},
+        {"type": "text", "name": "allowed",
+         "label": "Route to the hub (allowed-address)",
+         "value": peer.get("allowed-address", "") or "10.10.0.0/24"},
+        {"type": "text", "name": "keepalive", "label": "Persistent keepalive",
+         "value": peer.get("persistent-keepalive", "") or "25s",
+         "hint": "Keeps the NAT hole open so the hub can reach back (CGNAT)."},
     ]
 
 
 def hubtunnel_plan(pusher, cfg, flat, multi):
-    connect_to = flat.get("connect_to", "").strip()
-    if not connect_to:
-        return Plan(cfg.name, [], summary="sstp tunnel (need the hub IP)")
-    desired = {
-        "name": _HUB_NAME, "connect-to": connect_to,
-        "port": (flat.get("port", "") or "443").strip(),
-        "user": flat.get("user", "").strip(),
-        "verify-server-certificate": "true" if "verify"
-        in set(multi.get("opt", [])) else "false",
-        "add-default-route": "false", "disabled": "false",
-        "comment": _HUB_TAG + "sstp",
-    }
-    pwd = flat.get("password", "")
-    if pwd:  # RouterOS never returns the password â only set it when given
-        desired["password"] = pwd
-    return pusher.plan_managed_list(_HUB_SSTP, "name", [desired],
-                                    owns=_prefix_owner(_HUB_TAG),
-                                    label="sstp client")
+    endpoint = flat.get("endpoint", "").strip()
+    hub_pubkey = flat.get("hub_pubkey", "").strip()
+    tunnel_ip = flat.get("tunnel_ip", "").strip()
+    port = (flat.get("port", "") or "51820").strip()
+    allowed = (flat.get("allowed", "") or "10.10.0.0/24").strip()
+    if not (endpoint and hub_pubkey and tunnel_ip):
+        return Plan(cfg.name, [],
+                    summary="tunnel (need hub IP, hub key and tunnel IP)")
+    peer_cur = hubtunnel_read(pusher, cfg).get("peer", {})
+    ka = ((peer_cur.get("persistent-keepalive") if peer_cur
+           else flat.get("keepalive")) or "25s").strip() or "25s"
+    iface_plan = pusher.plan_managed_list(
+        _HUB_WG, "name", [{"name": _HUB_NAME, "comment": _HUB_TAG + "if"}],
+        owns=lambda r: r.get("name") == _HUB_NAME, label="wg interface")
+    addr_plan = pusher.plan_managed_list(
+        _HUB_ADDR, "address",
+        [{"address": tunnel_ip, "interface": _HUB_NAME,
+          "comment": _HUB_TAG + "addr"}],
+        owns=lambda r: r.get("interface") == _HUB_NAME, label="tunnel address")
+    peer_plan = pusher.plan_managed_list(
+        _HUB_PEERS, "comment",
+        [{"interface": _HUB_NAME, "public-key": hub_pubkey,
+          "endpoint-address": endpoint, "endpoint-port": port,
+          "allowed-address": allowed, "persistent-keepalive": ka,
+          "comment": _HUB_TAG + "hub"}],
+        owns=_prefix_owner(_HUB_TAG + "hub"), label="hub peer")
+    return Plan(cfg.name, iface_plan.ops + addr_plan.ops + peer_plan.ops,
+                summary="hub tunnel (wireguard)")
 
 
 # ===========================================================================

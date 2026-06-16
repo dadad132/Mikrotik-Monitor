@@ -521,36 +521,50 @@ check("disabling a block group removes its dns-static entries",
       and rm.inverse.action == "add")
 
 
-# ---- 15. hub tunnel — SSTP only, same on every unit (v6 and v7) ------------
-print("hub tunnel (SSTP):")
-SSTP = ("interface", "sstp-client")
-t_api = FakeApi({SSTP: []})
+# ---- 15. hub tunnel — WireGuard dial-home (RouterOS 7.1+) -------------------
+print("hub tunnel (WireGuard):")
+WG = ("interface", "wireguard")
+WGP = ("interface", "wireguard", "peers")
+IPA = ("ip", "address")
+t_api = FakeApi({WG: [], WGP: [], IPA: []})
 pt = Pusher(qcfg, t_api, dry_run=True)
 plan = F.hubtunnel_plan(pt, qcfg,
-                        {"connect_to": "102.36.140.219", "user": "router1",
-                         "password": "s3cret"}, {})
-ss = next((o for o in plan.ops if o.path == SSTP and o.action == "add"), None)
-check("hub tunnel creates a tagged SSTP client dialing the hub IP on 443",
-      ss is not None and ss.params.get("name") == "mikromon"
-      and ss.params.get("connect-to") == "102.36.140.219"
-      and ss.params.get("port") == "443"
-      and ss.params.get("user") == "router1"
-      and ss.params.get("password") == "s3cret"
-      and ss.params.get("comment", "").startswith("mikromon:tunnel:"))
-check("verify-server-certificate defaults off (connecting by IP)",
-      ss.params.get("verify-server-certificate") == "false")
-check("missing hub IP yields an empty (safe) plan",
-      F.hubtunnel_plan(pt, qcfg, {"connect_to": ""}, {}).empty)
-# idempotent: an already-configured SSTP client produces no changes (no password
-# resubmitted, so the volatile password field is not compared)
-cfgd = FakeApi({SSTP: [{".id": "*1", "name": "mikromon",
-                        "connect-to": "102.36.140.219", "port": "443",
-                        "user": "router1", "verify-server-certificate": "false",
-                        "add-default-route": "false", "disabled": "false",
-                        "comment": "mikromon:tunnel:sstp"}]})
+                        {"endpoint": "102.36.140.219", "port": "51820",
+                         "hub_pubkey": "HUBKEY==", "tunnel_ip": "10.10.0.2/24",
+                         "allowed": "10.10.0.0/24", "keepalive": "25s"}, {})
+iface_add = next((o for o in plan.ops if o.path == WG and o.action == "add"), None)
+addr_add = next((o for o in plan.ops if o.path == IPA and o.action == "add"), None)
+peer_add = next((o for o in plan.ops if o.path == WGP and o.action == "add"), None)
+check("hub tunnel creates the mikromon wireguard interface",
+      iface_add is not None and iface_add.params.get("name") == "mikromon")
+check("interface is created before the address/peer that reference it",
+      plan.ops.index(iface_add) < plan.ops.index(addr_add)
+      and plan.ops.index(iface_add) < plan.ops.index(peer_add))
+check("tunnel address bound to the interface",
+      addr_add.params.get("address") == "10.10.0.2/24"
+      and addr_add.params.get("interface") == "mikromon")
+check("peer dials the hub IP with the hub key + keepalive",
+      peer_add.params.get("public-key") == "HUBKEY=="
+      and peer_add.params.get("endpoint-address") == "102.36.140.219"
+      and peer_add.params.get("endpoint-port") == "51820"
+      and peer_add.params.get("persistent-keepalive") == "25s"
+      and peer_add.params.get("comment", "").startswith("mikromon:tunnel:"))
+check("missing hub IP / key / tunnel IP yields an empty (safe) plan",
+      F.hubtunnel_plan(pt, qcfg, {"endpoint": "x"}, {}).empty)
+cfgd = FakeApi({
+    WG: [{".id": "*1", "name": "mikromon", "public-key": "ROUTERPUB=",
+          "comment": "mikromon:tunnel:if"}],
+    IPA: [{".id": "*2", "address": "10.10.0.2/24", "interface": "mikromon",
+           "comment": "mikromon:tunnel:addr"}],
+    WGP: [{".id": "*3", "interface": "mikromon", "public-key": "HUBKEY==",
+           "endpoint-address": "102.36.140.219", "endpoint-port": "51820",
+           "allowed-address": "10.10.0.0/24", "persistent-keepalive": "25s",
+           "comment": "mikromon:tunnel:hub"}]})
 plan2 = F.hubtunnel_plan(Pusher(qcfg, cfgd, dry_run=True), qcfg,
-                         {"connect_to": "102.36.140.219", "user": "router1"}, {})
-check("re-applying an already-configured SSTP tunnel is a no-op", plan2.empty)
+                         {"endpoint": "102.36.140.219", "port": "51820",
+                          "hub_pubkey": "HUBKEY==", "tunnel_ip": "10.10.0.2/24",
+                          "allowed": "10.10.0.0/24", "keepalive": "25s"}, {})
+check("re-applying an already-configured WireGuard tunnel is a no-op", plan2.empty)
 
 
 # ---- 16. update RouterOS (check / install+reboot / firmware) ---------------

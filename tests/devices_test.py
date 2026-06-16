@@ -87,12 +87,18 @@ ip1 = web._alloc_tunnel_ip(hub, "A")
 ip2 = web._alloc_tunnel_ip(hub, "B")
 check("tunnel IPs are unique and stable per device",
       ip1 != ip2 and web._alloc_tunnel_ip(hub, "A") == ip1)
-secp = os.path.join(tmp, "sstp-secrets")
-ok1, _ = web._write_sstp_secret(secp, "branch7", "pw123", "10.10.0.2")
-ok2, _ = web._write_sstp_secret(secp, "branch7", "pwNEW", "10.10.0.2")
-seclines = open(secp).read().strip().splitlines()
-check("SSTP secret is written and updated (one chap-secrets line per user)",
-      ok1 and ok2 and seclines == ["branch7 * pwNEW 10.10.0.2"])
+peersp = os.path.join(tmp, "wg-peers.conf")
+ok1, _ = web._write_wg_peers(peersp, {
+    "branch7": {"ip": "10.10.0.2", "pubkey": "PUBKEYB7="},
+    "hq": {"ip": "10.10.0.3", "pubkey": "PUBKEYHQ="}})
+body_peers = open(peersp).read()
+check("WireGuard peers file lists each device as a [Peer]",
+      ok1 and "PublicKey = PUBKEYB7=" in body_peers
+      and "AllowedIPs = 10.10.0.2/32" in body_peers
+      and body_peers.count("[Peer]") == 2)
+kp = web._wg_keypair()
+check("wg keypair helper returns a tuple (priv/pub or graceful None+err)",
+      isinstance(kp, tuple) and len(kp) == 2)
 itab = web._interfaces_table({"ifaces": [
     {"name": "ether1", "type": "ether", "running": "true",
      "mac-address": "AA:BB", "mtu": "1500", "comment": "WAN"},
@@ -245,15 +251,15 @@ try:
           'type="password"' in body and "mmReveal" in body)
     st, body = post(admin, "/device/provision",
                     {"csrf": csrf, "device": "WebR1", "pwuser": "mikromon",
-                     "transport": "sstp", "hub": "monitor.example.com",
-                     "hub_port": "443", "harden": "1"})
-    check("provision generates a bootstrap script (user + API + SSTP)",
+                     "transport": "wg", "hub": "102.36.140.219", "harden": "1"})
+    check("provision generates a bootstrap script (user + API)",
           st == 200 and "/user add name=mikromon" in body
-          and "/ip service set api disabled=no" in body and "sstp-client" in body)
+          and "/ip service set api disabled=no" in body)
     check("provision script is guarded/idempotent (safe on configured units)",
           ":if ([:len [/user find name=mikromon]] = 0)" in body
-          and '[/system identity get name] = &quot;MikroTik&quot;' in body
-          and ":if ([:len [/interface sstp-client find name=mikromon]] = 0)" in body)
+          and '[/system identity get name] = &quot;MikroTik&quot;' in body)
+    check("WG hub not set up here -> prompts to run install.sh (no tunnel block)",
+          "install.sh" in body and "/interface wireguard add" not in body)
     saved = DevicesStore(wdb)
     raw = saved.raw("WebR1")
     check("provision saved a strong generated password as the push creds",
