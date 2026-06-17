@@ -312,12 +312,13 @@ Unit=mikromon-wg-reload.service
 WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
-  # Start wg-quick and print the journal on failure so the cause is visible.
+  # Start wg-quick and save the journal to a file on failure.
+  WG_LOG="${APP_DIR}/wg-install-error.log"
   if ! systemctl enable --now wg-quick@wg0; then
+    journalctl -n 60 -u wg-quick@wg0 --no-pager > "${WG_LOG}" 2>&1 || true
     echo ""
-    echo "--- wg-quick@wg0 journal (last 40 lines) ---"
-    journalctl -n 40 -u wg-quick@wg0 --no-pager || true
-    echo "--- end journal ---"
+    echo "WireGuard failed to start. Full error saved to: ${WG_LOG}"
+    echo "Run: cat ${WG_LOG}"
     exit 1
   fi
   systemctl enable --now mikromon-wg-reload.path
