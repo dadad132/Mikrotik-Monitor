@@ -284,16 +284,21 @@ set +e
     wg-quick down wg0 2>/dev/null || ip link delete wg0 2>/dev/null || true
   fi
 
+  # Plain WireGuard config — no PostUp.  Peers are loaded by
+  # mikromon-wg-reload.service AFTER wg-quick starts so we never run
+  # under wg-quick's restrictive AppArmor confinement.
   cat > /etc/wireguard/wg0.conf <<CONF
 [Interface]
 PrivateKey = ${HUB_PRIV}
 Address = 10.10.0.1/24
 ListenPort = ${WG_PORT}
-PostUp = bash -c 'test -s ${WG_PEERS} && wg addconf wg0 <(cat ${WG_PEERS}) || true'
 CONF
   chmod 600 /etc/wireguard/wg0.conf
-  # Whenever mikromon rewrites the peers file, sync the live interface.
-  # bash opens the files and passes them to wg via /dev/fd — bypasses AppArmor.
+
+  # This service runs as a plain systemd unit (not under wg-quick's AppArmor).
+  # bash can open /etc/wireguard/* freely; wg sees only an inherited fd.
+  # Enabled at boot so initial peers load after wg0 comes up.
+  # Also triggered by the path unit whenever mikromon writes new peers.
   cat > /etc/systemd/system/mikromon-wg-reload.service <<UNIT
 [Unit]
 Description=Apply mikromon WireGuard peers to wg0
@@ -302,6 +307,8 @@ Requires=wg-quick@wg0.service
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/bash -c 'wg syncconf wg0 <(cat /etc/wireguard/wg0.conf; cat ${WG_PEERS} 2>/dev/null || true)'
+[Install]
+WantedBy=multi-user.target
 UNIT
   cat > /etc/systemd/system/mikromon-wg-reload.path <<UNIT
 [Unit]
@@ -322,7 +329,10 @@ UNIT
     echo "Run: cat ${WG_LOG}"
     exit 1
   fi
+  # Load any already-registered peers immediately, then enable path watcher.
+  systemctl start mikromon-wg-reload.service || true
   systemctl enable --now mikromon-wg-reload.path
+  systemctl enable mikromon-wg-reload.service
   command -v ufw >/dev/null 2>&1 && ufw allow ${WG_PORT}/udp || true
   # publish the hub's public key + IP so the dashboard fills the router script
   HUB_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
