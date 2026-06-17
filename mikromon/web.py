@@ -2454,6 +2454,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if not commit:
                     return self._feature_tab_page(name, user, slug, preview=plan,
                                                   submitted=multi)
+                # After applying the hub-tunnel feature, register the router's
+                # WireGuard public key as a peer on this server automatically.
+                if slug == "hubtunnel" and devices_db:
+                    _register_hub_peer(name, pusher.api, flat, devices_db)
                 return self._redirect(
                     f"/device?name={quote(name)}&tab={slug}&msg=" +
                     quote("Changes applied to the router."))
@@ -2641,6 +2645,35 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._redirect("/", self._cookie_header(token))
 
     return Handler
+
+
+def _register_hub_peer(device_name: str, api, flat: dict, devices_db: str) -> None:
+    """After a successful hubtunnel apply, read the router's WireGuard public key
+    and add it as a peer in hub.json + wg-peers.conf so the server side is in sync.
+    Best-effort: any failure is silently swallowed so it never blocks the response."""
+    try:
+        from .push.features import _HUB_WG, _HUB_NAME
+        tunnel_ip = flat.get("tunnel_ip", "").strip().split("/")[0]
+        if not tunnel_ip:
+            return
+        ifaces = api.fetch(_HUB_WG)
+        router_pub = next(
+            (w.get("public-key", "") for w in ifaces if w.get("name") == _HUB_NAME),
+            "")
+        if not router_pub:
+            return  # keypair still generating — Provision tab handles the async case
+        hub_file = _hub_path(devices_db)
+        hub = _hub_load(hub_file)
+        peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
+        hub.setdefault("leases", {})[device_name] = tunnel_ip
+        hub.setdefault("leases_meta", {})[device_name] = {
+            "ip": tunnel_ip, "pubkey": router_pub}
+        leases = {n: {"ip": m.get("ip"), "pubkey": m.get("pubkey")}
+                  for n, m in hub.get("leases_meta", {}).items()}
+        _write_wg_peers(peers_path, leases)
+        _hub_save(hub_file, hub)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,

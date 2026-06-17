@@ -261,14 +261,19 @@ set +e
 PrivateKey = ${HUB_PRIV}
 Address = 10.10.0.1/24
 ListenPort = ${WG_PORT}
-# device peers are managed by mikromon in ${WG_PEERS} and merged on up/change
-PostUp = wg syncconf wg0 <(cat /etc/wireguard/wg0.conf ${WG_PEERS})
+# On startup, load any peers that mikromon has already registered.
+# wg addconf silently succeeds even if the peers file is empty.
+PostUp = wg addconf wg0 ${WG_PEERS}
 CONF
   chmod 600 /etc/wireguard/wg0.conf
-  # apply the peers file whenever mikromon rewrites it
+  # Whenever mikromon rewrites the peers file, sync the live interface.
+  # wg syncconf feeds the full merged config so peers removed from the file
+  # are also removed from the live interface.
   cat > /etc/systemd/system/mikromon-wg-reload.service <<UNIT
 [Unit]
 Description=Apply mikromon WireGuard peers to wg0
+After=wg-quick@wg0.service
+Requires=wg-quick@wg0.service
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/bash -c 'wg syncconf wg0 <(cat /etc/wireguard/wg0.conf ${WG_PEERS})'
