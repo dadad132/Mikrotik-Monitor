@@ -684,7 +684,7 @@ def _user_slug(s) -> str:
 # way the provisioning script is filled with the SERVER's real details and the
 # hub already accepts the peer — no manual entry, no mismatch.
 _HUB_SUBNET_DEFAULT = "10.10.0.0/24"
-_WG_PEERS_DEFAULT = "/opt/mikromon/wg-peers.conf"
+_WG_PEERS_DEFAULT = "/etc/wireguard/wg-peers.conf"
 _WG_PORT_DEFAULT = "51820"
 
 
@@ -1215,11 +1215,10 @@ def _hubtunnel_box(name, current) -> str:
     wg = ("# Ubuntu hub - WireGuard server (deploy/install.sh does this for you):\n"
           "sudo apt install wireguard\n"
           "# /etc/wireguard/wg0.conf (interface only; peers are managed by\n"
-          "#   mikromon in /opt/mikromon/wg-peers.conf):\n"
+          "#   mikromon in /etc/wireguard/wg-peers.conf):\n"
           "[Interface]\nPrivateKey = <hub private key>\nAddress = 10.10.0.1/24\n"
           "ListenPort = 51820\n"
-          "PostUp = wg syncconf wg0 <(cat /etc/wireguard/wg0.conf "
-          "/opt/mikromon/wg-peers.conf)")
+          "PostUp = wg addconf wg0 /etc/wireguard/wg-peers.conf")
     return (f'<div class="box"><h2>Hub (Ubuntu WireGuard server) setup</h2>'
             f'<p class="muted">Every device dials home with <b>WireGuard</b> '
             f'(needs RouterOS 7.1+). Run <code>sudo bash deploy/install.sh</code> '

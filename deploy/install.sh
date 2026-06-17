@@ -238,7 +238,7 @@ log "Web unit     : ${WEB_UNIT}"
 # the dashboard fills the router script automatically. Best-effort/guarded.
 # ---------------------------------------------------------------------------
 step "Setting up the WireGuard dial-home hub"
-WG_PEERS="${APP_DIR}/wg-peers.conf"
+WG_PEERS="/etc/wireguard/wg-peers.conf"
 WG_PORT=51820
 WG_SUBNET="10.10.0.0/24"
 set +e
