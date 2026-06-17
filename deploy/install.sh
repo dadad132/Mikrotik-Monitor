@@ -263,6 +263,11 @@ set +e
       exit 1
   fi
 
+  # IP forwarding must be on for the hub to relay packets between peers.
+  echo "net.ipv4.ip_forward=1"  > /etc/sysctl.d/99-wireguard.conf
+  echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.d/99-wireguard.conf
+  sysctl -p /etc/sysctl.d/99-wireguard.conf >/dev/null
+
   mkdir -p /etc/wireguard
   # peers file lives under APP_DIR so the (hardened) web service can write it
   [ -f "${WG_PEERS}" ] || install -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
@@ -273,19 +278,21 @@ set +e
   fi
   HUB_PRIV="$(cat /etc/wireguard/wg0.key)"
   HUB_PUB="$(cat /etc/wireguard/wg0.pub)"
+
+  # Tear down any leftover wg0 from a previous failed install attempt.
+  if ip link show wg0 &>/dev/null; then
+    wg-quick down wg0 2>/dev/null || ip link delete wg0 2>/dev/null || true
+  fi
+
   cat > /etc/wireguard/wg0.conf <<CONF
 [Interface]
 PrivateKey = ${HUB_PRIV}
 Address = 10.10.0.1/24
 ListenPort = ${WG_PORT}
-# On startup, load any peers that mikromon has already registered.
-# wg addconf silently succeeds even if the peers file is empty.
 PostUp = wg addconf wg0 ${WG_PEERS}
 CONF
   chmod 600 /etc/wireguard/wg0.conf
   # Whenever mikromon rewrites the peers file, sync the live interface.
-  # wg syncconf feeds the full merged config so peers removed from the file
-  # are also removed from the live interface.
   cat > /etc/systemd/system/mikromon-wg-reload.service <<UNIT
 [Unit]
 Description=Apply mikromon WireGuard peers to wg0
@@ -305,7 +312,14 @@ Unit=mikromon-wg-reload.service
 WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
-  systemctl enable --now wg-quick@wg0
+  # Start wg-quick and print the journal on failure so the cause is visible.
+  if ! systemctl enable --now wg-quick@wg0; then
+    echo ""
+    echo "--- wg-quick@wg0 journal (last 40 lines) ---"
+    journalctl -n 40 -u wg-quick@wg0 --no-pager || true
+    echo "--- end journal ---"
+    exit 1
+  fi
   systemctl enable --now mikromon-wg-reload.path
   command -v ufw >/dev/null 2>&1 && ufw allow ${WG_PORT}/udp || true
   # publish the hub's public key + IP so the dashboard fills the router script
