@@ -246,6 +246,23 @@ set +e
   set -e
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       wireguard wireguard-tools
+
+  # On many VPS providers (OVHcloud, Hetzner, etc.) the WireGuard kernel module
+  # ships in linux-modules-extra rather than the base kernel package.
+  KVER="$(uname -r)"
+  EXTRA_PKG="linux-modules-extra-${KVER}"
+  if apt-cache show "${EXTRA_PKG}" &>/dev/null; then
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          "${EXTRA_PKG}" || true
+  fi
+  # Load the module now; wg-quick@wg0 won't start without it.
+  modprobe wireguard 2>/dev/null || true
+  if ! modinfo wireguard &>/dev/null; then
+      echo "WireGuard kernel module not available for kernel ${KVER}."
+      echo "Reboot into a stock Ubuntu kernel and re-run the installer."
+      exit 1
+  fi
+
   mkdir -p /etc/wireguard
   # peers file lives under APP_DIR so the (hardened) web service can write it
   [ -f "${WG_PEERS}" ] || install -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
