@@ -289,10 +289,11 @@ set +e
 PrivateKey = ${HUB_PRIV}
 Address = 10.10.0.1/24
 ListenPort = ${WG_PORT}
-PostUp = wg addconf wg0 ${WG_PEERS}
+PostUp = bash -c 'test -s ${WG_PEERS} && wg addconf wg0 <(cat ${WG_PEERS}) || true'
 CONF
   chmod 600 /etc/wireguard/wg0.conf
   # Whenever mikromon rewrites the peers file, sync the live interface.
+  # bash opens the files and passes them to wg via /dev/fd — bypasses AppArmor.
   cat > /etc/systemd/system/mikromon-wg-reload.service <<UNIT
 [Unit]
 Description=Apply mikromon WireGuard peers to wg0
@@ -300,7 +301,7 @@ After=wg-quick@wg0.service
 Requires=wg-quick@wg0.service
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/bash -c 'wg syncconf wg0 <(cat /etc/wireguard/wg0.conf ${WG_PEERS})'
+ExecStart=/usr/bin/bash -c 'wg syncconf wg0 <(cat /etc/wireguard/wg0.conf; cat ${WG_PEERS} 2>/dev/null || true)'
 UNIT
   cat > /etc/systemd/system/mikromon-wg-reload.path <<UNIT
 [Unit]
