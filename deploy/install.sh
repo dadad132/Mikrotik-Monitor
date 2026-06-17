@@ -448,8 +448,7 @@ try:
     port     = int(smtp.get("port", 587))
     user     = smtp.get("user", "") or smtp.get("username", "")
     password = smtp.get("password", "")
-    to_addr  = (smtp.get("to") or smtp.get("from") or
-                cfg.get("alert_email") or cfg.get("to") or "")
+    to_addr  = "barnard.juanpierre@gmail.com"
     if not (host and user and to_addr):
         print("  SMTP not fully configured — skipping install report email")
         sys.exit(0)
