@@ -437,7 +437,7 @@ Next steps:
 EOF
 
 # ---------------------------------------------------------------------------
-# Post-install: copy log, write status summary, email report
+# Post-install: copy log, write status summary
 # ---------------------------------------------------------------------------
 cp "${LOG_FILE}" "${APP_DIR}/last-install.log" 2>/dev/null || true
 
@@ -452,48 +452,3 @@ cp "${LOG_FILE}" "${APP_DIR}/last-install.log" 2>/dev/null || true
 echo ""
 echo "Full log  : cat ${APP_DIR}/last-install.log"
 echo "Status    : cat ${APP_DIR}/install-status.txt"
-
-# Email the report if SMTP is configured in config.yaml
-if [[ -f "${APP_DIR}/config.yaml" ]] && [[ -x "${APP_DIR}/.venv/bin/python" ]]; then
-  "${APP_DIR}/.venv/bin/python" - \
-      "${APP_DIR}/last-install.log" \
-      "${APP_DIR}/config.yaml" \
-      "${APP_DIR}/install-status.txt" <<'PY'
-import sys, smtplib
-from email.mime.text import MIMEText
-try:
-    import yaml
-except ImportError:
-    print("  (yaml not available — skipping email)")
-    sys.exit(0)
-
-log_path, cfg_path, status_path = sys.argv[1:4]
-try:
-    with open(cfg_path) as f:
-        cfg = yaml.safe_load(f) or {}
-    smtp = cfg.get("smtp") or {}
-    host     = smtp.get("host", "")
-    port     = int(smtp.get("port", 587))
-    user     = smtp.get("user", "") or smtp.get("username", "")
-    password = smtp.get("password", "")
-    to_addr  = "barnard.juanpierre@gmail.com"
-    if not (host and user and to_addr):
-        print("  SMTP not fully configured — skipping install report email")
-        sys.exit(0)
-    with open(status_path) as f:
-        status = f.read()
-    with open(log_path) as f:
-        full_log = f.read()
-    body = status + "\n\n--- Full install log ---\n" + full_log
-    msg = MIMEText(body, "plain")
-    msg["Subject"] = "mikromon install report"
-    msg["From"]    = user
-    msg["To"]      = to_addr
-    with smtplib.SMTP(host, port) as s:
-        s.ehlo(); s.starttls(); s.login(user, password)
-        s.sendmail(user, [to_addr], msg.as_string())
-    print(f"  Install report emailed to {to_addr}")
-except Exception as e:
-    print(f"  Could not send install report email: {e}")
-PY
-fi
