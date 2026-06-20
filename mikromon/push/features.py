@@ -1057,113 +1057,82 @@ def harden_plan(pusher, cfg, flat, multi):
 
 
 # ===========================================================================
-# Hub tunnel (dial-home) - the router dials OUT to the monitoring hub over
-# WireGuard so it is reachable at a CONSTANT private IP with no public IP and
-# through CGNAT (persistent-keepalive holds the NAT hole open). Requires
-# RouterOS 7.1+ (WireGuard). The router generates its own keypair; we read the
-# public key back so it can be added as a peer on the hub. Provisioning (the
-# Provision tab) automates the hub side end-to-end.
+# Hub tunnel (dial-home) — the router joins a ZeroTier network so the
+# monitoring server can reach it at a stable private IP even behind NAT/CGNAT.
+# Requires RouterOS 7.1+ and a free ZeroTier network (my.zerotier.com).
+# No key management needed — ZeroTier handles NAT traversal automatically.
 # ===========================================================================
-_HUB_WG = ("interface", "wireguard")
-_HUB_PEERS = ("interface", "wireguard", "peers")
-_HUB_ADDR = ("ip", "address")
+_ZT_INST = ("zerotier",)
+_ZT_IFACE = ("zerotier", "interface")
 _HUB_TAG = "mikromon:tunnel:"
-_HUB_NAME = "mikromon"
+_HUB_ZT_INSTANCE = "zt1"
+_HUB_ZT_IFACE_NAME = "ztmikromon"
 
 
 def hubtunnel_read(pusher, cfg):
-    ifaces = [r for r in pusher.api.fetch(_HUB_WG) if r.get("name") == _HUB_NAME]
-    addrs = [r for r in pusher.api.fetch(_HUB_ADDR)
-             if r.get("interface") == _HUB_NAME]
-    peers = [r for r in pusher.api.fetch(_HUB_PEERS)
-             if str(r.get("comment", "")).startswith(_HUB_TAG)]
-    return {"iface": ifaces[0] if ifaces else {},
-            "address": addrs[0] if addrs else {},
-            "peer": peers[0] if peers else {}}
+    try:
+        instances = [r for r in pusher.api.fetch(_ZT_INST)
+                     if r.get("name") == _HUB_ZT_INSTANCE]
+    except Exception:
+        instances = []
+    try:
+        networks = [r for r in pusher.api.fetch(_ZT_IFACE)
+                    if str(r.get("comment", "")).startswith(_HUB_TAG)]
+    except Exception:
+        networks = []
+    return {"instance": instances[0] if instances else {},
+            "network": networks[0] if networks else {}}
 
 
 def hubtunnel_summary(current, cfg):
-    iface = current.get("iface", {})
-    if not iface:
-        return ["No WireGuard tunnel yet. Set the hub details and Preview to "
-                "create one that dials your monitoring hub (RouterOS 7.1+)."]
-    addr = current.get("address", {}).get("address", "(no address)")
-    peer = current.get("peer", {})
-    out = [f"WireGuard '{_HUB_NAME}' present - tunnel IP {addr}",
-           f"router public key: {iface.get('public-key', '(appears after apply)')}"]
-    if peer:
-        out.append(f"dials hub {peer.get('endpoint-address', '?')}:"
-                   f"{peer.get('endpoint-port', '?')} - keepalive "
-                   f"{peer.get('persistent-keepalive', '?')}")
-    return out
+    network = current.get("network", {})
+    if not network:
+        return ["No ZeroTier tunnel yet. Enter the ZeroTier Network ID and "
+                "click Apply (RouterOS 7.1+)."]
+    net_id = network.get("network", "(unknown)")
+    return [f"ZeroTier network {net_id} joined",
+            "Authorize this router in ZeroTier Central (my.zerotier.com) "
+            "then update the Host on the Devices page to its ZeroTier IP."]
 
 
 def hubtunnel_form(current, cfg):
-    peer = current.get("peer", {})
-    addr = current.get("address", {})
+    network = current.get("network", {})
     return [
-        {"type": "text", "name": "endpoint",
-         "label": "Hub address - your monitoring server's IP",
-         "value": peer.get("endpoint-address", ""),
-         "placeholder": "102.36.140.219"},
-        {"type": "text", "name": "port", "label": "Hub UDP port (WireGuard)",
-         "value": peer.get("endpoint-port", "") or "51820"},
-        {"type": "text", "name": "hub_pubkey",
-         "label": "Hub WireGuard public key",
-         "value": peer.get("public-key", ""),
-         "placeholder": "the monitoring server's WireGuard public key"},
-        {"type": "text", "name": "tunnel_ip",
-         "label": "This device's tunnel IP (with mask)",
-         "value": addr.get("address", ""), "placeholder": "10.10.0.2/24"},
-        {"type": "text", "name": "allowed",
-         "label": "Route to the hub (allowed-address)",
-         "value": peer.get("allowed-address", "") or "10.10.0.0/24"},
-        {"type": "text", "name": "keepalive", "label": "Persistent keepalive",
-         "value": peer.get("persistent-keepalive", "") or "25s",
-         "hint": "Keeps the NAT hole open so the hub can reach back (CGNAT)."},
+        {"type": "text", "name": "zt_network_id",
+         "label": "ZeroTier Network ID (from my.zerotier.com)",
+         "value": network.get("network", ""),
+         "placeholder": "1234567890abcdef"},
     ]
 
 
 def hubtunnel_plan(pusher, cfg, flat, multi):
-    endpoint = flat.get("endpoint", "").strip()
-    hub_pubkey = flat.get("hub_pubkey", "").strip()
-    tunnel_ip = flat.get("tunnel_ip", "").strip()
-    port = (flat.get("port", "") or "51820").strip()
-    allowed = (flat.get("allowed", "") or "10.10.0.0/24").strip()
-    if not (endpoint and hub_pubkey and tunnel_ip):
+    zt_network_id = flat.get("zt_network_id", "").strip()
+    if not zt_network_id:
+        return Plan(cfg.name, [], summary="tunnel (enter ZeroTier Network ID)")
+    major, minor, ver_str = _ros_version(pusher.api)
+    if major and (major, minor) < (7, 1):
         return Plan(cfg.name, [],
-                    summary="tunnel (need hub IP, hub key and tunnel IP)")
-    peer_cur = hubtunnel_read(pusher, cfg).get("peer", {})
-    ka = ((peer_cur.get("persistent-keepalive") if peer_cur
-           else flat.get("keepalive")) or "25s").strip() or "25s"
-    iface_plan = pusher.plan_managed_list(
-        _HUB_WG, "name", [{"name": _HUB_NAME, "comment": _HUB_TAG + "if"}],
-        owns=lambda r: r.get("name") == _HUB_NAME, label="wg interface")
-    addr_plan = pusher.plan_managed_list(
-        _HUB_ADDR, "address",
-        [{"address": tunnel_ip, "interface": _HUB_NAME,
-          "comment": _HUB_TAG + "addr"}],
-        owns=lambda r: r.get("interface") == _HUB_NAME, label="tunnel address")
-    peer_plan = pusher.plan_managed_list(
-        _HUB_PEERS, "comment",
-        [{"interface": _HUB_NAME, "public-key": hub_pubkey,
-          "endpoint-address": endpoint, "endpoint-port": port,
-          "allowed-address": allowed, "persistent-keepalive": ka,
-          "comment": _HUB_TAG + "hub"}],
-        owns=_prefix_owner(_HUB_TAG + "hub"), label="hub peer")
-    return Plan(cfg.name, iface_plan.ops + addr_plan.ops + peer_plan.ops,
-                summary="hub tunnel (wireguard)")
+                    summary=f"zerotier not available (RouterOS {ver_str}, requires 7.1+)")
+    inst_plan = pusher.plan_managed_list(
+        _ZT_INST, "name",
+        [{"name": _HUB_ZT_INSTANCE, "comment": _HUB_TAG + "inst"}],
+        owns=lambda r: r.get("name") == _HUB_ZT_INSTANCE,
+        label="zerotier instance")
+    net_plan = pusher.plan_managed_list(
+        _ZT_IFACE, "network",
+        [{"instance": _HUB_ZT_INSTANCE, "network": zt_network_id,
+          "name": _HUB_ZT_IFACE_NAME, "comment": _HUB_TAG + "if"}],
+        owns=lambda r: str(r.get("comment", "")).startswith(_HUB_TAG + "if"),
+        label="zerotier network")
+    return Plan(cfg.name, inst_plan.ops + net_plan.ops,
+                summary="hub tunnel (zerotier)")
 
 
 # ===========================================================================
 # Zero-touch provisioning over the API — mikromon connects to the router and
-# applies everything itself (no script to paste). Idempotent: each step checks
-# what's already there. Returns the router's WireGuard public key so the caller
-# can register it as a peer on the hub.
+# applies everything itself (no script to paste). Idempotent.
 # ===========================================================================
-def provision_apply(api, name, pwuser, pwd, *, harden=True, hub_pubkey="",
-                    hub_ip="", port="51820", subnet="10.10.0.0/24",
-                    tunnel_ip=""):
+def provision_apply(api, name, pwuser, pwd, *, harden=True, zt_network_id=""):
     steps = []
 
     def do(op):
@@ -1198,32 +1167,26 @@ def provision_apply(api, name, pwuser, pwd, *, harden=True, hub_pubkey="",
                              {".id": s[".id"], "disabled": "yes"},
                              desc=f"disable {s.get('name')}"))
 
-    # 4) WireGuard dial-home tunnel (RouterOS 7.1+) — only if the hub is ready
-    router_pub = ""
-    if hub_pubkey and tunnel_ip:
-        wg = next((w for w in api.fetch(_HUB_WG)
-                   if w.get("name") == _HUB_NAME), None)
-        if wg is None:
-            do(Operation("add", _HUB_WG,
-                         {"name": _HUB_NAME, "listen-port": "13231",
-                          "comment": _HUB_TAG + "if"},
-                         desc="add WireGuard interface mikromon"))
-            wg = next((w for w in api.fetch(_HUB_WG)
-                       if w.get("name") == _HUB_NAME), None)
-        router_pub = (wg or {}).get("public-key", "")
-        if not any(a.get("interface") == _HUB_NAME
-                   for a in api.fetch(_HUB_ADDR)):
-            do(Operation("add", _HUB_ADDR,
-                         {"address": tunnel_ip + "/24", "interface": _HUB_NAME,
-                          "comment": _HUB_TAG + "addr"}, desc="add tunnel address"))
-        if not any(str(p.get("comment", "")).startswith(_HUB_TAG)
-                   for p in api.fetch(_HUB_PEERS)):
-            do(Operation("add", _HUB_PEERS,
-                         {"interface": _HUB_NAME, "public-key": hub_pubkey,
-                          "endpoint-address": hub_ip, "endpoint-port": port,
-                          "allowed-address": subnet, "persistent-keepalive": "25s",
-                          "comment": _HUB_TAG + "hub"}, desc="add hub peer"))
-    return {"router_pubkey": router_pub, "steps": steps}
+    # 4) ZeroTier dial-home tunnel (RouterOS 7.1+) — only if network ID is set
+    if zt_network_id:
+        instances = api.fetch(_ZT_INST)
+        if not any(i.get("name") == _HUB_ZT_INSTANCE for i in instances):
+            do(Operation("add", _ZT_INST,
+                         {"name": _HUB_ZT_INSTANCE, "comment": _HUB_TAG + "inst"},
+                         desc=f"add ZeroTier instance {_HUB_ZT_INSTANCE}"))
+        networks = api.fetch(_ZT_IFACE)
+        if not any(n.get("network") == zt_network_id for n in networks):
+            do(Operation("add", _ZT_IFACE,
+                         {"instance": _HUB_ZT_INSTANCE, "network": zt_network_id,
+                          "name": _HUB_ZT_IFACE_NAME, "comment": _HUB_TAG + "if"},
+                         desc=f"join ZeroTier network {zt_network_id}"))
+        fw = api.fetch(("ip", "firewall", "filter"))
+        if not any(f.get("comment") == _HUB_TAG + "fw" for f in fw):
+            do(Operation("add", ("ip", "firewall", "filter"),
+                         {"chain": "input", "in-interface": _HUB_ZT_IFACE_NAME,
+                          "action": "accept", "comment": _HUB_TAG + "fw"},
+                         desc="allow tunnel traffic in firewall"))
+    return {"steps": steps}
 
 
 # ===========================================================================

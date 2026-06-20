@@ -22,7 +22,7 @@ PrivateTmp=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
-ReadWritePaths=/opt/mikromon /etc/wireguard
+ReadWritePaths=/opt/mikromon
 
 [Install]
 WantedBy=multi-user.target
