@@ -246,6 +246,7 @@ step "Setting up the WireGuard dial-home hub"
 WG_PEERS="/etc/wireguard/wg-peers.conf"
 WG_PORT=51820
 WG_SUBNET="10.10.0.0/24"
+WG_LOG="${APP_DIR}/wg-install-error.log"
 set +e
 (
   set -e
@@ -326,7 +327,6 @@ WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
   # Start wg-quick and save the journal to a file on failure.
-  WG_LOG="${APP_DIR}/wg-install-error.log"
   if ! systemctl enable --now wg-quick@wg0; then
     journalctl -n 60 -u wg-quick@wg0 --no-pager > "${WG_LOG}" 2>&1 || true
     echo ""
@@ -365,6 +365,9 @@ else
   log "WARN: WireGuard hub step failed/skipped. The dashboard still generates"
   log "      router scripts; set up WireGuard manually and put the hub public"
   log "      key + IP into ${APP_DIR}/hub.json."
+  log ""
+  log "      WireGuard error log : cat ${WG_LOG}"
+  log "      Full install log    : cat ${APP_DIR}/last-install.log"
 fi
 
 # Resolve the server's primary IP for the final message.

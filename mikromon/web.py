@@ -1213,12 +1213,12 @@ def _hubtunnel_box(name, current) -> str:
     """Hub-side (Ubuntu WireGuard server) setup help. deploy/install.sh sets this
     up automatically; the Provision tab registers each device as a peer."""
     wg = ("# Ubuntu hub - WireGuard server (deploy/install.sh does this for you):\n"
-          "sudo apt install wireguard\n"
-          "# /etc/wireguard/wg0.conf (interface only; peers are managed by\n"
-          "#   mikromon in /etc/wireguard/wg-peers.conf):\n"
+          "sudo apt install wireguard wireguard-tools\n"
+          "# /etc/wireguard/wg0.conf — NO PostUp; peers are applied by\n"
+          "#   mikromon-wg-reload.service (a separate systemd unit that runs\n"
+          "#   outside wg-quick's AppArmor confinement):\n"
           "[Interface]\nPrivateKey = <hub private key>\nAddress = 10.10.0.1/24\n"
-          "ListenPort = 51820\n"
-          "PostUp = wg addconf wg0 /etc/wireguard/wg-peers.conf")
+          "ListenPort = 51820")
     return (f'<div class="box"><h2>Hub (Ubuntu WireGuard server) setup</h2>'
             f'<p class="muted">Every device dials home with <b>WireGuard</b> '
             f'(needs RouterOS 7.1+). Run <code>sudo bash deploy/install.sh</code> '
