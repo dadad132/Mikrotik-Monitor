@@ -825,6 +825,11 @@ def _provision_script(name, raw, pwuser, pwd, *, hub_ip="", hub_port="51820",
           + port + " allowed-address=" + net
           + ' persistent-keepalive=25s comment="mikromon:tunnel:hub"')
         a("}")
+        a(":if ([:len [/ip firewall filter find "
+          'comment="mikromon:tunnel:fw"]] = 0) do={')
+        a('  /ip firewall filter add chain=input in-interface=mikromon '
+          'action=accept comment="mikromon:tunnel:fw"')
+        a("}")
     a("")
     a('/log info "mikromon provisioning done"')
     return "\n".join(L)

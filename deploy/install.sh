@@ -352,7 +352,11 @@ UNIT
   systemctl start mikromon-wg-reload.service || true
   systemctl enable --now mikromon-wg-reload.path
   systemctl enable mikromon-wg-reload.service
-  command -v ufw >/dev/null 2>&1 && ufw allow ${WG_PORT}/udp || true
+  if command -v ufw >/dev/null 2>&1; then
+    ufw allow ${WG_PORT}/udp          # WireGuard handshake port
+    ufw allow in  on wg0              # traffic arriving from tunnel peers
+    ufw allow out on wg0              # responses going back through the tunnel
+  fi
   # publish the hub's public key + IP so the dashboard fills the router script
   HUB_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
   "${APP_DIR}/.venv/bin/python" - "${APP_DIR}/hub.json" "${HUB_PUB}" \
