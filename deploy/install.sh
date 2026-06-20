@@ -261,13 +261,17 @@ set +e
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
           "${EXTRA_PKG}" || true
   fi
-  # Load the module now; wg-quick@wg0 won't start without it.
+  # Load the module now (wireguard may be a loadable module or built-in).
   modprobe wireguard 2>/dev/null || true
-  if ! modinfo wireguard &>/dev/null; then
-      echo "WireGuard kernel module not available for kernel ${KVER}."
+  # Use a direct kernel capability test: try to create a probe interface.
+  # This works for both loadable modules AND built-in kernels (where modinfo
+  # finds no .ko file and returns 1 even though wireguard is available).
+  if ! ip link add wg-probe type wireguard 2>/dev/null; then
+      echo "WireGuard kernel support not available for kernel ${KVER}."
       echo "Reboot into a stock Ubuntu kernel and re-run the installer."
       exit 1
   fi
+  ip link delete wg-probe 2>/dev/null || true
 
   # IP forwarding must be on for the hub to relay packets between peers.
   echo "net.ipv4.ip_forward=1"  > /etc/sysctl.d/99-wireguard.conf
@@ -278,17 +282,22 @@ set +e
   # peers file lives under APP_DIR so the (hardened) web service can write it
   [ -f "${WG_PEERS}" ] || install -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
       -m 640 /dev/null "${WG_PEERS}"
+
+  # Stop the wg-quick service first so systemd doesn't immediately respawn
+  # the interface while we reconfigure (handles re-runs cleanly).
+  systemctl stop wg-quick@wg0 2>/dev/null || true
+
+  # Tear down any leftover wg0 interface.
+  if ip link show wg0 &>/dev/null; then
+    ip link delete wg0 2>/dev/null || true
+  fi
+
   if [ ! -f /etc/wireguard/wg0.key ]; then
     umask 077
     wg genkey | tee /etc/wireguard/wg0.key | wg pubkey > /etc/wireguard/wg0.pub
   fi
   HUB_PRIV="$(cat /etc/wireguard/wg0.key)"
   HUB_PUB="$(cat /etc/wireguard/wg0.pub)"
-
-  # Tear down any leftover wg0 from a previous failed install attempt.
-  if ip link show wg0 &>/dev/null; then
-    wg-quick down wg0 2>/dev/null || ip link delete wg0 2>/dev/null || true
-  fi
 
   # Plain WireGuard config — no PostUp.  Peers are loaded by
   # mikromon-wg-reload.service AFTER wg-quick starts so we never run
@@ -326,8 +335,10 @@ Unit=mikromon-wg-reload.service
 WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
-  # Start wg-quick and save the journal to a file on failure.
-  if ! systemctl enable --now wg-quick@wg0; then
+  # Enable the service at boot, then (re)start it so it always picks up the
+  # freshly-written wg0.conf regardless of whether it was already running.
+  systemctl enable wg-quick@wg0
+  if ! systemctl restart wg-quick@wg0; then
     journalctl -n 60 -u wg-quick@wg0 --no-pager > "${WG_LOG}" 2>&1 || true
     echo ""
     echo "WireGuard failed to start. Full error saved to: ${WG_LOG}"
