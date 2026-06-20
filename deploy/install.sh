@@ -279,7 +279,10 @@ set +e
   sysctl -p /etc/sysctl.d/99-wireguard.conf >/dev/null
 
   mkdir -p /etc/wireguard
-  # peers file lives under APP_DIR so the (hardened) web service can write it
+  # The wireguard package sets /etc/wireguard to 700 root:root.  Grant the
+  # service user traverse + read so it can write wg-peers.conf inside.
+  chmod 750 /etc/wireguard
+  chgrp "${SERVICE_USER}" /etc/wireguard
   [ -f "${WG_PEERS}" ] || install -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
       -m 640 /dev/null "${WG_PEERS}"
 
@@ -369,6 +372,13 @@ PY
 )
 WG_OK=$?
 set -e
+# Guarantee the peers file is accessible regardless of WG install outcome.
+# (The wireguard package sets /etc/wireguard to 700; fix it unconditionally.)
+mkdir -p /etc/wireguard
+chmod 750 /etc/wireguard
+chgrp "${SERVICE_USER}" /etc/wireguard
+[ -f "${WG_PEERS}" ] || install -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
+    -m 640 /dev/null "${WG_PEERS}"
 if [ "${WG_OK}" -eq 0 ]; then
   log "WireGuard hub up (wg0 on :${WG_PORT}/udp); peers: ${WG_PEERS}"
   log "Hub public key: $(cat /etc/wireguard/wg0.pub 2>/dev/null)"
