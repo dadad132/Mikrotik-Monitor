@@ -268,6 +268,11 @@ PY
     )" || ZT_NETWORK=""
   fi
 
+  # Open ZeroTier's UDP port so peers can make direct connections to this server.
+  if command -v ufw >/dev/null 2>&1; then
+    ufw allow 9993/udp comment "ZeroTier" || true
+  fi
+
   if [[ -n "${ZT_NETWORK}" ]]; then
     zerotier-cli join "${ZT_NETWORK}" || true
     log "Joined ZeroTier network ${ZT_NETWORK}"
