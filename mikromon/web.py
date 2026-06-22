@@ -464,7 +464,25 @@ _DASH_JS = """
 </script>"""
 
 
-def _render_dashboard(store, state, user=None, allowed=None) -> str:
+def _zt_setup_banner(csrf: str) -> str:
+    return (
+        '<div style="background:#fffbeb;border-left:4px solid #d97706;padding:14px 20px;'
+        'margin:16px auto;max-width:1100px;border-radius:6px">'
+        '<b>ZeroTier not configured</b> — set up your dial-home tunnel so routers '
+        'behind NAT can connect back to this server.<br>'
+        '<small style="color:#92400e">Create a free network at '
+        '<a href="https://my.zerotier.com" target="_blank">my.zerotier.com</a>, '
+        'then paste the Network ID below.</small>'
+        f'<form method="POST" action="/admin/zerotier" '
+        f'style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        '<input name="zt_network_id" placeholder="ZeroTier Network ID (e.g. 1a2b3c4d5e6f7890)" '
+        'style="flex:1;min-width:260px">'
+        '<button class="btn" type="submit">Save &amp; activate</button>'
+        '</form></div>')
+
+
+def _render_dashboard(store, state, user=None, allowed=None, zt_banner="") -> str:
     devs = sorted(_all_devices(store, state, allowed),
                   key=lambda d: ({"crit": 0, "warn": 1, "ok": 2}[_severity(d)],
                                  d["device"].lower()))
@@ -496,6 +514,7 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
     return (f'<!doctype html><html><head><meta charset="utf-8">'
             f'<meta http-equiv="refresh" content="10"><title>mikromon</title>'
             f'<style>{_PAGE_CSS}</style></head><body>{_header(user)}'
+            f'{zt_banner}'
             f'{_render_noc_bar(summary)}{charts}{fbar}'
             f'<div class="grid">{grid}</div>{empty}{_DASH_JS}</body></html>')
 
@@ -1464,7 +1483,31 @@ def _device_chips(known_devices, selected, all_on) -> str:
             f'{chips}</div></div>')
 
 
-def _render_admin(auth: AuthStore, known_devices, csrf: str, user) -> str:
+def _render_admin(auth: AuthStore, known_devices, csrf: str, user, hub=None) -> str:
+    hub = hub or {}
+    zt_net = hub.get("zt_network_id", "")
+    zt_node = hub.get("zt_node_id", "")
+    zt_status = ('<span style="color:#16a34a">&#10003; Configured</span>'
+                 if zt_net else
+                 '<span style="color:#d97706">&#9888; Not configured</span>')
+    zt_box = (
+        f'<div class="box" id="zerotier"><h2>ZeroTier tunnel settings</h2>'
+        f'<p class="muted">Routers join this ZeroTier network to dial home to '
+        f'this server through NAT/CGNAT. Create a free network at '
+        f'<a href="https://my.zerotier.com" target="_blank">my.zerotier.com</a> '
+        f'and enable <b>Auto-Approve Members</b> in the network settings.</p>'
+        f'<p>Status: {zt_status}</p>'
+        f'<form method="POST" action="/admin/zerotier">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<div class="actions" style="flex-wrap:wrap;margin-bottom:8px">'
+        f'<input name="zt_network_id" value="{esc(zt_net)}" '
+        f'placeholder="Network ID (e.g. 1a2b3c4d5e6f7890)" style="flex:1;min-width:220px">'
+        f'<button class="btn" type="submit">Save</button>'
+        f'</div>'
+        + (f'<p class="muted" style="margin:0">Server ZeroTier node ID: '
+           f'<code>{esc(zt_node)}</code> — authorize this in ZeroTier Central.</p>'
+           if zt_node else '')
+        + f'</form></div>')
     rows = []
     for u in auth.list_users():
         is_all = u["devices"] == "*"
@@ -1495,8 +1538,9 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user) -> str:
             </form>
           </td></tr>""")
     inner = (
-        f'<div class="wrap"><h1>User management</h1>'
-        f'<div class="box"><table>'
+        f'<div class="wrap"><h1>Admin</h1>'
+        f'{zt_box}'
+        f'<div class="box"><h2>User management</h2><table>'
         f'<tr><th>User</th><th>Role</th><th>Allowed devices</th><th></th></tr>'
         f'{"".join(rows)}</table></div>'
         f'<div class="box"><h2>Add a user</h2>'
@@ -1512,7 +1556,7 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user) -> str:
         f'<div style="margin-top:14px">'
         f'<button class="btn" type="submit">Create user</button></div>'
         f'</form></div></div>')
-    return _page("Users", _header(user, "/admin") + inner + _ADMIN_JS)
+    return _page("Admin", _header(user, "/admin") + inner + _ADMIN_JS)
 
 
 def _page(title: str, body: str) -> str:
@@ -1832,8 +1876,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             try:
                 state = _load_state(state_file)
                 if path == "/":
+                    zt_banner = ""
+                    if AuthStore.is_admin(user) and devices_db:
+                        hub = _hub_load(_hub_path(devices_db))
+                        if not hub.get("zt_network_id"):
+                            zt_banner = _zt_setup_banner(self._session()["csrf"])
                     return self._send(200, _render_dashboard(store, state, user,
-                                      allowed), "text/html; charset=utf-8")
+                                      allowed, zt_banner=zt_banner),
+                                      "text/html; charset=utf-8")
                 if path == "/inventory":
                     return self._send(200, _render_inventory(store, state, user,
                                       allowed), "text/html; charset=utf-8")
@@ -1911,8 +1961,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             store = self._store()
             known = _known_devices(store, _load_state(state_file))
             store.close()
+            hub = _hub_load(_hub_path(devices_db)) if devices_db else {}
             return self._send(200, _render_admin(
-                auth, known, self._session()["csrf"], user),
+                auth, known, self._session()["csrf"], user, hub=hub),
                 "text/html; charset=utf-8")
 
         # ---- device management (admin only) ----
@@ -2477,6 +2528,16 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._device_adopt_post(flat, user)
             if path == "/device/wan":
                 return self._device_wan_post(flat, multi, user)
+            if path == "/admin/zerotier":
+                if not AuthStore.is_admin(user):
+                    return self._send(403, "forbidden")
+                zt_net = flat.get("zt_network_id", "").strip()
+                if devices_db:
+                    hub_file = _hub_path(devices_db)
+                    hub = _hub_load(hub_file)
+                    hub["zt_network_id"] = zt_net
+                    _hub_save(hub_file, hub)
+                return self._redirect("/admin#zerotier")
             try:
                 if path == "/admin/add":
                     auth.add_user(flat.get("username", ""), flat.get("password", ""),
