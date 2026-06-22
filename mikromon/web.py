@@ -280,7 +280,7 @@ def _nav(user, active) -> str:
     items = [("/", "Dashboard"), ("/inventory", "Inventory")]
     if user.get("role") == "admin":
         items += [("/devices", "Devices"), ("/logs", "Activity"),
-                  ("/admin", "Users")]
+                  ("/admin/zerotier", "ZeroTier"), ("/admin", "Users")]
     links = "".join(
         f'<a href="{href}" class="{"on" if href == active else ""}">{label}</a>'
         for href, label in items)
@@ -1483,6 +1483,156 @@ def _device_chips(known_devices, selected, all_on) -> str:
             f'{chips}</div></div>')
 
 
+def _zt_fetch_members(network_id: str, api_token: str) -> tuple:
+    """Fetch network members from ZeroTier Central API.
+    Returns (list_of_members, error_string)."""
+    if not (network_id and api_token):
+        return [], ""
+    import urllib.request
+    try:
+        url = f"https://api.zerotier.com/api/v1/network/{network_id}/member"
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"token {api_token}"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            return json.load(r), ""
+    except Exception as exc:  # noqa: BLE001
+        return [], str(exc)
+
+
+def _render_zt_admin(hub: dict, csrf: str, user, saved: bool = False) -> str:
+    zt_net    = hub.get("zt_network_id", "")
+    zt_token  = hub.get("zt_api_token", "")
+    zt_node   = hub.get("zt_node_id", "")
+    hub_ip    = hub.get("hub_ip", "")
+
+    saved_msg = ('<div style="background:#dcfce7;border-left:4px solid #16a34a;'
+                 'padding:10px 16px;border-radius:6px;margin-bottom:16px">'
+                 '&#10003; Settings saved.</div>' if saved else "")
+
+    # ── service status ───────────────────────────────────────────────────────
+    status_rows = []
+    if zt_node:
+        status_rows.append(f'<tr><td class="muted">Server node ID</td>'
+                           f'<td><code>{esc(zt_node)}</code></td></tr>')
+    if hub_ip:
+        status_rows.append(f'<tr><td class="muted">Server ZeroTier IP</td>'
+                           f'<td><code>{esc(hub_ip)}</code></td></tr>')
+    if zt_net:
+        status_rows.append(f'<tr><td class="muted">Network ID</td>'
+                           f'<td><code>{esc(zt_net)}</code></td></tr>')
+    svc_indicator = ('<span style="color:#16a34a">&#9679; configured</span>'
+                     if zt_net else
+                     '<span style="color:#d97706">&#9679; not configured</span>')
+    status_rows.append(f'<tr><td class="muted">Status</td>'
+                       f'<td>{svc_indicator}</td></tr>')
+    status_table = (f'<table style="width:100%;border-collapse:collapse">'
+                    + "".join(status_rows) + "</table>") if status_rows else ""
+    status_box = (f'<div class="box"><h2>Service status</h2>'
+                  f'<p class="muted">The ZeroTier service runs on this server. '
+                  f'Run <code>sudo bash deploy/install.sh</code> to install/join. '
+                  f'Authorize this server in '
+                  f'<a href="https://my.zerotier.com" target="_blank">ZeroTier Central</a>.'
+                  f'</p>{status_table}</div>')
+
+    # ── settings form ────────────────────────────────────────────────────────
+    settings_box = (
+        f'<div class="box"><h2>Network settings</h2>'
+        f'<form method="POST" action="/admin/zerotier">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<table style="width:100%;border-collapse:collapse">'
+        f'<tr><td style="padding:8px 0;width:200px" class="muted">Network ID</td>'
+        f'<td><input name="zt_network_id" value="{esc(zt_net)}" '
+        f'placeholder="1a2b3c4d5e6f7890" style="width:100%"></td></tr>'
+        f'<tr><td style="padding:8px 0" class="muted">API Token '
+        f'<small>(optional)</small></td>'
+        f'<td><input name="zt_api_token" value="{esc(zt_token)}" '
+        f'type="password" placeholder="Paste ZeroTier Central API token" '
+        f'style="width:100%">'
+        f'<small class="muted">Used to auto-approve routers and show member list. '
+        f'Generate at my.zerotier.com → Account → API Access Tokens.</small></td></tr>'
+        f'<tr><td style="padding:8px 0" class="muted">Hub IP override '
+        f'<small>(optional)</small></td>'
+        f'<td><input name="hub_ip" value="{esc(hub_ip)}" '
+        f'placeholder="Leave blank to auto-detect" style="width:100%">'
+        f'<small class="muted">The server\'s ZeroTier IP. '
+        f'Set this after the server is authorized and has a ZeroTier IP assigned. '
+        f'Find it in ZeroTier Central → your network → this server\'s entry.</small></td></tr>'
+        f'</table>'
+        f'<div class="actions" style="margin-top:14px">'
+        f'<button class="btn" type="submit">Save settings</button></div>'
+        f'</form></div>')
+
+    # ── members table ────────────────────────────────────────────────────────
+    members, members_err = _zt_fetch_members(zt_net, zt_token)
+    if members_err:
+        members_box = (f'<div class="box"><h2>Network members</h2>'
+                       f'<p style="color:#dc2626">Could not fetch members: '
+                       f'{esc(members_err)}</p></div>')
+    elif zt_token and zt_net:
+        m_rows = []
+        for m in members:
+            node  = esc(m.get("nodeId", ""))
+            name  = esc(m.get("name", "") or m.get("description", "") or "—")
+            ips   = ", ".join(m.get("config", {}).get("ipAssignments", [])) or "—"
+            auth  = m.get("config", {}).get("authorized", False)
+            badge = ('<span style="color:#16a34a">&#10003; authorized</span>'
+                     if auth else
+                     '<span style="color:#dc2626">&#10007; unauthorized</span>')
+            online = ('<span style="color:#16a34a">online</span>'
+                      if m.get("online") else
+                      '<span style="color:#94a3b8">offline</span>')
+            m_rows.append(f'<tr><td><code>{node}</code></td><td>{name}</td>'
+                          f'<td><code>{esc(ips)}</code></td>'
+                          f'<td>{badge}</td><td>{online}</td></tr>')
+        body = ("".join(m_rows) or
+                '<tr><td colspan="5" class="muted">No members yet. '
+                'Paste the provisioning script on a router to add one.</td></tr>')
+        members_box = (
+            f'<div class="box"><h2>Network members '
+            f'<small class="muted" style="font-weight:normal;font-size:13px">'
+            f'({len(members)} total)</small></h2>'
+            f'<table style="width:100%;border-collapse:collapse">'
+            f'<tr><th>Node ID</th><th>Name</th><th>ZeroTier IP</th>'
+            f'<th>Auth</th><th>Status</th></tr>'
+            f'{body}</table>'
+            f'<p class="muted" style="margin-top:8px">Manage members at '
+            f'<a href="https://my.zerotier.com/network/{esc(zt_net)}" '
+            f'target="_blank">my.zerotier.com/network/{esc(zt_net)}</a></p>'
+            f'</div>')
+    elif zt_net:
+        members_box = (f'<div class="box"><h2>Network members</h2>'
+                       f'<p class="muted">Add an <b>API Token</b> above to see '
+                       f'connected routers here and enable auto-approval.</p></div>')
+    else:
+        members_box = ""
+
+    # ── setup guide ──────────────────────────────────────────────────────────
+    guide_box = (
+        '<div class="box"><h2>Setup guide</h2>'
+        '<ol style="line-height:2">'
+        '<li>Create a free account at '
+        '<a href="https://my.zerotier.com" target="_blank">my.zerotier.com</a> '
+        'and click <b>Create A Network</b>.</li>'
+        '<li>Copy the <b>Network ID</b> and paste it above. '
+        'Enable <b>Auto-Approve Members</b> in the network settings '
+        '(or use an API Token so mikromon approves them automatically).</li>'
+        '<li>Add your <b>API Token</b> above (optional but recommended). '
+        'Generate one at my.zerotier.com → Account → API Access Tokens.</li>'
+        '<li>Run <code>sudo bash deploy/install.sh</code> on the server — '
+        'it installs ZeroTier and joins the network.</li>'
+        '<li>Authorize the server in ZeroTier Central. '
+        'Copy the server\'s ZeroTier IP and paste it in <b>Hub IP override</b> above.</li>'
+        '<li>Go to a router → <b>Hub tunnel</b> tab → apply. '
+        'The router joins ZeroTier automatically. '
+        'Authorize it in ZeroTier Central, then update its <b>Host</b> '
+        'on the Devices page to its ZeroTier IP.</li>'
+        '</ol></div>')
+
+    inner = (f'<div class="wrap"><h1>ZeroTier configuration</h1>'
+             f'{saved_msg}{status_box}{settings_box}{members_box}{guide_box}</div>')
+    return _page("ZeroTier", _header(user, "/admin/zerotier") + inner)
+
+
 def _render_admin(auth: AuthStore, known_devices, csrf: str, user, hub=None) -> str:
     hub = hub or {}
     zt_net = hub.get("zt_network_id", "")
@@ -1854,6 +2004,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._send(401, '{"error":"unauthorized"}',
                                       "application/json")
                 return self._redirect("/login")
+            if path == "/admin/zerotier":
+                return self._serve_zt_admin(user)
             if path == "/admin":
                 return self._serve_admin(user)
             if path == "/devices":
@@ -1939,6 +2091,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(404, "not found")
             finally:
                 store.close()
+
+        def _serve_zt_admin(self, user):
+            if not AuthStore.is_admin(user):
+                return self._send(403, "forbidden")
+            hub = _hub_load(_hub_path(devices_db)) if devices_db else {}
+            csrf = self._session()["csrf"]
+            saved = parse_qs(self.path.split("?", 1)[-1]).get("saved", [""])[0] == "1"
+            return self._send(200, _render_zt_admin(hub, csrf, user, saved=saved),
+                              "text/html; charset=utf-8")
 
         def _serve_metrics(self, url):
             token = (parse_qs(url.query).get("token", [""])[0]
@@ -2531,13 +2692,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if path == "/admin/zerotier":
                 if not AuthStore.is_admin(user):
                     return self._send(403, "forbidden")
-                zt_net = flat.get("zt_network_id", "").strip()
                 if devices_db:
                     hub_file = _hub_path(devices_db)
                     hub = _hub_load(hub_file)
-                    hub["zt_network_id"] = zt_net
+                    for field in ("zt_network_id", "zt_api_token", "hub_ip"):
+                        val = flat.get(field, "").strip()
+                        if val:
+                            hub[field] = val
+                        elif field in hub and not val:
+                            hub.pop(field, None)
                     _hub_save(hub_file, hub)
-                return self._redirect("/admin#zerotier")
+                return self._redirect("/admin/zerotier?saved=1")
             try:
                 if path == "/admin/add":
                     auth.add_user(flat.get("username", ""), flat.get("password", ""),
