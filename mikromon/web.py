@@ -1218,7 +1218,40 @@ _PRE = ('white-space:pre-wrap;background:#f8fafc;padding:10px;border-radius:6px;
         'font-family:ui-monospace,Consolas,monospace')
 
 
-def _hubtunnel_box(name, current) -> str:
+_WG_REPORT_STYLE = {
+    "healthy":   ("#16a34a", "✓ Tunnel healthy"),
+    "repaired":  ("#16a34a", "✓ Tunnel repaired"),
+    "attention": ("#d97706", "⚠ Tunnel needs attention"),
+    "failed":    ("#dc2626", "✗ Tunnel repair failed"),
+}
+_WG_STEP = {"ok": ("✓", "#16a34a"), "fixed": ("🔧", "#2563eb"),
+            "warn": ("⚠", "#d97706"), "error": ("✗", "#dc2626")}
+
+
+def _wg_repair_report_html(report) -> str:
+    """Render a WireGuard self-repair report: overall status + every check, with
+    what was auto-fixed and a clear message for anything that needs a human."""
+    color, title = _WG_REPORT_STYLE.get(report.get("status"),
+                                        ("#334155", "Tunnel report"))
+    items = []
+    for s in report.get("steps", []):
+        icon, c = _WG_STEP.get(s.get("level"), ("•", "#334155"))
+        items.append(f'<li style="margin:6px 0"><span style="color:{c};'
+                     f'font-weight:bold">{icon}</span> {esc(s.get("msg", ""))}</li>')
+    applied = report.get("applied", [])
+    applied_html = (f'<p class="muted" style="margin:8px 0 0">Applied '
+                    f'{len(applied)} automatic fix(es): {esc(", ".join(applied))}'
+                    f'.</p>' if applied else "")
+    return (f'<div class="box" style="border-left:4px solid {color}">'
+            f'<h2 style="margin-top:0;color:{color}">{esc(title)}</h2>'
+            f'<p class="muted" style="margin:0 0 8px">RouterOS '
+            f'{esc(report.get("version", "?"))} — diagnosed the WireGuard '
+            f'dial-home tunnel and applied any safe fixes.</p>'
+            f'<ul style="list-style:none;padding:0;margin:0">{"".join(items)}</ul>'
+            f'{applied_html}</div>')
+
+
+def _hubtunnel_box(name, current, csrf="") -> str:
     """Hub-side (Ubuntu WireGuard server) setup help. deploy/install.sh sets this
     up automatically; the Provision tab registers each device as a peer."""
     wg = ("# Ubuntu hub - WireGuard server (deploy/install.sh does this for you):\n"
@@ -1239,7 +1272,27 @@ def _hubtunnel_box(name, current) -> str:
             f'<pre style="{_PRE}">{esc(wg)}</pre>'
             f'<p class="muted">After a device is up, set its <b>Host</b> (Devices '
             f'page) to its tunnel IP and use <b>Restrict access</b> to lock the API '
-            f'to <code>10.10.0.0/24</code> and close the public port.</p></div>')
+            f'to <code>10.10.0.0/24</code> and close the public port.</p></div>'
+            + _wg_repair_box(name, csrf))
+
+
+def _wg_repair_box(name, csrf) -> str:
+    """A button that diagnoses the WireGuard tunnel on the router and self-repairs
+    what it safely can, then shows a full report of what it found and fixed."""
+    if not csrf:
+        return ""
+    q = esc(name)
+    return (f'<div class="box"><h2>Diagnose &amp; self-repair the tunnel</h2>'
+            f'<p class="muted">Checks the WireGuard dial-home tunnel on this '
+            f'router — firmware support, the interface, the hub peer, keepalive '
+            f'and the last handshake — fixes what it safely can (re-enables a '
+            f'disabled interface, restores the keepalive), and reports clearly on '
+            f'anything that needs you. The run is recorded in the activity log.</p>'
+            f'<form method="POST" action="/device/wg-repair">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            f'<input type="hidden" name="device" value="{q}">'
+            f'<div class="actions"><button class="btn" type="submit">'
+            f'Diagnose &amp; repair now</button></div></form></div>')
 
 
 def _update_box(name, csrf, current) -> str:
@@ -1401,7 +1454,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                         fields=None, preview=None, submitted=None, error="",
                         msg="", recent=None, facts=None, unmanaged=None,
                         confirm_action="/device/push", cfg=None,
-                        extra_html="") -> str:
+                        extra_html="", report_html="") -> str:
     tabbar = _device_tabbar(name, slug, AuthStore.is_admin(user or {}))
     q = quote(name)
     banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
@@ -1456,7 +1509,8 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
              if slug in _TAB_INTRO else "")
     inner = (f'<div class="wrap" style="max-width:1100px">'
              f'<h1>{esc(name)} &middot; {esc(feature["title"])}</h1>{tabbar}{intro}'
-             f'{_facts_strip(facts or {})}{banner}{err}{wan_editor}{body}{logbox}'
+             f'{_facts_strip(facts or {})}{banner}{err}{report_html}'
+             f'{wan_editor}{body}{logbox}'
              f'<p class="muted">These engines are experimental — every push is '
              f'dry-run-first and logged above so you can see exactly what the '
              f'router accepted or rejected.</p>'
@@ -2012,6 +2066,31 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             from .devices_store import DevicesStore
             return DevicesStore(devices_db)
 
+        @staticmethod
+        def _purge_device_data(name):
+            """Remove a deleted device's leftover data: its time-series samples
+            and its saved monitoring state, so it stops appearing on the
+            dashboard. Best-effort — a failure here must not break the delete."""
+            if not name:
+                return
+            if metrics_db:
+                try:
+                    ms = MetricsStore(metrics_db)
+                    try:
+                        ms.delete_device(name)
+                    finally:
+                        ms.close()
+                except Exception:  # noqa: BLE001 — never fail the delete on this
+                    log.exception("could not purge metrics for %s", name)
+            if state_file:
+                try:
+                    from .state import StateStore
+                    st = StateStore(state_file).load()
+                    st.forget_device(name)
+                    st.save()
+                except Exception:  # noqa: BLE001
+                    log.exception("could not purge state for %s", name)
+
         # ---- Backups tab (config-push engine, admin only) ----
         def _device_raw(self, name):
             store = self._devstore()
@@ -2287,7 +2366,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
         def _feature_tab_page(self, name, user, slug, preview=None,
                               submitted=None, error="", msg="",
-                              confirm_action="/device/push"):
+                              confirm_action="/device/push", report_html=""):
             from .push import FEATURES
 
             feature = FEATURES.get(slug)
@@ -2330,7 +2409,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     if slug == "scripts":
                         extra_html = _scripts_box(name, csrf, current)
                     elif slug == "hubtunnel":
-                        extra_html = _hubtunnel_box(name, current)
+                        extra_html = _hubtunnel_box(name, current, csrf)
                     elif slug == "update":
                         extra_html = _update_box(name, csrf, current)
                     elif slug == "interfaces":
@@ -2343,7 +2422,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 name, user, slug, feature, csrf, summary_lines=summary_lines,
                 fields=fields, preview=preview, submitted=submitted, error=error,
                 msg=msg, recent=recent, facts=facts, unmanaged=unmanaged,
-                confirm_action=confirm_action, cfg=cfg, extra_html=extra_html)
+                confirm_action=confirm_action, cfg=cfg, extra_html=extra_html,
+                report_html=report_html)
             return self._send(200, page, "text/html; charset=utf-8")
 
         def _device_wan_post(self, flat, multi, user):
@@ -2477,6 +2557,55 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if audit:
                     audit.close()
 
+        def _device_wg_repair_post(self, flat, user):
+            """Connect to the router, diagnose + self-repair the WireGuard tunnel,
+            log the outcome, and render the Hub tunnel tab with a full report. A
+            connection/read failure is itself reported as a failed repair (with
+            the error) rather than 500-ing."""
+            from .config import build_device
+            from .device import DeviceError
+            from .push import PushError, rw_device, wireguard_repair
+            from .push.api import PushApi
+
+            if not AuthStore.is_admin(user or {}):
+                return self._send(403, "forbidden")
+            name = flat.get("device", "")
+            raw = self._device_raw(name)
+            if raw is None:
+                return self._send(404, "no such device")
+            cfg = build_device(raw, defaults)
+            actor = (user or {}).get("username", "")
+            dev = rw_device(cfg)
+            api = PushApi(dev)
+            report, err = None, None
+            try:
+                api.connect()
+                report = wireguard_repair(api)
+            except (DeviceError, PushError) as exc:
+                err = str(exc)
+            finally:
+                dev.close()
+            if err is not None:
+                report = {"status": "failed", "version": "?", "supported": True,
+                          "applied": [],
+                          "steps": [{"level": "error",
+                                     "msg": f"Could not connect to the router to "
+                                            f"check the tunnel: {err}. Verify the "
+                                            f"Host and the read-write push user on "
+                                            f"the Devices page."}]}
+            audit = self._auditlog()
+            if audit:
+                summary = "; ".join(s["msg"] for s in report["steps"])
+                ok = report["status"] not in ("failed",)
+                audit.append(name, actor, "hubtunnel", "wg-repair",
+                             "ok" if ok else "error",
+                             f"tunnel self-repair: {report['status']} "
+                             f"({len(report['applied'])} fix(es))", summary)
+                audit.close()
+            return self._feature_tab_page(
+                name, user, "hubtunnel",
+                report_html=_wg_repair_report_html(report))
+
         def _serve_logs(self, user):
             if not AuthStore.is_admin(user):
                 return self._send(403, "forbidden")
@@ -2494,7 +2623,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                        "(set devices_db in config)")
             try:
                 if path == "/devices/delete":
-                    store.delete(flat.get("name", ""))
+                    name = flat.get("name", "")
+                    store.delete(name)
+                    # Purge the device everywhere it lingers, or it keeps showing
+                    # on the dashboard from stale metrics/state: its time-series
+                    # samples and its saved monitoring state. (The engine also
+                    # drops it from polling on its next cycle now it's gone from
+                    # the store.)
+                    self._purge_device_data(name)
                     return self._redirect("/devices")
                 if path == "/devices/test":
                     return self._device_test(store, flat.get("name", ""), user)
@@ -2605,6 +2741,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._device_provision_post(flat, user)
             if path == "/device/push":
                 return self._device_push_post(flat, multi, user)
+            if path == "/device/wg-repair":
+                return self._device_wg_repair_post(flat, user)
             if path == "/device/adopt":
                 return self._device_adopt_post(flat, user)
             if path == "/device/wan":

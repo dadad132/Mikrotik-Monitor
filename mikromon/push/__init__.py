@@ -16,11 +16,12 @@ Safety model:
   * apply() rolls back completed operations if a later one fails.
 """
 from .audit import AuditLog
-from .features import FEATURES, TAB_SLUGS, adopt_plan, provision_apply
+from .features import (FEATURES, TAB_SLUGS, adopt_plan, provision_apply,
+                       wireguard_repair)
 from .plan import Operation, Plan
 from .reconcile import reconcile_list
 from .runner import Pusher, PushError, rw_device
 
 __all__ = ["Operation", "Plan", "reconcile_list", "Pusher", "PushError",
            "rw_device", "AuditLog", "FEATURES", "TAB_SLUGS", "adopt_plan",
-           "provision_apply"]
+           "provision_apply", "wireguard_repair"]

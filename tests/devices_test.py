@@ -276,10 +276,28 @@ try:
     st = post_status(nobody, "/device/provision",
                      {"csrf": "x", "device": "WebR1"})
     check("non-admin blocked from provisioning (403)", st == 403)
+    # seed leftover metrics + saved state, then prove delete purges them so the
+    # device stops showing on the dashboard (it lists anything with samples).
+    from mikromon.state import StateStore
+    ms = MetricsStore(mdb)
+    ms.record([(1.0, "WebR1", "up", "", 1.0)])
+    check("device has metrics before delete", "WebR1" in ms.devices())
+    ms.close()
+    stt = StateStore(sfile).load()
+    stt.facts("WebR1")["model"] = "RB5009"
+    stt.save()
     st, _ = post(admin, "/devices/delete", {"csrf": csrf, "name": "WebR1"})
     saved = DevicesStore(wdb)
     check("device deleted via web", saved.names() == [])
     saved.close()
+    ms = MetricsStore(mdb)
+    check("delete purges the device's metrics (gone from dashboard)",
+          "WebR1" not in ms.devices())
+    ms.close()
+    with open(sfile, encoding="utf-8") as fh:
+        state_after = json.load(fh)
+    check("delete purges the device's saved monitoring state",
+          "WebR1" not in state_after.get("devices", {}))
     # non-admin is blocked
     bob = op_login("bob", "bob123")
     st, _ = get(bob, "/devices")

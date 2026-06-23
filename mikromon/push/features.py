@@ -1156,6 +1156,124 @@ def hubtunnel_plan(pusher, cfg, flat, multi):
 
 
 # ===========================================================================
+# WireGuard self-repair — diagnose the dial-home tunnel over the API, fix what
+# is safely auto-fixable (a disabled interface, a missing keepalive), and return
+# a structured report. Anything that can't be auto-fixed (unsupported firmware,
+# a missing interface/peer, no handshake with the hub) is reported with a clear,
+# actionable message of exactly what failed and what to do.
+# ===========================================================================
+def _wg_report(version, supported, steps, applied):
+    """Roll the per-check findings up into an overall status + the report dict.
+    failed  = a hard problem we could not auto-fix (clear message in `steps`).
+    repaired= we applied one or more fixes and hit no hard errors.
+    attention = nothing to fix but a warning needs a human (e.g. no handshake).
+    healthy = everything checks out."""
+    has_error = any(s["level"] == "error" for s in steps)
+    has_warn = any(s["level"] == "warn" for s in steps)
+    status = ("failed" if has_error else "repaired" if applied
+              else "attention" if has_warn else "healthy")
+    return {"status": status, "version": version, "supported": supported,
+            "steps": steps, "applied": applied}
+
+
+def wireguard_repair(api, *, iface=_HUB_NAME):
+    """Diagnose + self-repair the WireGuard dial-home tunnel. Reads live state,
+    applies safe fixes via the API, and returns a report (see _wg_report).
+    Each fix is captured; if a fix itself fails, that becomes an error finding
+    so the user sees precisely what went wrong."""
+    steps = []
+    applied = []
+
+    def note(level, msg):
+        steps.append({"level": level, "msg": msg})
+
+    def try_fix(op, problem):
+        try:
+            api.execute(op)
+        except Exception as exc:  # noqa: BLE001 — capture, don't crash the report
+            note("error", f"{problem} Automatic fix FAILED: {exc}")
+            return
+        applied.append(op.desc)
+        note("fixed", f"{problem} Fixed automatically ({op.desc}).")
+
+    major, minor, ver = _ros_version(api)
+    supported = _wg_supported(major, minor)
+    if not supported:
+        note("error", f"WireGuard needs RouterOS 7.1+, but this router runs "
+                      f"{ver}. WireGuard cannot run here — upgrade RouterOS, or "
+                      f"use a different transport for this device.")
+        return _wg_report(ver, supported, steps, applied)
+
+    try:
+        ifaces = api.fetch(_HUB_WG)
+    except Exception as exc:  # noqa: BLE001
+        note("error", f"Could not read the WireGuard interfaces: {exc}")
+        return _wg_report(ver, supported, steps, applied)
+    wg = next((r for r in ifaces if r.get("name") == iface), None)
+    if wg is None:
+        note("error", f"There is no WireGuard interface '{iface}' on the router. "
+                      f"Re-run Provision (or the Hub tunnel tab) to create the "
+                      f"tunnel — self-repair can't recreate it without the hub "
+                      f"key and tunnel IP.")
+        return _wg_report(ver, supported, steps, applied)
+    note("ok", f"WireGuard interface '{iface}' exists.")
+    if _norm(wg.get("disabled", "")) == "true":
+        try_fix(Operation("set", _HUB_WG,
+                          {".id": wg[".id"], "disabled": "no"},
+                          desc=f"enable interface '{iface}'",
+                          inverse=Operation(
+                              "set", _HUB_WG,
+                              {".id": wg[".id"], "disabled": "yes"},
+                              desc=f"disable interface '{iface}'")),
+                f"Interface '{iface}' was disabled.")
+    elif _norm(wg.get("running", "")) == "false":
+        note("warn", f"Interface '{iface}' is enabled but not running yet — "
+                     f"give it a moment, then re-check.")
+
+    try:
+        peers = api.fetch(_HUB_PEERS)
+    except Exception as exc:  # noqa: BLE001
+        note("error", f"Could not read the WireGuard peers: {exc}")
+        return _wg_report(ver, supported, steps, applied)
+    peer = next((p for p in peers
+                 if str(p.get("comment", "")).startswith(_HUB_TAG)), None)
+    if peer is None:
+        note("error", "No hub peer is configured on the tunnel — the router has "
+                      "nothing to dial home to. Re-run Provision, or set the hub "
+                      "details on the Hub tunnel tab and apply.")
+        return _wg_report(ver, supported, steps, applied)
+    note("ok", "The hub peer is configured.")
+    if not (peer.get("endpoint-address") or "").strip():
+        note("error", "The hub peer has no endpoint address — set the hub's IP "
+                      "on the Hub tunnel tab and apply, or re-run Provision.")
+    if not (peer.get("persistent-keepalive") or "").strip():
+        try_fix(Operation("set", _HUB_PEERS,
+                          {".id": peer[".id"], "persistent-keepalive": "25s"},
+                          desc="set persistent-keepalive=25s on the hub peer",
+                          inverse=Operation(
+                              "set", _HUB_PEERS,
+                              {".id": peer[".id"], "persistent-keepalive": "0"},
+                              desc="clear keepalive on the hub peer")),
+                "Persistent-keepalive was not set (it holds the NAT hole open "
+                "through CGNAT so the hub can reach back).")
+    handshake = (peer.get("last-handshake") or "").strip()
+    if handshake:
+        note("ok", f"Last handshake with the hub: {handshake} ago — the tunnel "
+                   f"is passing traffic.")
+    else:
+        note("warn", "No WireGuard handshake with the hub yet — the tunnel is "
+                     "NOT passing traffic. This is not something the router can "
+                     "fix by itself; check that (1) the hub's UDP port "
+                     f"{peer.get('endpoint-port', '51820')} is open to the "
+                     "internet, (2) this router can reach "
+                     f"{peer.get('endpoint-address', 'the hub')} (no ISP/CGNAT "
+                     "block on that port), and (3) the router's public key "
+                     f"({wg.get('public-key', '(read it on the Hub tunnel tab)')}) "
+                     "is registered as a peer on the hub.")
+    return _wg_report(ver, supported, steps, applied)
+
+
+# ===========================================================================
 # Zero-touch provisioning over the API — mikromon connects to the router and
 # applies everything itself (no script to paste). Idempotent: each step checks
 # what's already there. Returns the router's WireGuard public key so the caller

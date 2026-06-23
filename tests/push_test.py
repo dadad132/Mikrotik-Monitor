@@ -642,6 +642,66 @@ check("provision_apply leaves the API service untouched when enable_api=False",
       and not any(o.path == ("ip", "service") for o in na_api.executed))
 
 
+# ---- 15b. WireGuard self-repair: diagnose, auto-fix, report clearly ---------
+print("wireguard self-repair:")
+RES = ("system", "resource")
+HUBTAG = "mikromon:tunnel:"
+
+# unsupported firmware -> hard failure with a clear message, no fixes attempted
+rep = F.wireguard_repair(FakeApi({RES: [{"version": "6.49.8"}]}))
+check("repair flags RouterOS < 7.1 as a clear failure (no fix possible)",
+      rep["status"] == "failed" and rep["applied"] == []
+      and any(s["level"] == "error" and "7.1+" in s["msg"] for s in rep["steps"]))
+
+# missing interface -> failure telling the user to re-provision
+rep = F.wireguard_repair(FakeApi({RES: [{"version": "7.14.3"}], WG: [], WGP: []}))
+check("repair fails clearly when the WireGuard interface is missing",
+      rep["status"] == "failed"
+      and any("no wireguard interface" in s["msg"].lower() for s in rep["steps"]))
+
+# disabled interface + missing keepalive -> auto-repaired
+broken = FakeApi({
+    RES: [{"version": "7.14.3"}],
+    WG: [{".id": "*i", "name": "mikromon", "disabled": "true",
+          "public-key": "ROUTERPUB="}],
+    WGP: [{".id": "*p", "interface": "mikromon", "comment": HUBTAG + "hub",
+           "endpoint-address": "102.36.140.219", "endpoint-port": "51820",
+           "last-handshake": "1m2s"}]})
+rep = F.wireguard_repair(broken)
+check("repair re-enables a disabled interface AND restores keepalive",
+      rep["status"] == "repaired" and len(rep["applied"]) == 2
+      and any(o.action == "set" and o.params.get("disabled") == "no"
+              for o in broken.executed)
+      and any(o.action == "set" and o.params.get("persistent-keepalive") == "25s"
+              for o in broken.executed))
+
+# everything present but no handshake -> needs attention, clear guidance, no fix
+nohs = FakeApi({
+    RES: [{"version": "7.14.3"}],
+    WG: [{".id": "*i", "name": "mikromon", "disabled": "false",
+          "running": "true", "public-key": "ROUTERPUB="}],
+    WGP: [{".id": "*p", "interface": "mikromon", "comment": HUBTAG + "hub",
+           "endpoint-address": "102.36.140.219", "endpoint-port": "51820",
+           "persistent-keepalive": "25s", "last-handshake": ""}]})
+rep = F.wireguard_repair(nohs)
+check("repair reports no-handshake as needing attention with guidance",
+      rep["status"] == "attention" and rep["applied"] == []
+      and any(s["level"] == "warn" and "handshake" in s["msg"].lower()
+              for s in rep["steps"]))
+
+# fully healthy -> no changes
+good = FakeApi({
+    RES: [{"version": "7.14.3"}],
+    WG: [{".id": "*i", "name": "mikromon", "disabled": "false",
+          "running": "true", "public-key": "ROUTERPUB="}],
+    WGP: [{".id": "*p", "interface": "mikromon", "comment": HUBTAG + "hub",
+           "endpoint-address": "102.36.140.219", "endpoint-port": "51820",
+           "persistent-keepalive": "25s", "last-handshake": "30s"}]})
+rep = F.wireguard_repair(good)
+check("repair reports a healthy tunnel and changes nothing",
+      rep["status"] == "healthy" and rep["applied"] == [] and not good.executed)
+
+
 # ---- 16. update RouterOS (check / install+reboot / firmware) ---------------
 print("update RouterOS:")
 PKG = ("system", "package", "update")

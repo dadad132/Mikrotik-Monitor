@@ -55,6 +55,15 @@ class MetricsStore:
             self.db.execute("DELETE FROM samples WHERE ts < ?", (cutoff,))
             self.db.commit()
 
+    def delete_device(self, name: str) -> int:
+        """Delete every sample for a device. Returns the number of rows removed.
+        Used when a device is deleted from the dashboard so its stale series
+        stop showing up (devices() lists anything with samples)."""
+        with self._lock:
+            cur = self.db.execute("DELETE FROM samples WHERE device = ?", (name,))
+            self.db.commit()
+            return cur.rowcount
+
     # ----- queries ----------------------------------------------------------
     def devices(self) -> list:
         cur = self.db.execute("SELECT DISTINCT device FROM samples ORDER BY device")
