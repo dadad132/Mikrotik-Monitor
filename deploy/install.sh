@@ -317,6 +317,13 @@ CONF
   # bash can open /etc/wireguard/* freely; wg sees only an inherited fd.
   # Enabled at boot so initial peers load after wg0 comes up.
   # Also triggered by the path unit whenever mikromon writes new peers.
+  #
+  # IMPORTANT: `wg syncconf` speaks the low-level wg config format, which does
+  # NOT understand wg-quick-only directives (Address/DNS/MTU/Table/Pre*/Post*/
+  # SaveConfig). wg0.conf has `Address = 10.10.0.1/24`, so feeding it raw makes
+  # `wg syncconf` reject the WHOLE config and load NO peers — the hub then
+  # silently drops every router handshake (router dials, server never replies).
+  # Strip those wg-quick-only lines first, keeping PrivateKey/ListenPort + peers.
   cat > /etc/systemd/system/mikromon-wg-reload.service <<UNIT
 [Unit]
 Description=Apply mikromon WireGuard peers to wg0
@@ -324,7 +331,7 @@ After=wg-quick@wg0.service
 Requires=wg-quick@wg0.service
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/bash -c 'wg syncconf wg0 <(cat /etc/wireguard/wg0.conf; cat ${WG_PEERS} 2>/dev/null || true)'
+ExecStart=/usr/bin/bash -c 'wg syncconf wg0 <(grep -vE "^[[:space:]]*(Address|DNS|MTU|Table|PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=" /etc/wireguard/wg0.conf; cat ${WG_PEERS} 2>/dev/null || true)'
 [Install]
 WantedBy=multi-user.target
 UNIT
@@ -349,9 +356,20 @@ UNIT
     exit 1
   fi
   # Load any already-registered peers immediately, then enable path watcher.
-  systemctl start mikromon-wg-reload.service || true
-  systemctl enable --now mikromon-wg-reload.path
+  # Report the outcome instead of swallowing it — if this step fails, peers are
+  # NOT on wg0 and routers can't connect, which is otherwise invisible.
   systemctl enable mikromon-wg-reload.service
+  systemctl enable --now mikromon-wg-reload.path
+  if systemctl start mikromon-wg-reload.service; then
+    PEER_COUNT="$(wg show wg0 peers 2>/dev/null | grep -c . || true)"
+    echo "WireGuard peers applied to wg0 (currently ${PEER_COUNT:-0} peer(s))."
+  else
+    journalctl -n 30 -u mikromon-wg-reload.service --no-pager > "${WG_LOG}" 2>&1 || true
+    echo ""
+    echo "WARNING: applying WireGuard peers to wg0 FAILED — routers will not be"
+    echo "able to connect until this is fixed. Error saved to: ${WG_LOG}"
+    echo "Run: cat ${WG_LOG}"
+  fi
   if command -v ufw >/dev/null 2>&1; then
     ufw allow ${WG_PORT}/udp          # WireGuard handshake port
     ufw allow in  on wg0              # traffic arriving from tunnel peers
