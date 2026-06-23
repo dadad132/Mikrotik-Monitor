@@ -291,6 +291,36 @@ check("security builds tagged drop rules",
       adds and all(o.params["comment"].startswith("mikromon:sec:") for o in adds)
       and any(o.params.get("connection-state") == "invalid" for o in adds))
 
+# recipes: curated, reversible one-click firewall actions (mikromon:recipe:)
+print("recipes:")
+rp = Pusher(devcfg, FakeApi({("ip", "firewall", "filter"): []}), dry_run=True)
+rplan = F.recipes_plan(rp, devcfg, {},
+                       {"recipe": ["drop_invalid", "block_rdp_wan"]})
+radds = [o for o in rplan.ops if o.action == "add"]
+check("recipes add tagged firewall rules",
+      radds and all(o.params["comment"].startswith("mikromon:recipe:")
+                    for o in radds))
+check("drop_invalid recipe drops invalid on input + forward",
+      sum(1 for o in radds if o.params.get("connection-state") == "invalid") == 2)
+check("block_rdp_wan recipe drops 3389 inbound on the WAN uplink",
+      any(o.params.get("dst-port") == "3389"
+          and o.params.get("in-interface") == "ether1" for o in radds))
+# turning a recipe OFF removes exactly its rules; never a hand-made rule
+cur = [{".id": "*r1", "chain": "input", "connection-state": "invalid",
+        "action": "drop", "comment": "mikromon:recipe:drop_invalid:0"},
+       {".id": "*r2", "chain": "forward", "connection-state": "invalid",
+        "action": "drop", "comment": "mikromon:recipe:drop_invalid:1"},
+       {".id": "*m", "chain": "input", "action": "drop", "comment": "manual"}]
+off = F.recipes_plan(Pusher(devcfg, FakeApi({("ip", "firewall", "filter"): cur}),
+                            dry_run=True), devcfg, {}, {"recipe": []})
+check("disabling a recipe removes its rules and leaves manual ones",
+      {o.params[".id"] for o in off.ops if o.action == "remove"} == {"*r1", "*r2"})
+# WAN recipes are a safe no-op when no WAN uplinks are configured
+nowan = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[]))
+nwplan = F.recipes_plan(Pusher(nowan, FakeApi({("ip", "firewall", "filter"): []}),
+                               dry_run=True), nowan, {}, {"recipe": ["block_rdp_wan"]})
+check("a WAN recipe with no WAN uplinks adds nothing (safe no-op)", nwplan.empty)
+
 # attack-protection toggles -> tagged drop rules (added when on, removed when off)
 plan = F.security_plan(ps, devcfg, {},
                        {"opt": ["synflood", "ddos", "ssh_bruteforce", "port_scan"]})

@@ -122,6 +122,13 @@ twou = web._provision_script(
 check("script creates a read-write push user + a read-only monitor user",
       "/user add name=push " in twou and "group=full" in twou
       and "/user add name=push-ro " in twou and "group=read" in twou)
+# dashboard hides devices with no data (added but never successfully polled)
+check("dashboard hides a device with no data, shows one with telemetry",
+      not web._device_has_data({"metrics": {}, "problems": [], "facts": {}})
+      and web._device_has_data({"metrics": {"cpu": 5}, "problems": [],
+                                "facts": {}})
+      and web._device_has_data({"metrics": {}, "problems": [{"key": "x"}],
+                                "facts": {}}))
 itab = web._interfaces_table({"ifaces": [
     {"name": "ether1", "type": "ether", "running": "true",
      "mac-address": "AA:BB", "mtu": "1500", "comment": "WAN"},
