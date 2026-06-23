@@ -673,6 +673,19 @@ bound = {o.params.get(".id") for o in la_api.executed
          if o.path == ("ip", "service")
          and o.params.get("address") == "10.10.0.0/24"}
 check("lock_api binds api + api-ssl to the tunnel subnet", bound == {"*s1", "*s2"})
+# two-user provisioning: a read-write push user + a read-only monitor user
+tu_api = FakeApi({("user",): [], ("ip", "service"): [],
+                  WG: [], WGP: [], IPA: []})
+F.provision_apply(tu_api, "B", "push", "pw1234567890",
+                  mon_user="push-ro", mon_pwd="ro1234567890",
+                  harden=False, enable_api=False)
+uadds = [o for o in tu_api.executed
+         if o.action == "add" and o.path == ("user",)]
+check("provision_apply creates a full push user + a read-only monitor user",
+      any(o.params.get("name") == "push" and o.params.get("group") == "full"
+          for o in uadds)
+      and any(o.params.get("name") == "push-ro" and o.params.get("group") == "read"
+              for o in uadds))
 
 
 # ---- 15b. WireGuard self-repair: diagnose, auto-fix, report clearly ---------

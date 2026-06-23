@@ -1279,26 +1279,34 @@ def wireguard_repair(api, *, iface=_HUB_NAME):
 # what's already there. Returns the router's WireGuard public key so the caller
 # can register it as a peer on the hub.
 # ===========================================================================
-def provision_apply(api, name, pwuser, pwd, *, harden=True, enable_api=True,
-                    lock_api=False, hub_pubkey="", hub_ip="", port="51820",
-                    subnet="10.10.0.0/24", tunnel_ip=""):
+def provision_apply(api, name, pwuser, pwd, *, mon_user="", mon_pwd="",
+                    harden=True, enable_api=True, lock_api=False, hub_pubkey="",
+                    hub_ip="", port="51820", subnet="10.10.0.0/24", tunnel_ip=""):
     steps = []
 
     def do(op):
         api.execute(op)
         steps.append(op.desc)
 
-    # 1) management user — create if missing, else (re)set its password
-    users = api.fetch(("user",))
-    existing = next((u for u in users if u.get("name") == pwuser), None)
-    if existing is None:
-        do(Operation("add", ("user",),
-                     {"name": pwuser, "password": pwd, "group": "full",
-                      "comment": "mikromon-managed"}, desc=f"add user {pwuser}"))
-    else:
-        do(Operation("set", ("user",),
-                     {".id": existing[".id"], "password": pwd, "group": "full"},
-                     desc=f"reset password for user {pwuser}"))
+    def ensure_user(uname, upwd, group):
+        """Create the user if missing, else (re)set its password + group."""
+        row = next((u for u in api.fetch(("user",))
+                    if u.get("name") == uname), None)
+        if row is None:
+            do(Operation("add", ("user",),
+                         {"name": uname, "password": upwd, "group": group,
+                          "comment": "mikromon-managed"},
+                         desc=f"add {group} user {uname}"))
+        else:
+            do(Operation("set", ("user",),
+                         {".id": row[".id"], "password": upwd, "group": group},
+                         desc=f"reset {group} user {uname}"))
+
+    # 1) the read-WRITE push user (changes) + an optional read-ONLY monitor user
+    #    (polling — sees everything, changes nothing: the real safety boundary).
+    ensure_user(pwuser, pwd, "full")
+    if mon_user and mon_pwd:
+        ensure_user(mon_user, mon_pwd, "read")
 
     # 2) optionally make sure the API service is enabled. Optional because some
     # sites keep the binary API off (managing the router only over the tunnel,

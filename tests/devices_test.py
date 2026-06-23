@@ -115,6 +115,13 @@ unlocked = web._provision_script(
     subnet="10.10.0.0/24", lock_api=False)
 check("lock-API omitted when not requested",
       "/ip service set api address=" not in unlocked)
+# two users: a read-WRITE push user (group=full) + a read-ONLY monitor user
+twou = web._provision_script(
+    "R", {"host": "1.1.1.1"}, "push", "pw1234567890",
+    mon_user="push-ro", mon_pwd="ro1234567890")
+check("script creates a read-write push user + a read-only monitor user",
+      "/user add name=push " in twou and "group=full" in twou
+      and "/user add name=push-ro " in twou and "group=read" in twou)
 itab = web._interfaces_table({"ifaces": [
     {"name": "ether1", "type": "ether", "running": "true",
      "mac-address": "AA:BB", "mtu": "1500", "comment": "WAN"},

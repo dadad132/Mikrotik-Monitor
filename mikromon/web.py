@@ -803,9 +803,10 @@ def _write_wg_peers(path, leases):
         return False, str(exc)
 
 
-def _provision_script(name, raw, pwuser, pwd, *, hub_ip="", hub_port="51820",
-                      hub_pubkey="", wg_priv="", tunnel_ip="", subnet="",
-                      harden=True, enable_api=True, lock_api=True) -> str:
+def _provision_script(name, raw, pwuser, pwd, *, mon_user="", mon_pwd="",
+                      hub_ip="", hub_port="51820", hub_pubkey="", wg_priv="",
+                      tunnel_ip="", subnet="", harden=True, enable_api=True,
+                      lock_api=True) -> str:
     """A one-paste RouterOS bootstrap script that is SAFE on an already-configured
     router: every step is guarded so it only ADDS what is missing and never
     resets existing config. The WireGuard dial-home tunnel needs RouterOS 7.1+."""
@@ -815,18 +816,26 @@ def _provision_script(name, raw, pwuser, pwd, *, hub_ip="", hub_port="51820",
     def a(s=""):
         L.append(s)
 
+    def user_block(uname, upwd, group):
+        # create if missing, else just (re)set password + group — idempotent
+        a(":if ([:len [/user find name=" + uname + "]] = 0) do={")
+        a('  /user add name=' + uname + ' password="' + upwd + '" group=' + group
+          + ' comment="mikromon-managed"')
+        a("} else={")
+        a('  /user set [/user find name=' + uname + '] password="' + upwd
+          + '" group=' + group)
+        a("}")
+
     a(f"# === mikromon provisioning for {name} ===")
     a("# Safe to paste on a NEW *or* an already-configured router: it only ADDS")
     a("# what is missing and never resets your existing config. The WireGuard")
     a("# tunnel block needs RouterOS 7.1+.")
     a("")
-    a("# 1) management user - create if missing, else just (re)set its password")
-    a(":if ([:len [/user find name=" + u + "]] = 0) do={")
-    a('  /user add name=' + u + ' password="' + pwd + '" group=full '
-      'comment="mikromon-managed"')
-    a("} else={")
-    a('  /user set [/user find name=' + u + '] password="' + pwd + '" group=full')
-    a("}")
+    a("# 1) mikromon users - a read-WRITE push user (for changes) and, if given,")
+    a("#    a read-ONLY monitor user (for safe polling - sees all, changes none)")
+    user_block(u, pwd, "full")
+    if mon_user and mon_pwd:
+        user_block(mon_user, mon_pwd, "read")
     if enable_api:
         a("")
         a("# 2) make sure the API is reachable for mikromon (idempotent)")
@@ -957,8 +966,12 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
         f'<input type="hidden" name="csrf" value="{csrf}">'
         f'<input type="hidden" name="device" value="{esc(name)}">'
         f'<div class="fields">'
-        f'<div class="f"><label class="f">Management username (unique per '
-        f'device)</label><input name="pwuser" value="{esc(pwuser)}"></div>'
+        f'<div class="f"><label class="f">Push username <span class="muted">'
+        f'(read-write — for changes)</span></label>'
+        f'<input name="pwuser" value="{esc(pwuser)}"></div>'
+        f'<div class="f"><label class="f">Monitor username <span class="muted">'
+        f'(read-only — for polling; blank = &lt;push&gt;-ro)</span></label>'
+        f'<input name="mon_user" value="{esc(pwuser)}-ro"></div>'
         f'<div class="f"><label class="f">Dial-home tunnel</label>'
         f'<select name="transport">'
         f'<option value="wg" selected>WireGuard (RouterOS 7.1+)</option>'
@@ -1022,10 +1035,15 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
             body = (f'<pre style="{_PRE}">{esc(script)}</pre>{srv}'
                     f'<p class="muted">The script sets the password in plain text — '
                     f'paste it, then clear your clipboard.</p>')
+        mon_fields = (
+            f'{_secret_field("Monitor user (read-only)", c.get("mon_user", ""), "mu")}'
+            f'{_secret_field("Monitor password", c.get("mon_pwd", ""), "mp")}'
+            if c.get("mon_user") else "")
         out = (f'<div class="box" style="border-left:4px solid #16a34a">{head}{body}'
                f'<div class="fields">'
-               f'{_secret_field("Saved username", c.get("user", ""), "su")}'
-               f'{_secret_field("Saved password", c.get("pwd", ""), "sp")}'
+               f'{_secret_field("Push user (read-write)", c.get("user", ""), "su")}'
+               f'{_secret_field("Push password", c.get("pwd", ""), "sp")}'
+               f'{mon_fields}'
                f'</div></div>')
     connect = _connect_box(name, raw)
     inner = (f'<div class="wrap" style="max-width:1100px">'
@@ -2255,6 +2273,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
             uname = flat.get("pwuser", "").strip() or _user_slug(name)
             pwd = _gen_password()
+            # read-only monitor user (used for polling); separate from the
+            # read-write push user above.
+            mon_uname = flat.get("mon_user", "").strip() or (uname + "-ro")
+            mon_pwd = _gen_password()
             want_tunnel = flat.get("transport", "wg").strip() == "wg"
             lock_api = flat.get("lock_api") == "1"
             tunnel_ip = dev_pub = wg_priv = ""
@@ -2276,6 +2298,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             _hub_save(hub_file, hub)
             raw["push_username"] = uname
             raw["push_password"] = pwd
+            # poll as the read-only monitor user from now on
+            raw["username"] = mon_uname
+            raw["password"] = mon_pwd
             if tunnel_ip:
                 raw["host"] = tunnel_ip
                 # Locking the API to the tunnel also turns on API-SSL on the
@@ -2291,12 +2316,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(400, f"Error: {exc}")
             store.close()
             script = _provision_script(
-                name, raw, uname, pwd, hub_ip=hub_ip, hub_port=hub_port,
+                name, raw, uname, pwd, mon_user=mon_uname, mon_pwd=mon_pwd,
+                hub_ip=hub_ip, hub_port=hub_port,
                 hub_pubkey=hub_pubkey if tunnel_ip else "", wg_priv=wg_priv,
                 tunnel_ip=tunnel_ip, subnet=hub.get("subnet"),
                 harden=flat.get("harden") == "1",
                 enable_api=flat.get("enable_api") == "1", lock_api=lock_api)
-            creds = {"user": uname, "pwd": pwd, "ip": tunnel_ip, "hub": hub_ip,
+            creds = {"user": uname, "pwd": pwd, "mon_user": mon_uname,
+                     "mon_pwd": mon_pwd, "ip": tunnel_ip, "hub": hub_ip,
                      "pubkey": dev_pub, "reg_ok": reg_ok, "reg_err": reg_err,
                      "peers_path": peers_path,
                      "no_hub_key": want_tunnel and not hub_pubkey}
@@ -2343,6 +2370,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
             uname = flat.get("pwuser", "").strip() or _user_slug(name)
             pwd = _gen_password()
+            mon_uname = flat.get("mon_user", "").strip() or (uname + "-ro")
+            mon_pwd = _gen_password()
             want_tunnel = flat.get("transport", "wg").strip() == "wg"
             lock_api = flat.get("lock_api") == "1"
             tunnel_ip = _alloc_tunnel_ip(hub, name) if (want_tunnel and hub_pubkey) \
@@ -2357,6 +2386,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 api.connect()
                 result = provision_apply(
                     api, name, uname, pwd,
+                    mon_user=mon_uname, mon_pwd=mon_pwd,
                     harden=flat.get("harden") == "1",
                     enable_api=flat.get("enable_api") == "1",
                     lock_api=lock_api,
@@ -2392,16 +2422,20 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                           for n, m in hub["leases_meta"].items()}
                 reg_ok, reg_err = _write_wg_peers(peers_path, leases)
             _hub_save(hub_file, hub)
-            # save the new creds; reach the device at the tunnel IP from now on
+            # save the new creds; reach the device at the tunnel IP from now on,
+            # and POLL as the read-only monitor user
             raw["push_username"] = uname
             raw["push_password"] = pwd
+            raw["username"] = mon_uname
+            raw["password"] = mon_pwd
             if tunnel_ip and router_pub:
                 raw["host"] = tunnel_ip
             try:
                 store.upsert(raw, defaults, original_name=name)
             finally:
                 store.close()
-            creds = {"user": uname, "pwd": pwd, "ip": tunnel_ip if router_pub else "",
+            creds = {"user": uname, "pwd": pwd, "mon_user": mon_uname,
+                     "mon_pwd": mon_pwd, "ip": tunnel_ip if router_pub else "",
                      "hub": hub_ip, "pubkey": router_pub, "reg_ok": reg_ok,
                      "reg_err": reg_err, "peers_path": peers_path,
                      "no_hub_key": want_tunnel and not hub_pubkey, "applied": True}
