@@ -1066,16 +1066,37 @@ def _render_device_backups(name, user, facts, csrf, *, backups=None,
                   f'</a></form></div>')
     else:
         # Step 1: list existing backups + a create form (which previews first).
+        def _bk_btn(bname, action, label, cls, confirm):
+            return (f'<form method="POST" action="/device/backup" class="inline" '
+                    f'onsubmit="return confirm(\'{confirm}\')">'
+                    f'<input type="hidden" name="csrf" value="{csrf}">'
+                    f'<input type="hidden" name="device" value="{esc(name)}">'
+                    f'<input type="hidden" name="bkname" value="{esc(bname)}">'
+                    f'<input type="hidden" name="backup_action" value="{action}">'
+                    f'<button class="btn {cls}" type="submit">{label}</button>'
+                    f'</form>')
         rows = ""
         for b in (backups or []):
-            rows += (f'<tr><td><b>{esc(b["name"])}</b></td>'
+            bn = b["name"]
+            acts = (_bk_btn(bn, "restore", "Restore", "",
+                            f"Restore {bn}? This REBOOTS the router and replaces "
+                            f"its config with this snapshot.")
+                    + " " + _bk_btn(bn, "delete", "Delete", "ghost",
+                                    f"Delete {bn} from the router?"))
+            rows += (f'<tr><td><b>{esc(bn)}</b></td>'
                      f'<td class="muted">{esc(str(b.get("size", "")))}</td>'
-                     f'<td class="muted">{esc(str(b.get("time", "")))}</td></tr>')
+                     f'<td class="muted">{esc(str(b.get("time", "")))}</td>'
+                     f'<td>{acts}</td></tr>')
         if not rows and not error:
-            rows = '<tr><td colspan="3" class="muted">No backup files on the router yet.</td></tr>'
+            rows = '<tr><td colspan="4" class="muted">No backup files on the router yet.</td></tr>'
         table = (f'<div class="box"><h2>Restore points on the router</h2>'
-                 f'<table><tr><th>File</th><th>Size</th><th>Created</th></tr>'
-                 f'{rows}</table></div>') if not error else ""
+                 f'<p class="muted">A backup is taken automatically before every '
+                 f'change you push (named <code>before-&lt;feature&gt;-&lt;time&gt;'
+                 f'</code>). If a change broke something, <b>Restore</b> the '
+                 f'matching snapshot (reboots the router); once you\'ve confirmed a '
+                 f'change is good, <b>Delete</b> its snapshot to keep this tidy.</p>'
+                 f'<table><tr><th>File</th><th>Size</th><th>Created</th>'
+                 f'<th>Actions</th></tr>{rows}</table></div>') if not error else ""
         create = (f'<div class="box"><h2>Create a backup</h2>'
                   f'<p class="muted">Creates a <code>.backup</code> file on the '
                   f'router — a safe, additive write. You will see a dry-run '
@@ -2407,24 +2428,39 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
             cfg = build_device(raw, defaults)
             bkname = (flat.get("bkname") or "").strip() or None
-            if flat.get("apply") != "1":
+            action = flat.get("backup_action", "")
+            if action not in ("restore", "delete") and flat.get("apply") != "1":
                 # Step 1: dry-run preview — connects to nothing.
                 plan = Pusher(cfg, None, dry_run=True).plan_backup(bkname)
                 return self._device_backups_page(name, user, dry_plan=plan)
-            # Step 2: actually create it on the router.
+            # Restore / delete / create — actually talk to the router.
+            uname = (user or {}).get("username", "")
+            audit = self._auditlog()
             dev = rw_device(cfg)
             api = PushApi(dev)
-            pusher = Pusher(cfg, api, dry_run=False)
+            pusher = Pusher(cfg, api, dry_run=False, audit=audit, user=uname)
             try:
                 api.connect()
-                pusher.apply(pusher.plan_backup(bkname))
+                if action == "restore":
+                    pusher.apply(pusher.plan_restore(bkname or ""),
+                                 feature="backup:restore")
+                    msg = (f"Restoring '{bkname}' — the router is rebooting and "
+                           f"will be back in 1–2 minutes with that configuration.")
+                elif action == "delete":
+                    pusher.apply(pusher.plan_delete_backup(bkname or ""),
+                                 feature="backup:delete")
+                    msg = f"Deleted backup '{bkname}'."
+                else:
+                    pusher.apply(pusher.plan_backup(bkname), feature="backup")
+                    msg = "Backup created on the router."
                 return self._redirect(
-                    f"/device?name={quote(name)}&tab=backups&msg=" +
-                    quote("Backup created on the router."))
+                    f"/device?name={quote(name)}&tab=backups&msg=" + quote(msg))
             except (DeviceError, PushError) as exc:
                 return self._device_backups_page(name, user, error=str(exc))
             finally:
                 dev.close()
+                if audit:
+                    audit.close()
 
         # ---- generic feature tabs (SD-WAN/Security/NextDNS/QoS/…) ----
         def _auditlog(self):
@@ -2607,6 +2643,22 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                      "apply" if commit else "dry-run", "error",
                                      f"could not read the router: {exc}", str(exc))
                     return self._feature_tab_page(name, user, slug, error=str(exc))
+                # Safety net: snapshot the whole config to a named backup BEFORE
+                # committing a real change, so you can restore it from the
+                # Backups tab if the change breaks something. Skipped on dry-run
+                # previews and no-op plans. If the snapshot can't be made we do
+                # NOT proceed — better to fail safe than change without a backup.
+                if commit and not plan.empty:
+                    bkname = f"before-{slug}-{time.strftime('%Y%m%d-%H%M%S')}"
+                    try:
+                        pusher.apply(pusher.plan_backup(bkname),
+                                     feature=slug + ":backup")
+                    except PushError as exc:
+                        return self._feature_tab_page(
+                            name, user, slug,
+                            error=f"Could not create the safety backup before "
+                                  f"applying ({exc}). Nothing was changed — free "
+                                  f"up flash space or check the router, then retry.")
                 try:
                     pusher.apply(plan, feature=slug)  # logs its own outcome
                 except PushError as exc:

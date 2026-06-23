@@ -44,7 +44,8 @@ class Pusher:
         for r in rows:
             name = str(r.get("name", ""))
             if name.endswith(".backup") or name.endswith(".rsc"):
-                out.append({"name": name, "size": r.get("size", ""),
+                out.append({"id": r.get(".id"), "name": name,
+                            "size": r.get("size", ""),
                             "time": r.get("creation-time", "")})
         out.sort(key=lambda x: x.get("time", ""), reverse=True)
         return out
@@ -52,10 +53,34 @@ class Pusher:
     def plan_backup(self, name: str | None = None) -> Plan:
         name = name or ("mikromon-" +
                         datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+        # dont-encrypt=yes so the restore (load) works without a password prompt
+        # — the file lives on the router's own flash, which already requires
+        # router access to read.
         op = Operation("run", ("system", "backup"),
-                       {"_cmd": "save", "name": name},
+                       {"_cmd": "save", "name": name, "dont-encrypt": "yes"},
                        desc=f"create backup '{name}.backup' on the router")
         return Plan(self.cfg.name, [op], summary="backup")
+
+    def plan_restore(self, name: str) -> Plan:
+        """Restore a .backup file. RouterOS REBOOTS to apply, so this is a
+        detached run (the API session drops — treated as submitted)."""
+        if not name.endswith(".backup"):
+            name += ".backup"
+        op = Operation("run", ("system", "backup"),
+                       {"_cmd": "load", "name": name},
+                       desc=f"restore backup '{name}' (REBOOTS the router)",
+                       detach=True)
+        return Plan(self.cfg.name, [op], summary=f"restore {name}")
+
+    def plan_delete_backup(self, name: str) -> Plan:
+        """Delete a backup file from the router by its name."""
+        fid = next((r.get(".id") for r in self.api.fetch(("file",))
+                    if str(r.get("name", "")) == name), None)
+        if fid is None:
+            return Plan(self.cfg.name, [], summary="delete backup (not found)")
+        op = Operation("remove", ("file",), {".id": fid},
+                       desc=f"delete backup file '{name}'")
+        return Plan(self.cfg.name, [op], summary=f"delete {name}")
 
     # ----- generic managed-list reconcile (firewall, NAT, queues, …) --------
     def plan_managed_list(self, path, key, desired, *, manage_tag=None,

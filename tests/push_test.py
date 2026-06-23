@@ -174,6 +174,24 @@ check("backup plan is a single run op",
       len(plan.ops) == 1 and plan.ops[0].action == "run")
 check("backup dry-run previews the save",
       "nightly" in p.apply(plan)["diff"])
+check("list_backups exposes the file id (for delete)",
+      backups[0].get("id") == "*1")
+# backups are unencrypted so a restore needs no password
+check("plan_backup saves unencrypted",
+      plan.ops[0].params.get("dont-encrypt") == "yes")
+# restore = a detached (reboot) run that loads the .backup
+r = p.plan_restore("nightly")
+check("plan_restore loads the .backup as a detached reboot run",
+      r.ops[0].action == "run" and r.ops[0].detach
+      and r.ops[0].params.get("_cmd") == "load"
+      and r.ops[0].params.get("name") == "nightly.backup")
+# delete = remove the file by its id; missing file = safe empty plan
+d = p.plan_delete_backup("mikromon-20260101.backup")
+check("plan_delete_backup removes the file by id",
+      len(d.ops) == 1 and d.ops[0].action == "remove"
+      and d.ops[0].params.get(".id") == "*1")
+check("plan_delete_backup on a missing file is an empty (safe) plan",
+      p.plan_delete_backup("nope.backup").empty)
 
 # ---- 6. ownership by comment PREFIX (multi-rule features) ------------------
 print("ownership by prefix:")
