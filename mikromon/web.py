@@ -94,6 +94,20 @@ def _known_devices(store, state) -> list:
     return sorted(set(store.devices()) | set(state.get("devices", {}).keys()))
 
 
+def _visible_device_names(store, state, ds) -> set:
+    """The devices to show in the dashboard / inventory / device pages.
+
+    In web-managed mode (a devices DB is configured) the DB is the single
+    source of truth, so show ONLY its devices. This auto-hides "orphans" — a
+    device removed from the Devices page (or otherwise no longer managed) that
+    still has leftover metrics/state and would otherwise stay stuck on the
+    dashboard with no way to remove it. Without a devices DB (YAML mode) fall
+    back to whatever has metrics or saved state."""
+    if ds is not None:
+        return set(ds.names())
+    return set(_known_devices(store, state))
+
+
 def _all_devices(store, state, allowed=None) -> list:
     names = _known_devices(store, state)
     if allowed is not None:
@@ -1949,12 +1963,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._serve_logs(user)
 
             store = self._store()
-            known = set(_known_devices(store, _load_state(state_file)))
-            store.close()
-            ds = self._devstore()  # include web-managed devices not yet polled
+            ds = self._devstore()
+            # In web-managed mode show only devices still in the DB (hide
+            # orphans left in metrics/state); fall back to known in YAML mode.
+            known = _visible_device_names(store, _load_state(state_file), ds)
             if ds:
-                known |= set(ds.names())
                 ds.close()
+            store.close()
             allowed = AuthStore.allowed_devices(user, sorted(known))
             return self._serve_data(path, url, user=user, allowed=allowed)
 
@@ -1971,10 +1986,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if path == "/device":
                     q = parse_qs(url.query)
                     dev = q.get("name", [""])[0]
-                    known = set(_known_devices(store, state))
                     ds = self._devstore()
+                    known = _visible_device_names(store, state, ds)
                     if ds:
-                        known |= set(ds.names())
                         ds.close()
                     if dev not in known:
                         return self._send(404, "no such device")

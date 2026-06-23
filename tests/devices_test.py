@@ -201,6 +201,16 @@ try:
     check("edit updates host, keeps password",
           raw["host"] == "8.8.8.8" and raw["password"] == "secret")
     saved.close()
+    # orphan auto-hide: a device with metrics but NOT in the devices DB must not
+    # show on the dashboard (managed mode = the DB is the source of truth).
+    ms = MetricsStore(mdb)
+    ms.record([(1.0, "WebR1", "up", "", 1.0), (1.0, "GhostR", "up", "", 1.0)])
+    ms.close()
+    st, apidev = get(admin, "/api/devices")
+    shown = [d.get("device") for d in json.loads(apidev)]
+    check("managed device with metrics shows on the dashboard", "WebR1" in shown)
+    check("orphan device (not in the devices DB) is auto-hidden from dashboard",
+          "GhostR" not in shown)
     # --- Backups tab (config-push engine) wired into the web UI ---
     st, body = get(admin, "/device?name=WebR1")
     check("admin can open a web-managed device page (before any poll)",
