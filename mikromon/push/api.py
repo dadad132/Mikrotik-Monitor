@@ -44,8 +44,8 @@ class PushApi:
 
         Normalizes read failures to PushError so callers (and the web layer,
         which catches DeviceError/PushError) handle a rejected/missing menu —
-        e.g. /zerotier on a router without the package — instead of leaking a
-        raw librouteros error and 500-ing the request."""
+        e.g. /interface/wireguard on a RouterOS 6.x router that predates it —
+        instead of leaking a raw librouteros error and 500-ing the request."""
         try:
             return list(self.device.api.path(*path))
         except Exception as exc:  # noqa: BLE001 — normalize to PushError

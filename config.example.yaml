@@ -54,16 +54,6 @@ devices_db: ./devices.db
 #     dashboard; then set web.host: 0.0.0.0 and web.secure_cookies: true.
 #   Always use HTTPS for remote access so the login cookie isn't sent in clear.
 
-# ----------------------------------------------------------------------------
-# ZeroTier dial-home tunnel — lets routers behind NAT/CGNAT call back to this
-# server. Install zerotier-one on the server (deploy/install.sh does this),
-# create a free network at my.zerotier.com, paste the Network ID here, then
-# run the installer again to join. Each router's Provision tab generates the
-# RouterOS join command automatically.
-# ----------------------------------------------------------------------------
-zerotier:
-  network_id: ""   # 16-char hex, e.g. "1234567890abcdef" — get it from my.zerotier.com
-
 # Require a condition to be observed this many polls in a row before alerting.
 # 2 means a single bad poll (a blip) will NOT page you — it must persist.
 confirmations: 2

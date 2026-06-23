@@ -280,7 +280,7 @@ def _nav(user, active) -> str:
     items = [("/", "Dashboard"), ("/inventory", "Inventory")]
     if user.get("role") == "admin":
         items += [("/devices", "Devices"), ("/logs", "Activity"),
-                  ("/admin/zerotier", "ZeroTier"), ("/admin", "Users")]
+                  ("/admin", "Users")]
     links = "".join(
         f'<a href="{href}" class="{"on" if href == active else ""}">{label}</a>'
         for href, label in items)
@@ -464,25 +464,7 @@ _DASH_JS = """
 </script>"""
 
 
-def _zt_setup_banner(csrf: str) -> str:
-    return (
-        '<div style="background:#fffbeb;border-left:4px solid #d97706;padding:14px 20px;'
-        'margin:16px auto;max-width:1100px;border-radius:6px">'
-        '<b>ZeroTier not configured</b> — set up your dial-home tunnel so routers '
-        'behind NAT can connect back to this server.<br>'
-        '<small style="color:#92400e">Create a free network at '
-        '<a href="https://my.zerotier.com" target="_blank">my.zerotier.com</a>, '
-        'then paste the Network ID below.</small>'
-        f'<form method="POST" action="/admin/zerotier" '
-        f'style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">'
-        f'<input type="hidden" name="csrf" value="{csrf}">'
-        '<input name="zt_network_id" placeholder="ZeroTier Network ID (e.g. 1a2b3c4d5e6f7890)" '
-        'style="flex:1;min-width:260px">'
-        '<button class="btn" type="submit">Save &amp; activate</button>'
-        '</form></div>')
-
-
-def _render_dashboard(store, state, user=None, allowed=None, zt_banner="") -> str:
+def _render_dashboard(store, state, user=None, allowed=None) -> str:
     devs = sorted(_all_devices(store, state, allowed),
                   key=lambda d: ({"crit": 0, "warn": 1, "ok": 2}[_severity(d)],
                                  d["device"].lower()))
@@ -514,7 +496,6 @@ def _render_dashboard(store, state, user=None, allowed=None, zt_banner="") -> st
     return (f'<!doctype html><html><head><meta charset="utf-8">'
             f'<meta http-equiv="refresh" content="10"><title>mikromon</title>'
             f'<style>{_PAGE_CSS}</style></head><body>{_header(user)}'
-            f'{zt_banner}'
             f'{_render_noc_bar(summary)}{charts}{fbar}'
             f'<div class="grid">{grid}</div>{empty}{_DASH_JS}</body></html>')
 
@@ -696,9 +677,15 @@ def _user_slug(s) -> str:
     return out[:32] or "mikromon"
 
 
-# --- hub (ZeroTier) settings — loaded from hub.json written by install.sh ----
-# The dashboard reads the ZeroTier Network ID and fills each router's provision
-# script with the join command automatically. No key management needed.
+# --- hub (WireGuard server) settings + per-device peer registry -------------
+# The dashboard runs ON the Ubuntu server, so it can auto-detect the server's
+# own IP, generate each device's WireGuard keypair, and write the device's peer
+# into a peers file that the hub's wg0 reads (set up by deploy/install.sh). That
+# way the provisioning script is filled with the SERVER's real details and the
+# hub already accepts the peer — no manual entry, no mismatch.
+_HUB_SUBNET_DEFAULT = "10.10.0.0/24"
+_WG_PEERS_DEFAULT = "/etc/wireguard/wg-peers.conf"
+_WG_PORT_DEFAULT = "51820"
 
 
 def _detect_server_ip() -> str:
@@ -734,13 +721,58 @@ def _hub_save(path, data) -> None:
         log.warning("could not save hub settings to %s", path)
 
 
+def _alloc_tunnel_ip(hub, name) -> str:
+    """A stable per-device tunnel IP from the hub subnet (.2-.254)."""
+    leases = hub.setdefault("leases", {})
+    if name in leases:
+        return leases[name]
+    base = hub.get("subnet", _HUB_SUBNET_DEFAULT).split("/")[0].rsplit(".", 1)[0]
+    used = set(leases.values())
+    for i in range(2, 255):
+        ip = f"{base}.{i}"
+        if ip not in used:
+            leases[name] = ip
+            return ip
+    return f"{base}.2"
 
 
-def _provision_script(name, raw, pwuser, pwd, *, zt_network_id="",
+def _wg_keypair():
+    """Generate a WireGuard keypair via the `wg` CLI (wireguard-tools on the
+    Ubuntu hub). Returns (private, public) or (None, error)."""
+    import subprocess
+    try:
+        priv = subprocess.run(["wg", "genkey"], capture_output=True, text=True,
+                              check=True).stdout.strip()
+        pub = subprocess.run(["wg", "pubkey"], input=priv, capture_output=True,
+                             text=True, check=True).stdout.strip()
+        return priv, pub
+    except Exception as exc:  # noqa: BLE001 — wg missing / failed
+        return None, str(exc)
+
+
+def _write_wg_peers(path, leases):
+    """Rebuild the hub's WireGuard peers file from every device lease
+    ({name: {ip, pubkey}}). The hub's wg0 includes this file. Returns (ok, err)."""
+    blocks = []
+    for nm, lease in sorted(leases.items()):
+        pub, ip = lease.get("pubkey"), lease.get("ip")
+        if pub and ip:
+            blocks.append(f"[Peer]\n# {nm}\nPublicKey = {pub}\n"
+                          f"AllowedIPs = {ip}/32")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n\n".join(blocks) + ("\n" if blocks else ""))
+        return True, ""
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
+def _provision_script(name, raw, pwuser, pwd, *, hub_ip="", hub_port="51820",
+                      hub_pubkey="", wg_priv="", tunnel_ip="", subnet="",
                       harden=True) -> str:
     """A one-paste RouterOS bootstrap script that is SAFE on an already-configured
     router: every step is guarded so it only ADDS what is missing and never
-    resets existing config. The ZeroTier tunnel block needs RouterOS 7.1+."""
+    resets existing config. The WireGuard dial-home tunnel needs RouterOS 7.1+."""
     u = pwuser
     L = []
 
@@ -749,7 +781,7 @@ def _provision_script(name, raw, pwuser, pwd, *, zt_network_id="",
 
     a(f"# === mikromon provisioning for {name} ===")
     a("# Safe to paste on a NEW *or* an already-configured router: it only ADDS")
-    a("# what is missing and never resets your existing config. The ZeroTier")
+    a("# what is missing and never resets your existing config. The WireGuard")
     a("# tunnel block needs RouterOS 7.1+.")
     a("")
     a("# 1) management user - create if missing, else just (re)set its password")
@@ -773,30 +805,30 @@ def _provision_script(name, raw, pwuser, pwd, *, zt_network_id="",
         a("# 4) hardening - turn off legacy plaintext services (idempotent)")
         a("/ip service set telnet disabled=yes")
         a("/ip service set ftp disabled=yes")
-    if zt_network_id:
+    if hub_ip and hub_pubkey and wg_priv and tunnel_ip:
+        port = hub_port or "51820"
+        net = subnet or "10.10.0.0/24"
         a("")
-        a("# 5) ZeroTier dial-home tunnel (RouterOS 7.1+) - add only if absent.")
-        a("#    ZeroTier is a SEPARATE RouterOS package (not built in): if it")
-        a("#    isn't installed the /zerotier menu doesn't exist and would abort")
-        a("#    this script, so we guard on the package being present first.")
-        a(':if ([:len [/system package find where name=zerotier]] = 0) do={')
-        a('  :log warning "mikromon: ZeroTier package not installed - download '
-          "the 'zerotier' extra package for this router's architecture, upload "
-          'it and reboot, then re-run this script."')
-        a("} else={")
-        a("  :if ([:len [/zerotier find where name=zt1]] = 0) do={")
-        a('    /zerotier add name=zt1')
-        a("  }")
-        a('  :if ([:len [/zerotier interface find where network="'
-          + zt_network_id + '"]] = 0) do={')
-        a('    /zerotier interface add instance=zt1 network="' + zt_network_id
-          + '" name=ztmikromon comment="mikromon:tunnel:if"')
-        a("  }")
-        a("  :if ([:len [/ip firewall filter find where "
+        a("# 5) WireGuard dial-home tunnel (RouterOS 7.1+) - add only if absent")
+        a(":if ([:len [/interface wireguard find name=mikromon]] = 0) do={")
+        a('  /interface wireguard add name=mikromon listen-port=13231 '
+          'private-key="' + wg_priv + '" comment="mikromon:tunnel:if"')
+        a("}")
+        a(":if ([:len [/ip address find interface=mikromon]] = 0) do={")
+        a("  /ip address add address=" + tunnel_ip + "/24 interface=mikromon "
+          'comment="mikromon:tunnel:addr"')
+        a("}")
+        a(":if ([:len [/interface wireguard peers find "
+          "interface=mikromon]] = 0) do={")
+        a('  /interface wireguard peers add interface=mikromon public-key="'
+          + hub_pubkey + '" endpoint-address=' + hub_ip + " endpoint-port="
+          + port + " allowed-address=" + net
+          + ' persistent-keepalive=25s comment="mikromon:tunnel:hub"')
+        a("}")
+        a(":if ([:len [/ip firewall filter find "
           'comment="mikromon:tunnel:fw"]] = 0) do={')
-        a('    /ip firewall filter add chain=input in-interface=ztmikromon '
+        a('  /ip firewall filter add chain=input in-interface=mikromon '
           'action=accept comment="mikromon:tunnel:fw"')
-        a("  }")
         a("}")
     a("")
     a('/log info "mikromon provisioning done"')
@@ -861,9 +893,11 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
     pwuser = (raw or {}).get("push_username") or _user_slug(name)
     intro = ('<p class="muted" style="margin:-6px 0 14px">Generate a one-paste '
              'script for a new router. It creates a management user with a strong '
-             'password (saved here), enables the API, and adds a <b>ZeroTier</b> '
-             'dial-home tunnel. The Network ID is filled from <b>this</b> server '
-             'automatically. (ZeroTier tunnel needs RouterOS 7.1+.)</p>')
+             'password (saved here), enables the API, and adds a <b>WireGuard</b> '
+             'dial-home tunnel. The hub IP + keys are filled from <b>this</b> '
+             'server, and the device is registered as a WireGuard peer on the hub '
+             'automatically — no manual entry. (WireGuard tunnel needs RouterOS '
+             '7.1+.)</p>')
     form = (
         f'<div class="box"><h2>Generate provisioning script</h2>'
         f'<form method="POST" action="/device/provision">'
@@ -874,8 +908,11 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
         f'device)</label><input name="pwuser" value="{esc(pwuser)}"></div>'
         f'<div class="f"><label class="f">Dial-home tunnel</label>'
         f'<select name="transport">'
-        f'<option value="zt" selected>ZeroTier (RouterOS 7.1+)</option>'
+        f'<option value="wg" selected>WireGuard (RouterOS 7.1+)</option>'
         f'<option value="">None (just user + API)</option></select></div>'
+        f'<div class="f"><label class="f">Hub address (this server\'s IP)</label>'
+        f'<input name="hub" value="{esc(hub_ip)}" placeholder="102.36.140.219">'
+        f'</div>'
         f'<div class="f"><label class="chk"><input type="checkbox" name="harden" '
         f'value="1" class="switch" checked> Disable Telnet/FTP (basic hardening)'
         f'</label></div>'
@@ -889,21 +926,28 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
         f'API (using the Host + login from the Devices page) and sets everything '
         f'up automatically — no terminal, nothing to paste. Use it for a router '
         f'you can reach now (e.g. on the LAN with its default login). <b>Generate '
-        f'script</b> is the fallback when you can\'t reach it directly.</p></div>')
+        f'script</b> is the fallback when you can\'t reach it directly. Either way '
+        f'a NEW key + password is created and the peer registered on the '
+        f'server.</p></div>')
     out = ""
     c = creds or {}
     if script is not None or c.get("applied"):
-        if c.get("zt_network_id"):
-            srv = ('<p class="ok">✓ ZeroTier join command included in script. '
-                   'After pasting, authorize the router at '
-                   '<a href="https://my.zerotier.com" target="_blank">my.zerotier.com</a> '
-                   'then update the <b>Host</b> on the Devices page to its '
-                   'ZeroTier IP.</p>')
-        elif c.get("no_zt_network"):
-            srv = ('<p style="color:#b91c1c">⚠ ZeroTier Network ID not configured. '
-                   'Add it to <code>config.yaml</code> under '
-                   '<code>zerotier: network_id:</code> and re-run '
-                   '<code>sudo bash deploy/install.sh</code>.</p>')
+        ip = c.get("ip", "")
+        if ip and c.get("reg_ok"):
+            srv = (f'<p class="ok">✓ Registered as a WireGuard peer on this server '
+                   f'— the router connects to <code>{esc(c.get("hub", ""))}</code> '
+                   f'and gets tunnel IP <code>{esc(ip)}</code>. The device Host was '
+                   f'set to <code>{esc(ip)}</code>.</p>')
+        elif c.get("no_hub_key"):
+            srv = ('<p style="color:#b91c1c">⚠ The WireGuard hub isn\'t set up on '
+                   'this server yet (no hub key). Run <code>sudo bash '
+                   'deploy/install.sh</code> on the server, then re-run.</p>')
+        elif ip:
+            srv = (f'<p style="color:#b91c1c">⚠ Could not write the hub peers file '
+                   f'(<code>{esc(c.get("peers_path", ""))}</code>: '
+                   f'{esc(c.get("reg_err", ""))}). Add this peer on the server:</p>'
+                   f'<pre style="{_PRE}">[Peer]\n# {esc(name)}\nPublicKey = '
+                   f'{esc(c.get("pubkey", ""))}\nAllowedIPs = {esc(ip)}/32</pre>')
         else:
             srv = ""
         if c.get("applied"):
@@ -1171,26 +1215,27 @@ _PRE = ('white-space:pre-wrap;background:#f8fafc;padding:10px;border-radius:6px;
 
 
 def _hubtunnel_box(name, current) -> str:
-    """Hub-side (ZeroTier) setup help. deploy/install.sh sets this up."""
-    steps = ("# deploy/install.sh does all of this for you:\n"
-             "curl -fsSL https://install.zerotier.com | bash\n"
-             "zerotier-cli join <your-network-id>\n"
-             "# Then authorize this server in my.zerotier.com")
-    return (f'<div class="box"><h2>Hub (ZeroTier) setup</h2>'
-            f'<p class="muted">Every device dials home with <b>ZeroTier</b> '
-            f'(needs RouterOS 7.1+). '
-            f'<b>Step 1:</b> Create a free network at '
-            f'<a href="https://my.zerotier.com" target="_blank">my.zerotier.com</a>. '
-            f'<b>Step 2:</b> Add the Network ID to '
-            f'<code>config.yaml</code> under <code>zerotier: network_id:</code>. '
-            f'<b>Step 3:</b> Run <code>sudo bash deploy/install.sh</code> on the '
-            f'Ubuntu server — it installs ZeroTier, joins the network, and saves '
-            f'the Network ID so the Provision tab fills scripts automatically.</p>'
-            f'<pre style="{_PRE}">{esc(steps)}</pre>'
-            f'<p class="muted">After a device joins, authorize it in ZeroTier '
-            f'Central, then update its <b>Host</b> (Devices page) to the ZeroTier '
-            f'IP shown in my.zerotier.com. Use <b>Restrict access</b> to lock the '
-            f'API to the ZeroTier subnet and close the public port.</p></div>')
+    """Hub-side (Ubuntu WireGuard server) setup help. deploy/install.sh sets this
+    up automatically; the Provision tab registers each device as a peer."""
+    wg = ("# Ubuntu hub - WireGuard server (deploy/install.sh does this for you):\n"
+          "sudo apt install wireguard wireguard-tools\n"
+          "# /etc/wireguard/wg0.conf — NO PostUp; peers are applied by\n"
+          "#   mikromon-wg-reload.service (a separate systemd unit that runs\n"
+          "#   outside wg-quick's AppArmor confinement):\n"
+          "[Interface]\nPrivateKey = <hub private key>\nAddress = 10.10.0.1/24\n"
+          "ListenPort = 51820")
+    return (f'<div class="box"><h2>Hub (Ubuntu WireGuard server) setup</h2>'
+            f'<p class="muted">Every device dials home with <b>WireGuard</b> '
+            f'(needs RouterOS 7.1+). Run <code>sudo bash deploy/install.sh</code> '
+            f"on your Ubuntu host — it installs WireGuard, makes the hub key, and "
+            f'writes the hub\'s public key + IP where mikromon reads them. The '
+            f'<b>Provision</b> tab then generates each router\'s keypair, registers '
+            f'it as a peer on the hub, and fills the script automatically — no '
+            f'manual steps. For reference, the hub interface looks like:</p>'
+            f'<pre style="{_PRE}">{esc(wg)}</pre>'
+            f'<p class="muted">After a device is up, set its <b>Host</b> (Devices '
+            f'page) to its tunnel IP and use <b>Restrict access</b> to lock the API '
+            f'to <code>10.10.0.0/24</code> and close the public port.</p></div>')
 
 
 def _update_box(name, csrf, current) -> str:
@@ -1492,181 +1537,7 @@ def _device_chips(known_devices, selected, all_on) -> str:
             f'{chips}</div></div>')
 
 
-def _zt_fetch_members(network_id: str, api_token: str) -> tuple:
-    """Fetch network members from ZeroTier Central API.
-    Returns (list_of_members, error_string)."""
-    if not (network_id and api_token):
-        return [], ""
-    import urllib.request
-    try:
-        url = f"https://api.zerotier.com/api/v1/network/{network_id}/member"
-        req = urllib.request.Request(
-            url, headers={"Authorization": f"token {api_token}"})
-        with urllib.request.urlopen(req, timeout=6) as r:
-            return json.load(r), ""
-    except Exception as exc:  # noqa: BLE001
-        return [], str(exc)
-
-
-def _render_zt_admin(hub: dict, csrf: str, user, saved: bool = False) -> str:
-    zt_net    = hub.get("zt_network_id", "")
-    zt_token  = hub.get("zt_api_token", "")
-    zt_node   = hub.get("zt_node_id", "")
-    hub_ip    = hub.get("hub_ip", "")
-
-    saved_msg = ('<div style="background:#dcfce7;border-left:4px solid #16a34a;'
-                 'padding:10px 16px;border-radius:6px;margin-bottom:16px">'
-                 '&#10003; Settings saved.</div>' if saved else "")
-
-    # ── service status ───────────────────────────────────────────────────────
-    status_rows = []
-    if zt_node:
-        status_rows.append(f'<tr><td class="muted">Server node ID</td>'
-                           f'<td><code>{esc(zt_node)}</code></td></tr>')
-    if hub_ip:
-        status_rows.append(f'<tr><td class="muted">Server ZeroTier IP</td>'
-                           f'<td><code>{esc(hub_ip)}</code></td></tr>')
-    if zt_net:
-        status_rows.append(f'<tr><td class="muted">Network ID</td>'
-                           f'<td><code>{esc(zt_net)}</code></td></tr>')
-    svc_indicator = ('<span style="color:#16a34a">&#9679; configured</span>'
-                     if zt_net else
-                     '<span style="color:#d97706">&#9679; not configured</span>')
-    status_rows.append(f'<tr><td class="muted">Status</td>'
-                       f'<td>{svc_indicator}</td></tr>')
-    status_table = (f'<table style="width:100%;border-collapse:collapse">'
-                    + "".join(status_rows) + "</table>") if status_rows else ""
-    status_box = (f'<div class="box"><h2>Service status</h2>'
-                  f'<p class="muted">The ZeroTier service runs on this server. '
-                  f'Run <code>sudo bash deploy/install.sh</code> to install/join. '
-                  f'Authorize this server in '
-                  f'<a href="https://my.zerotier.com" target="_blank">ZeroTier Central</a>.'
-                  f'</p>{status_table}</div>')
-
-    # ── settings form ────────────────────────────────────────────────────────
-    settings_box = (
-        f'<div class="box"><h2>Network settings</h2>'
-        f'<form method="POST" action="/admin/zerotier">'
-        f'<input type="hidden" name="csrf" value="{csrf}">'
-        f'<table style="width:100%;border-collapse:collapse">'
-        f'<tr><td style="padding:8px 0;width:200px" class="muted">Network ID</td>'
-        f'<td><input name="zt_network_id" value="{esc(zt_net)}" '
-        f'placeholder="1a2b3c4d5e6f7890" style="width:100%"></td></tr>'
-        f'<tr><td style="padding:8px 0" class="muted">API Token '
-        f'<small>(optional)</small></td>'
-        f'<td><input name="zt_api_token" value="{esc(zt_token)}" '
-        f'type="password" placeholder="Paste ZeroTier Central API token" '
-        f'style="width:100%">'
-        f'<small class="muted">Used to auto-approve routers and show member list. '
-        f'Generate at my.zerotier.com → Account → API Access Tokens.</small></td></tr>'
-        f'<tr><td style="padding:8px 0" class="muted">Hub IP override '
-        f'<small>(optional)</small></td>'
-        f'<td><input name="hub_ip" value="{esc(hub_ip)}" '
-        f'placeholder="Leave blank to auto-detect" style="width:100%">'
-        f'<small class="muted">The server\'s ZeroTier IP. '
-        f'Set this after the server is authorized and has a ZeroTier IP assigned. '
-        f'Find it in ZeroTier Central → your network → this server\'s entry.</small></td></tr>'
-        f'</table>'
-        f'<div class="actions" style="margin-top:14px">'
-        f'<button class="btn" type="submit">Save settings</button></div>'
-        f'</form></div>')
-
-    # ── members table ────────────────────────────────────────────────────────
-    members, members_err = _zt_fetch_members(zt_net, zt_token)
-    if members_err:
-        members_box = (f'<div class="box"><h2>Network members</h2>'
-                       f'<p style="color:#dc2626">Could not fetch members: '
-                       f'{esc(members_err)}</p></div>')
-    elif zt_token and zt_net:
-        m_rows = []
-        for m in members:
-            node  = esc(m.get("nodeId", ""))
-            name  = esc(m.get("name", "") or m.get("description", "") or "—")
-            ips   = ", ".join(m.get("config", {}).get("ipAssignments", [])) or "—"
-            auth  = m.get("config", {}).get("authorized", False)
-            badge = ('<span style="color:#16a34a">&#10003; authorized</span>'
-                     if auth else
-                     '<span style="color:#dc2626">&#10007; unauthorized</span>')
-            online = ('<span style="color:#16a34a">online</span>'
-                      if m.get("online") else
-                      '<span style="color:#94a3b8">offline</span>')
-            m_rows.append(f'<tr><td><code>{node}</code></td><td>{name}</td>'
-                          f'<td><code>{esc(ips)}</code></td>'
-                          f'<td>{badge}</td><td>{online}</td></tr>')
-        body = ("".join(m_rows) or
-                '<tr><td colspan="5" class="muted">No members yet. '
-                'Paste the provisioning script on a router to add one.</td></tr>')
-        members_box = (
-            f'<div class="box"><h2>Network members '
-            f'<small class="muted" style="font-weight:normal;font-size:13px">'
-            f'({len(members)} total)</small></h2>'
-            f'<table style="width:100%;border-collapse:collapse">'
-            f'<tr><th>Node ID</th><th>Name</th><th>ZeroTier IP</th>'
-            f'<th>Auth</th><th>Status</th></tr>'
-            f'{body}</table>'
-            f'<p class="muted" style="margin-top:8px">Manage members at '
-            f'<a href="https://my.zerotier.com/network/{esc(zt_net)}" '
-            f'target="_blank">my.zerotier.com/network/{esc(zt_net)}</a></p>'
-            f'</div>')
-    elif zt_net:
-        members_box = (f'<div class="box"><h2>Network members</h2>'
-                       f'<p class="muted">Add an <b>API Token</b> above to see '
-                       f'connected routers here and enable auto-approval.</p></div>')
-    else:
-        members_box = ""
-
-    # ── setup guide ──────────────────────────────────────────────────────────
-    guide_box = (
-        '<div class="box"><h2>Setup guide</h2>'
-        '<ol style="line-height:2">'
-        '<li>Create a free account at '
-        '<a href="https://my.zerotier.com" target="_blank">my.zerotier.com</a> '
-        'and click <b>Create A Network</b>.</li>'
-        '<li>Copy the <b>Network ID</b> and paste it above. '
-        'Enable <b>Auto-Approve Members</b> in the network settings '
-        '(or use an API Token so mikromon approves them automatically).</li>'
-        '<li>Add your <b>API Token</b> above (optional but recommended). '
-        'Generate one at my.zerotier.com → Account → API Access Tokens.</li>'
-        '<li>Run <code>sudo bash deploy/install.sh</code> on the server — '
-        'it installs ZeroTier and joins the network.</li>'
-        '<li>Authorize the server in ZeroTier Central. '
-        'Copy the server\'s ZeroTier IP and paste it in <b>Hub IP override</b> above.</li>'
-        '<li>Go to a router → <b>Hub tunnel</b> tab → apply. '
-        'The router joins ZeroTier automatically. '
-        'Authorize it in ZeroTier Central, then update its <b>Host</b> '
-        'on the Devices page to its ZeroTier IP.</li>'
-        '</ol></div>')
-
-    inner = (f'<div class="wrap"><h1>ZeroTier configuration</h1>'
-             f'{saved_msg}{status_box}{settings_box}{members_box}{guide_box}</div>')
-    return _page("ZeroTier", _header(user, "/admin/zerotier") + inner)
-
-
-def _render_admin(auth: AuthStore, known_devices, csrf: str, user, hub=None) -> str:
-    hub = hub or {}
-    zt_net = hub.get("zt_network_id", "")
-    zt_node = hub.get("zt_node_id", "")
-    zt_status = ('<span style="color:#16a34a">&#10003; Configured</span>'
-                 if zt_net else
-                 '<span style="color:#d97706">&#9888; Not configured</span>')
-    zt_box = (
-        f'<div class="box" id="zerotier"><h2>ZeroTier tunnel settings</h2>'
-        f'<p class="muted">Routers join this ZeroTier network to dial home to '
-        f'this server through NAT/CGNAT. Create a free network at '
-        f'<a href="https://my.zerotier.com" target="_blank">my.zerotier.com</a> '
-        f'and enable <b>Auto-Approve Members</b> in the network settings.</p>'
-        f'<p>Status: {zt_status}</p>'
-        f'<form method="POST" action="/admin/zerotier">'
-        f'<input type="hidden" name="csrf" value="{csrf}">'
-        f'<div class="actions" style="flex-wrap:wrap;margin-bottom:8px">'
-        f'<input name="zt_network_id" value="{esc(zt_net)}" '
-        f'placeholder="Network ID (e.g. 1a2b3c4d5e6f7890)" style="flex:1;min-width:220px">'
-        f'<button class="btn" type="submit">Save</button>'
-        f'</div>'
-        + (f'<p class="muted" style="margin:0">Server ZeroTier node ID: '
-           f'<code>{esc(zt_node)}</code> — authorize this in ZeroTier Central.</p>'
-           if zt_node else '')
-        + f'</form></div>')
+def _render_admin(auth: AuthStore, known_devices, csrf: str, user) -> str:
     rows = []
     for u in auth.list_users():
         is_all = u["devices"] == "*"
@@ -1697,9 +1568,8 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user, hub=None) -> 
             </form>
           </td></tr>""")
     inner = (
-        f'<div class="wrap"><h1>Admin</h1>'
-        f'{zt_box}'
-        f'<div class="box"><h2>User management</h2><table>'
+        f'<div class="wrap"><h1>User management</h1>'
+        f'<div class="box"><table>'
         f'<tr><th>User</th><th>Role</th><th>Allowed devices</th><th></th></tr>'
         f'{"".join(rows)}</table></div>'
         f'<div class="box"><h2>Add a user</h2>'
@@ -1715,7 +1585,7 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user, hub=None) -> 
         f'<div style="margin-top:14px">'
         f'<button class="btn" type="submit">Create user</button></div>'
         f'</form></div></div>')
-    return _page("Admin", _header(user, "/admin") + inner + _ADMIN_JS)
+    return _page("Users", _header(user, "/admin") + inner + _ADMIN_JS)
 
 
 def _page(title: str, body: str) -> str:
@@ -2013,8 +1883,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._send(401, '{"error":"unauthorized"}',
                                       "application/json")
                 return self._redirect("/login")
-            if path == "/admin/zerotier":
-                return self._serve_zt_admin(user)
             if path == "/admin":
                 return self._serve_admin(user)
             if path == "/devices":
@@ -2037,14 +1905,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             try:
                 state = _load_state(state_file)
                 if path == "/":
-                    zt_banner = ""
-                    if AuthStore.is_admin(user) and devices_db:
-                        hub = _hub_load(_hub_path(devices_db))
-                        if not hub.get("zt_network_id"):
-                            zt_banner = _zt_setup_banner(self._session()["csrf"])
                     return self._send(200, _render_dashboard(store, state, user,
-                                      allowed, zt_banner=zt_banner),
-                                      "text/html; charset=utf-8")
+                                      allowed), "text/html; charset=utf-8")
                 if path == "/inventory":
                     return self._send(200, _render_inventory(store, state, user,
                                       allowed), "text/html; charset=utf-8")
@@ -2101,15 +1963,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             finally:
                 store.close()
 
-        def _serve_zt_admin(self, user):
-            if not AuthStore.is_admin(user):
-                return self._send(403, "forbidden")
-            hub = _hub_load(_hub_path(devices_db)) if devices_db else {}
-            csrf = self._session()["csrf"]
-            saved = parse_qs(self.path.split("?", 1)[-1]).get("saved", [""])[0] == "1"
-            return self._send(200, _render_zt_admin(hub, csrf, user, saved=saved),
-                              "text/html; charset=utf-8")
-
         def _serve_metrics(self, url):
             token = (parse_qs(url.query).get("token", [""])[0]
                      or self.headers.get("Authorization", "").removeprefix("Bearer "))
@@ -2131,9 +1984,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             store = self._store()
             known = _known_devices(store, _load_state(state_file))
             store.close()
-            hub = _hub_load(_hub_path(devices_db)) if devices_db else {}
             return self._send(200, _render_admin(
-                auth, known, self._session()["csrf"], user, hub=hub),
+                auth, known, self._session()["csrf"], user),
                 "text/html; charset=utf-8")
 
         # ---- device management (admin only) ----
@@ -2227,16 +2079,40 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if raw is None:
                 store.close()
                 return self._send(404, "no such device")
-            # hub (ZeroTier) details from hub.json written by install.sh
+            # hub (WireGuard server) details — auto-detected, overridable in form
             hub_file = _hub_path(devices_db)
             hub = _hub_load(hub_file)
-            zt_network_id = hub.get("zt_network_id", "")
+            hub_ip = (flat.get("hub", "").strip() or hub.get("hub_ip")
+                      or _detect_server_ip())
+            hub["hub_ip"] = hub_ip
+            hub.setdefault("subnet", _HUB_SUBNET_DEFAULT)
+            hub_pubkey = hub.get("hub_pubkey", "")
+            hub_port = hub.get("listen_port", _WG_PORT_DEFAULT)
+            peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
             uname = flat.get("pwuser", "").strip() or _user_slug(name)
             pwd = _gen_password()
-            want_tunnel = flat.get("transport", "zt").strip() == "zt"
+            want_tunnel = flat.get("transport", "wg").strip() == "wg"
+            tunnel_ip = dev_pub = wg_priv = ""
+            reg_ok, reg_err = True, ""
+            if want_tunnel and hub_pubkey:
+                wg_priv, dev_pub = _wg_keypair()
+                if wg_priv is None:
+                    reg_ok, reg_err = False, f"wg keygen failed: {dev_pub}"
+                    dev_pub = ""
+                else:
+                    tunnel_ip = _alloc_tunnel_ip(hub, name)
+                    hub.setdefault("leases_meta", {})[name] = {
+                        "ip": tunnel_ip, "pubkey": dev_pub}
+                    # rebuild the hub peers file from every device's pubkey+ip
+                    leases = {n: {"ip": hub["leases"].get(n),
+                                  "pubkey": m.get("pubkey")}
+                              for n, m in hub["leases_meta"].items()}
+                    reg_ok, reg_err = _write_wg_peers(peers_path, leases)
             _hub_save(hub_file, hub)
             raw["push_username"] = uname
             raw["push_password"] = pwd
+            if tunnel_ip:
+                raw["host"] = tunnel_ip
             try:
                 store.upsert(raw, defaults, original_name=name)
             except Exception as exc:  # noqa: BLE001 — surface validation errors
@@ -2244,20 +2120,25 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(400, f"Error: {exc}")
             store.close()
             script = _provision_script(
-                name, raw, uname, pwd,
-                zt_network_id=zt_network_id if want_tunnel else "",
+                name, raw, uname, pwd, hub_ip=hub_ip, hub_port=hub_port,
+                hub_pubkey=hub_pubkey if tunnel_ip else "", wg_priv=wg_priv,
+                tunnel_ip=tunnel_ip, subnet=hub.get("subnet"),
                 harden=flat.get("harden") == "1")
-            creds = {"user": uname, "pwd": pwd,
-                     "zt_network_id": zt_network_id if want_tunnel else "",
-                     "no_zt_network": want_tunnel and not zt_network_id}
-            if want_tunnel and zt_network_id:
-                msg = ("Script generated with ZeroTier join command. Paste into "
-                       "the router, then authorize it at my.zerotier.com and "
-                       "update the Host to its ZeroTier IP.")
-            elif want_tunnel and not zt_network_id:
-                msg = ("Generated user + API script, but the ZeroTier Network ID "
-                       "isn't configured. Add it to config.yaml under "
-                       "zerotier: network_id: and re-run deploy/install.sh.")
+            creds = {"user": uname, "pwd": pwd, "ip": tunnel_ip, "hub": hub_ip,
+                     "pubkey": dev_pub, "reg_ok": reg_ok, "reg_err": reg_err,
+                     "peers_path": peers_path,
+                     "no_hub_key": want_tunnel and not hub_pubkey}
+            if tunnel_ip and reg_ok:
+                msg = (f"Generated keys, registered the WireGuard peer on this "
+                       f"server, and filled the script with the server's IP "
+                       f"({hub_ip}). The device will be reachable at {tunnel_ip}.")
+            elif want_tunnel and not hub_pubkey:
+                msg = ("Generated the user + API script, but the WireGuard HUB "
+                       "isn't set up yet — run deploy/install.sh on the server "
+                       "(it creates the hub key). Then regenerate.")
+            elif tunnel_ip:
+                msg = ("Generated the script, but could NOT write the hub peers "
+                       "file — add the peer shown below on the server.")
             else:
                 msg = "Generated a strong password and script for this device."
             return self._device_provision_page(name, user, script=script,
@@ -2265,7 +2146,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
         def _device_provision_apply(self, flat, user):
             """Zero-touch: connect to the router over the API and apply everything
-            (user, API, ZeroTier tunnel) — no script to paste."""
+            (user, API, WireGuard tunnel) — no script to paste."""
             from .config import build_device
             from .device import DeviceError
             from .push import Pusher, PushError, provision_apply, rw_device
@@ -2281,10 +2162,18 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(404, "no such device")
             hub_file = _hub_path(devices_db)
             hub = _hub_load(hub_file)
-            zt_network_id = hub.get("zt_network_id", "")
+            hub_ip = (flat.get("hub", "").strip() or hub.get("hub_ip")
+                      or _detect_server_ip())
+            hub["hub_ip"] = hub_ip
+            hub.setdefault("subnet", _HUB_SUBNET_DEFAULT)
+            hub_pubkey = hub.get("hub_pubkey", "")
+            hub_port = hub.get("listen_port", _WG_PORT_DEFAULT)
+            peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
             uname = flat.get("pwuser", "").strip() or _user_slug(name)
             pwd = _gen_password()
-            want_tunnel = flat.get("transport", "zt").strip() == "zt"
+            want_tunnel = flat.get("transport", "wg").strip() == "wg"
+            tunnel_ip = _alloc_tunnel_ip(hub, name) if (want_tunnel and hub_pubkey) \
+                else ""
             cfg = build_device(raw, defaults)
             audit = self._auditlog()
             actor = (user or {}).get("username", "")
@@ -2295,8 +2184,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 api.connect()
                 result = provision_apply(
                     api, name, uname, pwd,
-                    harden=flat.get("harden") == "1",
-                    zt_network_id=zt_network_id if want_tunnel else "")
+                    harden=flat.get("harden") == "1", hub_pubkey=hub_pubkey,
+                    hub_ip=hub_ip, port=hub_port, subnet=hub.get("subnet"),
+                    tunnel_ip=tunnel_ip)
             except (DeviceError, PushError) as exc:
                 err = str(exc)
             finally:
@@ -2314,32 +2204,38 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if audit:
                 audit.append(name, actor, "provision", "apply", "ok",
                              f"provisioned {uname}"
-                             + (" + ZeroTier tunnel" if want_tunnel and zt_network_id
-                                else ""),
+                             + (f" + WG tunnel {tunnel_ip}" if tunnel_ip else ""),
                              "\n".join(result.get("steps", [])))
                 audit.close()
+            # register the router's WireGuard peer on the hub
+            reg_ok, reg_err, router_pub = True, "", result.get("router_pubkey", "")
+            if tunnel_ip and router_pub:
+                hub.setdefault("leases_meta", {})[name] = {
+                    "ip": tunnel_ip, "pubkey": router_pub}
+                leases = {n: {"ip": hub["leases"].get(n), "pubkey": m.get("pubkey")}
+                          for n, m in hub["leases_meta"].items()}
+                reg_ok, reg_err = _write_wg_peers(peers_path, leases)
             _hub_save(hub_file, hub)
+            # save the new creds; reach the device at the tunnel IP from now on
             raw["push_username"] = uname
             raw["push_password"] = pwd
+            if tunnel_ip and router_pub:
+                raw["host"] = tunnel_ip
             try:
                 store.upsert(raw, defaults, original_name=name)
             finally:
                 store.close()
-            zt_skipped = (result or {}).get("zt_skipped", "")
-            creds = {"user": uname, "pwd": pwd,
-                     "zt_network_id": zt_network_id if want_tunnel else "",
-                     "no_zt_network": want_tunnel and not zt_network_id,
-                     "zt_skipped": zt_skipped, "applied": True}
-            if want_tunnel and zt_skipped:
-                msg = ("✓ Provisioned the user + API over the API, but the "
-                       "ZeroTier tunnel was skipped: " + zt_skipped)
-            elif want_tunnel and zt_network_id:
-                msg = ("✓ Provisioned over the API. Router joined ZeroTier network. "
-                       "Authorize it at my.zerotier.com then update the Host to its "
-                       "ZeroTier IP.")
-            elif want_tunnel and not zt_network_id:
-                msg = ("Created the user + API, but the ZeroTier Network ID isn't "
-                       "configured — add it to config.yaml and re-run install.sh.")
+            creds = {"user": uname, "pwd": pwd, "ip": tunnel_ip if router_pub else "",
+                     "hub": hub_ip, "pubkey": router_pub, "reg_ok": reg_ok,
+                     "reg_err": reg_err, "peers_path": peers_path,
+                     "no_hub_key": want_tunnel and not hub_pubkey, "applied": True}
+            if tunnel_ip and router_pub and reg_ok:
+                msg = (f"✓ Provisioned over the API and registered the WireGuard "
+                       f"peer. The device is reachable at {tunnel_ip}.")
+            elif want_tunnel and not hub_pubkey:
+                msg = ("Created the user + API over the API, but the WireGuard hub "
+                       "isn't set up — run deploy/install.sh on the server, then "
+                       "re-run Provision now.")
             else:
                 msg = "Provisioned the user + API over the API."
             return self._device_provision_page(name, user, creds=creds, msg=msg)
@@ -2562,6 +2458,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if not commit:
                     return self._feature_tab_page(name, user, slug, preview=plan,
                                                   submitted=multi)
+                # After applying the hub-tunnel feature, register the router's
+                # WireGuard public key as a peer on this server automatically.
+                if slug == "hubtunnel" and devices_db:
+                    _register_hub_peer(name, pusher.api, flat, devices_db)
                 return self._redirect(
                     f"/device?name={quote(name)}&tab={slug}&msg=" +
                     quote("Changes applied to the router."))
@@ -2702,20 +2602,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._device_adopt_post(flat, user)
             if path == "/device/wan":
                 return self._device_wan_post(flat, multi, user)
-            if path == "/admin/zerotier":
-                if not AuthStore.is_admin(user):
-                    return self._send(403, "forbidden")
-                if devices_db:
-                    hub_file = _hub_path(devices_db)
-                    hub = _hub_load(hub_file)
-                    for field in ("zt_network_id", "zt_api_token", "hub_ip"):
-                        val = flat.get(field, "").strip()
-                        if val:
-                            hub[field] = val
-                        elif field in hub and not val:
-                            hub.pop(field, None)
-                    _hub_save(hub_file, hub)
-                return self._redirect("/admin/zerotier?saved=1")
             try:
                 if path == "/admin/add":
                     auth.add_user(flat.get("username", ""), flat.get("password", ""),
@@ -2764,6 +2650,34 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
     return Handler
 
+
+def _register_hub_peer(device_name: str, api, flat: dict, devices_db: str) -> None:
+    """After a successful hubtunnel apply, read the router's WireGuard public key
+    and add it as a peer in hub.json + wg-peers.conf so the server side is in sync.
+    Best-effort: any failure is silently swallowed so it never blocks the response."""
+    try:
+        from .push.features import _HUB_WG, _HUB_NAME
+        tunnel_ip = flat.get("tunnel_ip", "").strip().split("/")[0]
+        if not tunnel_ip:
+            return
+        ifaces = api.fetch(_HUB_WG)
+        router_pub = next(
+            (w.get("public-key", "") for w in ifaces if w.get("name") == _HUB_NAME),
+            "")
+        if not router_pub:
+            return  # keypair still generating — Provision tab handles the async case
+        hub_file = _hub_path(devices_db)
+        hub = _hub_load(hub_file)
+        peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
+        hub.setdefault("leases", {})[device_name] = tunnel_ip
+        hub.setdefault("leases_meta", {})[device_name] = {
+            "ip": tunnel_ip, "pubkey": router_pub}
+        leases = {n: {"ip": m.get("ip"), "pubkey": m.get("pubkey")}
+                  for n, m in hub.get("leases_meta", {}).items()}
+        _write_wg_peers(peers_path, leases)
+        _hub_save(hub_file, hub)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,

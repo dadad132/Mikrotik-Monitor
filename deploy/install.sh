@@ -236,77 +236,163 @@ log "Monitor unit : ${SYSTEMD_UNIT}"
 log "Web unit     : ${WEB_UNIT}"
 
 # ---------------------------------------------------------------------------
-# ZeroTier dial-home hub — lets routers behind NAT/CGNAT connect back to this
-# box without port-forwarding. Much simpler than WireGuard: no key management,
-# no peers file, NAT traversal is automatic. Requires a free account at
-# my.zerotier.com and a network_id in config.yaml (zerotier.network_id).
+# WireGuard dial-home hub — lets routers connect BACK to this box. The hub key
+# is generated here; mikromon (Provision tab) generates each device's keypair,
+# writes the peers into ${WG_PEERS}, and a path-unit applies them with
+# `wg syncconf`. The hub public key + IP are written to ${APP_DIR}/hub.json so
+# the dashboard fills the router script automatically. Best-effort/guarded.
 # ---------------------------------------------------------------------------
-step "Setting up ZeroTier dial-home"
-ZT_LOG="${APP_DIR}/zt-install-error.log"
+step "Setting up the WireGuard dial-home hub"
+WG_PEERS="/etc/wireguard/wg-peers.conf"
+WG_PORT=51820
+WG_SUBNET="10.10.0.0/24"
+WG_LOG="${APP_DIR}/wg-install-error.log"
 set +e
 (
   set -e
-  # Install zerotier-one via the official apt installer script.
-  if ! command -v zerotier-one &>/dev/null; then
-    curl -fsSL https://install.zerotier.com | bash
-  fi
-  systemctl enable --now zerotier-one
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      wireguard wireguard-tools
 
-  # Read zerotier.network_id from config.yaml if yaml is available.
-  ZT_NETWORK=""
-  if [[ -f "${APP_DIR}/config.yaml" ]] && [[ -x "${APP_DIR}/.venv/bin/python" ]]; then
-    ZT_NETWORK="$("${APP_DIR}/.venv/bin/python" - "${APP_DIR}/config.yaml" <<'PY'
-import sys
-try:
-    import yaml
-    with open(sys.argv[1]) as f:
-        c = yaml.safe_load(f) or {}
-    print((c.get("zerotier") or {}).get("network_id", ""))
-except Exception:
-    pass
-PY
-    )" || ZT_NETWORK=""
+  # On many VPS providers (OVHcloud, Hetzner, etc.) the WireGuard kernel module
+  # ships in linux-modules-extra rather than the base kernel package.
+  KVER="$(uname -r)"
+  EXTRA_PKG="linux-modules-extra-${KVER}"
+  if apt-cache show "${EXTRA_PKG}" &>/dev/null; then
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          "${EXTRA_PKG}" || true
+  fi
+  # Load the module now (wireguard may be a loadable module or built-in).
+  modprobe wireguard 2>/dev/null || true
+  # Use a direct kernel capability test: try to create a probe interface.
+  # This works for both loadable modules AND built-in kernels (where modinfo
+  # finds no .ko file and returns 1 even though wireguard is available).
+  if ! ip link add wg-probe type wireguard 2>/dev/null; then
+      echo "WireGuard kernel support not available for kernel ${KVER}."
+      echo "Reboot into a stock Ubuntu kernel and re-run the installer."
+      exit 1
+  fi
+  ip link delete wg-probe 2>/dev/null || true
+
+  # IP forwarding must be on for the hub to relay packets between peers.
+  echo "net.ipv4.ip_forward=1"  > /etc/sysctl.d/99-wireguard.conf
+  echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.d/99-wireguard.conf
+  sysctl -p /etc/sysctl.d/99-wireguard.conf >/dev/null
+
+  mkdir -p /etc/wireguard
+  # The wireguard package sets /etc/wireguard to 700 root:root.  Grant the
+  # service user traverse + read so it can write wg-peers.conf inside.
+  chmod 750 /etc/wireguard
+  chgrp "${SERVICE_USER}" /etc/wireguard
+  [ -f "${WG_PEERS}" ] || install -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
+      -m 640 /dev/null "${WG_PEERS}"
+
+  # Stop the wg-quick service first so systemd doesn't immediately respawn
+  # the interface while we reconfigure (handles re-runs cleanly).
+  systemctl stop wg-quick@wg0 2>/dev/null || true
+
+  # Tear down any leftover wg0 interface.
+  if ip link show wg0 &>/dev/null; then
+    ip link delete wg0 2>/dev/null || true
   fi
 
-  # Open ZeroTier's UDP port so peers can make direct connections to this server.
+  if [ ! -f /etc/wireguard/wg0.key ]; then
+    umask 077
+    wg genkey | tee /etc/wireguard/wg0.key | wg pubkey > /etc/wireguard/wg0.pub
+  fi
+  HUB_PRIV="$(cat /etc/wireguard/wg0.key)"
+  HUB_PUB="$(cat /etc/wireguard/wg0.pub)"
+
+  # Plain WireGuard config — no PostUp.  Peers are loaded by
+  # mikromon-wg-reload.service AFTER wg-quick starts so we never run
+  # under wg-quick's restrictive AppArmor confinement.
+  cat > /etc/wireguard/wg0.conf <<CONF
+[Interface]
+PrivateKey = ${HUB_PRIV}
+Address = 10.10.0.1/24
+ListenPort = ${WG_PORT}
+CONF
+  chmod 600 /etc/wireguard/wg0.conf
+
+  # This service runs as a plain systemd unit (not under wg-quick's AppArmor).
+  # bash can open /etc/wireguard/* freely; wg sees only an inherited fd.
+  # Enabled at boot so initial peers load after wg0 comes up.
+  # Also triggered by the path unit whenever mikromon writes new peers.
+  cat > /etc/systemd/system/mikromon-wg-reload.service <<UNIT
+[Unit]
+Description=Apply mikromon WireGuard peers to wg0
+After=wg-quick@wg0.service
+Requires=wg-quick@wg0.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash -c 'wg syncconf wg0 <(cat /etc/wireguard/wg0.conf; cat ${WG_PEERS} 2>/dev/null || true)'
+[Install]
+WantedBy=multi-user.target
+UNIT
+  cat > /etc/systemd/system/mikromon-wg-reload.path <<UNIT
+[Unit]
+Description=Watch the mikromon WireGuard peers file
+[Path]
+PathModified=${WG_PEERS}
+Unit=mikromon-wg-reload.service
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  # Enable the service at boot, then (re)start it so it always picks up the
+  # freshly-written wg0.conf regardless of whether it was already running.
+  systemctl enable wg-quick@wg0
+  if ! systemctl restart wg-quick@wg0; then
+    journalctl -n 60 -u wg-quick@wg0 --no-pager > "${WG_LOG}" 2>&1 || true
+    echo ""
+    echo "WireGuard failed to start. Full error saved to: ${WG_LOG}"
+    echo "Run: cat ${WG_LOG}"
+    exit 1
+  fi
+  # Load any already-registered peers immediately, then enable path watcher.
+  systemctl start mikromon-wg-reload.service || true
+  systemctl enable --now mikromon-wg-reload.path
+  systemctl enable mikromon-wg-reload.service
   if command -v ufw >/dev/null 2>&1; then
-    ufw allow 9993/udp comment "ZeroTier" || true
+    ufw allow ${WG_PORT}/udp          # WireGuard handshake port
+    ufw allow in  on wg0              # traffic arriving from tunnel peers
+    ufw allow out on wg0              # responses going back through the tunnel
   fi
-
-  if [[ -n "${ZT_NETWORK}" ]]; then
-    zerotier-cli join "${ZT_NETWORK}" || true
-    log "Joined ZeroTier network ${ZT_NETWORK}"
-  fi
-
-  ZT_NODE="$(zerotier-cli info 2>/dev/null | awk '{print $3}' || echo '')"
-
-  # Save ZeroTier info to hub.json so the dashboard fills the router script.
-  "${APP_DIR}/.venv/bin/python" - "${APP_DIR}/hub.json" \
-      "${ZT_NETWORK:-}" "${ZT_NODE:-}" <<'PY'
+  # publish the hub's public key + IP so the dashboard fills the router script
+  HUB_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  "${APP_DIR}/.venv/bin/python" - "${APP_DIR}/hub.json" "${HUB_PUB}" \
+      "${WG_PORT}" "${WG_PEERS}" "${WG_SUBNET}" "${HUB_IP}" <<'PY'
 import json, sys
-path, zt_net, zt_node = sys.argv[1:4]
+path, pub, port, peers, subnet, ip = sys.argv[1:7]
 try:
     with open(path) as f: data = json.load(f)
 except Exception:
     data = {}
-if zt_net:  data["zt_network_id"] = zt_net
-if zt_node: data["zt_node_id"]    = zt_node
+data.update({"hub_pubkey": pub, "listen_port": port, "wg_peers": peers,
+             "subnet": subnet})
+data.setdefault("hub_ip", ip)
 with open(path, "w") as f: json.dump(data, f, indent=2)
 PY
   chown "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}/hub.json"
 )
-ZT_OK=$?
+WG_OK=$?
 set -e
-if [ "${ZT_OK}" -eq 0 ]; then
-  ZT_NODE_ID="$(zerotier-cli info 2>/dev/null | awk '{print $3}' || echo 'unknown')"
-  log "ZeroTier installed. Node ID: ${ZT_NODE_ID}"
-  log "Go to my.zerotier.com → your network → authorize this node."
-  log "Then update hub_ip in ${APP_DIR}/hub.json to this server's ZeroTier IP."
+# Guarantee the peers file is accessible regardless of WG install outcome.
+# (The wireguard package sets /etc/wireguard to 700; fix it unconditionally.)
+mkdir -p /etc/wireguard
+chmod 750 /etc/wireguard
+chgrp "${SERVICE_USER}" /etc/wireguard
+[ -f "${WG_PEERS}" ] || install -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
+    -m 640 /dev/null "${WG_PEERS}"
+if [ "${WG_OK}" -eq 0 ]; then
+  log "WireGuard hub up (wg0 on :${WG_PORT}/udp); peers: ${WG_PEERS}"
+  log "Hub public key: $(cat /etc/wireguard/wg0.pub 2>/dev/null)"
 else
-  log "WARN: ZeroTier setup failed. Check: cat ${ZT_LOG}"
-  log "      Install manually: curl -s https://install.zerotier.com | bash"
-  log "      Then: zerotier-cli join <your-network-id>"
-  log "      Add network_id under zerotier: in ${APP_DIR}/config.yaml"
+  log "WARN: WireGuard hub step failed/skipped. The dashboard still generates"
+  log "      router scripts; set up WireGuard manually and put the hub public"
+  log "      key + IP into ${APP_DIR}/hub.json."
+  log ""
+  log "      WireGuard error log : cat ${WG_LOG}"
+  log "      Full install log    : cat ${APP_DIR}/last-install.log"
 fi
 
 # Resolve the server's primary IP for the final message.
@@ -358,7 +444,7 @@ cp "${LOG_FILE}" "${APP_DIR}/last-install.log" 2>/dev/null || true
 {
   echo "Date   : $(date)"
   echo "Commit : $(git -C "${SRC_DIR}" log --oneline -1 2>/dev/null || echo unknown)"
-  echo "ZeroTier (zerotier-one)   : $(systemctl is-active zerotier-one   2>/dev/null || echo unknown)"
+  echo "WireGuard (wg-quick@wg0)  : $(systemctl is-active wg-quick@wg0  2>/dev/null || echo unknown)"
   echo "mikromon                  : $(systemctl is-active mikromon        2>/dev/null || echo unknown)"
   echo "mikromon-web              : $(systemctl is-active mikromon-web    2>/dev/null || echo unknown)"
 } | tee "${APP_DIR}/install-status.txt"
