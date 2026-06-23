@@ -251,7 +251,8 @@ try:
           'type="password"' in body and "mmReveal" in body)
     st, body = post(admin, "/device/provision",
                     {"csrf": csrf, "device": "WebR1", "pwuser": "mikromon",
-                     "transport": "wg", "hub": "102.36.140.219", "harden": "1"})
+                     "transport": "wg", "hub": "102.36.140.219",
+                     "enable_api": "1", "harden": "1"})
     check("provision generates a bootstrap script (user + API)",
           st == 200 and "/user add name=mikromon" in body
           and "/ip service set api disabled=no" in body)
@@ -260,6 +261,13 @@ try:
           and '[/system identity get name] = &quot;MikroTik&quot;' in body)
     check("WG hub not set up here -> prompts to run install.sh (no tunnel block)",
           "install.sh" in body and "/interface wireguard add" not in body)
+    # enabling the API is OPTIONAL: leaving the box unchecked omits the line
+    st, body2 = post(admin, "/device/provision",
+                     {"csrf": csrf, "device": "WebR1", "pwuser": "mikromon",
+                      "transport": "wg", "hub": "102.36.140.219"})
+    check("API enable is optional (omitted when unchecked)",
+          st == 200 and "/user add name=mikromon" in body2
+          and "/ip service set api disabled=no" not in body2)
     saved = DevicesStore(wdb)
     raw = saved.raw("WebR1")
     check("provision saved a strong generated password as the push creds",

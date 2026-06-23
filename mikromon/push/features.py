@@ -1161,9 +1161,9 @@ def hubtunnel_plan(pusher, cfg, flat, multi):
 # what's already there. Returns the router's WireGuard public key so the caller
 # can register it as a peer on the hub.
 # ===========================================================================
-def provision_apply(api, name, pwuser, pwd, *, harden=True, hub_pubkey="",
-                    hub_ip="", port="51820", subnet="10.10.0.0/24",
-                    tunnel_ip=""):
+def provision_apply(api, name, pwuser, pwd, *, harden=True, enable_api=True,
+                    hub_pubkey="", hub_ip="", port="51820",
+                    subnet="10.10.0.0/24", tunnel_ip=""):
     steps = []
 
     def do(op):
@@ -1182,12 +1182,15 @@ def provision_apply(api, name, pwuser, pwd, *, harden=True, hub_pubkey="",
                      {".id": existing[".id"], "password": pwd, "group": "full"},
                      desc=f"reset password for user {pwuser}"))
 
-    # 2) make sure the API is enabled
-    svc = next((s for s in api.fetch(("ip", "service"))
-                if s.get("name") == "api"), None)
-    if svc is not None and _norm(svc.get("disabled", "")) == "true":
-        do(Operation("set", ("ip", "service"),
-                     {".id": svc[".id"], "disabled": "no"}, desc="enable API"))
+    # 2) optionally make sure the API service is enabled. Optional because some
+    # sites keep the binary API off (managing the router only over the tunnel,
+    # WinBox or REST) and don't want provisioning to flip it back on.
+    if enable_api:
+        svc = next((s for s in api.fetch(("ip", "service"))
+                    if s.get("name") == "api"), None)
+        if svc is not None and _norm(svc.get("disabled", "")) == "true":
+            do(Operation("set", ("ip", "service"),
+                         {".id": svc[".id"], "disabled": "no"}, desc="enable API"))
 
     # 3) basic hardening
     if harden:

@@ -630,6 +630,16 @@ check("provision_apply is idempotent (user set, no duplicate WG/peer adds)",
               for o in pa_api.executed)
       and any(o.action == "set" and o.path == ("user",)
               for o in pa_api.executed))
+# enabling the API is OPTIONAL — enable_api=False leaves /ip service api alone
+na_api = FakeApi({
+    ("user",): [],
+    ("ip", "service"): [{".id": "*s1", "name": "api", "disabled": "true"}],
+    WG: [], WGP: [], IPA: []})
+F.provision_apply(na_api, "Branch9", "mikromon", "pw1234567890",
+                  harden=False, enable_api=False)
+check("provision_apply leaves the API service untouched when enable_api=False",
+      any(o.action == "add" and o.path == ("user",) for o in na_api.executed)
+      and not any(o.path == ("ip", "service") for o in na_api.executed))
 
 
 # ---- 16. update RouterOS (check / install+reboot / firmware) ---------------

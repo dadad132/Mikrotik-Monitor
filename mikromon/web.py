@@ -769,7 +769,7 @@ def _write_wg_peers(path, leases):
 
 def _provision_script(name, raw, pwuser, pwd, *, hub_ip="", hub_port="51820",
                       hub_pubkey="", wg_priv="", tunnel_ip="", subnet="",
-                      harden=True) -> str:
+                      harden=True, enable_api=True) -> str:
     """A one-paste RouterOS bootstrap script that is SAFE on an already-configured
     router: every step is guarded so it only ADDS what is missing and never
     resets existing config. The WireGuard dial-home tunnel needs RouterOS 7.1+."""
@@ -791,9 +791,10 @@ def _provision_script(name, raw, pwuser, pwd, *, hub_ip="", hub_port="51820",
     a("} else={")
     a('  /user set [/user find name=' + u + '] password="' + pwd + '" group=full')
     a("}")
-    a("")
-    a("# 2) make sure the API is reachable for mikromon (idempotent)")
-    a("/ip service set api disabled=no")
+    if enable_api:
+        a("")
+        a("# 2) make sure the API is reachable for mikromon (idempotent)")
+        a("/ip service set api disabled=no")
     a("")
     a("# 3) baseline defaults - ONLY on an unconfigured (factory) unit")
     a(':if ([/system identity get name] = "MikroTik") do={')
@@ -893,11 +894,11 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
     pwuser = (raw or {}).get("push_username") or _user_slug(name)
     intro = ('<p class="muted" style="margin:-6px 0 14px">Generate a one-paste '
              'script for a new router. It creates a management user with a strong '
-             'password (saved here), enables the API, and adds a <b>WireGuard</b> '
-             'dial-home tunnel. The hub IP + keys are filled from <b>this</b> '
-             'server, and the device is registered as a WireGuard peer on the hub '
-             'automatically — no manual entry. (WireGuard tunnel needs RouterOS '
-             '7.1+.)</p>')
+             'password (saved here), optionally enables the API, and adds a '
+             '<b>WireGuard</b> dial-home tunnel. The hub IP + keys are filled from '
+             '<b>this</b> server, and the device is registered as a WireGuard peer '
+             'on the hub automatically — no manual entry. (WireGuard tunnel needs '
+             'RouterOS 7.1+.)</p>')
     form = (
         f'<div class="box"><h2>Generate provisioning script</h2>'
         f'<form method="POST" action="/device/provision">'
@@ -913,6 +914,9 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
         f'<div class="f"><label class="f">Hub address (this server\'s IP)</label>'
         f'<input name="hub" value="{esc(hub_ip)}" placeholder="102.36.140.219">'
         f'</div>'
+        f'<div class="f"><label class="chk"><input type="checkbox" '
+        f'name="enable_api" value="1" class="switch" checked> Enable the API '
+        f'service (needed for mikromon to connect over the API)</label></div>'
         f'<div class="f"><label class="chk"><input type="checkbox" name="harden" '
         f'value="1" class="switch" checked> Disable Telnet/FTP (basic hardening)'
         f'</label></div>'
@@ -2123,7 +2127,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 name, raw, uname, pwd, hub_ip=hub_ip, hub_port=hub_port,
                 hub_pubkey=hub_pubkey if tunnel_ip else "", wg_priv=wg_priv,
                 tunnel_ip=tunnel_ip, subnet=hub.get("subnet"),
-                harden=flat.get("harden") == "1")
+                harden=flat.get("harden") == "1",
+                enable_api=flat.get("enable_api") == "1")
             creds = {"user": uname, "pwd": pwd, "ip": tunnel_ip, "hub": hub_ip,
                      "pubkey": dev_pub, "reg_ok": reg_ok, "reg_err": reg_err,
                      "peers_path": peers_path,
@@ -2184,7 +2189,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 api.connect()
                 result = provision_apply(
                     api, name, uname, pwd,
-                    harden=flat.get("harden") == "1", hub_pubkey=hub_pubkey,
+                    harden=flat.get("harden") == "1",
+                    enable_api=flat.get("enable_api") == "1",
+                    hub_pubkey=hub_pubkey,
                     hub_ip=hub_ip, port=hub_port, subnet=hub.get("subnet"),
                     tunnel_ip=tunnel_ip)
             except (DeviceError, PushError) as exc:
