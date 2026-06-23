@@ -107,7 +107,14 @@ defaults:
 # ----------------------------------------------------------------------------
 # Devices to monitor.
 # ----------------------------------------------------------------------------
-devices:
+# Devices are managed in the DASHBOARD now (you set `devices_db:` above): add,
+# edit and delete routers at http://<server>:8090/devices — no YAML editing.
+# A fresh install therefore starts with NO devices and re-installing will NOT
+# recreate a sample router. Prefer to manage them in YAML instead? Rename
+# `devices_example:` below to `devices:` and fill in your own routers.
+devices: []
+
+devices_example:
   - name: "HQ-Router"
     host: 192.168.88.1
     api_port: 8728           # 8728 = plain API, 8729 = API-SSL

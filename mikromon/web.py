@@ -95,17 +95,15 @@ def _known_devices(store, state) -> list:
 
 
 def _visible_device_names(store, state, ds) -> set:
-    """The devices to show in the dashboard / inventory / device pages.
-
-    In web-managed mode (a devices DB is configured) the DB is the single
-    source of truth, so show ONLY its devices. This auto-hides "orphans" — a
-    device removed from the Devices page (or otherwise no longer managed) that
-    still has leftover metrics/state and would otherwise stay stuck on the
-    dashboard with no way to remove it. Without a devices DB (YAML mode) fall
-    back to whatever has metrics or saved state."""
+    """Every device to consider for the dashboard / inventory / device pages:
+    anything with metrics or saved state, plus any in the web-managed devices
+    DB (so freshly-added, not-yet-polled devices still show). A device removed
+    from everywhere is gone; leftover "orphans" can be cleared with the
+    per-device Remove button (/device/forget)."""
+    names = set(_known_devices(store, state))
     if ds is not None:
-        return set(ds.names())
-    return set(_known_devices(store, state))
+        names |= set(ds.names())
+    return names
 
 
 def _all_devices(store, state, allowed=None) -> list:
@@ -597,7 +595,7 @@ def _render_inventory(store, state, user, allowed) -> str:
     return _page("Inventory", _header(user, "/inventory") + inner)
 
 
-def _render_device(store, state, name, user) -> str:
+def _render_device(store, state, name, user, csrf="") -> str:
     d = _device_view(store, state, name)
     f = d["facts"]
     sev = _severity(d)
@@ -672,9 +670,33 @@ def _render_device(store, state, name, user) -> str:
         f'{spark or "<p class=muted>No throughput data yet.</p>"}</div>'
         f'<div class="box"><h2>Active problems</h2>{probs_html}</div>'
         f'</div>'
+        f'{_device_forget_box(name, csrf) if AuthStore.is_admin(user or {}) else ""}'
         f'<p><a href="/">&larr; dashboard</a> &nbsp; '
         f'<a href="/inventory">inventory</a></p></div>')
     return _page(esc(name), _header(user, "/") + inner)
+
+
+def _device_forget_box(name, csrf) -> str:
+    """Admin-only: remove this device from the dashboard entirely — deletes it
+    from the devices DB (if managed) and purges its metrics + saved state, so a
+    stale/orphan device that's stuck on the dashboard can be cleared from here."""
+    if not csrf:
+        return ""
+    q = esc(name)
+    return (f'<div class="box" style="border-left:4px solid #dc2626">'
+            f'<h2>Remove from dashboard</h2>'
+            f'<p class="muted">Deletes <b>{q}</b> from the device list and purges '
+            f'its metrics history and saved state. It disappears from the '
+            f'dashboard. If the router is still configured to dial in / be polled '
+            f'it can reappear — remove it on the Devices page or stop polling it '
+            f'too.</p>'
+            f'<form method="POST" action="/device/forget" '
+            f'onsubmit="return confirm(\'Remove {q} and all its data from the '
+            f'dashboard?\')">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            f'<input type="hidden" name="device" value="{q}">'
+            f'<div class="actions"><button class="btn red" type="submit">'
+            f'Remove this device</button></div></form></div>')
 
 
 _PWALPHABET = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -1710,7 +1732,9 @@ def _render_devices(store, csrf, user, edit_name=None, msg="") -> str:
     fields = (
         field("Name", f'<input name="name" value="{v("name")}">')
         + field("Host / DDNS", f'<input name="host" value="{v("host")}">')
-        + field("API port", f'<input name="api_port" '
+        + field("API port <span class='muted'>(how mikromon connects to monitor "
+                "this router — blank = 8728, or 8729 with API-SSL)</span>",
+                f'<input name="api_port" placeholder="8728" '
                 f'value="{esc(str(pre.get("api_port", 8728)))}">')
         + field("API timeout <span class='muted'>(seconds; raise for slow boxes "
                 "/ long scripts)</span>", f'<input name="timeout" '
@@ -2010,8 +2034,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         if tab in FEATURES:
                             return self._feature_tab_page(
                                 dev, user, tab, msg=q.get("msg", [""])[0])
-                    return self._send(200, _render_device(store, state, dev, user),
-                                      "text/html; charset=utf-8")
+                    sess = self._session()
+                    csrf = sess["csrf"] if sess else ""
+                    return self._send(200, _render_device(store, state, dev, user,
+                                      csrf), "text/html; charset=utf-8")
                 if path == "/api/devices":
                     return self._send(200, json.dumps(
                         _all_devices(store, state, allowed), indent=2),
@@ -2571,6 +2597,23 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if audit:
                     audit.close()
 
+        def _device_forget_post(self, flat, user):
+            """Remove a device from the dashboard entirely: delete it from the
+            devices DB (if managed) and purge its metrics + saved state. Works
+            for orphan devices that are no longer in the DB too (just purges)."""
+            if not AuthStore.is_admin(user or {}):
+                return self._send(403, "forbidden")
+            name = flat.get("device", "")
+            if name:
+                store = self._devstore()
+                if store is not None:
+                    try:
+                        store.delete(name)
+                    finally:
+                        store.close()
+                self._purge_device_data(name)
+            return self._redirect("/")
+
         def _device_wg_repair_post(self, flat, user):
             """Connect to the router, diagnose + self-repair the WireGuard tunnel,
             log the outcome, and render the Hub tunnel tab with a full report. A
@@ -2681,10 +2724,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 nm, ifc, gw = nm.strip(), ifc.strip(), gw.strip()
                 if nm or ifc or gw:
                     links.append({"name": nm, "interface": ifc, "gateway": gw})
+            # API port is required to connect, but you can leave it blank: it
+            # defaults to 8729 when API-SSL is ticked, else 8728.
+            api_port = (flat.get("api_port") or "").strip()
+            if not api_port:
+                api_port = "8729" if "use_ssl" in flat else "8728"
             return {
                 "name": flat.get("name", "").strip(),
                 "host": flat.get("host", "").strip(),
-                "api_port": int(flat.get("api_port") or 8728),
+                "api_port": int(api_port),
                 "username": flat.get("username", ""),
                 "password": pwd,
                 "push_username": flat.get("push_username", "").strip(),
@@ -2755,6 +2803,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._device_provision_post(flat, user)
             if path == "/device/push":
                 return self._device_push_post(flat, multi, user)
+            if path == "/device/forget":
+                return self._device_forget_post(flat, user)
             if path == "/device/wg-repair":
                 return self._device_wg_repair_post(flat, user)
             if path == "/device/adopt":

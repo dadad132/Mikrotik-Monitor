@@ -191,6 +191,16 @@ try:
     check("3 WAN links captured in priority order",
           [l["name"] for l in raw["wan"]["links"]] == ["Vodacom", "MTN", "LTE"])
     saved.close()
+    # API port is optional in the form: blank defaults to 8728, or 8729 with SSL.
+    post(admin, "/devices/save", {
+        "csrf": csrf, "original_name": "", "name": "SslR", "host": "1.2.3.4",
+        "api_port": "", "use_ssl": "on", "username": "monitor", "password": "x",
+        "checks": ["resources"]})
+    saved = DevicesStore(wdb)
+    check("blank API port + API-SSL defaults to 8729",
+          (saved.raw("SslR") or {}).get("api_port") == 8729)
+    saved.delete("SslR")
+    saved.close()
     # edit: change host, leave password blank -> keep existing
     st, _ = post(admin, "/devices/save", {
         "csrf": csrf, "original_name": "WebR1", "name": "WebR1", "host": "8.8.8.8",
@@ -201,16 +211,23 @@ try:
     check("edit updates host, keeps password",
           raw["host"] == "8.8.8.8" and raw["password"] == "secret")
     saved.close()
-    # orphan auto-hide: a device with metrics but NOT in the devices DB must not
-    # show on the dashboard (managed mode = the DB is the source of truth).
+    # devices with metrics show on the dashboard (managed AND orphan), and the
+    # per-device Remove button (/device/forget) purges any of them on demand.
     ms = MetricsStore(mdb)
     ms.record([(1.0, "WebR1", "up", "", 1.0), (1.0, "GhostR", "up", "", 1.0)])
     ms.close()
     st, apidev = get(admin, "/api/devices")
     shown = [d.get("device") for d in json.loads(apidev)]
-    check("managed device with metrics shows on the dashboard", "WebR1" in shown)
-    check("orphan device (not in the devices DB) is auto-hidden from dashboard",
-          "GhostR" not in shown)
+    check("devices with metrics show on the dashboard",
+          "WebR1" in shown and "GhostR" in shown)
+    forget_st = post_status(admin, "/device/forget",
+                            {"csrf": csrf, "device": "GhostR"})
+    st, apidev = get(admin, "/api/devices")
+    shown = [d.get("device") for d in json.loads(apidev)]
+    check("Remove button purges an (orphan) device from the dashboard",
+          forget_st in (302, 303) and "GhostR" not in shown and "WebR1" in shown)
+    check("Remove button purges the device's metrics too",
+          "GhostR" not in MetricsStore(mdb).devices())
     # --- Backups tab (config-push engine) wired into the web UI ---
     st, body = get(admin, "/device?name=WebR1")
     check("admin can open a web-managed device page (before any poll)",
