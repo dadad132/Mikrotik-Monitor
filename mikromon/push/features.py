@@ -1167,26 +1167,54 @@ def provision_apply(api, name, pwuser, pwd, *, harden=True, zt_network_id=""):
                              {".id": s[".id"], "disabled": "yes"},
                              desc=f"disable {s.get('name')}"))
 
-    # 4) ZeroTier dial-home tunnel (RouterOS 7.1+) — only if network ID is set
+    # 4) ZeroTier dial-home tunnel (RouterOS 7.1+) — only if network ID is set.
+    # ZeroTier ships as a SEPARATE RouterOS package (not built in): on a router
+    # where it isn't installed the /zerotier menu doesn't exist and any read of
+    # it raises. Detect that up front and skip gracefully — the user + API are
+    # already in place, so provisioning still succeeds; we just report that the
+    # tunnel needs the package installed (upload the 'zerotier' npk + reboot).
+    zt_skipped = ""
     if zt_network_id:
-        instances = api.fetch(_ZT_INST)
-        if not any(i.get("name") == _HUB_ZT_INSTANCE for i in instances):
-            do(Operation("add", _ZT_INST,
-                         {"name": _HUB_ZT_INSTANCE, "comment": _HUB_TAG + "inst"},
-                         desc=f"add ZeroTier instance {_HUB_ZT_INSTANCE}"))
-        networks = api.fetch(_ZT_IFACE)
-        if not any(n.get("network") == zt_network_id for n in networks):
-            do(Operation("add", _ZT_IFACE,
-                         {"instance": _HUB_ZT_INSTANCE, "network": zt_network_id,
-                          "name": _HUB_ZT_IFACE_NAME, "comment": _HUB_TAG + "if"},
-                         desc=f"join ZeroTier network {zt_network_id}"))
-        fw = api.fetch(("ip", "firewall", "filter"))
-        if not any(f.get("comment") == _HUB_TAG + "fw" for f in fw):
-            do(Operation("add", ("ip", "firewall", "filter"),
-                         {"chain": "input", "in-interface": _HUB_ZT_IFACE_NAME,
-                          "action": "accept", "comment": _HUB_TAG + "fw"},
-                         desc="allow tunnel traffic in firewall"))
-    return {"steps": steps}
+        if not _zerotier_available(api):
+            zt_skipped = ("ZeroTier package not installed on this router — "
+                          "download the 'zerotier' extra package for its "
+                          "architecture, upload it and reboot, then re-provision.")
+        else:
+            instances = api.fetch(_ZT_INST)
+            if not any(i.get("name") == _HUB_ZT_INSTANCE for i in instances):
+                do(Operation("add", _ZT_INST,
+                             {"name": _HUB_ZT_INSTANCE, "comment": _HUB_TAG + "inst"},
+                             desc=f"add ZeroTier instance {_HUB_ZT_INSTANCE}"))
+            networks = api.fetch(_ZT_IFACE)
+            if not any(n.get("network") == zt_network_id for n in networks):
+                do(Operation("add", _ZT_IFACE,
+                             {"instance": _HUB_ZT_INSTANCE, "network": zt_network_id,
+                              "name": _HUB_ZT_IFACE_NAME, "comment": _HUB_TAG + "if"},
+                             desc=f"join ZeroTier network {zt_network_id}"))
+            fw = api.fetch(("ip", "firewall", "filter"))
+            if not any(f.get("comment") == _HUB_TAG + "fw" for f in fw):
+                do(Operation("add", ("ip", "firewall", "filter"),
+                             {"chain": "input", "in-interface": _HUB_ZT_IFACE_NAME,
+                              "action": "accept", "comment": _HUB_TAG + "fw"},
+                             desc="allow tunnel traffic in firewall"))
+    return {"steps": steps, "zt_skipped": zt_skipped}
+
+
+def _zerotier_available(api) -> bool:
+    """True when this router has the ZeroTier package installed (the /zerotier
+    menu exists). ZeroTier is an optional RouterOS package, so on routers
+    without it any read of /zerotier raises — treat that as 'not available'."""
+    try:
+        pkgs = api.fetch(("system", "package"))
+    except Exception:  # noqa: BLE001 — fall through to the direct probe
+        pkgs = None
+    if pkgs is not None:
+        return any(str(p.get("name", "")).lower() == "zerotier" for p in pkgs)
+    try:
+        api.fetch(_ZT_INST)
+        return True
+    except Exception:  # noqa: BLE001 — menu missing → package not installed
+        return False
 
 
 # ===========================================================================

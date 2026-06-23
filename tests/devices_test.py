@@ -81,24 +81,22 @@ check("reorder JS is defined on feature tabs", "function pushMoveRow" in web._FE
 check("toggles render as on/off sliders",
       'class="switch"' in web._field_html(
           {"type": "toggle", "name": "opt", "value": "x", "label": "L"}))
-# hub SSTP-secret registry: stable per-device tunnel IPs + chap-secrets writing
-hub = {}
-ip1 = web._alloc_tunnel_ip(hub, "A")
-ip2 = web._alloc_tunnel_ip(hub, "B")
-check("tunnel IPs are unique and stable per device",
-      ip1 != ip2 and web._alloc_tunnel_ip(hub, "A") == ip1)
-peersp = os.path.join(tmp, "wg-peers.conf")
-ok1, _ = web._write_wg_peers(peersp, {
-    "branch7": {"ip": "10.10.0.2", "pubkey": "PUBKEYB7="},
-    "hq": {"ip": "10.10.0.3", "pubkey": "PUBKEYHQ="}})
-body_peers = open(peersp).read()
-check("WireGuard peers file lists each device as a [Peer]",
-      ok1 and "PublicKey = PUBKEYB7=" in body_peers
-      and "AllowedIPs = 10.10.0.2/32" in body_peers
-      and body_peers.count("[Peer]") == 2)
-kp = web._wg_keypair()
-check("wg keypair helper returns a tuple (priv/pub or graceful None+err)",
-      isinstance(kp, tuple) and len(kp) == 2)
+# provisioning script: the ZeroTier dial-home block is guarded on the package
+# being installed, so pasting it on a router without ZeroTier doesn't abort the
+# whole script (it logs a warning and still applies the user + API).
+script = web._provision_script("Branch7", {"host": "1.1.1.1"}, "mikromon",
+                               "pw1234567890", zt_network_id="1a2b3c4d5e6f7890")
+check("provision script creates the management user",
+      "/user add name=mikromon" in script)
+check("provision script enables the API",
+      "/ip service set api disabled=no" in script)
+check("ZeroTier block is guarded on the package being installed",
+      "/system package find where name=zerotier" in script
+      and "/zerotier interface add" in script
+      and "1a2b3c4d5e6f7890" in script)
+check("no ZeroTier block when no network ID is configured",
+      "/zerotier" not in web._provision_script(
+          "B", {"host": "1.1.1.1"}, "u", "pw1234567890", zt_network_id=""))
 itab = web._interfaces_table({"ifaces": [
     {"name": "ether1", "type": "ether", "running": "true",
      "mac-address": "AA:BB", "mtu": "1500", "comment": "WAN"},
@@ -251,15 +249,15 @@ try:
           'type="password"' in body and "mmReveal" in body)
     st, body = post(admin, "/device/provision",
                     {"csrf": csrf, "device": "WebR1", "pwuser": "mikromon",
-                     "transport": "wg", "hub": "102.36.140.219", "harden": "1"})
+                     "transport": "zt", "harden": "1"})
     check("provision generates a bootstrap script (user + API)",
           st == 200 and "/user add name=mikromon" in body
           and "/ip service set api disabled=no" in body)
     check("provision script is guarded/idempotent (safe on configured units)",
           ":if ([:len [/user find name=mikromon]] = 0)" in body
           and '[/system identity get name] = &quot;MikroTik&quot;' in body)
-    check("WG hub not set up here -> prompts to run install.sh (no tunnel block)",
-          "install.sh" in body and "/interface wireguard add" not in body)
+    check("ZeroTier network not configured -> prompts to run install.sh (no tunnel block)",
+          "install.sh" in body and "/zerotier interface add" not in body)
     saved = DevicesStore(wdb)
     raw = saved.raw("WebR1")
     check("provision saved a strong generated password as the push creds",

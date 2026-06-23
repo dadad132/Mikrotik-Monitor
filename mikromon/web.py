@@ -775,19 +775,28 @@ def _provision_script(name, raw, pwuser, pwd, *, zt_network_id="",
         a("/ip service set ftp disabled=yes")
     if zt_network_id:
         a("")
-        a("# 5) ZeroTier dial-home tunnel (RouterOS 7.1+) - add only if absent")
-        a(":if ([:len [/zerotier find name=zt1]] = 0) do={")
-        a('  /zerotier add name=zt1')
-        a("}")
-        a(':if ([:len [/zerotier interface find network="'
+        a("# 5) ZeroTier dial-home tunnel (RouterOS 7.1+) - add only if absent.")
+        a("#    ZeroTier is a SEPARATE RouterOS package (not built in): if it")
+        a("#    isn't installed the /zerotier menu doesn't exist and would abort")
+        a("#    this script, so we guard on the package being present first.")
+        a(':if ([:len [/system package find where name=zerotier]] = 0) do={')
+        a('  :log warning "mikromon: ZeroTier package not installed - download '
+          "the 'zerotier' extra package for this router's architecture, upload "
+          'it and reboot, then re-run this script."')
+        a("} else={")
+        a("  :if ([:len [/zerotier find where name=zt1]] = 0) do={")
+        a('    /zerotier add name=zt1')
+        a("  }")
+        a('  :if ([:len [/zerotier interface find where network="'
           + zt_network_id + '"]] = 0) do={')
-        a('  /zerotier interface add instance=zt1 network="' + zt_network_id
+        a('    /zerotier interface add instance=zt1 network="' + zt_network_id
           + '" name=ztmikromon comment="mikromon:tunnel:if"')
-        a("}")
-        a(":if ([:len [/ip firewall filter find "
+        a("  }")
+        a("  :if ([:len [/ip firewall filter find where "
           'comment="mikromon:tunnel:fw"]] = 0) do={')
-        a('  /ip firewall filter add chain=input in-interface=ztmikromon '
+        a('    /ip firewall filter add chain=input in-interface=ztmikromon '
           'action=accept comment="mikromon:tunnel:fw"')
+        a("  }")
         a("}")
     a("")
     a('/log info "mikromon provisioning done"')
@@ -2316,11 +2325,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 store.upsert(raw, defaults, original_name=name)
             finally:
                 store.close()
+            zt_skipped = (result or {}).get("zt_skipped", "")
             creds = {"user": uname, "pwd": pwd,
                      "zt_network_id": zt_network_id if want_tunnel else "",
                      "no_zt_network": want_tunnel and not zt_network_id,
-                     "applied": True}
-            if want_tunnel and zt_network_id:
+                     "zt_skipped": zt_skipped, "applied": True}
+            if want_tunnel and zt_skipped:
+                msg = ("✓ Provisioned the user + API over the API, but the "
+                       "ZeroTier tunnel was skipped: " + zt_skipped)
+            elif want_tunnel and zt_network_id:
                 msg = ("✓ Provisioned over the API. Router joined ZeroTier network. "
                        "Authorize it at my.zerotier.com then update the Host to its "
                        "ZeroTier IP.")

@@ -40,8 +40,16 @@ class PushApi:
         self.device.close()
 
     def fetch(self, path) -> list:
-        """Read all rows from a menu path (e.g. ("ip","firewall","filter"))."""
-        return list(self.device.api.path(*path))
+        """Read all rows from a menu path (e.g. ("ip","firewall","filter")).
+
+        Normalizes read failures to PushError so callers (and the web layer,
+        which catches DeviceError/PushError) handle a rejected/missing menu —
+        e.g. /zerotier on a router without the package — instead of leaking a
+        raw librouteros error and 500-ing the request."""
+        try:
+            return list(self.device.api.path(*path))
+        except Exception as exc:  # noqa: BLE001 — normalize to PushError
+            raise PushError(f"read {'/'.join(path)} failed: {exc}") from exc
 
     def execute(self, op):
         """Carry out one Operation. Returns the new id for an 'add'."""

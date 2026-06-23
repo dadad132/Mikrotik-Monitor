@@ -546,50 +546,35 @@ check("forcing client DNS implies allow-remote-requests=true",
           and o.params.get("allow-remote-requests") == "true" for o in fp.ops))
 
 
-# ---- 15. hub tunnel — WireGuard dial-home (RouterOS 7.1+) -------------------
-print("hub tunnel (WireGuard):")
-WG = ("interface", "wireguard")
-WGP = ("interface", "wireguard", "peers")
-IPA = ("ip", "address")
-t_api = FakeApi({WG: [], WGP: [], IPA: []})
+# ---- 15. hub tunnel — ZeroTier dial-home (RouterOS 7.1+) --------------------
+print("hub tunnel (ZeroTier):")
+ZT = ("zerotier",)
+ZTI = ("zerotier", "interface")
+PKGS = ("system", "package")
+NETID = "1a2b3c4d5e6f7890"
+t_api = FakeApi({ZT: [], ZTI: []})
 pt = Pusher(qcfg, t_api, dry_run=True)
-plan = F.hubtunnel_plan(pt, qcfg,
-                        {"endpoint": "102.36.140.219", "port": "51820",
-                         "hub_pubkey": "HUBKEY==", "tunnel_ip": "10.10.0.2/24",
-                         "allowed": "10.10.0.0/24", "keepalive": "25s"}, {})
-iface_add = next((o for o in plan.ops if o.path == WG and o.action == "add"), None)
-addr_add = next((o for o in plan.ops if o.path == IPA and o.action == "add"), None)
-peer_add = next((o for o in plan.ops if o.path == WGP and o.action == "add"), None)
-check("hub tunnel creates the mikromon wireguard interface",
-      iface_add is not None and iface_add.params.get("name") == "mikromon")
-check("interface is created before the address/peer that reference it",
-      plan.ops.index(iface_add) < plan.ops.index(addr_add)
-      and plan.ops.index(iface_add) < plan.ops.index(peer_add))
-check("tunnel address bound to the interface",
-      addr_add.params.get("address") == "10.10.0.2/24"
-      and addr_add.params.get("interface") == "mikromon")
-check("peer dials the hub IP with the hub key + keepalive",
-      peer_add.params.get("public-key") == "HUBKEY=="
-      and peer_add.params.get("endpoint-address") == "102.36.140.219"
-      and peer_add.params.get("endpoint-port") == "51820"
-      and peer_add.params.get("persistent-keepalive") == "25s"
-      and peer_add.params.get("comment", "").startswith("mikromon:tunnel:"))
-check("missing hub IP / key / tunnel IP yields an empty (safe) plan",
-      F.hubtunnel_plan(pt, qcfg, {"endpoint": "x"}, {}).empty)
+plan = F.hubtunnel_plan(pt, qcfg, {"zt_network_id": NETID}, {})
+inst_add = next((o for o in plan.ops if o.path == ZT and o.action == "add"), None)
+net_add = next((o for o in plan.ops if o.path == ZTI and o.action == "add"), None)
+check("hub tunnel creates the zt1 ZeroTier instance",
+      inst_add is not None and inst_add.params.get("name") == "zt1")
+check("instance is created before the network that references it",
+      plan.ops.index(inst_add) < plan.ops.index(net_add))
+check("network join targets the configured network ID on zt1",
+      net_add.params.get("network") == NETID
+      and net_add.params.get("instance") == "zt1"
+      and net_add.params.get("name") == "ztmikromon"
+      and net_add.params.get("comment", "").startswith("mikromon:tunnel:"))
+check("missing ZeroTier network ID yields an empty (safe) plan",
+      F.hubtunnel_plan(pt, qcfg, {}, {}).empty)
 cfgd = FakeApi({
-    WG: [{".id": "*1", "name": "mikromon", "public-key": "ROUTERPUB=",
-          "comment": "mikromon:tunnel:if"}],
-    IPA: [{".id": "*2", "address": "10.10.0.2/24", "interface": "mikromon",
-           "comment": "mikromon:tunnel:addr"}],
-    WGP: [{".id": "*3", "interface": "mikromon", "public-key": "HUBKEY==",
-           "endpoint-address": "102.36.140.219", "endpoint-port": "51820",
-           "allowed-address": "10.10.0.0/24", "persistent-keepalive": "25s",
-           "comment": "mikromon:tunnel:hub"}]})
+    ZT: [{".id": "*1", "name": "zt1", "comment": "mikromon:tunnel:inst"}],
+    ZTI: [{".id": "*2", "instance": "zt1", "network": NETID,
+           "name": "ztmikromon", "comment": "mikromon:tunnel:if"}]})
 plan2 = F.hubtunnel_plan(Pusher(qcfg, cfgd, dry_run=True), qcfg,
-                         {"endpoint": "102.36.140.219", "port": "51820",
-                          "hub_pubkey": "HUBKEY==", "tunnel_ip": "10.10.0.2/24",
-                          "allowed": "10.10.0.0/24", "keepalive": "25s"}, {})
-check("re-applying an already-configured WireGuard tunnel is a no-op", plan2.empty)
+                         {"zt_network_id": NETID}, {})
+check("re-applying an already-configured ZeroTier tunnel is a no-op", plan2.empty)
 
 # zero-touch: provision_apply drives the router over the API (no script paste)
 pa_api = FakeApi({
@@ -597,10 +582,10 @@ pa_api = FakeApi({
     ("ip", "service"): [
         {".id": "*s1", "name": "api", "disabled": "true"},
         {".id": "*s2", "name": "telnet", "disabled": "false"}],
-    WG: [], WGP: [], IPA: []})
-res = F.provision_apply(pa_api, "Branch9", "mikromon", "pw1234567890", harden=True,
-                        hub_pubkey="HUBKEY==", hub_ip="102.36.140.219",
-                        port="51820", subnet="10.10.0.0/24", tunnel_ip="10.10.0.2")
+    PKGS: [{"name": "routeros"}, {"name": "zerotier"}],
+    ZT: [], ZTI: [], ("ip", "firewall", "filter"): []})
+res = F.provision_apply(pa_api, "Branch9", "mikromon", "pw1234567890",
+                        harden=True, zt_network_id=NETID)
 ex = pa_api.executed
 check("provision_apply creates the management user over the API",
       any(o.action == "add" and o.path == ("user",)
@@ -612,24 +597,48 @@ check("provision_apply enables the API service",
 check("provision_apply hardens (disables telnet)",
       any(o.path == ("ip", "service") and o.params.get(".id") == "*s2"
           and o.params.get("disabled") == "yes" for o in ex))
-check("provision_apply creates the WG interface, address and hub peer",
-      any(o.action == "add" and o.path == WG for o in ex)
-      and any(o.action == "add" and o.path == IPA
-              and o.params.get("address") == "10.10.0.2/24" for o in ex)
-      and any(o.action == "add" and o.path == WGP
-              and o.params.get("public-key") == "HUBKEY==" for o in ex))
-check("provision_apply returns a result dict (router pubkey key present)",
-      isinstance(res, dict) and "router_pubkey" in res)
+check("provision_apply joins the ZeroTier network + opens the firewall",
+      any(o.action == "add" and o.path == ZT for o in ex)
+      and any(o.action == "add" and o.path == ZTI
+              and o.params.get("network") == NETID for o in ex)
+      and any(o.action == "add" and o.path == ("ip", "firewall", "filter")
+              and o.params.get("in-interface") == "ztmikromon" for o in ex))
+check("provision_apply returns a result dict (zt_skipped key present, empty)",
+      isinstance(res, dict) and res.get("zt_skipped") == "")
 # idempotent: running again against the now-configured router adds nothing new
 pa_api.executed = []
-F.provision_apply(pa_api, "Branch9", "mikromon", "pwNEWNEW12345", harden=True,
-                  hub_pubkey="HUBKEY==", hub_ip="102.36.140.219", port="51820",
-                  subnet="10.10.0.0/24", tunnel_ip="10.10.0.2")
-check("provision_apply is idempotent (user set, no duplicate WG/peer adds)",
-      not any(o.action == "add" and o.path in (WG, IPA, WGP)
+F.provision_apply(pa_api, "Branch9", "mikromon", "pwNEWNEW12345",
+                  harden=True, zt_network_id=NETID)
+check("provision_apply is idempotent (user set, no duplicate ZeroTier adds)",
+      not any(o.action == "add" and o.path in (ZT, ZTI)
               for o in pa_api.executed)
       and any(o.action == "set" and o.path == ("user",)
               for o in pa_api.executed))
+
+
+# regression: a router WITHOUT the ZeroTier package must NOT crash provisioning.
+# Before the fix, reading /zerotier raised an error that escaped the web layer's
+# (DeviceError, PushError) handler and 500-ed the page. Now the package is
+# absent → ZeroTier is skipped (with a reason) and user+API still apply.
+class NoZtApi(FakeApi):
+    def fetch(self, path):
+        if tuple(path) == ZT or tuple(path) == ZTI:
+            raise RuntimeError("no such command prefix")  # /zerotier menu absent
+        return super().fetch(path)
+
+
+noztapi = NoZtApi({
+    ("user",): [],
+    ("ip", "service"): [{".id": "*s1", "name": "api", "disabled": "false"}],
+    PKGS: [{"name": "routeros"}],  # zerotier package NOT installed
+    ("ip", "firewall", "filter"): []})
+res_skip = F.provision_apply(noztapi, "Branch9", "mikromon", "pw1234567890",
+                             harden=False, zt_network_id=NETID)
+check("missing ZeroTier package skips the tunnel with a reason (no crash)",
+      isinstance(res_skip, dict) and bool(res_skip.get("zt_skipped")))
+check("missing ZeroTier package still provisions the user",
+      any(o.action == "add" and o.path == ("user",) for o in noztapi.executed)
+      and not any(o.path in (ZT, ZTI) for o in noztapi.executed))
 
 
 # ---- 16. update RouterOS (check / install+reboot / firmware) ---------------
