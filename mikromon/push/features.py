@@ -1280,7 +1280,7 @@ def wireguard_repair(api, *, iface=_HUB_NAME):
 # can register it as a peer on the hub.
 # ===========================================================================
 def provision_apply(api, name, pwuser, pwd, *, harden=True, enable_api=True,
-                    hub_pubkey="", hub_ip="", port="51820",
+                    lock_api=False, hub_pubkey="", hub_ip="", port="51820",
                     subnet="10.10.0.0/24", tunnel_ip=""):
     steps = []
 
@@ -1344,6 +1344,28 @@ def provision_apply(api, name, pwuser, pwd, *, harden=True, enable_api=True,
                           "endpoint-address": hub_ip, "endpoint-port": port,
                           "allowed-address": subnet, "persistent-keepalive": "25s",
                           "comment": _HUB_TAG + "hub"}, desc="add hub peer"))
+
+    # 5) Lock the API to the VPN tunnel — bind the api / api-ssl services to the
+    # tunnel subnet so they're no longer reachable from the internet (WireGuard
+    # encrypts the tunnel itself). This is done LAST and is BEST-EFFORT: binding
+    # the address cuts our current (non-tunnel) session, so a disconnect here is
+    # expected — mikromon reconnects over the tunnel afterwards. Captured in the
+    # steps either way so the outcome is visible in the activity log.
+    if lock_api and tunnel_ip:
+        for svc in ("api", "api-ssl"):
+            row = next((s for s in api.fetch(("ip", "service"))
+                        if s.get("name") == svc), None)
+            if row is None or _norm(row.get("address", "")) == _norm(subnet):
+                continue
+            try:
+                api.execute(Operation(
+                    "set", ("ip", "service"),
+                    {".id": row[".id"], "address": subnet},
+                    desc=f"bind {svc} to the tunnel {subnet}"))
+                steps.append(f"bind {svc} to the tunnel {subnet}")
+            except Exception as exc:  # noqa: BLE001 — disconnect is expected
+                steps.append(f"bind {svc} to the tunnel {subnet} "
+                             f"(session dropped as expected: {exc})")
     return {"router_pubkey": router_pub, "steps": steps}
 
 

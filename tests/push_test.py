@@ -640,6 +640,21 @@ F.provision_apply(na_api, "Branch9", "mikromon", "pw1234567890",
 check("provision_apply leaves the API service untouched when enable_api=False",
       any(o.action == "add" and o.path == ("user",) for o in na_api.executed)
       and not any(o.path == ("ip", "service") for o in na_api.executed))
+# lock_api binds api + api-ssl to the tunnel subnet (no public exposure) last
+la_api = FakeApi({
+    ("user",): [],
+    ("ip", "service"): [
+        {".id": "*s1", "name": "api", "disabled": "false", "address": ""},
+        {".id": "*s2", "name": "api-ssl", "disabled": "false", "address": ""}],
+    WG: [{".id": "*w", "name": "mikromon", "public-key": "RPUB="}],
+    WGP: [], IPA: []})
+F.provision_apply(la_api, "B", "mikromon", "pw1234567890", harden=False,
+                  lock_api=True, hub_pubkey="HUBKEY==", hub_ip="1.2.3.4",
+                  subnet="10.10.0.0/24", tunnel_ip="10.10.0.2")
+bound = {o.params.get(".id") for o in la_api.executed
+         if o.path == ("ip", "service")
+         and o.params.get("address") == "10.10.0.0/24"}
+check("lock_api binds api + api-ssl to the tunnel subnet", bound == {"*s1", "*s2"})
 
 
 # ---- 15b. WireGuard self-repair: diagnose, auto-fix, report clearly ---------

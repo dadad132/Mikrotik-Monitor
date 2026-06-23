@@ -805,7 +805,7 @@ def _write_wg_peers(path, leases):
 
 def _provision_script(name, raw, pwuser, pwd, *, hub_ip="", hub_port="51820",
                       hub_pubkey="", wg_priv="", tunnel_ip="", subnet="",
-                      harden=True, enable_api=True) -> str:
+                      harden=True, enable_api=True, lock_api=True) -> str:
     """A one-paste RouterOS bootstrap script that is SAFE on an already-configured
     router: every step is guarded so it only ADDS what is missing and never
     resets existing config. The WireGuard dial-home tunnel needs RouterOS 7.1+."""
@@ -867,6 +867,22 @@ def _provision_script(name, raw, pwuser, pwd, *, hub_ip="", hub_port="51820",
         a('  /ip firewall filter add chain=input in-interface=mikromon '
           'action=accept comment="mikromon:tunnel:fw"')
         a("}")
+        if lock_api:
+            a("")
+            a("# 6) Lock the API to the VPN tunnel + enable API-SSL - no public")
+            a("#    exposure. WireGuard already encrypts the tunnel; binding the")
+            a("#    API services to the tunnel subnet removes them from the")
+            a("#    internet entirely (this runs LAST so you don't lock yourself")
+            a("#    out mid-script - you reach mikromon over the tunnel after).")
+            a(":if ([:len [/certificate find name=mikromon-api]] = 0) do={")
+            a("  /certificate add name=mikromon-api common-name=mikromon "
+              "key-size=prime256v1 days-valid=3650")
+            a("  /certificate sign mikromon-api")
+            a("}")
+            a(":delay 2s")
+            a("/ip service set api-ssl certificate=mikromon-api disabled=no")
+            a("/ip service set api-ssl address=" + net)
+            a("/ip service set api address=" + net)
     a("")
     a('/log info "mikromon provisioning done"')
     return "\n".join(L)
@@ -956,6 +972,10 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
         f'<div class="f"><label class="chk"><input type="checkbox" name="harden" '
         f'value="1" class="switch" checked> Disable Telnet/FTP (basic hardening)'
         f'</label></div>'
+        f'<div class="f"><label class="chk"><input type="checkbox" '
+        f'name="lock_api" value="1" class="switch" checked> Lock the API to the '
+        f'VPN tunnel + API-SSL (no public exposure — needs the WireGuard tunnel '
+        f'above)</label></div>'
         f'</div>'
         f'<div class="actions" style="margin-top:12px">'
         f'<button class="btn" type="submit" name="auto" value="1">Provision now '
@@ -2215,6 +2235,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             uname = flat.get("pwuser", "").strip() or _user_slug(name)
             pwd = _gen_password()
             want_tunnel = flat.get("transport", "wg").strip() == "wg"
+            lock_api = flat.get("lock_api") == "1"
             tunnel_ip = dev_pub = wg_priv = ""
             reg_ok, reg_err = True, ""
             if want_tunnel and hub_pubkey:
@@ -2236,6 +2257,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             raw["push_password"] = pwd
             if tunnel_ip:
                 raw["host"] = tunnel_ip
+                # Locking the API to the tunnel also turns on API-SSL on the
+                # router, so reach it encrypted on 8729 over the tunnel.
+                if lock_api:
+                    raw["use_ssl"] = True
+                    raw["verify_ssl"] = False  # router uses a self-signed cert
+                    raw["api_port"] = 8729
             try:
                 store.upsert(raw, defaults, original_name=name)
             except Exception as exc:  # noqa: BLE001 — surface validation errors
@@ -2247,7 +2274,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 hub_pubkey=hub_pubkey if tunnel_ip else "", wg_priv=wg_priv,
                 tunnel_ip=tunnel_ip, subnet=hub.get("subnet"),
                 harden=flat.get("harden") == "1",
-                enable_api=flat.get("enable_api") == "1")
+                enable_api=flat.get("enable_api") == "1", lock_api=lock_api)
             creds = {"user": uname, "pwd": pwd, "ip": tunnel_ip, "hub": hub_ip,
                      "pubkey": dev_pub, "reg_ok": reg_ok, "reg_err": reg_err,
                      "peers_path": peers_path,
@@ -2296,6 +2323,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             uname = flat.get("pwuser", "").strip() or _user_slug(name)
             pwd = _gen_password()
             want_tunnel = flat.get("transport", "wg").strip() == "wg"
+            lock_api = flat.get("lock_api") == "1"
             tunnel_ip = _alloc_tunnel_ip(hub, name) if (want_tunnel and hub_pubkey) \
                 else ""
             cfg = build_device(raw, defaults)
@@ -2310,6 +2338,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     api, name, uname, pwd,
                     harden=flat.get("harden") == "1",
                     enable_api=flat.get("enable_api") == "1",
+                    lock_api=lock_api,
                     hub_pubkey=hub_pubkey,
                     hub_ip=hub_ip, port=hub_port, subnet=hub.get("subnet"),
                     tunnel_ip=tunnel_ip)

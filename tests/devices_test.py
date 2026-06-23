@@ -99,6 +99,22 @@ check("WireGuard peers file lists each device as a [Peer]",
 kp = web._wg_keypair()
 check("wg keypair helper returns a tuple (priv/pub or graceful None+err)",
       isinstance(kp, tuple) and len(kp) == 2)
+# provisioning script: "lock API" binds api/api-ssl to the tunnel subnet + sets
+# up API-SSL, so the API has no public exposure. Only emitted with a tunnel.
+locked = web._provision_script(
+    "R", {"host": "1.1.1.1"}, "mon", "pw1234567890", hub_ip="102.36.140.219",
+    hub_pubkey="HUBKEY=", wg_priv="PRIV=", tunnel_ip="10.10.0.2",
+    subnet="10.10.0.0/24", lock_api=True)
+check("lock-API binds api + api-ssl to the tunnel subnet and enables API-SSL",
+      "/ip service set api address=10.10.0.0/24" in locked
+      and "/ip service set api-ssl address=10.10.0.0/24" in locked
+      and "certificate add name=mikromon-api" in locked)
+unlocked = web._provision_script(
+    "R", {"host": "1.1.1.1"}, "mon", "pw1234567890", hub_ip="102.36.140.219",
+    hub_pubkey="HUBKEY=", wg_priv="PRIV=", tunnel_ip="10.10.0.2",
+    subnet="10.10.0.0/24", lock_api=False)
+check("lock-API omitted when not requested",
+      "/ip service set api address=" not in unlocked)
 itab = web._interfaces_table({"ifaces": [
     {"name": "ether1", "type": "ether", "running": "true",
      "mac-address": "AA:BB", "mtu": "1500", "comment": "WAN"},
