@@ -168,9 +168,19 @@ _FILTER = ("ip", "firewall", "filter")
 _SEC_TAG = "mikromon:sec:"
 
 
+_IP_SERVICE = ("ip", "service")
+
+
+def _service_disabled(pusher, name) -> bool:
+    """True if the named /ip service row (e.g. 'ssh') is disabled on the router."""
+    row = next((s for s in pusher.api.fetch(_IP_SERVICE)
+                if s.get("name") == name), None)
+    return row is not None and _norm(row.get("disabled", "")) == "true"
+
+
 def security_read(pusher, cfg):
-    return [r for r in pusher.api.fetch(_FILTER)
-            if _prefix_owner(_SEC_TAG)(r)]
+    rules = [r for r in pusher.api.fetch(_FILTER) if _prefix_owner(_SEC_TAG)(r)]
+    return {"rules": rules, "ssh_disabled": _service_disabled(pusher, "ssh")}
 
 
 def security_unmanaged(pusher, cfg):
@@ -185,13 +195,18 @@ def security_unmanaged(pusher, cfg):
 
 
 def security_summary(current, cfg):
-    return [f"{r.get('comment', '')[len(_SEC_TAG):]} — {r.get('chain')}/"
-            f"{r.get('action')}" for r in current] or \
-           ["No mikromon security rules on the router yet."]
+    rules = current.get("rules", [])
+    lines = [f"{r.get('comment', '')[len(_SEC_TAG):]} — {r.get('chain')}/"
+             f"{r.get('action')}" for r in rules]
+    if not lines:
+        lines = ["No mikromon security rules on the router yet."]
+    lines.append("SSH service is currently "
+                 + ("DISABLED." if current.get("ssh_disabled") else "enabled."))
+    return lines
 
 
 def security_form(current, cfg):
-    have = {r.get("comment", "") for r in current}
+    have = {r.get("comment", "") for r in current.get("rules", [])}
     def on(key):
         return any(c.startswith(_SEC_TAG + key) for c in have)
     wan = ", ".join(e.interface for e in cfg.wan.links if e.interface) or "WAN"
@@ -218,7 +233,13 @@ def security_form(current, cfg):
                      "10 concurrent (connection-limit)."},
             {"type": "toggle", "name": "opt", "value": "port_scan",
              "label": "Port-scanner protection", "on": on("port_scan"),
-             "desc": "Drop hosts detected port-scanning the router (PSD)."}]
+             "desc": "Drop hosts detected port-scanning the router (PSD)."},
+            {"type": "toggle", "name": "opt", "value": "disable_ssh",
+             "label": "Disable the SSH service",
+             "on": bool(current.get("ssh_disabled")),
+             "desc": "Turn the router's SSH server off entirely (/ip service "
+                     "ssh). Manage over WinBox or the tunnel instead. Re-enable "
+                     "here any time — reflects the router's current state."}]
 
 
 def security_plan(pusher, cfg, flat, multi):
@@ -258,8 +279,29 @@ def security_plan(pusher, cfg, flat, multi):
         desired.append({"chain": "input", "protocol": "tcp",
                         "psd": "21,3s,3,1", "action": "drop",
                         "comment": _SEC_TAG + "port_scan"})
-    return pusher.plan_managed_list(_FILTER, "comment", desired,
-                                    owns=_prefix_owner(_SEC_TAG), label="security rule")
+    fw_plan = pusher.plan_managed_list(_FILTER, "comment", desired,
+                                       owns=_prefix_owner(_SEC_TAG),
+                                       label="security rule")
+    ops = list(fw_plan.ops)
+    # Disable/enable the SSH service — a reversible `set` on the /ip service ssh
+    # row. Only emitted when the desired state differs from what's on the router,
+    # so leaving the toggle as-is (it mirrors the live state) never churns or
+    # re-enables SSH the user turned off by hand.
+    want_disabled = "disable_ssh" in opts
+    ssh = next((s for s in pusher.api.fetch(_IP_SERVICE)
+                if s.get("name") == "ssh"), None)
+    if ssh is not None and _norm(ssh.get("disabled", "")) != (
+            "true" if want_disabled else "false"):
+        ops.insert(0, Operation(
+            "set", _IP_SERVICE,
+            {".id": ssh[".id"], "disabled": "yes" if want_disabled else "no"},
+            desc=("disable the SSH service" if want_disabled
+                  else "enable the SSH service"),
+            inverse=Operation(
+                "set", _IP_SERVICE,
+                {".id": ssh[".id"], "disabled": ssh.get("disabled", "no")},
+                desc="restore the SSH service to its previous state")))
+    return Plan(cfg.name, ops, summary="security")
 
 
 # ===========================================================================

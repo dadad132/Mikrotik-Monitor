@@ -372,6 +372,33 @@ off = F.security_plan(Pusher(devcfg, off_api, dry_run=True), devcfg, {}, {"opt":
 check("turning a protection off removes its rule (reconcile)",
       any(o.action == "remove" and o.params.get(".id") == "*1" for o in off.ops))
 
+# Security tab "Disable SSH" toggle -> reversible set on /ip service ssh
+ssh_on = FakeApi({("ip", "firewall", "filter"): [],
+                  ("ip", "service"): [
+                      {".id": "*ssh", "name": "ssh", "disabled": "false"},
+                      {".id": "*api", "name": "api", "disabled": "false"}]})
+dis = F.security_plan(Pusher(devcfg, ssh_on, dry_run=True), devcfg, {},
+                      {"opt": ["disable_ssh"]})
+sops = [o for o in dis.ops if o.path == ("ip", "service")]
+check("Security 'disable SSH' sets the ssh service disabled=yes (reversible)",
+      len(sops) == 1 and sops[0].action == "set"
+      and sops[0].params == {".id": "*ssh", "disabled": "yes"}
+      and sops[0].inverse.params.get("disabled") == "false")
+noop = F.security_plan(Pusher(devcfg, ssh_on, dry_run=True), devcfg, {}, {"opt": []})
+check("SSH toggle off while ssh already enabled = no service op (no churn)",
+      not any(o.path == ("ip", "service") for o in noop.ops))
+ssh_off = FakeApi({("ip", "firewall", "filter"): [],
+                   ("ip", "service"): [
+                       {".id": "*ssh", "name": "ssh", "disabled": "true"}]})
+en = F.security_plan(Pusher(devcfg, ssh_off, dry_run=True), devcfg, {}, {"opt": []})
+sops = [o for o in en.ops if o.path == ("ip", "service")]
+check("SSH toggle off while ssh disabled re-enables it (disabled=no)",
+      len(sops) == 1 and sops[0].params == {".id": "*ssh", "disabled": "no"})
+# the form reflects the live SSH state so re-applying never fights the user
+frm = F.security_form({"rules": [], "ssh_disabled": True}, devcfg)
+check("Security form shows a 'Disable the SSH service' toggle, on when disabled",
+      any(f.get("value") == "disable_ssh" and f.get("on") is True for f in frm))
+
 # qos rows -> simple queues
 api = FakeApi({("queue", "simple"): []})
 pq = Pusher(devcfg, api, dry_run=True)
