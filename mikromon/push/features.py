@@ -354,6 +354,8 @@ def nextdns_summary(current, cfg):
     out = [f"DNS servers: {dns.get('servers', '(none)')}",
            f"allow-remote-requests: {dns.get('allow-remote-requests', '?')}"]
     out.append(f"{len(current.get('bypass', []))} bypass address(es)")
+    out.append("Force client DNS: " +
+               ("on" if current.get("forced") else "off"))
     groups = sorted({str(r.get("comment", ""))[len(_DNSBLOCK_TAG):]
                      for r in current.get("static", [])})
     if groups:
@@ -437,7 +439,14 @@ def nextdns_form(current, cfg):
          "label": "Allow remote DNS requests",
          "on": _norm(dns.get("allow-remote-requests", "")) == "true",
          "hint": "Must be ON for the router to answer client DNS — blocking does "
-                 "nothing without it."},
+                 "nothing without it. (Turned on automatically when you force "
+                 "client DNS below.)"},
+        {"type": "toggle", "name": "opt", "value": "force_dns",
+         "label": "Force all client DNS through this router",
+         "on": bool(current.get("forced")),
+         "hint": "Redirects every client's port-53 traffic to the router (NAT) so "
+                 "a device hard-coded to 8.8.8.8 can't bypass the blocks. Needed "
+                 "for the filtering to actually take effect."},
         {"type": "textarea", "name": "bypass", "label": "Bypass IPs (one per line)",
          "value": ips, "hint": "Hosts allowed to skip the filter."},
         {"type": "text", "name": "block_ip",
@@ -458,15 +467,17 @@ def nextdns_form(current, cfg):
 
 def nextdns_plan(pusher, cfg, flat, multi):
     opts = set(multi.get("opt", []))
+    force_dns = "force_dns" in opts
     # A switched-on provider preset sets the DNS servers. The toggles are
     # mutually exclusive in the UI, but if more than one arrives (e.g. no JS)
     # just take the first. With NONE on we leave /ip dns servers untouched
     # (the servers field was removed from the form).
     chosen = [k for k in multi.get("dns_preset", []) if k in _DNS_PRESET_SERVERS]
     # RouterOS returns true/false here, so send true/false (not yes/no) to avoid
-    # a perpetual no-op diff.
-    desired_dns = {"allow-remote-requests": "true" if "allow_remote" in opts
-                   else "false"}
+    # a perpetual no-op diff. Forcing client DNS only works if the router answers
+    # DNS, so allow-remote-requests is implied on when force_dns is on.
+    desired_dns = {"allow-remote-requests": "true" if ("allow_remote" in opts
+                   or force_dns) else "false"}
     if chosen:
         desired_dns["servers"] = _DNS_PRESET_SERVERS[chosen[0]]
     plan = pusher.plan_settings(_DNS, desired_dns, label="dns")
@@ -492,10 +503,18 @@ def nextdns_plan(pusher, cfg, flat, multi):
     static_plan = pusher.plan_managed_list(
         _DNS_STATIC, "regexp", static_desired,
         owns=_prefix_owner(_DNSBLOCK_TAG), label="dns block")
-    # Force-client-DNS was removed from the UI; reconcile away any port-53
-    # redirect rules we created in the past so nothing is left orphaned.
+    # Force-DNS: redirect client port-53 traffic to the router so hard-coded
+    # resolvers can't slip past the sinkhole. dstnat/redirect only sees client
+    # (forwarded) traffic in prerouting, so the router's own DNS is untouched.
+    force_desired = []
+    if force_dns:
+        for proto in ("udp", "tcp"):
+            force_desired.append({
+                "chain": "dstnat", "protocol": proto, "dst-port": "53",
+                "action": "redirect", "to-ports": "53",
+                "comment": _DNSFORCE_TAG + proto})
     force_plan = pusher.plan_managed_list(
-        _NAT, "comment", [],
+        _NAT, "comment", force_desired,
         owns=_prefix_owner(_DNSFORCE_TAG), label="dns redirect")
     return Plan(cfg.name,
                 plan.ops + list_plan.ops + static_plan.ops + force_plan.ops,

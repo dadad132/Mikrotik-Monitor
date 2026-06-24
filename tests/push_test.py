@@ -597,25 +597,27 @@ rm = next((o for o in plan2.ops if o.path == ("ip", "dns", "static")
 check("disabling a block group removes its dns-static entries",
       rm is not None and rm.params.get(".id") == "*9"
       and rm.inverse.action == "add")
-# force-client-DNS was removed from the UI: applying the DNS tab reconciles away
-# any port-53 redirect rules we created in the past (nothing left orphaned).
+# force-DNS: redirect client port-53 to the router (and imply allow-remote)
 nd_api3 = FakeApi({
     ("ip", "dns"): [{".id": "*0", "servers": "1.1.1.1",
-                     "allow-remote-requests": "true"}],
+                     "allow-remote-requests": "false"}],
     ("ip", "firewall", "address-list"): [],
-    ("ip", "firewall", "nat"): [
-        {".id": "*f1", "chain": "dstnat", "protocol": "udp", "dst-port": "53",
-         "action": "redirect", "comment": "mikromon:dnsforce:udp"}],
+    ("ip", "firewall", "nat"): [],
     ("ip", "dns", "static"): []})
 fp = F.nextdns_plan(Pusher(qcfg, nd_api3, dry_run=True), qcfg,
-                    {"bypass": ""}, {"opt": ["allow_remote"], "block": []})
-nat_rm = [o for o in fp.ops if o.path == ("ip", "firewall", "nat")
-          and o.action == "remove"]
-check("force-DNS removed: old port-53 redirect rules are reconciled away",
-      len(nat_rm) == 1 and nat_rm[0].params.get(".id") == "*f1")
-check("no force-DNS redirect rules are ever added now",
-      not any(o.path == ("ip", "firewall", "nat") and o.action == "add"
-              for o in fp.ops))
+                    {"bypass": ""}, {"opt": ["force_dns"], "block": []})
+nat_adds = [o for o in fp.ops if o.path == ("ip", "firewall", "nat")
+            and o.action == "add"]
+check("forcing client DNS adds udp+tcp dstnat redirect rules on port 53",
+      len(nat_adds) == 2
+      and all(o.params.get("action") == "redirect"
+              and o.params.get("dst-port") == "53"
+              and o.params.get("comment", "").startswith("mikromon:dnsforce:")
+              for o in nat_adds)
+      and {o.params.get("protocol") for o in nat_adds} == {"udp", "tcp"})
+check("forcing client DNS implies allow-remote-requests=true",
+      any(o.path == ("ip", "dns") and o.action == "set"
+          and o.params.get("allow-remote-requests") == "true" for o in fp.ops))
 # DNS provider presets (AdGuard / OpenDNS / Google / Cloudflare): switching one
 # toggle on sets /ip dns servers to that pair and wins over the typed field; the
 # toggles are mutually exclusive and the form pre-switches the matching one on.
