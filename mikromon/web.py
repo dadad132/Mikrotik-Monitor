@@ -95,15 +95,19 @@ def _known_devices(store, state) -> list:
 
 
 def _visible_device_names(store, state, ds) -> set:
-    """Every device to consider for the dashboard / inventory / device pages:
-    anything with metrics or saved state, plus any in the web-managed devices
-    DB (so freshly-added, not-yet-polled devices still show). A device removed
-    from everywhere is gone; leftover "orphans" can be cleared with the
-    per-device Remove button (/device/forget)."""
-    names = set(_known_devices(store, state))
+    """Which devices the dashboard / inventory / device pages may show.
+
+    Web-managed mode (`devices_db` set, so `ds` is given): the devices DB is the
+    single source of truth — show EXACTLY what's in the Devices tab, nothing
+    more. A device deleted there vanishes immediately, even if stale samples or
+    saved state linger (those get swept by the delete itself and by the engine's
+    next poll). This is why a removed device no longer haunts the dashboard.
+
+    YAML mode (no `devices_db`, `ds` is None): fall back to anything that has
+    metrics or saved state, since there is no managed inventory to defer to."""
     if ds is not None:
-        names |= set(ds.names())
-    return names
+        return set(ds.names())
+    return set(_known_devices(store, state))
 
 
 def _device_has_data(d) -> bool:
@@ -207,14 +211,17 @@ _PAGE_CSS = """
    gap:14px 16px}
  .fields label.f{display:block;font-size:12px;color:#475569;font-weight:600;
    margin-bottom:4px}
- .fields .f input,.fields .f select{width:100%}
+ .fields .f input:not([type=checkbox]):not([type=radio]),
+ .fields .f select{width:100%}
  .full{grid-column:1/-1}
+ .chkrow{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;
+   min-height:38px}
  .chips{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0}
  .chips label{background:#f1f5f9;border:1px solid #e2e8f0;border-radius:999px;
    padding:4px 11px;font-size:12px;cursor:pointer;user-select:none}
  .chips label:hover{background:#e2e8f0}
  .chips input{margin:0 5px 0 0;vertical-align:middle}
- .chk{margin-right:12px;font-size:13px}
+ .chk{display:inline-flex;align-items:center;gap:6px;margin-right:12px;font-size:13px}
  input.switch{appearance:none;-webkit-appearance:none;width:38px;height:20px;
    background:#cbd5e1;border-radius:999px;position:relative;cursor:pointer;
    vertical-align:middle;transition:.15s;flex:none}
@@ -813,7 +820,7 @@ def _write_wg_peers(path, leases):
         return False, str(exc)
 
 
-def _provision_script(name, raw, pwuser, pwd, *, mon_user="", mon_pwd="",
+def _provision_script(name, raw, pwuser, pwd, *,
                       hub_ip="", hub_port="51820", hub_pubkey="", wg_priv="",
                       tunnel_ip="", subnet="", harden=True, enable_api=True,
                       lock_api=True) -> str:
@@ -841,11 +848,9 @@ def _provision_script(name, raw, pwuser, pwd, *, mon_user="", mon_pwd="",
     a("# what is missing and never resets your existing config. The WireGuard")
     a("# tunnel block needs RouterOS 7.1+.")
     a("")
-    a("# 1) mikromon users - a read-WRITE push user (for changes) and, if given,")
-    a("#    a read-ONLY monitor user (for safe polling - sees all, changes none)")
+    a("# 1) the mikromon management user (full access - used for both monitoring")
+    a("#    and config-push; one login keeps things simple)")
     user_block(u, pwd, "full")
-    if mon_user and mon_pwd:
-        user_block(mon_user, mon_pwd, "read")
     if enable_api:
         a("")
         a("# 2) make sure the API is reachable for mikromon (idempotent)")
@@ -962,7 +967,8 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
               f'</div>' if msg else "")
     err = (f'<div class="box" style="border-left:4px solid #dc2626">{esc(error)}'
            f'</div>' if error else "")
-    pwuser = (raw or {}).get("push_username") or _user_slug(name)
+    pwuser = ((raw or {}).get("push_username") or (raw or {}).get("username")
+              or _user_slug(name))
     intro = ('<p class="muted" style="margin:-6px 0 14px">Generate a one-paste '
              'script for a new router. It creates a management user with a strong '
              'password (saved here), optionally enables the API, and adds a '
@@ -976,12 +982,10 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
         f'<input type="hidden" name="csrf" value="{csrf}">'
         f'<input type="hidden" name="device" value="{esc(name)}">'
         f'<div class="fields">'
-        f'<div class="f"><label class="f">Push username <span class="muted">'
-        f'(read-write — for changes)</span></label>'
+        f'<div class="f"><label class="f">Username <span class="muted">'
+        f'(the mikromon login — full access, used for monitoring &amp; '
+        f'changes)</span></label>'
         f'<input name="pwuser" value="{esc(pwuser)}"></div>'
-        f'<div class="f"><label class="f">Monitor username <span class="muted">'
-        f'(read-only — for polling; blank = &lt;push&gt;-ro)</span></label>'
-        f'<input name="mon_user" value="{esc(pwuser)}-ro"></div>'
         f'<div class="f"><label class="f">Dial-home tunnel</label>'
         f'<select name="transport">'
         f'<option value="wg" selected>WireGuard (RouterOS 7.1+)</option>'
@@ -1045,15 +1049,10 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
             body = (f'<pre style="{_PRE}">{esc(script)}</pre>{srv}'
                     f'<p class="muted">The script sets the password in plain text — '
                     f'paste it, then clear your clipboard.</p>')
-        mon_fields = (
-            f'{_secret_field("Monitor user (read-only)", c.get("mon_user", ""), "mu")}'
-            f'{_secret_field("Monitor password", c.get("mon_pwd", ""), "mp")}'
-            if c.get("mon_user") else "")
         out = (f'<div class="box" style="border-left:4px solid #16a34a">{head}{body}'
                f'<div class="fields">'
-               f'{_secret_field("Push user (read-write)", c.get("user", ""), "su")}'
-               f'{_secret_field("Push password", c.get("pwd", ""), "sp")}'
-               f'{mon_fields}'
+               f'{_secret_field("Username", c.get("user", ""), "su")}'
+               f'{_secret_field("Password", c.get("pwd", ""), "sp")}'
                f'</div></div>')
     connect = _connect_box(name, raw)
     inner = (f'<div class="wrap" style="max-width:1100px">'
@@ -1840,16 +1839,12 @@ def _render_devices(store, csrf, user, edit_name=None, msg="") -> str:
         + field("Password", f'<input name="password" type="password" '
                 f'placeholder="{"(unchanged)" if edit_name else ""}">')
         + field("Security",
+                f'<div class="chkrow">'
                 f'<label class="chk"><input type="checkbox" name="use_ssl"'
-                f'{" checked" if pre.get("use_ssl") else ""}> API-SSL</label> '
+                f'{" checked" if pre.get("use_ssl") else ""}> API-SSL</label>'
                 f'<label class="chk"><input type="checkbox" name="verify_ssl"'
-                f'{" checked" if pre.get("verify_ssl") else ""}> verify cert</label>')
-        + field("Push user <span class='muted'>(read-write, for config-push; "
-                "optional)</span>",
-                f'<input name="push_username" value="{v("push_username")}">')
-        + field("Push password",
-                f'<input name="push_password" type="password" '
-                f'placeholder="{"(unchanged)" if edit_name else ""}">')
+                f'{" checked" if pre.get("verify_ssl") else ""}> verify cert</label>'
+                f'</div>')
         + field("WAN uplinks <span class='muted'>(top = highest priority; "
                 "add as many as the router has)</span>",
                 _wan_editor(wan.get("links") or []), full=True)
@@ -2045,7 +2040,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
             # No auth configured -> open dashboard (back-compat / demo without auth).
             if auth is None:
-                return self._serve_data(path, url, user=None, allowed=None)
+                store = self._store()
+                ds = self._devstore()
+                managed = ds is not None
+                known = _visible_device_names(store, _load_state(state_file), ds)
+                if ds:
+                    ds.close()
+                store.close()
+                # Even with auth off, the devices DB stays authoritative in
+                # web-managed mode so orphans never leak onto the open dashboard.
+                allowed = sorted(known) if managed else None
+                return self._serve_data(path, url, user=None, allowed=allowed)
 
             # First-run bootstrap: with no admin yet, force creating one.
             needs_setup = auth.count_admins() == 0
@@ -2311,10 +2316,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
             uname = flat.get("pwuser", "").strip() or _user_slug(name)
             pwd = _gen_password()
-            # read-only monitor user (used for polling); separate from the
-            # read-write push user above.
-            mon_uname = flat.get("mon_user", "").strip() or (uname + "-ro")
-            mon_pwd = _gen_password()
             want_tunnel = flat.get("transport", "wg").strip() == "wg"
             lock_api = flat.get("lock_api") == "1"
             tunnel_ip = dev_pub = wg_priv = ""
@@ -2334,11 +2335,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                               for n, m in hub["leases_meta"].items()}
                     reg_ok, reg_err = _write_wg_peers(peers_path, leases)
             _hub_save(hub_file, hub)
-            raw["push_username"] = uname
-            raw["push_password"] = pwd
-            # poll as the read-only monitor user from now on
-            raw["username"] = mon_uname
-            raw["password"] = mon_pwd
+            # one full-access user, used for both polling and config-push
+            raw["username"] = uname
+            raw["password"] = pwd
+            raw["push_username"] = ""   # no separate push user; falls back above
+            raw["push_password"] = ""
             if tunnel_ip:
                 raw["host"] = tunnel_ip
                 # Locking the API to the tunnel also turns on API-SSL on the
@@ -2354,14 +2355,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(400, f"Error: {exc}")
             store.close()
             script = _provision_script(
-                name, raw, uname, pwd, mon_user=mon_uname, mon_pwd=mon_pwd,
+                name, raw, uname, pwd,
                 hub_ip=hub_ip, hub_port=hub_port,
                 hub_pubkey=hub_pubkey if tunnel_ip else "", wg_priv=wg_priv,
                 tunnel_ip=tunnel_ip, subnet=hub.get("subnet"),
                 harden=flat.get("harden") == "1",
                 enable_api=flat.get("enable_api") == "1", lock_api=lock_api)
-            creds = {"user": uname, "pwd": pwd, "mon_user": mon_uname,
-                     "mon_pwd": mon_pwd, "ip": tunnel_ip, "hub": hub_ip,
+            creds = {"user": uname, "pwd": pwd, "ip": tunnel_ip, "hub": hub_ip,
                      "pubkey": dev_pub, "reg_ok": reg_ok, "reg_err": reg_err,
                      "peers_path": peers_path,
                      "no_hub_key": want_tunnel and not hub_pubkey}
@@ -2408,8 +2408,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
             uname = flat.get("pwuser", "").strip() or _user_slug(name)
             pwd = _gen_password()
-            mon_uname = flat.get("mon_user", "").strip() or (uname + "-ro")
-            mon_pwd = _gen_password()
             want_tunnel = flat.get("transport", "wg").strip() == "wg"
             lock_api = flat.get("lock_api") == "1"
             tunnel_ip = _alloc_tunnel_ip(hub, name) if (want_tunnel and hub_pubkey) \
@@ -2424,7 +2422,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 api.connect()
                 result = provision_apply(
                     api, name, uname, pwd,
-                    mon_user=mon_uname, mon_pwd=mon_pwd,
                     harden=flat.get("harden") == "1",
                     enable_api=flat.get("enable_api") == "1",
                     lock_api=lock_api,
@@ -2460,20 +2457,20 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                           for n, m in hub["leases_meta"].items()}
                 reg_ok, reg_err = _write_wg_peers(peers_path, leases)
             _hub_save(hub_file, hub)
-            # save the new creds; reach the device at the tunnel IP from now on,
-            # and POLL as the read-only monitor user
-            raw["push_username"] = uname
-            raw["push_password"] = pwd
-            raw["username"] = mon_uname
-            raw["password"] = mon_pwd
+            # save the new creds; reach the device at the tunnel IP from now on.
+            # one full-access user does both polling and config-push.
+            raw["username"] = uname
+            raw["password"] = pwd
+            raw["push_username"] = ""   # no separate push user; falls back
+            raw["push_password"] = ""
             if tunnel_ip and router_pub:
                 raw["host"] = tunnel_ip
             try:
                 store.upsert(raw, defaults, original_name=name)
             finally:
                 store.close()
-            creds = {"user": uname, "pwd": pwd, "mon_user": mon_uname,
-                     "mon_pwd": mon_pwd, "ip": tunnel_ip if router_pub else "",
+            creds = {"user": uname, "pwd": pwd,
+                     "ip": tunnel_ip if router_pub else "",
                      "hub": hub_ip, "pubkey": router_pub, "reg_ok": reg_ok,
                      "reg_err": reg_err, "peers_path": peers_path,
                      "no_hub_key": want_tunnel and not hub_pubkey, "applied": True}
@@ -2861,11 +2858,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return [x.strip() for x in (s or "").split(",") if x.strip()]
             pwd = flat.get("password", "")
             orig = flat.get("original_name") or None
-            if not pwd and orig:  # keep existing password when left blank on edit
-                pwd = (store.raw(orig) or {}).get("password", "")
-            push_pwd = flat.get("push_password", "")
-            if not push_pwd and orig:  # likewise keep the push password
-                push_pwd = (store.raw(orig) or {}).get("push_password", "")
+            orig_raw = (store.raw(orig) or {}) if orig else {}
+            if not pwd and orig_raw:  # keep existing password when blank on edit
+                pwd = orig_raw.get("password", "")
+            # The form no longer has separate push-user fields — one full-access
+            # login does both monitoring and config-push. Preserve any push creds
+            # an older device still has (so editing it doesn't break pushing);
+            # new devices have none and fall back to username/password.
+            push_user = (flat.get("push_username", "").strip()
+                         or orig_raw.get("push_username", ""))
+            push_pwd = (flat.get("push_password", "")
+                        or orig_raw.get("push_password", ""))
             checks_sel = set(multi.get("checks", []))
             # WAN uplinks come as parallel arrays, one entry per editor row,
             # in priority order (top row = highest priority).
@@ -2888,7 +2891,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 "api_port": int(api_port),
                 "username": flat.get("username", ""),
                 "password": pwd,
-                "push_username": flat.get("push_username", "").strip(),
+                "push_username": push_user,
                 "push_password": push_pwd,
                 "use_ssl": "use_ssl" in flat,
                 "verify_ssl": "verify_ssl" in flat,

@@ -49,7 +49,14 @@ class Engine:
             self.metrics = MetricsStore(config.metrics_db)
             self.metrics.prune(getattr(config, "metrics_retention_days", 30))
         self._stop = threading.Event()
-        self.state.prune_unknown_devices({d.name for d in self.devices})
+        known = {d.name for d in self.devices}
+        self.state.prune_unknown_devices(known)
+        # Web-managed mode: the devices DB is the single source of truth, so
+        # sweep metrics for any device no longer in it (orphans from deletes or
+        # from older builds) — otherwise their stale series keep them on the
+        # dashboard even though they're gone from the Devices tab.
+        if self.devices_store is not None and self.metrics is not None:
+            self.metrics.keep_only(known)
 
     def _devices_from_store(self):
         return [Device(c) for c in
@@ -110,7 +117,10 @@ class Engine:
         # Pick up devices added/edited/removed in the dashboard since last poll.
         if self.devices_store is not None:
             self.devices = self._devices_from_store()
-            self.state.prune_unknown_devices({d.name for d in self.devices})
+            known = {d.name for d in self.devices}
+            self.state.prune_unknown_devices(known)
+            if self.metrics is not None:
+                self.metrics.keep_only(known)
         batch = []
         for device in self.devices:
             batch.extend(self._poll_device(device))

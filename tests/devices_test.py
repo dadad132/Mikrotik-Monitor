@@ -12,6 +12,7 @@ import re
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -70,6 +71,32 @@ eng.devices = eng._devices_from_store()
 check("engine hot-reload sees new device",
       sorted(x.name for x in eng.devices) == ["E1", "E2"])
 
+# keep_only sweeps orphan series so the devices DB stays authoritative.
+mko = MetricsStore(os.path.join(tmp, "ko.db"))
+mko.record([(1.0, "E1", "up", "", 1.0), (1.0, "Ghost", "up", "", 1.0)])
+mko.keep_only({"E1", "E2"})
+check("keep_only drops devices not in the keep set, keeps the rest",
+      mko.devices() == ["E1"])
+mko.keep_only(set())
+check("keep_only with an empty set clears everything", mko.devices() == [])
+mko.close()
+
+# Web-managed mode: constructing the engine sweeps orphan metrics for any
+# device no longer in the devices DB (deletes / old-build leftovers), so they
+# can't keep haunting the dashboard.
+mdb_e = os.path.join(tmp, "e-metrics.db")
+now = time.time()  # recent ts so the retention prune doesn't pre-empt the sweep
+mse = MetricsStore(mdb_e)
+mse.record([(now, "E1", "up", "", 1.0), (now, "Ghost", "up", "", 1.0)])
+mse.close()
+Engine(AppConfig(state_file=os.path.join(tmp, "st2.json"), devices_db=edb,
+                 metrics_db=mdb_e, defaults=DEF, devices=[]))
+mse = MetricsStore(mdb_e)
+left = mse.devices()
+mse.close()
+check("engine sweep keeps managed-device metrics, purges orphan metrics",
+      "E1" in left and "Ghost" not in left)
+
 print("Web render helpers (offline):")
 cfgwan = build_device({"name": "R", "host": "1.1.1.1", "wan": {"links": [
     {"name": "Fibre", "interface": "ether1"},
@@ -115,13 +142,12 @@ unlocked = web._provision_script(
     subnet="10.10.0.0/24", lock_api=False)
 check("lock-API omitted when not requested",
       "/ip service set api address=" not in unlocked)
-# two users: a read-WRITE push user (group=full) + a read-ONLY monitor user
-twou = web._provision_script(
-    "R", {"host": "1.1.1.1"}, "push", "pw1234567890",
-    mon_user="push-ro", mon_pwd="ro1234567890")
-check("script creates a read-write push user + a read-only monitor user",
-      "/user add name=push " in twou and "group=full" in twou
-      and "/user add name=push-ro " in twou and "group=read" in twou)
+# single user: ONE full-access login does both monitoring and config-push
+oneu = web._provision_script(
+    "R", {"host": "1.1.1.1"}, "mikromon", "pw1234567890")
+check("script creates exactly one full-access user (no second read-only user)",
+      "/user add name=mikromon " in oneu and "group=full" in oneu
+      and "group=read" not in oneu and oneu.count("/user add name=") == 1)
 # dashboard hides devices with no data (added but never successfully polled)
 check("dashboard hides a device with no data, shows one with telemetry",
       not web._device_has_data({"metrics": {}, "problems": [], "facts": {}})
@@ -241,23 +267,25 @@ try:
     check("edit updates host, keeps password",
           raw["host"] == "8.8.8.8" and raw["password"] == "secret")
     saved.close()
-    # devices with metrics show on the dashboard (managed AND orphan), and the
-    # per-device Remove button (/device/forget) purges any of them on demand.
+    # Web-managed mode: the devices DB is the single source of truth. A managed
+    # device shows on the dashboard; a device with leftover metrics but NOT in
+    # the Devices tab (an orphan) must NOT appear at all — it's gone the moment
+    # it leaves the tab, with no need to "remove" it from the dashboard.
     ms = MetricsStore(mdb)
     ms.record([(1.0, "WebR1", "up", "", 1.0), (1.0, "GhostR", "up", "", 1.0)])
     ms.close()
     st, apidev = get(admin, "/api/devices")
     shown = [d.get("device") for d in json.loads(apidev)]
-    check("devices with metrics show on the dashboard",
-          "WebR1" in shown and "GhostR" in shown)
+    check("managed device (in the Devices tab) shows on the dashboard",
+          "WebR1" in shown)
+    check("orphan device (metrics but not in the Devices tab) is hidden",
+          "GhostR" not in shown)
+    # The per-device Remove button still purges any leftover series from the DB.
     forget_st = post_status(admin, "/device/forget",
                             {"csrf": csrf, "device": "GhostR"})
-    st, apidev = get(admin, "/api/devices")
-    shown = [d.get("device") for d in json.loads(apidev)]
-    check("Remove button purges an (orphan) device from the dashboard",
-          forget_st in (302, 303) and "GhostR" not in shown and "WebR1" in shown)
-    check("Remove button purges the device's metrics too",
-          "GhostR" not in MetricsStore(mdb).devices())
+    check("Remove button purges an orphan device's metrics from the DB",
+          forget_st in (302, 303)
+          and "GhostR" not in MetricsStore(mdb).devices())
     # --- Backups tab (config-push engine) wired into the web UI ---
     st, body = get(admin, "/device?name=WebR1")
     check("admin can open a web-managed device page (before any poll)",
@@ -327,8 +355,9 @@ try:
           and "/ip service set api disabled=no" not in body2)
     saved = DevicesStore(wdb)
     raw = saved.raw("WebR1")
-    check("provision saved a strong generated password as the push creds",
-          raw["push_username"] == "mikromon" and len(raw.get("push_password", "")) >= 16)
+    check("provision saved the single user + a strong generated password",
+          raw["username"] == "mikromon" and len(raw.get("password", "")) >= 16
+          and not raw.get("push_username"))
     saved.close()
     st = post_status(nobody, "/device/provision",
                      {"csrf": "x", "device": "WebR1"})

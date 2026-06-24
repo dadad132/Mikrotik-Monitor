@@ -45,7 +45,22 @@ def reconcile_list(path, key, desired, current, *, manage_tag=None,
         return owns(row)
 
     cur_owned = [r for r in current if owned(r)]
-    cur_by_key = {r.get(key): r for r in cur_owned}
+    # De-duplicate rows we own that share a key. Older, non-idempotent builds
+    # could stack several identical managed rows (same comment / public-key /
+    # address); keep the FIRST ("the open one") and remove the rest so every
+    # apply converges on a single rule instead of letting duplicates pile up.
+    cur_by_key = {}
+    for r in cur_owned:
+        k = r.get(key)
+        if k in cur_by_key:
+            ops.append(Operation(
+                "remove", path, {".id": r[".id"]},
+                desc=f"remove duplicate {label} {key}={k}",
+                inverse=Operation(
+                    "add", path, {f: v for f, v in r.items() if f != ".id"},
+                    desc=f"restore duplicate {label} {key}={k}")))
+        else:
+            cur_by_key[k] = r
     desired_keys = set()
 
     for raw in desired:

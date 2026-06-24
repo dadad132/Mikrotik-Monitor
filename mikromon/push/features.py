@@ -1288,9 +1288,9 @@ def wireguard_repair(api, *, iface=_HUB_NAME):
 # what's already there. Returns the router's WireGuard public key so the caller
 # can register it as a peer on the hub.
 # ===========================================================================
-def provision_apply(api, name, pwuser, pwd, *, mon_user="", mon_pwd="",
-                    harden=True, enable_api=True, lock_api=False, hub_pubkey="",
-                    hub_ip="", port="51820", subnet="10.10.0.0/24", tunnel_ip=""):
+def provision_apply(api, name, pwuser, pwd, *, harden=True, enable_api=True,
+                    lock_api=False, hub_pubkey="", hub_ip="", port="51820",
+                    subnet="10.10.0.0/24", tunnel_ip=""):
     steps = []
 
     def do(op):
@@ -1311,11 +1311,9 @@ def provision_apply(api, name, pwuser, pwd, *, mon_user="", mon_pwd="",
                          {".id": row[".id"], "password": upwd, "group": group},
                          desc=f"reset {group} user {uname}"))
 
-    # 1) the read-WRITE push user (changes) + an optional read-ONLY monitor user
-    #    (polling — sees everything, changes nothing: the real safety boundary).
+    # 1) a single mikromon management user (full access — used for both polling
+    #    and config-push). One login keeps provisioning simple.
     ensure_user(pwuser, pwd, "full")
-    if mon_user and mon_pwd:
-        ensure_user(mon_user, mon_pwd, "read")
 
     # 2) optionally make sure the API service is enabled. Optional because some
     # sites keep the binary API off (managing the router only over the tunnel,

@@ -101,6 +101,27 @@ check("remove has an add inverse that restores the row",
       rm_op.inverse.action == "add" and
       rm_op.inverse.params.get("address") == "9.9.9.9")
 
+# de-dupe: older non-idempotent builds could stack identical owned rows; a
+# reconcile must collapse them to ONE (keep the first, remove the extras) so
+# rules don't pile up every time the same config is applied.
+dup_current = [
+    {".id": "*1", "address": "1.1.1.1", "list": "block", "comment": TAG},  # keep
+    {".id": "*2", "address": "1.1.1.1", "list": "block", "comment": TAG},  # dup
+    {".id": "*3", "address": "1.1.1.1", "list": "block", "comment": TAG},  # dup
+    {".id": "*9", "address": "1.1.1.1", "list": "block", "comment": "manual"},  # not ours
+]
+dops = reconcile_list(PATH, "address",
+                      [{"address": "1.1.1.1", "list": "block"}],
+                      dup_current, manage_tag=TAG, label="entry")
+removed_ids = {o.params.get(".id") for o in dops if o.action == "remove"}
+check("collapses duplicate owned rows to one (removes the extras)",
+      removed_ids == {"*2", "*3"})
+check("keeps a single owned row and never the hand-made duplicate (*9)",
+      "*1" not in removed_ids and "*9" not in removed_ids
+      and not any(o.action == "add" for o in dops))
+check("de-dupe removal is reversible (add inverse restores the row)",
+      all(o.inverse.action == "add" for o in dops if o.action == "remove"))
+
 # a 'set' when a field changes
 ops2 = reconcile_list(PATH, "address",
                       [{"address": "1.1.1.1", "list": "drop"}],
@@ -724,19 +745,17 @@ bound = {o.params.get(".id") for o in la_api.executed
          if o.path == ("ip", "service")
          and o.params.get("address") == "10.10.0.0/24"}
 check("lock_api binds api + api-ssl to the tunnel subnet", bound == {"*s1", "*s2"})
-# two-user provisioning: a read-write push user + a read-only monitor user
+# single-user provisioning: ONE full-access user (does both polling + push)
 tu_api = FakeApi({("user",): [], ("ip", "service"): [],
                   WG: [], WGP: [], IPA: []})
-F.provision_apply(tu_api, "B", "push", "pw1234567890",
-                  mon_user="push-ro", mon_pwd="ro1234567890",
+F.provision_apply(tu_api, "B", "mikromon", "pw1234567890",
                   harden=False, enable_api=False)
 uadds = [o for o in tu_api.executed
          if o.action == "add" and o.path == ("user",)]
-check("provision_apply creates a full push user + a read-only monitor user",
-      any(o.params.get("name") == "push" and o.params.get("group") == "full"
-          for o in uadds)
-      and any(o.params.get("name") == "push-ro" and o.params.get("group") == "read"
-              for o in uadds))
+check("provision_apply creates exactly ONE full-access user (no 2nd user)",
+      len(uadds) == 1
+      and uadds[0].params.get("name") == "mikromon"
+      and uadds[0].params.get("group") == "full")
 
 
 # ---- 15b. WireGuard self-repair: diagnose, auto-fix, report clearly ---------

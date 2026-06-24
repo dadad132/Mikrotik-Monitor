@@ -64,6 +64,26 @@ class MetricsStore:
             self.db.commit()
             return cur.rowcount
 
+    def keep_only(self, names) -> int:
+        """Delete samples for any device NOT in `names`. Returns rows removed.
+
+        Web-managed mode treats the devices DB as authoritative, so the engine
+        calls this each poll to sweep orphan series left by deletes (including
+        ones removed in older builds before deletes purged metrics). An empty
+        `names` clears everything — correct when no devices are managed."""
+        names = list(names)
+        with self._lock:
+            if names:
+                placeholders = ",".join("?" * len(names))
+                cur = self.db.execute(
+                    f"DELETE FROM samples WHERE device NOT IN ({placeholders})",
+                    names)
+            else:
+                cur = self.db.execute("DELETE FROM samples")
+            if cur.rowcount:
+                self.db.commit()
+            return cur.rowcount
+
     # ----- queries ----------------------------------------------------------
     def devices(self) -> list:
         cur = self.db.execute("SELECT DISTINCT device FROM samples ORDER BY device")
