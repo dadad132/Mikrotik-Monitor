@@ -1174,7 +1174,22 @@ _FEATURE_JS = """
      });
    });
  }
+ // Toggles sharing a data-exclusive group behave like radio buttons: switching
+ // one ON turns the others in the same group OFF (e.g. only one DNS provider at
+ // a time). Leaving them all off falls back to the manual field.
+ function mmExclusive(){
+   document.querySelectorAll('input[data-exclusive]').forEach(function(cb){
+     if(cb._excl) return; cb._excl=1;
+     cb.addEventListener('change', function(){
+       if(!cb.checked) return;
+       var g=cb.getAttribute('data-exclusive');
+       document.querySelectorAll('input[data-exclusive="'+g+'"]').forEach(
+         function(o){ if(o!==cb) o.checked=false; });
+     });
+   });
+ }
  document.addEventListener('DOMContentLoaded', mmInitDrag);
+ document.addEventListener('DOMContentLoaded', mmExclusive);
 </script>"""
 
 
@@ -1187,9 +1202,13 @@ def _field_html(desc) -> str:
         ck = " checked" if desc.get("on") else ""
         d = (f'<div class="muted">{esc(desc["desc"])}</div>'
              if desc.get("desc") else "")
+        # toggles sharing an "exclusive" group act like radios (only one on) — JS
+        # mmExclusive() turns the others off when one is switched on.
+        excl = (f' data-exclusive="{esc(desc["exclusive"])}"'
+                if desc.get("exclusive") else "")
         return (f'<div class="f"><label class="chk"><input type="checkbox" '
                 f'class="switch" name="{desc["name"]}" '
-                f'value="{esc(desc["value"])}"{ck}> '
+                f'value="{esc(desc["value"])}"{ck}{excl}> '
                 f'<b>{esc(label)}</b></label>{d}</div>')
     if t == "text":
         return (f'<div class="f"><label class="f">{esc(label)}</label>'

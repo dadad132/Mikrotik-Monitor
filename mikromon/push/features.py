@@ -312,19 +312,24 @@ _ADDR_LIST = ("ip", "firewall", "address-list")
 _NAT = ("ip", "firewall", "nat")
 _DNSFORCE_TAG = "mikromon:dnsforce:"
 
-# Quick DNS presets — point the router's resolver at a known filtering service
-# with one pick. (value, label, "primary,secondary"). "custom" keeps whatever is
-# typed in the servers field. AdGuard DNS public resolvers:
+# Quick DNS presets — point the router's resolver at a known public DNS with one
+# switch. (value, label, "primary,secondary"). Rendered as mutually-exclusive
+# toggles (only one on at a time); all off = use the manually-typed servers.
 _DNS_PRESETS = [
-    ("custom", "Custom — use the servers I type below", ""),
     ("adguard_default", "AdGuard — block ads & trackers",
      "94.140.14.14,94.140.15.15"),
     ("adguard_family", "AdGuard Family — ads, trackers, adult + Safe Search",
      "94.140.14.15,94.140.15.16"),
     ("adguard_nofilter", "AdGuard — no filtering (just fast, private DNS)",
      "94.140.14.140,94.140.14.141"),
+    ("opendns", "OpenDNS — safe browsing",
+     "208.67.222.222,208.67.220.220"),
+    ("google", "Google Public DNS",
+     "8.8.8.8,8.8.4.4"),
+    ("cloudflare", "Cloudflare — fast & private",
+     "1.1.1.1,1.0.0.1"),
 ]
-_DNS_PRESET_SERVERS = {k: s for k, _label, s in _DNS_PRESETS if s}
+_DNS_PRESET_SERVERS = {k: s for k, _label, s in _DNS_PRESETS}
 
 
 def _server_set(s):
@@ -418,17 +423,22 @@ def nextdns_form(current, cfg):
     forced_on = bool(current.get("forced"))
     cur_preset = next((k for k, s in _DNS_PRESET_SERVERS.items()
                        if _server_set(s) == _server_set(dns.get("servers", ""))),
-                      "custom")
+                      "")
     fields = [
-        {"type": "select", "name": "dns_preset", "label": "Quick DNS preset",
-         "options": [(k, label) for k, label, _s in _DNS_PRESETS],
-         "value": cur_preset,
-         "hint": "Pick a ready-made AdGuard filtering DNS and it fills in the "
-                 "servers for you. Choose Custom to type your own below."},
+        {"type": "static", "label": "Quick DNS provider",
+         "value": "Flip one on to point the router at that DNS — only one at a "
+                  "time (turning one on switches the others off). Leave them all "
+                  "off to use the servers you type below."},
+    ]
+    for k, label, servers in _DNS_PRESETS:
+        fields.append({"type": "toggle", "name": "dns_preset", "value": k,
+                       "label": label, "on": k == cur_preset,
+                       "exclusive": "dns_preset", "desc": servers})
+    fields += [
         {"type": "text", "name": "servers", "label": "DNS servers (comma-separated)",
          "value": dns.get("servers", ""),
          "placeholder": "1.1.1.1, 9.9.9.9  (e.g. a filtering DNS service)",
-         "hint": "Ignored while a preset other than Custom is selected above."},
+         "hint": "Used only when no provider above is switched on."},
         {"type": "toggle", "name": "opt", "value": "allow_remote",
          "label": "Allow remote DNS requests",
          "on": _norm(dns.get("allow-remote-requests", "")) == "true",
@@ -461,10 +471,12 @@ def nextdns_form(current, cfg):
 def nextdns_plan(pusher, cfg, flat, multi):
     opts = set(multi.get("opt", []))
     force_dns = "force_dns" in opts
-    # A chosen preset (AdGuard mode) wins over the typed servers field.
-    preset = flat.get("dns_preset", "custom")
-    if _DNS_PRESET_SERVERS.get(preset):
-        servers = _DNS_PRESET_SERVERS[preset]
+    # A switched-on provider preset wins over the typed servers field. The
+    # toggles are mutually exclusive in the UI, but if more than one arrives
+    # (e.g. no JS) just take the first.
+    chosen = [k for k in multi.get("dns_preset", []) if k in _DNS_PRESET_SERVERS]
+    if chosen:
+        servers = _DNS_PRESET_SERVERS[chosen[0]]
     else:
         servers = ",".join(x.strip() for x in flat.get("servers", "").split(",")
                            if x.strip())

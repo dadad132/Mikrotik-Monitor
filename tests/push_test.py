@@ -619,33 +619,45 @@ check("forcing client DNS adds udp+tcp dstnat redirect rules on port 53",
 check("forcing client DNS implies allow-remote-requests=true",
       any(o.path == ("ip", "dns") and o.action == "set"
           and o.params.get("allow-remote-requests") == "true" for o in fp.ops))
-# AdGuard DNS presets: picking a preset sets the /ip dns servers to that pair and
-# wins over the typed servers field; the form pre-selects the live preset.
+# DNS provider presets (AdGuard / OpenDNS / Google / Cloudflare): switching one
+# toggle on sets /ip dns servers to that pair and wins over the typed field; the
+# toggles are mutually exclusive and the form pre-switches the matching one on.
 ag_api = FakeApi({("ip", "dns"): [{".id": "*0", "servers": "8.8.8.8",
                                    "allow-remote-requests": "true"}],
                   ("ip", "firewall", "address-list"): [],
                   ("ip", "dns", "static"): []})
-agp = F.nextdns_plan(Pusher(qcfg, ag_api, dry_run=True), qcfg,
-                     {"servers": "8.8.8.8", "dns_preset": "adguard_family"},
-                     {"opt": ["allow_remote"], "block": []})
-ag_set = next((o for o in agp.ops if o.path == ("ip", "dns")
-               and o.action == "set"), None)
-check("AdGuard preset sets the DNS servers to its pair (overrides typed field)",
-      ag_set is not None
-      and ag_set.params.get("servers") == "94.140.14.15,94.140.15.16")
-cust = F.nextdns_plan(Pusher(qcfg, ag_api, dry_run=True), qcfg,
-                      {"servers": "1.0.0.1", "dns_preset": "custom"},
-                      {"opt": ["allow_remote"], "block": []})
-c_set = next((o for o in cust.ops if o.path == ("ip", "dns")
-              and o.action == "set"), None)
-check("Custom preset keeps the typed DNS servers",
-      c_set is not None and c_set.params.get("servers") == "1.0.0.1")
-agform = F.nextdns_form({"dns": {"servers": "94.140.14.14,94.140.15.15"},
+
+
+def _dns_servers(flat_in, multi_in):
+    p = F.nextdns_plan(Pusher(qcfg, ag_api, dry_run=True), qcfg, flat_in, multi_in)
+    s = next((o for o in p.ops if o.path == ("ip", "dns") and o.action == "set"),
+             None)
+    return s.params.get("servers") if s else None
+
+
+check("AdGuard Family toggle sets its DNS pair (overrides typed field)",
+      _dns_servers({"servers": "8.8.8.8"},
+                   {"opt": ["allow_remote"], "dns_preset": ["adguard_family"]})
+      == "94.140.14.15,94.140.15.16")
+check("Cloudflare toggle sets 1.1.1.1,1.0.0.1",
+      _dns_servers({"servers": "8.8.8.8"},
+                   {"opt": ["allow_remote"], "dns_preset": ["cloudflare"]})
+      == "1.1.1.1,1.0.0.1")
+check("OpenDNS + Google presets exist with the right IPs",
+      F._DNS_PRESET_SERVERS["opendns"] == "208.67.222.222,208.67.220.220"
+      and F._DNS_PRESET_SERVERS["google"] == "8.8.8.8,8.8.4.4")
+check("no provider toggle on keeps the typed DNS servers",
+      _dns_servers({"servers": "1.0.0.1"}, {"opt": ["allow_remote"]}) == "1.0.0.1")
+agform = F.nextdns_form({"dns": {"servers": "1.1.1.1,1.0.0.1"},
                          "bypass": [], "static": [], "forced": []}, qcfg)
-presel = next((f for f in agform if f.get("name") == "dns_preset"), {})
-check("DNS form pre-selects the AdGuard preset matching the live servers",
-      presel.get("value") == "adguard_default"
-      and any(o[0] == "adguard_family" for o in presel.get("options", [])))
+ptoggles = [f for f in agform if f.get("name") == "dns_preset"]
+check("DNS form renders 6 mutually-exclusive provider toggles",
+      len(ptoggles) == 6
+      and all(f.get("type") == "toggle" and f.get("exclusive") == "dns_preset"
+              for f in ptoggles))
+check("DNS form switches on the toggle matching the live servers (Cloudflare)",
+      next(f for f in ptoggles if f["value"] == "cloudflare")["on"] is True
+      and all(not f["on"] for f in ptoggles if f["value"] != "cloudflare"))
 
 
 # ---- 15. hub tunnel — WireGuard dial-home (RouterOS 7.1+) -------------------
