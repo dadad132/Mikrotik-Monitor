@@ -337,6 +337,18 @@ def _server_set(s):
     return frozenset(x.strip() for x in str(s or "").split(",") if x.strip())
 
 
+def _active_preset(dns):
+    """Which provider preset the router's DNS currently matches, so its toggle
+    shows on. Tolerant on purpose: matches if ANY of a provider's IPs appears in
+    the configured OR dynamic (WAN-learned) servers — so it still detects the
+    provider when only the primary is set, the order differs, or an extra server
+    is present. '' when nothing matches (a custom/unknown DNS)."""
+    live = (_server_set(dns.get("servers", ""))
+            | _server_set(dns.get("dynamic-servers", "")))
+    return next((k for k, s in _DNS_PRESET_SERVERS.items()
+                 if live & _server_set(s)), "")
+
+
 def nextdns_read(pusher, cfg):
     dns = pusher.api.fetch(_DNS)
     bypass = [r for r in pusher.api.fetch(_ADDR_LIST)
@@ -420,9 +432,7 @@ def nextdns_form(current, cfg):
                for r in current.get("static", [])}
     cur_ip = next((r.get("address") for r in current.get("static", [])
                    if r.get("address")), "") or "127.0.0.1"
-    cur_preset = next((k for k, s in _DNS_PRESET_SERVERS.items()
-                       if _server_set(s) == _server_set(dns.get("servers", ""))),
-                      "")
+    cur_preset = _active_preset(dns)
     fields = [
         {"type": "static", "label": "Quick DNS provider",
          "value": "Flip one on to point the router at that DNS — only one at a "

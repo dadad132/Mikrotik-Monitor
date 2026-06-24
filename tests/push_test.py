@@ -659,6 +659,24 @@ check("DNS form switches on the toggle matching the live servers (Cloudflare)",
       and all(not f["on"] for f in ptoggles if f["value"] != "cloudflare"))
 
 
+def _active(servers, dynamic=""):
+    f = F.nextdns_form({"dns": {"servers": servers, "dynamic-servers": dynamic},
+                        "bypass": [], "static": [], "forced": []}, qcfg)
+    return [t["value"] for t in f if t.get("name") == "dns_preset" and t["on"]]
+
+
+# tolerant detection: any provider IP present (primary-only, different order, an
+# extra server, or DNS learned dynamically from the WAN) still ticks the provider
+check("detects Google when both IPs are set", _active("8.8.8.8,8.8.4.4") == ["google"])
+check("detects Google from the primary IP only", _active("8.8.8.8") == ["google"])
+check("detects regardless of order", _active("8.8.4.4,8.8.8.8") == ["google"])
+check("detects even with an extra server present",
+      _active("8.8.8.8,8.8.4.4,192.168.1.1") == ["google"])
+check("detects DNS learned dynamically from the WAN",
+      _active("", dynamic="1.1.1.1,1.0.0.1") == ["cloudflare"])
+check("a truly custom DNS ticks nothing", _active("192.168.1.1,9.9.9.9") == [])
+
+
 # ---- 15. hub tunnel — WireGuard dial-home (RouterOS 7.1+) -------------------
 print("hub tunnel (WireGuard):")
 WG = ("interface", "wireguard")
