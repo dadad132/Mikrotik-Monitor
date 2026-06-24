@@ -527,20 +527,20 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
             f'<div class="grid">{grid}</div>{empty}{_DASH_JS}</body></html>')
 
 
-_DEVICE_TABS = ["Overview", "Provision", "Recipes", "SD-WAN", "Security",
-                "Restrict access", "NextDNS", "QoS", "Port forwarding",
+_DEVICE_TABS = ["Overview", "Provision", "SD-WAN", "Security",
+                "Restrict access", "DNS", "QoS", "Port forwarding",
                 "Interfaces", "Remote access", "Tunnel", "Hub tunnel", "Scripts",
                 "Update", "Backups"]
 # label -> url slug (all tabs are wired to the engine now)
-_LIVE_TABS = {"Overview": "", "Provision": "provision", "Recipes": "recipes",
+_LIVE_TABS = {"Overview": "", "Provision": "provision",
               "SD-WAN": "sdwan",
               "Security": "security", "Restrict access": "harden",
-              "NextDNS": "nextdns", "QoS": "qos", "Port forwarding": "portfwd",
+              "DNS": "nextdns", "QoS": "qos", "Port forwarding": "portfwd",
               "Interfaces": "interfaces", "Remote access": "remote",
               "Tunnel": "tunnel", "Hub tunnel": "hubtunnel", "Scripts": "scripts",
               "Update": "update", "Backups": "backups"}
 # tabs that WRITE to the router (admins only); Overview + Interfaces are read-only
-_ADMIN_TABS = {"provision", "recipes", "sdwan", "security", "harden", "nextdns",
+_ADMIN_TABS = {"provision", "sdwan", "security", "harden", "nextdns",
                "qos", "portfwd", "remote", "tunnel", "hubtunnel", "scripts",
                "update", "backups"}
 
@@ -1545,9 +1545,6 @@ def _wan_uplink_editor(name, cfg, csrf) -> str:
 
 
 _TAB_INTRO = {
-    "recipes": "Safe one-click protections — flip a switch to apply, flip it back "
-               "to remove. Each is previewed, backed up first, and fully "
-               "reversible. No RouterOS knowledge needed.",
     "sdwan": "Add your internet links, set failover or load-balancing priority, "
              "and choose which LANs go out which WAN.",
     "security": "Toggle common firewall protections. Existing rules below can be "

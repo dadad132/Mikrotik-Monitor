@@ -305,7 +305,7 @@ def security_plan(pusher, cfg, flat, multi):
 
 
 # ===========================================================================
-# NextDNS / DNS content filtering — DNS servers + a bypass address-list
+# DNS — content filtering: DNS servers + a bypass address-list
 # ===========================================================================
 _DNS = ("ip", "dns")
 _ADDR_LIST = ("ip", "firewall", "address-list")
@@ -400,7 +400,7 @@ def nextdns_form(current, cfg):
     fields = [
         {"type": "text", "name": "servers", "label": "DNS servers (comma-separated)",
          "value": dns.get("servers", ""),
-         "placeholder": "45.90.28.0, 45.90.30.0  (e.g. your NextDNS endpoints)"},
+         "placeholder": "1.1.1.1, 9.9.9.9  (e.g. a filtering DNS service)"},
         {"type": "toggle", "name": "opt", "value": "allow_remote",
          "label": "Allow remote DNS requests",
          "on": _norm(dns.get("allow-remote-requests", "")) == "true",
@@ -1546,147 +1546,7 @@ def adopt_plan(pusher, cfg, feature, row_id):
 # ===========================================================================
 # Registry — keyed by URL slug; order follows the device tab bar.
 # ===========================================================================
-# ===========================================================================
-# Recipes — a curated, growing catalog of SAFE, one-click, REVERSIBLE actions
-# for people who don't know RouterOS. Each recipe is a toggle: ON adds a few
-# tagged firewall rules, OFF removes exactly those. Every recipe is a SPECIFIC
-# drop rule (safe regardless of its position in the chain, and it can't lock
-# anyone out), and it rides the same dry-run -> auto-backup -> apply -> rollback
-# -> audit path as every other push. Add new recipes to _RECIPES over time.
-# ===========================================================================
-_RECIPE_TAG = "mikromon:recipe:"
-
-
-def _recipe_wan_ifaces(cfg):
-    return [e.interface for e in cfg.wan.links if e.interface]
-
-
-def _wan_drop(cfg, *, protocol=None, dst_port=None):
-    """One inbound drop rule per WAN uplink (new connections from the internet).
-    Empty when no WAN uplinks are set, so those recipes simply no-op until the
-    WAN is configured — never dropping on the LAN by accident."""
-    rows = []
-    for ifc in _recipe_wan_ifaces(cfg):
-        r = {"chain": "input", "in-interface": ifc, "action": "drop",
-             "connection-state": "new"}
-        if protocol:
-            r["protocol"] = protocol
-        if dst_port:
-            r["dst-port"] = dst_port
-        rows.append(r)
-    return rows
-
-
-# (key, label, needs_wan, description, rows(cfg)) grouped into UI categories.
-_RECIPES = [
-    ("Router protection", [
-        ("drop_invalid", "Drop invalid traffic", False,
-         "Drops packets in an invalid connection state (input + forward). A "
-         "safe, recommended baseline.",
-         lambda cfg: [{"chain": "input", "connection-state": "invalid",
-                       "action": "drop"},
-                      {"chain": "forward", "connection-state": "invalid",
-                       "action": "drop"}]),
-        ("block_wan_admin", "Block router admin from the internet", True,
-         "Drops new SSH / Telnet / Winbox / API / WebFig arriving on your WAN "
-         "uplinks — manage the router from the LAN or the VPN instead.",
-         lambda cfg: _wan_drop(cfg, protocol="tcp",
-                               dst_port="22,23,80,443,8291,8728,8729")),
-        ("block_ping_wan", "Stop replying to ping from the internet", True,
-         "Drops ICMP (ping) arriving on your WAN uplinks.",
-         lambda cfg: _wan_drop(cfg, protocol="icmp")),
-    ]),
-    ("Block risky services from the internet", [
-        ("block_smb_wan", "Block Windows file sharing (SMB)", True,
-         "Drops SMB / NetBIOS (137-139, 445) from the internet — a common "
-         "ransomware entry point.",
-         lambda cfg: _wan_drop(cfg, protocol="tcp", dst_port="137,138,139,445")),
-        ("block_rdp_wan", "Block Remote Desktop (RDP)", True,
-         "Drops Remote Desktop (TCP 3389) from the internet.",
-         lambda cfg: _wan_drop(cfg, protocol="tcp", dst_port="3389")),
-    ]),
-    ("Attack protection", [
-        ("syn_flood", "SYN-flood protection", False,
-         "Drops a source opening too many half-open TCP (SYN) connections — the "
-         "classic SYN-flood denial-of-service.",
-         lambda cfg: [{"chain": "input", "protocol": "tcp", "tcp-flags": "syn",
-                       "connection-state": "new", "connection-limit": "30,32",
-                       "action": "drop"}]),
-        ("ddos_connlimit", "DDoS / connection-flood protection", False,
-         "Limits how many simultaneous forwarded connections one source IP can "
-         "open (100) and drops the excess — blunts connection-flood DDoS.",
-         lambda cfg: [{"chain": "forward", "protocol": "tcp",
-                       "connection-state": "new", "connection-limit": "100,32",
-                       "action": "drop"}]),
-        ("ssh_bruteforce", "Block SSH / Telnet brute-force", False,
-         "Drops new SSH/Telnet sessions once a source exceeds 10 at once — stops "
-         "password-guessing bots.",
-         lambda cfg: [{"chain": "input", "protocol": "tcp", "dst-port": "22,23",
-                       "connection-state": "new", "connection-limit": "10,32",
-                       "action": "drop"}]),
-        ("port_scan", "Block port scanners", False,
-         "Drops hosts detected scanning the router's ports (RouterOS PSD).",
-         lambda cfg: [{"chain": "input", "protocol": "tcp",
-                       "psd": "21,3s,3,1", "action": "drop"}]),
-    ]),
-]
-_RECIPE_BY_KEY = {k: (label, needs_wan, desc, rows)
-                  for _cat, items in _RECIPES
-                  for k, label, needs_wan, desc, rows in items}
-
-
-def recipes_read(pusher, cfg):
-    rows = [r for r in pusher.api.fetch(_FILTER)
-            if str(r.get("comment", "")).startswith(_RECIPE_TAG)]
-    enabled = {str(r.get("comment", ""))[len(_RECIPE_TAG):].split(":")[0]
-               for r in rows}
-    return {"rows": rows, "enabled": enabled}
-
-
-def recipes_summary(current, cfg):
-    enabled = current.get("enabled", set())
-    if not enabled:
-        return ["No recipes enabled yet — pick from the list below."]
-    return [f"{_RECIPE_BY_KEY.get(k, (k,))[0]} — on" for k in sorted(enabled)]
-
-
-def recipes_form(current, cfg):
-    enabled = current.get("enabled", set())
-    has_wan = bool(_recipe_wan_ifaces(cfg))
-    fields = []
-    if not has_wan:
-        fields.append({"type": "static", "label": "Heads up",
-                       "value": "Some recipes act on your WAN uplinks — set those "
-                                "on the SD-WAN tab first, or those toggles won't "
-                                "do anything yet."})
-    for cat, items in _RECIPES:
-        fields.append({"type": "static", "label": cat, "value": ""})
-        for k, label, needs_wan, desc, _rows in items:
-            d = desc + (" (needs WAN uplinks)" if needs_wan and not has_wan else "")
-            fields.append({"type": "toggle", "name": "recipe", "value": k,
-                           "label": label, "on": k in enabled, "desc": d})
-    return fields
-
-
-def recipes_plan(pusher, cfg, flat, multi):
-    enabled = set(multi.get("recipe", []))
-    desired = []
-    for k in enabled:
-        entry = _RECIPE_BY_KEY.get(k)
-        if not entry:
-            continue
-        _label, _needs_wan, _desc, rows = entry
-        for i, row in enumerate(rows(cfg)):
-            desired.append({**row, "comment": f"{_RECIPE_TAG}{k}:{i}"})
-    return pusher.plan_managed_list(_FILTER, "comment", desired,
-                                    owns=_prefix_owner(_RECIPE_TAG),
-                                    label="recipe rule")
-
-
 FEATURES = {
-    "recipes": {"title": "Recipes — safe one-click actions", "write": True,
-                "read": recipes_read, "summary": recipes_summary,
-                "form": recipes_form, "plan": recipes_plan},
     "sdwan": {"title": "SD-WAN — failover & load balancing", "write": True,
               "read": sdwan_read, "summary": sdwan_summary, "form": sdwan_form,
               "plan": sdwan_plan},
@@ -1696,7 +1556,7 @@ FEATURES = {
     "harden": {"title": "Restrict management access", "write": True,
                "read": harden_read, "summary": harden_summary,
                "form": harden_form, "plan": harden_plan},
-    "nextdns": {"title": "NextDNS / DNS filtering", "write": True,
+    "nextdns": {"title": "DNS", "write": True,
                 "read": nextdns_read, "summary": nextdns_summary,
                 "form": nextdns_form, "plan": nextdns_plan},
     "qos": {"title": "QoS — bandwidth limits", "write": True, "read": qos_read,
@@ -1730,8 +1590,8 @@ FEATURES = {
 }
 
 # tab label -> url slug (Overview/Backups handled elsewhere)
-TAB_SLUGS = {"Recipes": "recipes", "SD-WAN": "sdwan", "Security": "security",
-             "Restrict access": "harden", "NextDNS": "nextdns",
+TAB_SLUGS = {"SD-WAN": "sdwan", "Security": "security",
+             "Restrict access": "harden", "DNS": "nextdns",
              "QoS": "qos", "Port forwarding": "portfwd", "Interfaces": "interfaces",
              "Remote access": "remote", "Tunnel": "tunnel",
              "Hub tunnel": "hubtunnel", "Scripts": "scripts", "Update": "update"}
