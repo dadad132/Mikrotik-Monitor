@@ -22,7 +22,11 @@ PrivateTmp=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
-ReadWritePaths=/opt/mikromon
+# /opt/mikromon holds the app + its SQLite/state; /etc/wireguard is where the
+# Provision tab writes wg-peers.conf to register dial-home peers. Without the
+# second path, ProtectSystem=strict makes /etc read-only and provisioning fails
+# with "[Errno 30] Read-only file system" (file perms alone aren't enough).
+ReadWritePaths=/opt/mikromon /etc/wireguard
 
 [Install]
 WantedBy=multi-user.target
