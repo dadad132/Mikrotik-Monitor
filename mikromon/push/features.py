@@ -430,10 +430,10 @@ def nextdns_form(current, cfg):
                   "time (turning one on switches the others off). Leave them all "
                   "off to use the servers you type below."},
     ]
-    for k, label, servers in _DNS_PRESETS:
+    for k, label, _servers in _DNS_PRESETS:
         fields.append({"type": "toggle", "name": "dns_preset", "value": k,
                        "label": label, "on": k == cur_preset,
-                       "exclusive": "dns_preset", "desc": servers})
+                       "exclusive": "dns_preset"})
     fields += [
         {"type": "text", "name": "servers", "label": "DNS servers (comma-separated)",
          "value": dns.get("servers", ""),
