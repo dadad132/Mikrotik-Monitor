@@ -471,26 +471,35 @@ def qos_form(current, cfg):
     for r in current:
         up, _, down = str(r.get("max-limit", "/")).partition("/")
         rows.append({"name": r.get("name", ""), "target": r.get("target", ""),
-                     "down": down.replace("M", ""), "up": up.replace("M", "")})
-    return [{"type": "rows", "name": "q", "label": "Queues",
+                     "down": down.replace("M", ""), "up": up.replace("M", ""),
+                     "off": "yes" if _norm(r.get("disabled", "")) == "true" else ""})
+    return [{"type": "rows", "name": "q", "label": "Queues (speed limits)",
              "cols": [("name", "name", "office"),
-                      ("target", "target subnet/iface", "192.168.88.0/24"),
+                      ("target", "target subnet/iface/IP", "192.168.88.10"),
                       ("down", "download Mbps", "50"),
-                      ("up", "upload Mbps", "20")],
+                      ("up", "upload Mbps", "20"),
+                      ("off", "paused? (yes)", "")],
              "rows": rows,
-             "hint": "max-limit is upload/download. Blank rows are ignored."}]
+             "hint": "Each row is a speed limit (simple queue). max-limit is "
+                     "upload/download. Put 'yes' in the last column to PAUSE a "
+                     "limit (disable it) without deleting it; clear it to resume. "
+                     "Blank rows are ignored."}]
 
 
 def qos_plan(pusher, cfg, flat, multi):
     # Keyed by the queue name (preserved as-is) so adopted queues round-trip.
     desired = []
-    for r in _rows(multi, "q", ("name", "target", "down", "up")):
+    for r in _rows(multi, "q", ("name", "target", "down", "up", "off")):
         if not r["name"] or not r["target"]:
             continue
         down = (r["down"] or "0") + "M"
         up = (r["up"] or "0") + "M"
+        paused = r["off"].strip().lower() in ("yes", "y", "1", "true", "off")
+        # RouterOS prints disabled as true/false — use the same token so an
+        # unchanged queue produces no diff (no perpetual churn).
         desired.append({"name": r["name"], "target": r["target"],
                         "max-limit": f"{up}/{down}",
+                        "disabled": "true" if paused else "false",
                         "comment": _QOS_TAG + r["name"]})
     return pusher.plan_managed_list(_QUEUE, "name", desired,
                                     owns=_prefix_owner(_QOS_TAG), label="queue")
@@ -1555,6 +1564,30 @@ _RECIPES = [
         ("block_rdp_wan", "Block Remote Desktop (RDP)", True,
          "Drops Remote Desktop (TCP 3389) from the internet.",
          lambda cfg: _wan_drop(cfg, protocol="tcp", dst_port="3389")),
+    ]),
+    ("Attack protection", [
+        ("syn_flood", "SYN-flood protection", False,
+         "Drops a source opening too many half-open TCP (SYN) connections — the "
+         "classic SYN-flood denial-of-service.",
+         lambda cfg: [{"chain": "input", "protocol": "tcp", "tcp-flags": "syn",
+                       "connection-state": "new", "connection-limit": "30,32",
+                       "action": "drop"}]),
+        ("ddos_connlimit", "DDoS / connection-flood protection", False,
+         "Limits how many simultaneous forwarded connections one source IP can "
+         "open (100) and drops the excess — blunts connection-flood DDoS.",
+         lambda cfg: [{"chain": "forward", "protocol": "tcp",
+                       "connection-state": "new", "connection-limit": "100,32",
+                       "action": "drop"}]),
+        ("ssh_bruteforce", "Block SSH / Telnet brute-force", False,
+         "Drops new SSH/Telnet sessions once a source exceeds 10 at once — stops "
+         "password-guessing bots.",
+         lambda cfg: [{"chain": "input", "protocol": "tcp", "dst-port": "22,23",
+                       "connection-state": "new", "connection-limit": "10,32",
+                       "action": "drop"}]),
+        ("port_scan", "Block port scanners", False,
+         "Drops hosts detected scanning the router's ports (RouterOS PSD).",
+         lambda cfg: [{"chain": "input", "protocol": "tcp",
+                       "psd": "21,3s,3,1", "action": "drop"}]),
     ]),
 ]
 _RECIPE_BY_KEY = {k: (label, needs_wan, desc, rows)

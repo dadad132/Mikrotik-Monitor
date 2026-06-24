@@ -320,6 +320,18 @@ nowan = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[]))
 nwplan = F.recipes_plan(Pusher(nowan, FakeApi({("ip", "firewall", "filter"): []}),
                                dry_run=True), nowan, {}, {"recipe": ["block_rdp_wan"]})
 check("a WAN recipe with no WAN uplinks adds nothing (safe no-op)", nwplan.empty)
+# attack-protection recipes work without WAN (input/forward connection limits)
+atk = F.recipes_plan(Pusher(nowan, FakeApi({("ip", "firewall", "filter"): []}),
+                            dry_run=True), nowan, {},
+                     {"recipe": ["syn_flood", "ddos_connlimit", "ssh_bruteforce",
+                                 "port_scan"]})
+aadds = [o for o in atk.ops if o.action == "add"]
+check("attack-protection recipes add 4 tagged rules (no WAN needed)",
+      len(aadds) == 4
+      and any(o.params.get("tcp-flags") == "syn" for o in aadds)
+      and any(o.params.get("connection-limit") == "100,32" for o in aadds)
+      and any(o.params.get("dst-port") == "22,23" for o in aadds)
+      and any(o.params.get("psd") == "21,3s,3,1" for o in aadds))
 
 # attack-protection toggles -> tagged drop rules (added when on, removed when off)
 plan = F.security_plan(ps, devcfg, {},
@@ -368,9 +380,10 @@ print("adoption:")
 QUEUE = ("queue", "simple")
 api = FakeApi({QUEUE: [
     {".id": "*1", "name": "office", "target": "192.168.88.0/24",
-     "max-limit": "20M/50M"},                                   # unmanaged
+     "max-limit": "20M/50M", "disabled": "false"},              # unmanaged
     {".id": "*2", "name": "mm", "target": "10.0.0.0/24",
-     "max-limit": "5M/5M", "comment": "mikromon:qos:mm"},       # already managed
+     "max-limit": "5M/5M", "disabled": "false",
+     "comment": "mikromon:qos:mm"},                             # already managed
 ]})
 qcfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[]))
 pa = Pusher(qcfg, api, dry_run=False)
@@ -398,10 +411,18 @@ multi = {"q__name": [r.get("name", "") for r in cur],
          "q__down": [str(r.get("max-limit", "/")).split("/")[1].replace("M", "")
                      for r in cur],
          "q__up": [str(r.get("max-limit", "/")).split("/")[0].replace("M", "")
-                   for r in cur]}
+                   for r in cur],
+         "q__off": ["" for r in cur]}
 roundtrip = F.qos_plan(pa, qcfg, {}, multi)
 check("re-applying adopted+managed queues is a no-op (no churn)",
       roundtrip.empty)
+# pausing a queue (status off) disables it without deleting it
+pause = F.qos_plan(pa, qcfg, {},
+                   {"q__name": ["office"], "q__target": ["192.168.88.0/24"],
+                    "q__down": ["50"], "q__up": ["20"], "q__off": ["yes"]})
+check("pausing a speed limit sets disabled=true (kept, not deleted)",
+      any(o.action == "set" and o.params.get("disabled") == "true"
+          for o in pause.ops))
 
 # port-forward adoption only offers dst-nat rules
 napi = FakeApi({("ip", "firewall", "nat"): [

@@ -1160,6 +1160,28 @@ _FEATURE_JS = """
    if(dir<0){ var prev=tr.previousElementSibling; if(prev) p.insertBefore(tr,prev); }
    else { var next=tr.nextElementSibling; if(next) p.insertBefore(next,tr); }
  }
+ // Drag-and-drop reordering via the ⠿ handle. Delegated so dynamically-added
+ // rows work too. Reordering the rows reorders the submitted inputs = priority.
+ function mmInitDrag(){
+   document.querySelectorAll('table.rowtbl tbody').forEach(function(tb){
+     if(tb._dnd) return; tb._dnd=1;
+     tb.addEventListener('dragstart', function(e){
+       var h=e.target.closest('.draghandle'); if(!h) return;
+       tb._drag=h.closest('tr'); if(tb._drag) tb._drag.style.opacity='0.4';
+     });
+     tb.addEventListener('dragend', function(){
+       if(tb._drag){ tb._drag.style.opacity=''; tb._drag=null; }
+     });
+     tb.addEventListener('dragover', function(e){
+       if(!tb._drag) return; e.preventDefault();
+       var tr=e.target.closest('tr'); if(!tr || tr===tb._drag) return;
+       var r=tr.getBoundingClientRect();
+       tb.insertBefore(tb._drag,
+         (e.clientY-r.top)/r.height > 0.5 ? tr.nextElementSibling : tr);
+     });
+   });
+ }
+ document.addEventListener('DOMContentLoaded', mmInitDrag);
 </script>"""
 
 
@@ -1500,6 +1522,8 @@ def _wan_uplink_editor(name, cfg, csrf) -> str:
                 f'<td><input name="link_gw" placeholder="gateway IP (optional)" '
                 f'value="{esc(link.gateway if link else "")}" style="width:100%">'
                 f'</td><td style="white-space:nowrap">'
+                f'<span class="draghandle" draggable="true" title="drag to '
+                f'reorder priority" style="cursor:grab;padding:0 6px">&#9776;</span>'
                 f'<button type="button" class="btn ghost" title="move up (higher '
                 f'priority)" onclick="pushMoveRow(this,-1)">&uarr;</button>'
                 f'<button type="button" class="btn ghost" title="move down" '
@@ -1510,9 +1534,10 @@ def _wan_uplink_editor(name, cfg, csrf) -> str:
     body = "".join(row(link) for link in links) + row(None)
     return (f'<div class="box"><h2>WAN uplinks</h2>'
             f'<p class="muted">List your internet links in <b>priority order</b> — '
-            f'<b>top = primary</b>, 2nd = first backup, and so on. Use the '
-            f'&uarr;/&darr; buttons to reorder; failover/load-balancing below uses '
-            f'this order. Saved on the device — no router change.</p>'
+            f'<b>top = primary</b>, 2nd = first backup, and so on. <b>Drag the '
+            f'&#9776; handle</b> (or use the &uarr;/&darr; buttons) to reorder; '
+            f'failover/load-balancing below uses this order. Saved on the device '
+            f'— no router change.</p>'
             f'<form method="POST" action="/device/wan">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="device" value="{esc(name)}">'
