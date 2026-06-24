@@ -312,6 +312,25 @@ _ADDR_LIST = ("ip", "firewall", "address-list")
 _NAT = ("ip", "firewall", "nat")
 _DNSFORCE_TAG = "mikromon:dnsforce:"
 
+# Quick DNS presets — point the router's resolver at a known filtering service
+# with one pick. (value, label, "primary,secondary"). "custom" keeps whatever is
+# typed in the servers field. AdGuard DNS public resolvers:
+_DNS_PRESETS = [
+    ("custom", "Custom — use the servers I type below", ""),
+    ("adguard_default", "AdGuard — block ads & trackers",
+     "94.140.14.14,94.140.15.15"),
+    ("adguard_family", "AdGuard Family — ads, trackers, adult + Safe Search",
+     "94.140.14.15,94.140.15.16"),
+    ("adguard_nofilter", "AdGuard — no filtering (just fast, private DNS)",
+     "94.140.14.140,94.140.14.141"),
+]
+_DNS_PRESET_SERVERS = {k: s for k, _label, s in _DNS_PRESETS if s}
+
+
+def _server_set(s):
+    """Order-insensitive set of the IPs in a comma-separated servers string."""
+    return frozenset(x.strip() for x in str(s or "").split(",") if x.strip())
+
 
 def nextdns_read(pusher, cfg):
     dns = pusher.api.fetch(_DNS)
@@ -397,10 +416,19 @@ def nextdns_form(current, cfg):
     cur_ip = next((r.get("address") for r in current.get("static", [])
                    if r.get("address")), "") or "127.0.0.1"
     forced_on = bool(current.get("forced"))
+    cur_preset = next((k for k, s in _DNS_PRESET_SERVERS.items()
+                       if _server_set(s) == _server_set(dns.get("servers", ""))),
+                      "custom")
     fields = [
+        {"type": "select", "name": "dns_preset", "label": "Quick DNS preset",
+         "options": [(k, label) for k, label, _s in _DNS_PRESETS],
+         "value": cur_preset,
+         "hint": "Pick a ready-made AdGuard filtering DNS and it fills in the "
+                 "servers for you. Choose Custom to type your own below."},
         {"type": "text", "name": "servers", "label": "DNS servers (comma-separated)",
          "value": dns.get("servers", ""),
-         "placeholder": "1.1.1.1, 9.9.9.9  (e.g. a filtering DNS service)"},
+         "placeholder": "1.1.1.1, 9.9.9.9  (e.g. a filtering DNS service)",
+         "hint": "Ignored while a preset other than Custom is selected above."},
         {"type": "toggle", "name": "opt", "value": "allow_remote",
          "label": "Allow remote DNS requests",
          "on": _norm(dns.get("allow-remote-requests", "")) == "true",
@@ -433,8 +461,13 @@ def nextdns_form(current, cfg):
 def nextdns_plan(pusher, cfg, flat, multi):
     opts = set(multi.get("opt", []))
     force_dns = "force_dns" in opts
-    servers = ",".join(x.strip() for x in flat.get("servers", "").split(",")
-                       if x.strip())
+    # A chosen preset (AdGuard mode) wins over the typed servers field.
+    preset = flat.get("dns_preset", "custom")
+    if _DNS_PRESET_SERVERS.get(preset):
+        servers = _DNS_PRESET_SERVERS[preset]
+    else:
+        servers = ",".join(x.strip() for x in flat.get("servers", "").split(",")
+                           if x.strip())
     # RouterOS returns true/false here, so send true/false (not yes/no) to avoid
     # a perpetual no-op diff. Forcing client DNS only works if the router answers
     # DNS, so allow-remote-requests is implied on when force_dns is on.

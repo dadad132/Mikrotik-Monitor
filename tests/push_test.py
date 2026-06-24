@@ -619,6 +619,33 @@ check("forcing client DNS adds udp+tcp dstnat redirect rules on port 53",
 check("forcing client DNS implies allow-remote-requests=true",
       any(o.path == ("ip", "dns") and o.action == "set"
           and o.params.get("allow-remote-requests") == "true" for o in fp.ops))
+# AdGuard DNS presets: picking a preset sets the /ip dns servers to that pair and
+# wins over the typed servers field; the form pre-selects the live preset.
+ag_api = FakeApi({("ip", "dns"): [{".id": "*0", "servers": "8.8.8.8",
+                                   "allow-remote-requests": "true"}],
+                  ("ip", "firewall", "address-list"): [],
+                  ("ip", "dns", "static"): []})
+agp = F.nextdns_plan(Pusher(qcfg, ag_api, dry_run=True), qcfg,
+                     {"servers": "8.8.8.8", "dns_preset": "adguard_family"},
+                     {"opt": ["allow_remote"], "block": []})
+ag_set = next((o for o in agp.ops if o.path == ("ip", "dns")
+               and o.action == "set"), None)
+check("AdGuard preset sets the DNS servers to its pair (overrides typed field)",
+      ag_set is not None
+      and ag_set.params.get("servers") == "94.140.14.15,94.140.15.16")
+cust = F.nextdns_plan(Pusher(qcfg, ag_api, dry_run=True), qcfg,
+                      {"servers": "1.0.0.1", "dns_preset": "custom"},
+                      {"opt": ["allow_remote"], "block": []})
+c_set = next((o for o in cust.ops if o.path == ("ip", "dns")
+              and o.action == "set"), None)
+check("Custom preset keeps the typed DNS servers",
+      c_set is not None and c_set.params.get("servers") == "1.0.0.1")
+agform = F.nextdns_form({"dns": {"servers": "94.140.14.14,94.140.15.15"},
+                         "bypass": [], "static": [], "forced": []}, qcfg)
+presel = next((f for f in agform if f.get("name") == "dns_preset"), {})
+check("DNS form pre-selects the AdGuard preset matching the live servers",
+      presel.get("value") == "adguard_default"
+      and any(o[0] == "adguard_family" for o in presel.get("options", [])))
 
 
 # ---- 15. hub tunnel — WireGuard dial-home (RouterOS 7.1+) -------------------
