@@ -223,9 +223,9 @@ _PAGE_CSS = """
  .chips input{margin:0 5px 0 0;vertical-align:middle}
  .chk{display:inline-flex;align-items:center;gap:6px;margin-right:12px;font-size:13px}
  input.switch{appearance:none;-webkit-appearance:none;width:38px;height:20px;
-   background:#cbd5e1;border-radius:999px;position:relative;cursor:pointer;
+   background:#dc2626;border-radius:999px;position:relative;cursor:pointer;
    vertical-align:middle;transition:.15s;flex:none}
- input.switch:checked{background:#2563eb}
+ input.switch:checked{background:#16a34a}
  input.switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;
    height:16px;background:#fff;border-radius:50%;transition:.15s}
  input.switch:checked::after{left:20px}
