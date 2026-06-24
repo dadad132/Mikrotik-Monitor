@@ -893,20 +893,14 @@ def _provision_script(name, raw, pwuser, pwd, *,
         a("}")
         if lock_api:
             a("")
-            a("# 6) Lock the API to the VPN tunnel + enable API-SSL - no public")
-            a("#    exposure. WireGuard already encrypts the tunnel; binding the")
-            a("#    API services to the tunnel subnet removes them from the")
-            a("#    internet entirely (this runs LAST so you don't lock yourself")
-            a("#    out mid-script - you reach mikromon over the tunnel after).")
-            a(":if ([:len [/certificate find name=mikromon-api]] = 0) do={")
-            a("  /certificate add name=mikromon-api common-name=mikromon "
-              "key-size=prime256v1 days-valid=3650")
-            a("  /certificate sign mikromon-api")
-            a("}")
-            a(":delay 2s")
-            a("/ip service set api-ssl certificate=mikromon-api disabled=no")
-            a("/ip service set api-ssl address=" + net)
+            a("# 6) Lock the API to the VPN tunnel - no public exposure. WireGuard")
+            a("#    already encrypts the tunnel, so binding the API services to the")
+            a("#    tunnel subnet removes them from the internet entirely (no")
+            a("#    API-SSL/cert needed - the tunnel is the encryption). Runs LAST")
+            a("#    so you don't lock yourself out mid-script: you reach mikromon")
+            a("#    over the tunnel afterwards, on plain API (8728).")
             a("/ip service set api address=" + net)
+            a("/ip service set api-ssl address=" + net)
     a("")
     a('/log info "mikromon provisioning done"')
     return "\n".join(L)
@@ -1001,8 +995,8 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
         f'</label></div>'
         f'<div class="f"><label class="chk"><input type="checkbox" '
         f'name="lock_api" value="1" class="switch" checked> Lock the API to the '
-        f'VPN tunnel + API-SSL (no public exposure — needs the WireGuard tunnel '
-        f'above)</label></div>'
+        f'VPN tunnel (no public exposure — WireGuard encrypts it, so no API-SSL '
+        f'needed; needs the tunnel above)</label></div>'
         f'</div>'
         f'<div class="actions" style="margin-top:12px">'
         f'<button class="btn" type="submit" name="auto" value="1">Provision now '
@@ -2342,12 +2336,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             raw["push_password"] = ""
             if tunnel_ip:
                 raw["host"] = tunnel_ip
-                # Locking the API to the tunnel also turns on API-SSL on the
-                # router, so reach it encrypted on 8729 over the tunnel.
+                # Reach the router over the tunnel on plain API (8728). WireGuard
+                # encrypts the tunnel, so no API-SSL is needed — locking the API
+                # to the tunnel subnet is what removes it from the internet.
                 if lock_api:
-                    raw["use_ssl"] = True
-                    raw["verify_ssl"] = False  # router uses a self-signed cert
-                    raw["api_port"] = 8729
+                    raw["use_ssl"] = False
+                    raw["api_port"] = 8728
             try:
                 store.upsert(raw, defaults, original_name=name)
             except Exception as exc:  # noqa: BLE001 — surface validation errors
@@ -2465,6 +2459,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             raw["push_password"] = ""
             if tunnel_ip and router_pub:
                 raw["host"] = tunnel_ip
+                # plain API (8728) over the encrypted tunnel — no API-SSL
+                if lock_api:
+                    raw["use_ssl"] = False
+                    raw["api_port"] = 8728
             try:
                 store.upsert(raw, defaults, original_name=name)
             finally:

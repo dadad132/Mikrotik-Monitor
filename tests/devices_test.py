@@ -132,10 +132,11 @@ locked = web._provision_script(
     "R", {"host": "1.1.1.1"}, "mon", "pw1234567890", hub_ip="102.36.140.219",
     hub_pubkey="HUBKEY=", wg_priv="PRIV=", tunnel_ip="10.10.0.2",
     subnet="10.10.0.0/24", lock_api=True)
-check("lock-API binds api + api-ssl to the tunnel subnet and enables API-SSL",
+check("lock-API binds api + api-ssl to the tunnel subnet (plain API, no cert)",
       "/ip service set api address=10.10.0.0/24" in locked
       and "/ip service set api-ssl address=10.10.0.0/24" in locked
-      and "certificate add name=mikromon-api" in locked)
+      and "certificate add" not in locked
+      and "api-ssl certificate=" not in locked)
 unlocked = web._provision_script(
     "R", {"host": "1.1.1.1"}, "mon", "pw1234567890", hub_ip="102.36.140.219",
     hub_pubkey="HUBKEY=", wg_priv="PRIV=", tunnel_ip="10.10.0.2",
