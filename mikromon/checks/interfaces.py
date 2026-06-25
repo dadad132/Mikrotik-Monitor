@@ -14,6 +14,23 @@ from .base import Check
 _AUTO_TYPES = ("ether", "lte", "wlan", "sfp", "wireless", "vdsl", "pppoe-out",
                "ppp-out", "gpon")
 
+# Physical port types where "nothing plugged in" is a normal, non-alerting
+# state. A down ether/sfp that the admin never configured or used is a spare
+# port, not a fault — so we only alert on it once it looks like it's in use.
+_PHYSICAL = ("ether", "sfp")
+
+
+def _configured_ifaces(snap):
+    """Names of interfaces that carry an enabled IP address (clearly in use)."""
+    out = set()
+    for addr in snap.rows("ip_address"):
+        if as_bool(addr.get("disabled")):
+            continue
+        name = str(addr.get("interface", "")).strip()
+        if name:
+            out.add(name)
+    return out
+
 
 def _watch_list(snap, dev):
     if dev.monitor_interfaces:
@@ -30,7 +47,7 @@ def _watch_list(snap, dev):
 
 class InterfaceCheck(Check):
     flags = ("interfaces",)
-    requires = ("interface",)
+    requires = ("interface", "ip_address")
     name = "interfaces"
 
     def run(self, snap, dev, ctx) -> None:
@@ -43,6 +60,12 @@ class InterfaceCheck(Check):
         window = as_int(dev.th("flap_window_s"), 600)
         threshold = as_int(dev.th("flap_threshold"), 4)
 
+        # If the admin enumerated interfaces explicitly, every watched one is
+        # intentional, so a down state is always worth reporting. Otherwise
+        # (auto-watch) we suppress spare/unplugged physical ports.
+        explicit = bool(dev.monitor_interfaces)
+        configured = _configured_ifaces(snap)
+
         by_name = {str(i.get("name", "")): i for i in snap.rows("interface")}
         for name in watch:
             iface = by_name.get(name)
@@ -51,10 +74,22 @@ class InterfaceCheck(Check):
             disabled = as_bool(iface.get("disabled"))
             running = as_bool(iface.get("running"))
             comment = str(iface.get("comment", ""))
+            itype = str(iface.get("type", "")).lower()
+            downs = as_int(iface.get("link-downs"))
 
-            # ---- link down (ignore administratively disabled links) -------
+            # Does this port look like it's actually in use? Any of: the admin
+            # asked to watch it, it has an IP, it's labelled, it has carried a
+            # link this uptime, or it's up right now.
+            in_use = (explicit or name in configured or bool(comment)
+                      or downs > 0 or running)
+            physical = any(itype.startswith(t) for t in _PHYSICAL)
+            # A down physical port that isn't in use = nothing plugged in /
+            # not configured -> not a fault, so treat it as healthy.
+            unplugged = physical and not running and not disabled and not in_use
+
+            # ---- link down (ignore administratively disabled + spare ports) --
             ctx.transition(
-                f"iface_down:{name}", healthy=running or disabled,
+                f"iface_down:{name}", healthy=running or disabled or unplugged,
                 severity=Severity.WARNING,
                 title=f"Interface {name} link DOWN",
                 detail=(f"Comment: {comment}" if comment else ""),

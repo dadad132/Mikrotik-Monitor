@@ -22,6 +22,7 @@ DATASETS = {
     "routerboard": ("system", "routerboard"),
     "route": ("ip", "route"),
     "interface": ("interface",),
+    "ip_address": ("ip", "address"),
     "health": ("system", "health"),
     "log": ("log",),
     "history": ("system", "history"),

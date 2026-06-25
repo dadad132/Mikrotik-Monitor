@@ -121,10 +121,24 @@ print("Interfaces:")
 run(InterfaceCheck(), {"interface": [{"name": "ether1", "type": "ether",
     "running": "true", "disabled": "false", "link-downs": "0"}]},
     dev, store)  # seed
+# A port that has carried a link (link-downs>0) and is now down -> a real fault.
 a = run(InterfaceCheck(), {"interface": [{"name": "ether1", "type": "ether",
-    "running": "false", "disabled": "false", "link-downs": "0"}]}, dev, store)
-check("link down -> iface_down WARNING",
+    "running": "false", "disabled": "false", "link-downs": "1"}]}, dev, store)
+check("link down (in use) -> iface_down WARNING",
       any(k.startswith("iface_down") for k in keys(a)))
+# A spare ether port: down, never up, no IP, no comment -> nothing plugged in,
+# so it must NOT raise a problem.
+a = run(InterfaceCheck(), {"interface": [{"name": "ether9", "type": "ether",
+    "running": "false", "disabled": "false", "link-downs": "0"}]}, dev, store)
+check("spare/unplugged port -> no iface_down",
+      not any(k.startswith("iface_down:ether9") for k in keys(a)))
+# Same spare port but carrying an IP -> configured, so a down link IS a fault.
+a = run(InterfaceCheck(), {"interface": [{"name": "ether9", "type": "ether",
+    "running": "false", "disabled": "false", "link-downs": "0"}],
+    "ip_address": [{"interface": "ether9", "address": "192.0.2.1/24",
+                    "disabled": "false"}]}, dev, store)
+check("configured port (has IP) down -> iface_down WARNING",
+      any(k.startswith("iface_down:ether9") for k in keys(a)))
 
 print("Security (dedup + first-run seeding):")
 log1 = {"log": [{"time": "10:00:00", "topics": "system,error,account",
