@@ -1676,9 +1676,6 @@ FEATURES = {
     "scripts": {"title": "Custom scripts", "write": True, "read": scripts_read,
                 "summary": scripts_summary, "form": scripts_form,
                 "plan": scripts_plan},
-    "hubtunnel": {"title": "Hub tunnel (dial-home)", "write": True,
-                  "read": hubtunnel_read, "summary": hubtunnel_summary,
-                  "form": hubtunnel_form, "plan": hubtunnel_plan},
     "update": {"title": "Update RouterOS", "write": True, "read": update_read,
                "summary": update_summary, "form": update_form,
                "plan": update_plan},
@@ -1689,4 +1686,4 @@ TAB_SLUGS = {"WAN": "sdwan", "Security": "security",
              "Restrict access": "harden", "DNS": "nextdns",
              "QoS": "qos", "Port forwarding": "portfwd", "Interfaces": "interfaces",
              "Remote access": "remote", "Tunnel": "tunnel",
-             "Hub tunnel": "hubtunnel", "Scripts": "scripts", "Update": "update"}
+             "Scripts": "scripts", "Update": "update"}

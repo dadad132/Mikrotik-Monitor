@@ -320,12 +320,13 @@ try:
     check("non-admin blocked from creating a backup (403)", st == 403)
     # --- all engines opened: device tabs + activity log ---
     st, body = get(admin, "/device?name=WebR1")
-    check("device tab bar links every engine (sd-wan/security/qos/portfwd)",
+    check("device tab bar links every engine (wan/security/qos/portfwd)",
           all(s in body for s in ("tab=sdwan", "tab=security", "tab=qos",
                                   "tab=portfwd", "tab=nextdns", "tab=remote",
                                   "tab=interfaces", "tab=scripts", "tab=harden",
-                                  "tab=tunnel", "tab=hubtunnel", "tab=update",
+                                  "tab=tunnel", "tab=update",
                                   "tab=provision")))
+    check("Hub tunnel tab removed", "tab=hubtunnel" not in body)
     st, body = get(admin, "/logs")
     check("admin can open the activity log", st == 200 and "activity log" in body.lower())
     st, _ = get(nobody, "/logs")

@@ -546,20 +546,20 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
 # dropdown (see _MAINT_ITEMS / _device_tabbar), not in this list.
 _DEVICE_TABS = ["Overview", "Provision", "WAN", "Security",
                 "Restrict access", "DNS", "QoS", "Port forwarding",
-                "Interfaces", "Remote access", "Tunnel", "Hub tunnel", "Scripts"]
+                "Interfaces", "Remote access", "Tunnel", "Scripts"]
 # label -> url slug (all tabs are wired to the engine now)
 _LIVE_TABS = {"Overview": "", "Provision": "provision",
               "WAN": "sdwan",
               "Security": "security", "Restrict access": "harden",
               "DNS": "nextdns", "QoS": "qos", "Port forwarding": "portfwd",
               "Interfaces": "interfaces", "Remote access": "remote",
-              "Tunnel": "tunnel", "Hub tunnel": "hubtunnel", "Scripts": "scripts",
+              "Tunnel": "tunnel", "Scripts": "scripts",
               "Update": "update", "Backups": "backups"}
 # grouped under the "Maintenance" dropdown on the device tab bar
 _MAINT_ITEMS = [("Update", "update"), ("Backups", "backups")]
 # tabs that WRITE to the router (admins only); Overview + Interfaces are read-only
 _ADMIN_TABS = {"provision", "sdwan", "security", "harden", "nextdns",
-               "qos", "portfwd", "remote", "tunnel", "hubtunnel", "scripts",
+               "qos", "portfwd", "remote", "tunnel", "scripts",
                "update", "backups"}
 
 
@@ -1634,10 +1634,6 @@ _TAB_INTRO = {
     "remote": "Grant a temporary firewall opening for Winbox/SSH/WebFig.",
     "tunnel": ("Manage WireGuard VPN interfaces and peers. "
                "Requires RouterOS 7.1+; shows a compatibility notice on older firmware."),
-    "hubtunnel": "Connect a router with no public / a changing IP. It dials out to "
-                 "your monitoring server over WireGuard and is reachable at a "
-                 "constant private IP — works through CGNAT. Requires RouterOS "
-                 "7.1+. Provisioning sets up the hub side automatically.",
     "scripts": "Paste any RouterOS script for things the other tabs don't cover. "
                "Save adds it (tagged), Run executes it, Remove deletes it — all "
                "previewed first and logged.",
