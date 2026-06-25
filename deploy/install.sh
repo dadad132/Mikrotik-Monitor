@@ -219,11 +219,15 @@ step "Registering systemd services"
 
 WEB_UNIT=/etc/systemd/system/mikromon-web.service
 
-# Stop running services before replacing their unit files.
+# Stop running services before replacing their unit files. Remember which were
+# running so we can bring them back up with the freshly-synced code at the end
+# (so a `git pull` + re-run of this script actually deploys the new code).
+RESTART_SVCS=""
 for svc in mikromon-web mikromon; do
     if systemctl is-active --quiet "${svc}" 2>/dev/null; then
         systemctl stop "${svc}"
-        log "Stopped ${svc} for upgrade"
+        RESTART_SVCS="${RESTART_SVCS} ${svc}"
+        log "Stopped ${svc} for upgrade (will restart with the new code)"
     fi
 done
 
@@ -411,6 +415,25 @@ else
   log ""
   log "      WireGuard error log : cat ${WG_LOG}"
   log "      Full install log    : cat ${APP_DIR}/last-install.log"
+fi
+
+# ---------------------------------------------------------------------------
+# Restart any services we stopped, now running the freshly-synced code. (On a
+# first install nothing was running yet, so this is skipped and the user starts
+# them via the "Next steps" below.) Start mikromon before mikromon-web, since
+# the web unit BindsTo / After the monitor.
+# ---------------------------------------------------------------------------
+if [[ -n "${RESTART_SVCS}" ]]; then
+    step "Restarting mikromon services with the updated code"
+    for svc in mikromon mikromon-web; do
+        if [[ " ${RESTART_SVCS} " == *" ${svc} "* ]]; then
+            if systemctl start "${svc}"; then
+                log "Started ${svc}"
+            else
+                log "WARN: could not start ${svc} — check: journalctl -u ${svc} -e"
+            fi
+        fi
+    done
 fi
 
 # Resolve the server's primary IP for the final message.
