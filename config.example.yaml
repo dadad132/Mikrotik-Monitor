@@ -34,12 +34,24 @@ web:
   # random one, e.g.  python -c "import secrets;print(secrets.token_urlsafe(24))"
   # metrics_token: "paste-a-long-random-token-here"
 
-# User accounts for the dashboard. When set, the dashboard requires login and
-# each user only sees the devices an admin grants them. Create the first admin:
-#   python -m mikromon useradd --user admin --password 'strong-pass' \
-#       --role admin --devices '*' -c config.yaml
-# Then manage the rest from the /admin page in the browser.
+# User accounts for the dashboard. When set, the dashboard requires login.
+# Accounts are multi-tenant: each belongs to a COMPANY and signs in by EMAIL.
+# Anyone can self-register a company at /signup (becoming its owner); owners then
+# add team members and choose which devices each one sees, from the Team page.
+# (CLI equivalent:  python -m mikromon useradd --user owner@acme.com \
+#     --password 'strong-pass' --company 'Acme' --role owner -c config.yaml)
 auth_db: ./auth.db
+
+# ----------------------------------------------------------------------------
+# Billing (Stripe) — DISABLED / not wired in yet. Leave commented until the
+# rest of the site is finished; uncommenting nothing here keeps the dashboard
+# free with no device limits. See mikromon/billing.py for the enable steps.
+# ----------------------------------------------------------------------------
+# billing:
+#   db: ./billing.db
+#   stripe_secret: "sk_live_..."     # Stripe secret key
+#   stripe_price: "price_..."        # the recurring Price to subscribe to
+#   webhook_secret: "whsec_..."      # /stripe/webhook signing secret
 
 # Manage devices from the dashboard (admins use the /devices page to add, edit,
 # delete, and test routers) instead of editing this file. When set, the devices

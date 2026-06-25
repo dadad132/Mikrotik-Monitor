@@ -203,8 +203,8 @@ def _cmd_users(args, config) -> int:
             for u in users:
                 devs = "*" if u["devices"] == "*" else ",".join(u["devices"]) or "-"
                 org = store.org_name(u["org_id"]) or f"#{u['org_id']}"
-                print(f"  {u['email']:28} {org:16} role={u['role']:6} "
-                      f"devices={devs}")
+                who = u.get("email") or u.get("username") or "?"
+                print(f"  {who:28} {org:16} role={u['role']:6} devices={devs}")
             return 0
         if not args.user:
             print("--user (email) is required for this command.", file=sys.stderr)

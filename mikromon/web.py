@@ -43,6 +43,12 @@ _PROM_SAFE = re.compile(r"[^a-zA-Z0-9_]")
 _COOKIE = "mikromon_session"
 _SESSION_TTL = 12 * 3600
 
+# The product name shown in the UI. Internal identifiers (on-router rule tags
+# "mikromon:…", the WireGuard interface name, the Prometheus metric prefix, the
+# package, the systemd units and file paths) stay "mikromon" on purpose —
+# changing them would break already-deployed routers and the server install.
+_BRAND = "easymikrotik"
+
 
 # ============================ data assembly ================================
 def _load_state(path: str) -> dict:
@@ -328,13 +334,20 @@ def _nav(user, active) -> str:
     return f"<nav>{links}</nav>"
 
 
+def _who(user) -> str:
+    """The account's display/login name — its email, or a legacy username."""
+    return (user.get("email") or user.get("username")
+            or user.get("login") or "")
+
+
 def _header(user, active="/") -> str:
-    brand = '<div class="brand"><span class="logo">&#9670;</span>mikromon</div>'
+    brand = (f'<div class="brand"><span class="logo">&#9670;</span>'
+             f'{esc(_BRAND)}</div>')
     if not user:
         return f"<header>{brand}</header>"
     org = user.get("org_name", "")
     sub = f'{esc(org)} &middot; {esc(user["role"])}' if org else esc(user["role"])
-    chip = (f'<span class="who">{esc(user["email"])}'
+    chip = (f'<span class="who">{esc(_who(user))}'
             f'<small>{sub}</small></span>')
     return (f"<header>{brand}{_nav(user, active)}"
             f'<div class="right">{chip}<a class="logout" href="/logout">Log out</a>'
@@ -538,7 +551,7 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
              'No devices match this filter.</p>')
     charts = _render_noc_charts(devs) if devs else ""
     return (f'<!doctype html><html><head><meta charset="utf-8">'
-            f'<meta http-equiv="refresh" content="10"><title>mikromon</title>'
+            f'<meta http-equiv="refresh" content="10"><title>{esc(_BRAND)}</title>'
             f'<style>{_PAGE_CSS}</style></head><body>{_header(user)}'
             f'{_render_noc_bar(summary)}{charts}{fbar}'
             f'<div class="grid">{grid}</div>{empty}{_DASH_JS}</body></html>')
@@ -1018,7 +1031,7 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
         f'<input type="hidden" name="device" value="{esc(name)}">'
         f'<div class="fields">'
         f'<div class="f"><label class="f">Username <span class="muted">'
-        f'(the mikromon login — full access, used for monitoring &amp; '
+        f'(the {esc(_BRAND)} login — full access, used for monitoring &amp; '
         f'changes)</span></label>'
         f'<input name="pwuser" value="{esc(pwuser)}"></div>'
         f'<div class="f"><label class="f">Dial-home tunnel</label>'
@@ -1033,7 +1046,7 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
         f'</div></div>'
         f'<div class="f"><label class="chk"><input type="checkbox" '
         f'name="enable_api" value="1" class="switch" checked> Enable the API '
-        f'service (needed for mikromon to connect over the API)</label></div>'
+        f'service (needed for {esc(_BRAND)} to connect over the API)</label></div>'
         f'<div class="f"><label class="chk"><input type="checkbox" name="harden" '
         f'value="1" class="switch" checked> Disable Telnet/FTP (basic hardening)'
         f'</label></div>'
@@ -1077,7 +1090,7 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
             srv = ""
         if c.get("applied"):
             head = ('<h2>Provisioned over the API ✓</h2>'
-                    '<p class="muted">mikromon connected to the router and applied '
+                    f'<p class="muted">{esc(_BRAND)} connected to the router and applied '
                     'everything — nothing to paste. The saved login is below.</p>')
             body = srv
         else:
@@ -1362,7 +1375,7 @@ def _adopt_box(name, slug, feature, csrf, unmanaged) -> str:
         else:
             action = '<span class="muted">read-only</span>'
         rows += f'<tr><td>{esc(u["text"])}</td><td>{action}</td></tr>'
-    note = ("Adopt = bring a rule under mikromon management (stamps a "
+    note = (f"Adopt = bring a rule under {_BRAND} management (stamps a "
             "<code>mikromon:…</code> comment) so it appears in the editor above. "
             "Previewed and reversible." if can_adopt else
             "Shown for reference. Adopting these into an editable policy is coming "
@@ -1623,10 +1636,10 @@ _TAB_INTRO = {
     "sdwan": "Add your internet links, set failover or load-balancing priority, "
              "and choose which LANs go out which WAN.",
     "security": "Toggle common firewall protections. Existing rules below can be "
-                "viewed; mikromon only manages the ones it creates.",
+                "viewed; easymikrotik only manages the ones it creates.",
     "harden": "Stop brute-force attacks: lock API/Winbox/SSH to your trusted IPs, "
               "disable insecure services, and block attacker IPs. ⚠ Include this "
-              "server's IP in the allowed list so you don't lock mikromon out.",
+              "server's IP in the allowed list so you don't lock easymikrotik out.",
     "nextdns": "Point DNS at a filtering service and list any IPs that bypass it.",
     "qos": "Cap upload/download speed for a subnet or interface (simple queues). "
            "Add a row, then Preview.",
@@ -1675,7 +1688,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
         body = ""
     else:
         sm = "".join(f'<li>{esc(s)}</li>' for s in (summary_lines or []))
-        state = (f'<div class="box"><h2>Current (managed by mikromon)</h2>'
+        state = (f'<div class="box"><h2>Current (managed by {esc(_BRAND)})</h2>'
                  f'<ul style="margin:0 0 0 18px">{sm}</ul></div>')
         if fields is not None:
             ff = "".join(_field_html(d) for d in fields)
@@ -1723,7 +1736,8 @@ def _render_logs(user, rows) -> str:
 
 _AUTH_BRAND = ('<div class="brand" style="justify-content:center;color:#0f172a;'
                'font-size:22px;margin-bottom:6px">'
-               '<span class="logo" style="color:#2563eb">&#9670;</span>mikromon</div>')
+               '<span class="logo" style="color:#2563eb">&#9670;</span>'
+               + _BRAND + '</div>')
 
 
 def _auth_page(title, body) -> str:
@@ -1739,8 +1753,10 @@ def _render_login(error: str = "") -> str:
     return _auth_page("Sign in",
             f'<h2 style="margin-top:0">Sign in</h2>{msg}'
             f'<form method="POST" action="/login">'
-            f'<p><input name="email" type="email" placeholder="Email" autofocus '
+            f'<p><input name="email" placeholder="Email" autofocus '
             f'style="width:100%"></p>'
+            f'<p class="muted" style="margin:-6px 0 8px;font-size:12px">'
+            f'Existing account? You can sign in with your username too.</p>'
             f'<p><input name="password" type="password" placeholder="Password" '
             f'style="width:100%"></p>'
             f'<button class="btn" type="submit" style="width:100%">Sign in</button>'
@@ -1773,14 +1789,24 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "") -> str:
     note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
            (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
     org = user.get("org_name", "")
+    # Legacy accounts have a username and can ADD an email here; either signs in.
+    uname_row = (f'<p>Username <span class="muted">(your existing login — you can '
+                 f'keep using it)</span><br><input value="{esc(user["username"])}" '
+                 f'disabled style="width:100%;max-width:360px;background:#f1f5f9">'
+                 f'</p>') if user.get("username") else ""
+    email_hint = ("Add an email to sign in with it too"
+                  if user.get("username") and not user.get("email")
+                  else "Used to sign in")
     inner = (
         f'<div class="wrap"><h1>My account</h1>{note}'
         f'<div class="box"><p class="muted" style="margin-top:0">'
         f'Company: <b>{esc(org)}</b> &middot; Role: <b>{esc(user["role"])}</b></p>'
         f'<form method="POST" action="/account">'
         f'<input type="hidden" name="csrf" value="{csrf}">'
-        f'<p>Email<br><input name="email" type="email" '
-        f'value="{esc(user["email"])}" style="width:100%;max-width:360px"></p>'
+        f'{uname_row}'
+        f'<p>Email <span class="muted">({email_hint})</span><br>'
+        f'<input name="email" type="email" value="{esc(user.get("email") or "")}" '
+        f'style="width:100%;max-width:360px"></p>'
         f'<p>New password <span class="muted">(leave blank to keep current)</span>'
         f'<br><input name="password" type="password" placeholder="min 6 characters" '
         f'style="width:100%;max-width:360px"></p>'
@@ -1820,14 +1846,15 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user) -> str:
     for u in auth.list_users(user["org_id"]):
         is_all = u["devices"] == "*"
         selected = set() if is_all else set(u["devices"])
-        is_self = u["email"] == user["email"]
+        acct = u["login"]                         # email, or legacy username
+        is_self = acct == user["login"]
         rows.append(f"""<tr>
-          <td><b>{esc(u['email'])}</b></td>
+          <td><b>{esc(_who(u))}</b></td>
           <td><span class="pill {esc(u['role'])}">{esc(u['role'])}</span></td>
           <td>
             <form method="POST" action="/admin/update">
               <input type="hidden" name="csrf" value="{csrf}">
-              <input type="hidden" name="email" value="{esc(u['email'])}">
+              <input type="hidden" name="account" value="{esc(acct)}">
               <div class="actions" style="margin-bottom:8px">
                 <select name="role">
                   <option value="member"{' selected' if u['role']=='member' else ''}>member</option>
@@ -1840,9 +1867,9 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user) -> str:
           </td>
           <td>{'' if is_self else f'''
             <form method="POST" action="/admin/delete"
-              onsubmit="return confirm('Delete user {esc(u['email'])}?')">
+              onsubmit="return confirm('Delete user {esc(_who(u))}?')">
               <input type="hidden" name="csrf" value="{csrf}">
-              <input type="hidden" name="email" value="{esc(u['email'])}">
+              <input type="hidden" name="account" value="{esc(acct)}">
               <button class="btn red" type="submit">Delete</button>
             </form>'''}
           </td></tr>""")
@@ -1918,7 +1945,7 @@ def _render_devices(store, csrf, user, edit_name=None, msg="") -> str:
     fields = (
         field("Name", f'<input name="name" value="{v("name")}">')
         + field("Host / DDNS", f'<input name="host" value="{v("host")}">')
-        + field("API port <span class='muted'>(how mikromon connects to monitor "
+        + field(f"API port <span class='muted'>(how {esc(_BRAND)} connects to monitor "
                 "this router — blank = 8728, or 8729 with API-SSL)</span>",
                 f'<input name="api_port" placeholder="8728" '
                 f'value="{esc(str(pre.get("api_port", 8728)))}">')
@@ -2037,9 +2064,9 @@ class SessionManager:
     def __init__(self):
         self._s: dict[str, dict] = {}
 
-    def create(self, email: str) -> str:
+    def create(self, login: str) -> str:
         token = secrets.token_urlsafe(32)
-        self._s[token] = {"email": email, "expires": time.time() + _SESSION_TTL,
+        self._s[token] = {"login": login, "expires": time.time() + _SESSION_TTL,
                           "csrf": secrets.token_urlsafe(16)}
         return token
 
@@ -2112,7 +2139,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             s = self._session()
             if not s:
                 return None
-            user = auth.get_user(s["email"])
+            user = auth.get_user(s["login"])
             if user:
                 user["org_name"] = auth.org_name(user.get("org_id"))
             return user
@@ -2525,7 +2552,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 else ""
             cfg = build_device(raw, defaults)
             audit = self._auditlog()
-            actor = (user or {}).get("email", "")
+            actor = (user or {}).get("login", "")
             dev = rw_device(cfg)
             api = PushApi(dev)
             result, err = None, None
@@ -2618,7 +2645,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 plan = Pusher(cfg, None, dry_run=True).plan_backup(bkname)
                 return self._device_backups_page(name, user, dry_plan=plan)
             # Restore / delete / create — actually talk to the router.
-            uname = (user or {}).get("email", "")
+            uname = (user or {}).get("login", "")
             audit = self._auditlog()
             dev = rw_device(cfg)
             api = PushApi(dev)
@@ -2762,7 +2789,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(403, "forbidden")
             cfg = build_device(raw, defaults)
             commit = flat.get("apply") == "1"
-            uname = (user or {}).get("email", "")
+            uname = (user or {}).get("login", "")
             audit = self._auditlog()
             dev = rw_device(cfg)
             api = PushApi(dev)
@@ -2810,7 +2837,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(403, "forbidden")
             cfg = build_device(raw, defaults)
             commit = flat.get("apply") == "1"
-            uname = (user or {}).get("email", "")
+            uname = (user or {}).get("login", "")
             audit = self._auditlog()
             dev = rw_device(cfg)
             api = PushApi(dev)
@@ -2878,7 +2905,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(404, "no such device")
             cfg = build_device(raw, defaults)
             audit = self._auditlog()
-            uname = (user or {}).get("email", "")
+            uname = (user or {}).get("login", "")
             dev = rw_device(cfg)
             api = PushApi(dev)
             pusher = Pusher(cfg, api, dry_run=False, audit=audit, user=uname)
@@ -2945,7 +2972,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if raw is None:
                 return self._send(404, "no such device")
             cfg = build_device(raw, defaults)
-            actor = (user or {}).get("email", "")
+            actor = (user or {}).get("login", "")
             dev = rw_device(cfg)
             api = PushApi(dev)
             report, err = None, None
@@ -3147,25 +3174,28 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                     role=flat.get("role", "member"),
                                     devices=self._devices(flat, multi))
                 elif path == "/admin/update":
-                    if not self._same_org(flat.get("email", ""), user):
+                    acct = flat.get("account", "")
+                    if not self._same_org(acct, user):
                         return self._send(403, "forbidden")
-                    auth.set_role(flat["email"], flat.get("role", "member"))
-                    auth.set_devices(flat["email"], self._devices(flat, multi))
+                    auth.set_role(acct, flat.get("role", "member"))
+                    auth.set_devices(acct, self._devices(flat, multi))
                 elif path == "/admin/delete":
-                    if not self._same_org(flat.get("email", ""), user):
+                    acct = flat.get("account", "")
+                    if not self._same_org(acct, user):
                         return self._send(403, "forbidden")
-                    if flat["email"] == user["email"]:
+                    if acct == user["login"]:
                         return self._send(400, "cannot delete yourself")
-                    auth.delete_user(flat["email"])
+                    auth.delete_user(acct)
                 else:
                     return self._send(404, "not found")
             except Exception as exc:  # noqa: BLE001 — surface as a simple message
                 return self._send(400, f"Error: {exc}")
             return self._redirect("/admin")
 
-        def _same_org(self, email, user) -> bool:
-            """True if `email` is a user in the acting owner's company."""
-            target = auth.get_user(email) if email else None
+        def _same_org(self, identifier, user) -> bool:
+            """True if `identifier` (email or username) is a user in the acting
+            owner's company."""
+            target = auth.get_user(identifier) if identifier else None
             return bool(target) and target.get("org_id") == user.get("org_id")
 
         def _owns_target(self, flat, user) -> bool:
@@ -3210,11 +3240,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
         def _post_login(self):
             flat, _ = self._form()
-            user = auth.verify(flat.get("email", ""), flat.get("password", ""))
+            # Accept either an email or a (legacy) username as the identifier.
+            ident = flat.get("email", "") or flat.get("username", "")
+            user = auth.verify(ident, flat.get("password", ""))
             if not user:
                 time.sleep(0.5)  # mild brute-force friction
                 return self._redirect("/login?error=1")
-            token = sessions.create(user["email"])
+            token = sessions.create(user["login"])
             return self._redirect("/", self._cookie_header(token))
 
         def _post_account(self):
@@ -3226,16 +3258,18 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(400, "bad csrf token")
             new_email = flat.get("email", "").strip().lower()
             new_pw = flat.get("password", "")
+            ident = user["login"]
             try:
                 if new_pw:
-                    auth.set_password(user["email"], new_pw)
-                if new_email and new_email != user["email"]:
-                    auth.set_email(user["email"], new_email)
-                    # The session is keyed by email — repoint it so the user
-                    # stays logged in under the new address.
+                    auth.set_password(ident, new_pw)
+                if new_email and new_email != (user.get("email") or ""):
+                    auth.set_email(ident, new_email)
+                    # The session is keyed by login id. If they signed in with
+                    # the email they just changed, repoint it so they stay
+                    # logged in (signing in with a username keeps working as-is).
                     sess = self._session()
-                    if sess:
-                        sess["email"] = new_email
+                    if sess and sess.get("login") == user.get("email"):
+                        sess["login"] = new_email
             except Exception as exc:  # noqa: BLE001
                 return self._redirect("/account?error=" + quote(str(exc)))
             return self._redirect("/account?ok=" + quote("Saved."))

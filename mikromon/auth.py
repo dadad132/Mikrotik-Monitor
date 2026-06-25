@@ -5,15 +5,17 @@ PBKDF2-hashed (stdlib, no dependencies). The model is multi-tenant:
 
   * An **organisation** (company) is the tenant boundary. Devices belong to
     exactly one org; nobody ever sees another org's devices or users.
-  * A user logs in with their **email** (the unique identifier — there is no
-    separate username). Each user belongs to one org and has a role:
+  * A user belongs to one org and has a role:
       - "owner"  -> created/owns the company; manages its members and which
                     devices each may see; sees every device in the org.
       - "member" -> sees only the devices the owner allocated (a list, or "*"
                     meaning all of the org's devices).
-
-Anyone can self-sign-up: signing up creates a brand-new company with the new
-account as its owner.
+  * **Login identifier:** new accounts sign in by **email** (self-signup
+    creates a company with the new account as its owner). **Existing/legacy
+    accounts keep their username** and may sign in with EITHER their username
+    or an email they add later — so upgrading never locks anyone out. A user
+    therefore has an optional `username` and an optional `email`; at least one
+    is set and either one works as a login.
 
 Data isolation is enforced at the web layer: every response is filtered to the
 user's org and then to `allowed_devices(...)`, so tenants stay separated.
@@ -40,7 +42,11 @@ CREATE TABLE IF NOT EXISTS orgs (
     created REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS users (
-    email      TEXT PRIMARY KEY,
+    id         INTEGER PRIMARY KEY,
+    username   TEXT UNIQUE,                       -- legacy login id; NULL for
+                                                  -- new (email-only) accounts
+    email      TEXT UNIQUE,                       -- login id for new accounts;
+                                                  -- legacy accounts may add one
     pw_hash    TEXT NOT NULL,
     salt       TEXT NOT NULL,
     iterations INTEGER NOT NULL,
@@ -85,15 +91,20 @@ class AuthStore:
         have = self.db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='users'"
         ).fetchone() is not None
-        if have and "email" not in self._columns("users"):
-            self._migrate_v1()
+        if have:
+            cols = self._columns("users")
+            if "email" not in cols:
+                self._migrate_legacy()        # original single-tenant (username)
+            elif "username" not in cols or "id" not in cols:
+                self._migrate_intermediate()  # email-keyed multi-tenant build
         self.db.executescript(_SCHEMA)
         self.db.commit()
 
-    def _migrate_v1(self) -> None:
-        """Upgrade the legacy single-tenant schema (username-keyed, role
-        admin/user, no orgs) into the multi-tenant one. All existing users move
-        into one "Default" company; old admins become owners, others members."""
+    def _migrate_legacy(self) -> None:
+        """Upgrade the original single-tenant schema (username-keyed, role
+        admin/user, no orgs). Everyone moves into one "Default" company; old
+        admins become owners, others members. Usernames are KEPT (email NULL),
+        so legacy logins keep working and an email can be added later."""
         old = self.db.execute(
             "SELECT username, pw_hash, salt, iterations, role, devices, created "
             "FROM users").fetchall()
@@ -104,12 +115,32 @@ class AuthStore:
                         ("Default", now))
         for username, pw_hash, salt, iters, role, devices, created in old:
             self.db.execute(
-                "INSERT INTO users (email, pw_hash, salt, iterations, role, "
-                "org_id, devices, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO users (username, email, pw_hash, salt, iterations, "
+                "role, org_id, devices, created) "
+                "VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)",
                 (username, pw_hash, salt, iters,
                  "owner" if role == "admin" else "member", 1,
                  devices, created or now))
         self.db.execute("DROP TABLE users_legacy")
+        self.db.commit()
+
+    def _migrate_intermediate(self) -> None:
+        """Upgrade the first multi-tenant build (email-keyed PK, no username/id
+        columns) to the current schema (surrogate id + optional username). Orgs
+        are preserved; each row keeps its email and becomes an email-only
+        account (username NULL)."""
+        old = self.db.execute(
+            "SELECT email, pw_hash, salt, iterations, role, org_id, devices, "
+            "created FROM users").fetchall()
+        self.db.execute("ALTER TABLE users RENAME TO users_intermediate")
+        self.db.executescript(_SCHEMA)        # orgs already exists (IF NOT EXISTS)
+        for email, pw_hash, salt, iters, role, org_id, devices, created in old:
+            self.db.execute(
+                "INSERT INTO users (username, email, pw_hash, salt, iterations, "
+                "role, org_id, devices, created) "
+                "VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (email, pw_hash, salt, iters, role, org_id, devices, created))
+        self.db.execute("DROP TABLE users_intermediate")
         self.db.commit()
 
     # ----- mutations --------------------------------------------------------
@@ -131,8 +162,9 @@ class AuthStore:
                 (company, time.time()))
             org_id = cur.lastrowid
             self.db.execute(
-                "INSERT INTO users (email, pw_hash, salt, iterations, role, "
-                "org_id, devices, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO users (username, email, pw_hash, salt, iterations, "
+                "role, org_id, devices, created) "
+                "VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (email, pw_hash, salt, iters, _norm_role(role), org_id,
                  _dump_devices("*" if _norm_role(role) == "owner" else None),
                  time.time()))
@@ -141,14 +173,16 @@ class AuthStore:
 
     def add_member(self, org_id: int, email: str, password: str,
                    role: str = "member", devices=None) -> None:
-        """An owner adds a user to their own company."""
+        """An owner adds a user to their own company. New members are
+        email-only (no username)."""
         email = _norm_email(email)
         self._check_new_user(email, password)
         salt, pw_hash, iters = hash_password(password)
         with self._lock:
             self.db.execute(
-                "INSERT INTO users (email, pw_hash, salt, iterations, role, "
-                "org_id, devices, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO users (username, email, pw_hash, salt, iterations, "
+                "role, org_id, devices, created) "
+                "VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (email, pw_hash, salt, iters, _norm_role(role), int(org_id),
                  _dump_devices(devices), time.time()))
             self.db.commit()
@@ -163,66 +197,90 @@ class AuthStore:
         if len(password) < 6:
             raise AuthError("Password must be at least 6 characters.")
 
-    def set_password(self, email: str, password: str) -> None:
+    def set_password(self, identifier: str, password: str) -> None:
         if len(password) < 6:
             raise AuthError("Password must be at least 6 characters.")
         salt, pw_hash, iters = hash_password(password)
-        self._update(_norm_email(email), pw_hash=pw_hash, salt=salt,
+        self._update(self._require(identifier)["id"], pw_hash=pw_hash, salt=salt,
                      iterations=iters)
 
-    def set_email(self, email: str, new_email: str) -> None:
+    def set_email(self, identifier: str, new_email: str) -> None:
+        """Add or change an account's email (legacy username accounts use this
+        to add one). The username, if any, is left untouched."""
+        user = self._require(identifier)
         new_email = _norm_email(new_email)
         if not _EMAIL_RE.match(new_email):
             raise AuthError("Enter a valid email address.")
-        if new_email != _norm_email(email) and self.get_user(new_email):
+        clash = self.get_user(new_email)
+        if clash and clash["id"] != user["id"]:
             raise AuthError("An account with that email already exists.")
-        self._update(_norm_email(email), email=new_email)
+        self._update(user["id"], email=new_email)
 
-    def set_devices(self, email: str, devices) -> None:
-        self._update(_norm_email(email), devices=_dump_devices(devices))
+    def set_devices(self, identifier: str, devices) -> None:
+        self._update(self._require(identifier)["id"],
+                     devices=_dump_devices(devices))
 
-    def set_role(self, email: str, role: str) -> None:
-        self._update(_norm_email(email), role=_norm_role(role))
+    def set_role(self, identifier: str, role: str) -> None:
+        self._update(self._require(identifier)["id"], role=_norm_role(role))
 
-    def delete_user(self, email: str) -> None:
+    def delete_user(self, identifier: str) -> None:
+        user = self.get_user(identifier)
+        if not user:
+            return
         with self._lock:
-            self.db.execute("DELETE FROM users WHERE email = ?",
-                            (_norm_email(email),))
+            self.db.execute("DELETE FROM users WHERE id = ?", (user["id"],))
             self.db.commit()
 
-    def _update(self, _email: str, **cols) -> None:
-        if not self.get_user(_email):
-            raise AuthError(f"No such user: {_email!r}")
+    def _require(self, identifier: str) -> dict:
+        user = self.get_user(identifier)
+        if not user:
+            raise AuthError(f"No such user: {identifier!r}")
+        return user
+
+    def _update(self, user_id: int, **cols) -> None:
         sets = ", ".join(f"{k} = ?" for k in cols)
         with self._lock:
-            self.db.execute(f"UPDATE users SET {sets} WHERE email = ?",
-                            (*cols.values(), _email))
+            self.db.execute(f"UPDATE users SET {sets} WHERE id = ?",
+                            (*cols.values(), user_id))
             self.db.commit()
 
     # ----- queries ----------------------------------------------------------
-    def get_user(self, email: str) -> dict | None:
+    def get_user(self, identifier: str) -> dict | None:
+        """Look up by login identifier — matches EITHER email or username,
+        case-insensitively."""
+        ident = (identifier or "").strip().lower()
+        if not ident:
+            return None
         cur = self.db.execute(
-            "SELECT email, pw_hash, salt, iterations, role, org_id, devices, "
-            "created FROM users WHERE email = ?", (_norm_email(email),))
+            "SELECT id, username, email, pw_hash, salt, iterations, role, "
+            "org_id, devices, created FROM users "
+            "WHERE lower(email) = ? OR lower(username) = ? LIMIT 1",
+            (ident, ident))
         row = cur.fetchone()
         if not row:
             return None
-        return {"email": row[0], "pw_hash": row[1], "salt": row[2],
-                "iterations": row[3], "role": row[4], "org_id": row[5],
-                "devices": _load_devices(row[6]), "created": row[7]}
+        return {"id": row[0], "username": row[1], "email": row[2],
+                "pw_hash": row[3], "salt": row[4], "iterations": row[5],
+                "role": row[6], "org_id": row[7],
+                "devices": _load_devices(row[8]), "created": row[9],
+                "login": row[2] or row[1]}     # email preferred, else username
 
     def list_users(self, org_id: int | None = None) -> list:
-        if org_id is None:
-            cur = self.db.execute(
-                "SELECT email, role, org_id, devices, created FROM users "
-                "ORDER BY email")
-        else:
-            cur = self.db.execute(
-                "SELECT email, role, org_id, devices, created FROM users "
-                "WHERE org_id = ? ORDER BY email", (int(org_id),))
-        return [{"email": r[0], "role": r[1], "org_id": r[2],
-                 "devices": _load_devices(r[3]), "created": r[4]}
-                for r in cur.fetchall()]
+        cols = ("id", "username", "email", "role", "org_id", "devices", "created")
+        sql = ("SELECT id, username, email, role, org_id, devices, created "
+               "FROM users")
+        args: tuple = ()
+        if org_id is not None:
+            sql += " WHERE org_id = ?"
+            args = (int(org_id),)
+        sql += " ORDER BY COALESCE(email, username)"
+        out = []
+        for r in self.db.execute(sql, args).fetchall():
+            d = {"id": r[0], "username": r[1], "email": r[2], "role": r[3],
+                 "org_id": r[4], "devices": _load_devices(r[5]), "created": r[6]}
+            d["login"] = d["email"] or d["username"]
+            out.append(d)
+        return out
 
     def count_users(self) -> int:
         return self.db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -236,8 +294,8 @@ class AuthStore:
         org = self.org(org_id) if org_id is not None else None
         return org["name"] if org else ""
 
-    def verify(self, email: str, password: str) -> dict | None:
-        user = self.get_user(email)
+    def verify(self, identifier: str, password: str) -> dict | None:
+        user = self.get_user(identifier)
         if not user:
             # Spend ~equal time to reduce account enumeration via timing.
             hash_password(password)

@@ -304,9 +304,11 @@ seed the database; after that the database is the source of truth.
 ## Users & access control
 
 Set `auth_db:` in the config and the dashboard requires a **login**. The model
-is multi-tenant: each account belongs to a **company** and is identified by its
-**email** (there is no separate username). Companies are isolated — nobody ever
-sees another company's devices or team.
+is multi-tenant: each account belongs to a **company**. New accounts sign in by
+**email**; existing/legacy accounts keep their **username** and can sign in with
+either their username or an email they add later (on `/account`) — so upgrading
+never locks anyone out. Companies are isolated — nobody ever sees another
+company's devices or team.
 
 **Getting started — sign up in the browser.** With no accounts yet, opening the
 dashboard redirects to **`/signup`**: enter a company name, your email and a

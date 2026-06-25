@@ -135,6 +135,15 @@ check("everyone landed in one Default company",
 check("legacy 'user' -> member, devices preserved",
       am.get_user("olduser")["role"] == "member"
       and am.get_user("olduser")["devices"] == ["R2"])
+check("legacy account keeps its username, has no email yet",
+      mu["username"] == "oldadmin" and mu["email"] is None)
+# A legacy user can ADD an email, then sign in with EITHER identifier.
+am.set_email("oldadmin", "admin@new.test")
+check("after adding an email, both username and email log in",
+      am.verify("oldadmin", "oldpass") is not None
+      and am.verify("admin@new.test", "oldpass") is not None)
+check("the added email did not drop the username",
+      am.get_user("admin@new.test")["username"] == "oldadmin")
 am.close()
 
 # ---- self-signup on a fresh empty server -----------------------------------
@@ -156,7 +165,7 @@ try:
                    {"company": "Startup", "email": "founder@startup.test",
                     "password": "startup1"}, B0)
     check("signing up creates the company + logs in",
-          st == 200 and "mikromon" in body)
+          st == 200 and "easymikrotik" in body)
     st, body = req(op0, "/signup", base=B0)
     check("a logged-in visitor to /signup lands on the dashboard",
           st == 200 and "create your company account" not in body.lower())
