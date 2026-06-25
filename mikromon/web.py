@@ -771,12 +771,23 @@ def _device_forget_box(name, csrf) -> str:
 
 
 _PWALPHABET = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+# Special characters that are safe inside a RouterOS double-quoted string and
+# paste cleanly into a terminal script. Deliberately EXCLUDES " \ $ (string
+# terminator, escape char, and RouterOS variable-expansion trigger) plus spaces.
+_PW_SPECIALS = "!#%*+-=?@^_.:~"
 
 
 def _gen_password(n=20) -> str:
-    """A strong password using only RouterOS-script-safe characters (no quotes,
-    spaces or backslashes, so it pastes cleanly into a terminal script)."""
-    return "".join(secrets.choice(_PWALPHABET) for _ in range(n))
+    """A strong password (letters, digits and script-safe specials) that pastes
+    cleanly into a RouterOS terminal script. Ambiguous characters (0/O/1/l) are
+    omitted; the result always contains lower, upper, a digit and a special."""
+    pool = _PWALPHABET + _PW_SPECIALS
+    while True:
+        pw = "".join(secrets.choice(pool) for _ in range(n))
+        if (any(c.islower() for c in pw) and any(c.isupper() for c in pw)
+                and any(c.isdigit() for c in pw)
+                and any(c in _PW_SPECIALS for c in pw)):
+            return pw
 
 
 def _user_slug(s) -> str:
