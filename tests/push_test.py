@@ -303,31 +303,28 @@ devcfg = _t.SimpleNamespace(
         links=[_t.SimpleNamespace(interface="ether1", gateway="", name="ISP1",
                                   label=lambda i=0: "ISP1")]))
 
-# security toggles -> firewall drop rules
-api = FakeApi({("ip", "firewall", "filter"): []})
+# The Security tab now exposes ONLY the 4 user-requested toggles; the old
+# built-in protections were removed and their option keys produce no rules.
+api = FakeApi({("ip", "firewall", "filter"): [], ("ip", "firewall", "raw"): [],
+               ("ip", "settings"): [{"tcp-syncookies": "no"}]})
 ps = Pusher(devcfg, api, dry_run=True)
-plan = F.security_plan(ps, devcfg, {}, {"opt": ["drop_invalid", "block_mgmt_wan"]})
-adds = [o for o in plan.ops if o.action == "add"]
-check("security builds tagged drop rules",
-      adds and all(o.params["comment"].startswith("mikromon:sec:") for o in adds)
-      and any(o.params.get("connection-state") == "invalid" for o in adds))
-
-# attack-protection toggles -> tagged drop rules (added when on, removed when off)
 plan = F.security_plan(ps, devcfg, {},
-                       {"opt": ["synflood", "ddos", "ssh_bruteforce", "port_scan"]})
-prot = {o.params.get("comment"): o.params for o in plan.ops if o.action == "add"}
-check("security adds SYN/DDoS/SSH/port-scan protections as tagged rules",
-      {"mikromon:sec:synflood", "mikromon:sec:ddos", "mikromon:sec:ssh_bruteforce",
-       "mikromon:sec:port_scan"} <= set(prot))
-check("protection rules use real RouterOS matchers (connection-limit / psd)",
-      prot["mikromon:sec:synflood"].get("connection-limit") == "30,32"
-      and prot["mikromon:sec:port_scan"].get("psd")
-      and prot["mikromon:sec:ddos"].get("chain") == "forward")
+                       {"opt": ["drop_invalid", "block_mgmt_wan", "block_icmp_wan",
+                                "synflood", "ddos", "ssh_bruteforce", "port_scan"]})
+check("removed security toggles produce no firewall rules",
+      not any(o.path == ("ip", "firewall", "filter") and o.action == "add"
+              for o in plan.ops))
+form_vals = {f["value"] for f in F.security_form(
+    {"rules": [], "ssh_disabled": False, "syn_cookies": False}, devcfg)}
+check("security form exposes only the 4 requested toggles",
+      form_vals == {"syn_cookies", "ddos_detect", "ssh_blacklist", "disable_ssh"})
+# a leftover rule from a removed toggle is reconciled AWAY on the next apply
 off_api = FakeApi({("ip", "firewall", "filter"): [
     {".id": "*1", "chain": "input", "action": "drop",
-     "comment": "mikromon:sec:synflood"}]})
+     "comment": "mikromon:sec:synflood"}],
+    ("ip", "firewall", "raw"): [], ("ip", "settings"): [{"tcp-syncookies": "no"}]})
 off = F.security_plan(Pusher(devcfg, off_api, dry_run=True), devcfg, {}, {"opt": []})
-check("turning a protection off removes its rule (reconcile)",
+check("a leftover rule from a removed toggle is reconciled away",
       any(o.action == "remove" and o.params.get(".id") == "*1" for o in off.ops))
 
 # Security tab "Disable SSH" toggle -> reversible set on /ip service ssh
@@ -420,12 +417,13 @@ check("SSH staged blacklist adds a drop + 4 staging rules on port 22",
 check("SSH staged blacklist never uses an invalid two-list matcher",
       all("," not in (o.params.get("src-address-list") or "") for o in sadds))
 
-# the multi-rule ddos_detect must NOT also light the separate 'ddos' toggle
+# ddos_detect rules light the ddos_detect toggle (and the old 'ddos' toggle,
+# which shared a comment prefix, has been removed entirely)
 ddform = {f["value"]: f["on"] for f in F.security_form(
     {"rules": [{"comment": "mikromon:sec:ddos_detect-1return"}],
      "ssh_disabled": False, "syn_cookies": False}, devcfg)}
-check("ddos_detect rules light only the ddos_detect toggle, not 'ddos'",
-      ddform.get("ddos_detect") is True and ddform.get("ddos") is False)
+check("ddos_detect rules light the ddos_detect toggle; no 'ddos' toggle exists",
+      ddform.get("ddos_detect") is True and "ddos" not in ddform)
 
 # qos rows -> simple queues
 api = FakeApi({("queue", "simple"): []})

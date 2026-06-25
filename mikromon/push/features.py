@@ -225,48 +225,23 @@ def security_form(current, cfg):
         # multi-rule "ddos_detect-*" comments.
         pre = _SEC_TAG + key
         return any(c == pre or c.startswith(pre + "-") for c in have)
-    wan = ", ".join(e.interface for e in cfg.wan.links if e.interface) or "WAN"
-    return [{"type": "toggle", "name": "opt", "value": "drop_invalid",
-             "label": "Drop invalid connections", "on": on("drop_invalid"),
-             "desc": "Drop packets in connection-state=invalid (input + forward)."},
-            {"type": "toggle", "name": "opt", "value": "block_mgmt_wan",
-             "label": "Block management from WAN", "on": on("block_mgmt_wan"),
-             "desc": f"Drop new FTP/SSH/Telnet/Winbox from {wan} (anti-brute-force)."},
-            {"type": "toggle", "name": "opt", "value": "block_icmp_wan",
-             "label": "Block ping from WAN", "on": on("block_icmp_wan"),
-             "desc": f"Drop ICMP arriving on {wan}."},
-            {"type": "toggle", "name": "opt", "value": "synflood",
-             "label": "SYN-flood protection", "on": on("synflood"),
-             "desc": "Drop a source opening too many half-open TCP (SYN) "
-                     "connections (connection-limit 30/src)."},
-            {"type": "toggle", "name": "opt", "value": "syn_cookies",
+    return [{"type": "toggle", "name": "opt", "value": "syn_cookies",
              "label": "SYN attack — TCP SYN-cookies",
              "on": bool(current.get("syn_cookies")),
              "desc": "Kernel-level SYN-flood defence (/ip settings "
                      "tcp-syncookies=yes). Lets the router weather a SYN flood "
                      "without exhausting connection memory."},
-            {"type": "toggle", "name": "opt", "value": "ddos",
-             "label": "DDoS / connection-flood protection", "on": on("ddos"),
-             "desc": "Limit concurrent forwarded connections per source IP "
-                     "(connection-limit 100/src) and drop the excess."},
             {"type": "toggle", "name": "opt", "value": "ddos_detect",
              "label": "DDoS attack — auto-detect & blacklist",
              "on": on("ddos_detect"),
              "desc": "Rate-detects DDoS in a detect-ddos chain, flags the "
                      "attacker + target IPs for 10 min, and drops them early in "
                      "raw/prerouting. Adds a forward jump so the detector runs."},
-            {"type": "toggle", "name": "opt", "value": "ssh_bruteforce",
-             "label": "Block SSH/Telnet brute-force (rate)", "on": on("ssh_bruteforce"),
-             "desc": "Drop new SSH/Telnet sessions once a source exceeds "
-                     "10 concurrent (connection-limit)."},
             {"type": "toggle", "name": "opt", "value": "ssh_blacklist",
              "label": "SSH brute-force — staged blacklist", "on": on("ssh_blacklist"),
              "desc": "Escalating tarpit on SSH (port 22): repeat attempts move a "
                      "source through connection1→2→3, then a 1-day "
                      "bruteforce_blacklist that is dropped."},
-            {"type": "toggle", "name": "opt", "value": "port_scan",
-             "label": "Port-scanner protection", "on": on("port_scan"),
-             "desc": "Drop hosts detected port-scanning the router (PSD)."},
             {"type": "toggle", "name": "opt", "value": "disable_ssh",
              "label": "Disable the SSH service",
              "on": bool(current.get("ssh_disabled")),
@@ -277,41 +252,7 @@ def security_form(current, cfg):
 
 def security_plan(pusher, cfg, flat, multi):
     opts = set(multi.get("opt", []))
-    wan_ifaces = [e.interface for e in cfg.wan.links if e.interface]
     desired = []
-    if "drop_invalid" in opts:
-        for chain in ("input", "forward"):
-            desired.append({"chain": chain, "connection-state": "invalid",
-                            "action": "drop",
-                            "comment": _SEC_TAG + f"drop_invalid-{chain}"})
-    if "block_mgmt_wan" in opts:
-        for ifc in (wan_ifaces or [""]):
-            desired.append({"chain": "input", "protocol": "tcp",
-                            "in-interface": ifc, "dst-port": "21,22,23,8291",
-                            "connection-state": "new", "action": "drop",
-                            "comment": _SEC_TAG + f"block_mgmt_wan-{ifc or 'wan'}"})
-    if "block_icmp_wan" in opts:
-        for ifc in (wan_ifaces or [""]):
-            desired.append({"chain": "input", "protocol": "icmp",
-                            "in-interface": ifc, "action": "drop",
-                            "comment": _SEC_TAG + f"block_icmp_wan-{ifc or 'wan'}"})
-    if "synflood" in opts:
-        desired.append({"chain": "input", "protocol": "tcp", "tcp-flags": "syn",
-                        "connection-state": "new", "connection-limit": "30,32",
-                        "action": "drop", "comment": _SEC_TAG + "synflood"})
-    if "ddos" in opts:
-        desired.append({"chain": "forward", "protocol": "tcp",
-                        "connection-state": "new", "connection-limit": "100,32",
-                        "action": "drop", "comment": _SEC_TAG + "ddos"})
-    if "ssh_bruteforce" in opts:
-        desired.append({"chain": "input", "protocol": "tcp",
-                        "dst-port": "22,23", "connection-state": "new",
-                        "connection-limit": "10,32", "action": "drop",
-                        "comment": _SEC_TAG + "ssh_bruteforce"})
-    if "port_scan" in opts:
-        desired.append({"chain": "input", "protocol": "tcp",
-                        "psd": "21,3s,3,1", "action": "drop",
-                        "comment": _SEC_TAG + "port_scan"})
     if "ddos_detect" in opts:
         # A dedicated detect-ddos chain: rule 1 lets traffic under the rate pass
         # (return); over the rate, the source + target get flagged for 10 min.
