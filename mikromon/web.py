@@ -2050,7 +2050,12 @@ def _render_devices(store, csrf, user, edit_name=None, msg="") -> str:
 
     fields = (
         field("Name", f'<input name="name" value="{v("name")}">')
-        + field("Host / DDNS", f'<input name="host" value="{v("host")}">')
+        + field("Host / IP <span class='muted'>(leave BLANK to provision over "
+                "the tunnel — no public IP; you'll get a script to paste and the "
+                "device syncs itself. Only fill this for a directly-reachable "
+                "router.)</span>",
+                f'<input name="host" placeholder="leave blank to provision" '
+                f'value="{v("host")}">')
         + field(f"API port <span class='muted'>(how {esc(_BRAND)} connects to monitor "
                 "this router — blank = 8728, or 8729 with API-SSL)</span>",
                 f'<input name="api_port" placeholder="8728" '
@@ -2082,9 +2087,16 @@ def _render_devices(store, csrf, user, edit_name=None, msg="") -> str:
                 f'<div class="chips">{src_boxes}</div>', full=True)
         + field("Enabled checks", f'<div class="chips">{chk_boxes}</div>', full=True))
 
-    save_lbl = "Save changes" if edit_name else "Add device"
+    save_lbl = "Save changes" if edit_name else "Add device & get script"
     cancel = ('<a class="btn ghost" href="/devices">Cancel</a>' if edit_name else "")
-    form = (f'<form method="POST" action="/devices/save">'
+    intro = ("" if edit_name else
+             '<p class="muted" style="margin-top:0">Just enter a <b>name</b> and '
+             'click <b>Add device &amp; get script</b> — you\'ll get a script to '
+             'paste into the router\'s terminal (New Terminal in WinBox/WebFig). '
+             'The router dials home over the tunnel and the device syncs here on '
+             'its own — no public IP needed. (Advanced: enter a Host/IP only for a '
+             'router this server can already reach directly.)</p>')
+    form = (intro + f'<form method="POST" action="/devices/save">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="original_name" value="{esc(edit_name or "")}">'
             f'<div class="fields">{fields}</div>'
@@ -3198,9 +3210,29 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._device_test(store, flat.get("name", ""), user)
                 if path == "/devices/save":
                     raw = self._device_form_to_raw(store, flat, multi)
-                    store.upsert(raw, defaults,
-                                 original_name=flat.get("original_name") or None,
+                    orig = flat.get("original_name") or None
+                    # Script-first add: no public IP entered -> provision over
+                    # the tunnel. Pre-assign a stable tunnel IP now so the record
+                    # is valid; the router dials home when the generated script
+                    # is pasted, then the device syncs on the next poll.
+                    provision_mode = not raw.get("host") and not orig
+                    if provision_mode:
+                        if not raw.get("name"):
+                            return self._send(400, "Error: a device name is "
+                                                   "required")
+                        hub_file = _hub_path(devices_db)
+                        hub = _hub_load(hub_file)
+                        hub.setdefault("subnet", _HUB_SUBNET_DEFAULT)
+                        raw["host"] = _alloc_tunnel_ip(hub, raw["name"])
+                        _hub_save(hub_file, hub)
+                        raw["use_ssl"] = False
+                        raw["api_port"] = 8728
+                    store.upsert(raw, defaults, original_name=orig,
                                  org_id=user["org_id"])
+                    if provision_mode:
+                        # Straight to the provisioning script to paste & sync.
+                        return self._redirect(
+                            f"/device?name={quote(raw['name'])}&tab=provision")
                     return self._redirect("/devices")
                 return self._send(404, "not found")
             except Exception as exc:  # noqa: BLE001 — surface validation errors

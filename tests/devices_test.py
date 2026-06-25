@@ -265,6 +265,20 @@ try:
     check("3 WAN links captured in priority order",
           [l["name"] for l in raw["wan"]["links"]] == ["Vodacom", "MTN", "LTE"])
     saved.close()
+    # Script-first add: a BLANK host means "provision over the tunnel" — the
+    # device is saved with a pre-assigned tunnel IP (no public IP) and the user
+    # is sent to the provisioning script tab.
+    redir = post_status(admin, "/devices/save", {
+        "csrf": csrf, "original_name": "", "name": "DialHome", "host": "",
+        "checks": ["resources"]})
+    saved = DevicesStore(wdb)
+    raw = saved.raw("DialHome")
+    check("blank host -> device saved with a tunnel IP (no public IP)",
+          raw is not None and raw["host"].startswith("10.10.0."))
+    check("blank-host add redirects to the provisioning script tab",
+          redir == 303)
+    saved.delete("DialHome")
+    saved.close()
     # API port is optional in the form: blank defaults to 8728, or 8729 with SSL.
     post(admin, "/devices/save", {
         "csrf": csrf, "original_name": "", "name": "SslR", "host": "1.2.3.4",
