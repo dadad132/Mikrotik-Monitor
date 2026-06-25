@@ -1,0 +1,11 @@
+# Re-applies nginx access config the moment the dashboard opens or closes a
+# grant (the web app rewrites this file). Pairs with the .timer for expiry.
+[Unit]
+Description=Watch the easymikrotik access-grants file
+
+[Path]
+PathModified=/opt/mikromon/access-grants.json
+Unit=easymikrotik-access-reload.service
+
+[Install]
+WantedBy=multi-user.target

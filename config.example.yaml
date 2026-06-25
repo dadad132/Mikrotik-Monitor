@@ -59,6 +59,20 @@ auth_db: ./auth.db
 # truth and the monitor picks up changes on its next poll (no restart needed).
 devices_db: ./devices.db
 
+# On-demand WebFig / Winbox access through the hub. When set, each device page
+# gets "Open WebFig" / "Open Winbox" buttons that expose a time-limited public
+# port on the hub, proxied to the router over the WireGuard tunnel, then auto-
+# close. Requires nginx (with the stream module) + a TLS cert on the hub — see
+# deploy/REMOTE-ACCESS.md for the full setup. Leave commented to disable.
+# access:
+#   hub_host: access.example.com          # public hostname customers connect to
+#   ttl_minutes: 15                       # how long a grant stays open
+#   grants_file: /opt/mikromon/access-grants.json
+#   tls_cert: /etc/letsencrypt/live/access.example.com/fullchain.pem
+#   tls_key:  /etc/letsencrypt/live/access.example.com/privkey.pem
+#   nginx_http_conf:   /etc/nginx/conf.d/easymikrotik-access.conf
+#   nginx_stream_conf: /etc/nginx/streams.d/easymikrotik-access.conf
+
 # Accessing from anywhere (securely):
 #   * Easiest & safest: a tunnel — Cloudflare Tunnel, Tailscale, or ngrok —
 #     so you DON'T port-forward. Point it at 127.0.0.1:8080.

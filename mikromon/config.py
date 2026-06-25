@@ -154,6 +154,7 @@ class AppConfig:
     metrics_token: str | None = None  # bearer/query token for Prometheus scraping
     devices_db: str | None = None   # if set, devices are managed in the dashboard
     push_log_db: str | None = None  # if set, config-push actions are logged here
+    access: dict | None = None      # on-demand WebFig/Winbox-through-hub settings
     defaults: dict = field(default_factory=lambda: dict(DEFAULT_THRESHOLDS))
     devices: list = field(default_factory=list)
 
@@ -251,6 +252,7 @@ def load_config(path: str) -> AppConfig:
         auth_db=raw.get("auth_db") or None,
         devices_db=devices_db,
         push_log_db=raw.get("push_log_db") or None,
+        access=(raw.get("access") or None),
         defaults=defaults,
         devices=devices,
     )

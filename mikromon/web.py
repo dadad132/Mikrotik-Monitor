@@ -666,7 +666,7 @@ def _render_inventory(store, state, user, allowed) -> str:
     return _page("Inventory", _header(user, "/inventory") + inner)
 
 
-def _render_device(store, state, name, user, csrf="") -> str:
+def _render_device(store, state, name, user, csrf="", access_html="") -> str:
     d = _device_view(store, state, name)
     f = d["facts"]
     sev = _severity(d)
@@ -741,10 +741,87 @@ def _render_device(store, state, name, user, csrf="") -> str:
         f'{spark or "<p class=muted>No throughput data yet.</p>"}</div>'
         f'<div class="box"><h2>Active problems</h2>{probs_html}</div>'
         f'</div>'
+        f'{access_html if AuthStore.is_admin(user or {}) else ""}'
         f'{_device_forget_box(name, csrf) if AuthStore.is_admin(user or {}) else ""}'
         f'<p><a href="/">&larr; dashboard</a> &nbsp; '
         f'<a href="/inventory">inventory</a></p></div>')
     return _page(esc(name), _header(user, "/") + inner)
+
+
+def _access_box(name, csrf, hub_host, tunnel_ip, creds, grants) -> str:
+    """On-demand remote access through the hub. `grants` maps kind -> active
+    grant dict (or None). Each kind shows either an Open button or the live
+    connection details + a countdown + Close while a grant is active."""
+    if not csrf:
+        return ""
+    q = esc(name)
+    if not hub_host:
+        return ""
+    if not tunnel_ip:
+        return (f'<div class="box"><h2>Remote access</h2>'
+                f'<p class="muted">This device has no hub tunnel yet. Provision it '
+                f'(Maintenance &rarr; Provision) so it dials home, then you can '
+                f'open WebFig / Winbox here.</p></div>')
+    u, pw = esc(creds.get("user", "")), esc(creds.get("pwd", ""))
+
+    def row(kind, label, how):
+        g = grants.get(kind)
+        if g:
+            port = g["port"]
+            exp = int(g["expires"])
+            if kind == "webfig":
+                target = (f'<a href="https://{esc(hub_host)}:{port}" '
+                          f'target="_blank" rel="noopener">'
+                          f'https://{esc(hub_host)}:{port}</a>')
+            else:
+                target = (f'<code>{esc(hub_host)}:{port}</code> '
+                          f'<span class="muted">(enter in the Winbox client)</span>')
+            close = (f'<form method="POST" action="/device/access" '
+                     f'style="display:inline">'
+                     f'<input type="hidden" name="csrf" value="{csrf}">'
+                     f'<input type="hidden" name="device" value="{q}">'
+                     f'<input type="hidden" name="kind" value="{kind}">'
+                     f'<input type="hidden" name="action" value="close">'
+                     f'<button class="btn ghost" type="submit">Close</button></form>')
+            return (f'<div class="linkrow" style="display:block">'
+                    f'<b>{label}</b> &nbsp;{target} &nbsp;'
+                    f'<span class="muted" data-expires="{exp}">'
+                    f'expires in …</span> &nbsp;{close}<br>'
+                    f'<span class="muted">{how} &middot; sign in with '
+                    f'<b>{u}</b> / <b>{pw}</b></span></div>')
+        return (f'<div class="linkrow" style="display:block">'
+                f'<form method="POST" action="/device/access" '
+                f'style="display:inline">'
+                f'<input type="hidden" name="csrf" value="{csrf}">'
+                f'<input type="hidden" name="device" value="{q}">'
+                f'<input type="hidden" name="kind" value="{kind}">'
+                f'<input type="hidden" name="action" value="open">'
+                f'<button class="btn" type="submit">Open {label}</button></form> '
+                f'<span class="muted">{how}</span></div>')
+
+    return (f'<div class="box"><h2>Remote access <span class="muted" '
+            f'style="font-weight:400;font-size:13px">(through the hub — no public '
+            f'IP on the router)</span></h2>'
+            f'{row("webfig", "WebFig", "Browser management over HTTPS")}'
+            f'{row("winbox", "Winbox", "Desktop Winbox client (raw TCP)")}'
+            f'<p class="muted" style="margin:10px 0 0">Access opens for a few '
+            f'minutes then closes itself, so the router is never left exposed.</p>'
+            f'{_ACCESS_JS}</div>')
+
+
+_ACCESS_JS = """
+<script>
+ // Live "expires in mm:ss" countdown for any open access grant.
+ function mmTickAccess(){
+   document.querySelectorAll('[data-expires]').forEach(function(el){
+     var left=Math.max(0, (+el.getAttribute('data-expires'))*1000 - Date.now());
+     var s=Math.floor(left/1000), m=Math.floor(s/60);
+     el.textContent = left ? ('expires in '+m+':'+('0'+(s%60)).slice(-2))
+                           : 'expired — refresh';
+   });
+ }
+ mmTickAccess(); setInterval(mmTickAccess, 1000);
+</script>"""
 
 
 def _device_forget_box(name, csrf) -> str:
@@ -821,6 +898,24 @@ def _detect_server_ip() -> str:
 def _hub_path(devices_db) -> str:
     d = (os.path.dirname(devices_db) if devices_db else "") or "."
     return os.path.join(d, "hub.json")
+
+
+def _access_grants_path(devices_db) -> str:
+    d = (os.path.dirname(devices_db) if devices_db else "") or "."
+    return os.path.join(d, "access-grants.json")
+
+
+def _device_tunnel_ip(name, devices_db) -> str:
+    """The device's tunnel IP (10.10.0.x) — from its saved host if that's
+    already a tunnel address, else from the hub lease table in hub.json."""
+    hub = _hub_load(_hub_path(devices_db))
+    meta = (hub.get("leases_meta") or {}).get(name) or {}
+    if meta.get("ip"):
+        return meta["ip"]
+    lease = (hub.get("leases") or {}).get(name)
+    if lease:
+        return lease
+    return ""
 
 
 def _hub_load(path) -> dict:
@@ -2099,8 +2194,9 @@ class SessionManager:
 def make_handler(metrics_db, state_file, auth: AuthStore | None,
                  sessions: SessionManager, secure_cookies=False,
                  metrics_token=None, devices_db=None, defaults=None,
-                 push_log_db=None):
+                 push_log_db=None, access_cfg=None):
     defaults = defaults or {}
+    access_cfg = access_cfg or {}
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "mikromon"
@@ -2282,8 +2378,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                 dev, user, tab, msg=q.get("msg", [""])[0])
                     sess = self._session()
                     csrf = sess["csrf"] if sess else ""
+                    access_html = (self._access_box_html(dev, csrf)
+                                   if AuthStore.is_admin(user or {}) else "")
                     return self._send(200, _render_device(store, state, dev, user,
-                                      csrf), "text/html; charset=utf-8")
+                                      csrf, access_html),
+                                      "text/html; charset=utf-8")
                 if path == "/api/devices":
                     return self._send(200, json.dumps(
                         _all_devices(store, state, allowed), indent=2),
@@ -2356,6 +2455,33 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return None
             from .devices_store import DevicesStore
             return DevicesStore(devices_db)
+
+        def _access_store(self):
+            """The on-demand access grant store, or None when the feature is
+            not configured (no `access.hub_host`)."""
+            if not access_cfg.get("hub_host"):
+                return None
+            from .access import AccessStore
+            path = access_cfg.get("grants_file") or _access_grants_path(devices_db)
+            return AccessStore(path)
+
+        def _access_ttl(self):
+            return int(access_cfg.get("ttl_minutes", 15)) * 60
+
+        def _access_box_html(self, name, csrf):
+            store = self._access_store()
+            if store is None:
+                return ""
+            ds = self._devstore()
+            raw = ds.raw(name) if ds else None
+            if ds:
+                ds.close()
+            raw = raw or {}
+            creds = {"user": raw.get("username", ""),
+                     "pwd": raw.get("password", "")}
+            grants = {k: store.grant_for(name, k) for k in ("webfig", "winbox")}
+            return _access_box(name, csrf, access_cfg.get("hub_host", ""),
+                               _device_tunnel_ip(name, devices_db), creds, grants)
 
         @staticmethod
         def _purge_device_data(name):
@@ -2949,6 +3075,33 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                               _header(user, "/") + f'<div class="wrap">{box}</div>'),
                               "text/html; charset=utf-8")
 
+        def _device_access_post(self, flat, user):
+            """Open or close an on-demand WebFig/Winbox grant for a device. The
+            grant is written to the access-grants file; the hub's reload unit
+            turns it into (or removes it from) the nginx proxy config."""
+            store = self._access_store()
+            if store is None:
+                return self._send(400, "remote access not configured "
+                                       "(set access.hub_host in config)")
+            name = flat.get("device", "")
+            kind = flat.get("kind", "")
+            action = flat.get("action", "")
+            from .access import KINDS
+            if kind not in KINDS:
+                return self._send(400, "unknown access kind")
+            q = quote(name)
+            if action == "close":
+                store.close(name, kind)
+                return self._redirect(f"/device?name={q}")
+            tunnel_ip = _device_tunnel_ip(name, devices_db)
+            if not tunnel_ip:
+                return self._send(400, "this device has no hub tunnel yet")
+            try:
+                store.open(name, kind, tunnel_ip, ttl=self._access_ttl())
+            except (ValueError, RuntimeError) as exc:
+                return self._send(400, f"Error: {exc}")
+            return self._redirect(f"/device?name={q}")
+
         def _device_forget_post(self, flat, user):
             """Remove a device from the dashboard entirely: delete it from the
             devices DB (if managed) and purge its metrics + saved state. Works
@@ -3178,6 +3331,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._device_wan_post(flat, multi, user)
             if path == "/device/reboot":
                 return self._device_reboot_post(flat, user)
+            if path == "/device/access":
+                return self._device_access_post(flat, user)
             try:
                 if path == "/admin/add":
                     auth.add_member(user["org_id"], flat.get("email", ""),
@@ -3319,7 +3474,7 @@ def _register_hub_peer(device_name: str, api, flat: dict, devices_db: str) -> No
 
 def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,
           secure_cookies=False, metrics_token=None, devices_db=None,
-          defaults=None, push_log_db=None):
+          defaults=None, push_log_db=None, access_cfg=None):
     if metrics_db and not os.path.exists(metrics_db):
         log.warning("metrics DB %s not found yet — start the monitor first",
                     metrics_db)
@@ -3331,7 +3486,7 @@ def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,
     httpd = ThreadingHTTPServer(
         (host, port), make_handler(metrics_db, state_file, auth, sessions,
                                    secure_cookies, metrics_token, devices_db,
-                                   defaults, push_log_db))
+                                   defaults, push_log_db, access_cfg))
     scheme = "auth ON" if auth else "auth OFF (open)"
     log.info("Dashboard at http://%s:%d  [%s]  Prometheus: /metrics",
              host, port, scheme)

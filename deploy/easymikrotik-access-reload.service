@@ -1,0 +1,12 @@
+# Renders the current on-demand WebFig/Winbox access grants into nginx config
+# and reloads nginx. Triggered by the .path unit (on every open/close) and the
+# .timer unit (once a minute, so expired grants close themselves). Runs as root
+# because it writes /etc/nginx and reloads the service.
+[Unit]
+Description=Apply easymikrotik on-demand remote-access grants to nginx
+After=nginx.service
+Wants=nginx.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/mikromon/.venv/bin/python -m mikromon access-apply -c /opt/mikromon/config.yaml

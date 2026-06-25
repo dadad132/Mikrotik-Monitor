@@ -1,0 +1,12 @@
+# Runs the reload once a minute so EXPIRED access grants are pruned and their
+# nginx listen ports torn down — this is what makes access auto-close.
+[Unit]
+Description=Expire stale easymikrotik access grants every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Unit=easymikrotik-access-reload.service
+
+[Install]
+WantedBy=timers.target

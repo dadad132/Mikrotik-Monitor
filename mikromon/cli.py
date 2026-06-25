@@ -35,11 +35,12 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["run", "once", "demo", "dashboard",
                             "test-connection", "test-email", "list-checks",
                             "useradd", "userlist", "userdel", "passwd",
-                            "set-devices", "backup-list", "backup-now"],
+                            "set-devices", "backup-list", "backup-now",
+                            "access-apply"],
                    help="run | once | demo | dashboard | test-connection | "
                         "test-email | list-checks | useradd | userlist | "
                         "userdel | passwd | set-devices | backup-list | "
-                        "backup-now")
+                        "backup-now | access-apply")
     p.add_argument("-c", "--config", default="config.yaml",
                    help="path to config file (default: config.yaml)")
     p.add_argument("--dry-run", action="store_true",
@@ -105,6 +106,9 @@ def main(argv=None) -> int:
     if args.command in ("backup-list", "backup-now"):
         return _cmd_push(args, config)
 
+    if args.command == "access-apply":
+        return _cmd_access_apply(config)
+
     if args.command == "dashboard":
         from . import web
 
@@ -117,7 +121,7 @@ def main(argv=None) -> int:
                   secure_cookies=config.web_secure_cookies,
                   metrics_token=config.metrics_token,
                   devices_db=config.devices_db, defaults=config.defaults,
-                  push_log_db=config.push_log_db)
+                  push_log_db=config.push_log_db, access_cfg=config.access)
         return 0
 
     if args.command == "list-checks":
@@ -259,6 +263,38 @@ def _push_device_cfgs(config):
         finally:
             store.close()
     return []
+
+
+def _cmd_access_apply(config) -> int:
+    """Hub-side: render the active WebFig/Winbox access grants into nginx config
+    and reload nginx. Invoked (as root) by easymikrotik-access-reload.{path,timer}."""
+    import subprocess
+
+    from . import access
+
+    acc = config.access or {}
+    need = ("grants_file", "nginx_http_conf", "nginx_stream_conf")
+    missing = [k for k in need if not acc.get(k)]
+    if missing:
+        print(f"access config incomplete (missing: {', '.join(missing)}).",
+              file=sys.stderr)
+        return 2
+    ports = access.apply_hub_config(
+        acc["grants_file"], acc.get("tls_cert", ""), acc.get("tls_key", ""),
+        acc["nginx_http_conf"], acc["nginx_stream_conf"])
+    # Reload nginx so the new listen ports take effect (and closed ones drop).
+    for cmd in (["systemctl", "reload", "nginx"], ["nginx", "-s", "reload"]):
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            break
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            continue
+    else:
+        print("WARNING: could not reload nginx — reload it manually.",
+              file=sys.stderr)
+    print(f"Applied {len(ports)} active access port(s): "
+          f"{', '.join(map(str, ports)) or '(none)'}")
+    return 0
 
 
 def _cmd_push(args, config) -> int:
