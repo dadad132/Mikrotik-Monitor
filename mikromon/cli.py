@@ -51,10 +51,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=None,
                    help="web dashboard port (default: 8080)")
     # user-management arguments
-    p.add_argument("--user", help="username (useradd/userdel/passwd/set-devices)")
+    p.add_argument("--user", help="email (useradd/userdel/passwd/set-devices)")
     p.add_argument("--password", help="password (useradd/passwd)")
-    p.add_argument("--role", choices=["admin", "user"], default="user",
-                   help="role for useradd (default: user)")
+    p.add_argument("--role", choices=["owner", "member"], default="member",
+                   help="role for useradd (default: member)")
+    p.add_argument("--company",
+                   help="new company name — useradd creates it with this user "
+                        "as owner")
+    p.add_argument("--org", type=int,
+                   help="existing company id to add a member to (useradd)")
     p.add_argument("--devices", default="",
                    help="comma-separated device names this user may see, or '*' "
                         "for all (useradd/set-devices)")
@@ -197,18 +202,30 @@ def _cmd_users(args, config) -> int:
                 print("(no users yet)")
             for u in users:
                 devs = "*" if u["devices"] == "*" else ",".join(u["devices"]) or "-"
-                print(f"  {u['username']:20} role={u['role']:5} devices={devs}")
+                org = store.org_name(u["org_id"]) or f"#{u['org_id']}"
+                print(f"  {u['email']:28} {org:16} role={u['role']:6} "
+                      f"devices={devs}")
             return 0
         if not args.user:
-            print("--user is required for this command.", file=sys.stderr)
+            print("--user (email) is required for this command.", file=sys.stderr)
             return 2
         if args.command == "useradd":
             if not args.password:
                 print("--password is required for useradd.", file=sys.stderr)
                 return 2
-            store.add_user(args.user, args.password, role=args.role,
-                           devices=args.devices or None)
-            print(f"Created {args.role} '{args.user}'.")
+            if args.company:
+                org_id = store.signup(args.user, args.password, args.company,
+                                      role=args.role)
+                print(f"Created company '{args.company}' (id {org_id}) with "
+                      f"owner '{args.user}'.")
+            elif args.org is not None:
+                store.add_member(args.org, args.user, args.password,
+                                 role=args.role, devices=args.devices or None)
+                print(f"Added {args.role} '{args.user}' to company #{args.org}.")
+            else:
+                print("Provide --company NAME (new company) or --org ID "
+                      "(existing).", file=sys.stderr)
+                return 2
         elif args.command == "passwd":
             if not args.password:
                 print("--password is required for passwd.", file=sys.stderr)
@@ -342,10 +359,10 @@ def _cmd_demo(args) -> int:
         port = args.port or config.web_port
         print(f"\nServing the dashboard with the demo data on "
               f"http://127.0.0.1:{port}  (Ctrl-C to stop)")
-        print("  Log in as  admin/admin123   (sees both routers; Devices + Admin)")
-        print("         or  branch/branch123 (sees only DEMO-Router-Branch)")
-        print("  As admin, use the Devices page to add/edit/test routers, and")
-        print("  Admin to create users and choose which devices each one sees.")
+        print("  Log in as  admin@demo.local/admin123   (owner; Devices + Team)")
+        print("         or  branch@demo.local/branch123 (sees only DEMO-Router-Branch)")
+        print("  As the owner, use the Devices page to add/edit/test routers, and")
+        print("  Team to add members and choose which devices each one sees.")
         web.serve(config.metrics_db, config.state_file, "127.0.0.1", port,
                   auth_db=config.auth_db, devices_db=config.devices_db,
                   defaults=config.defaults, push_log_db=config.push_log_db)

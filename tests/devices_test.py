@@ -189,8 +189,8 @@ MetricsStore(mdb).close()
 with open(sfile, "w") as fh:
     json.dump({"devices": {}}, fh)
 a = AuthStore(adb)
-a.add_user("admin", "admin123", role="admin", devices="*")
-a.add_user("bob", "bob123", role="user", devices=[])
+org = a.signup("admin@acme.test", "admin123", "Acme")   # owner of Acme
+a.add_member(org, "bob@acme.test", "bob123", devices=[])  # member, no devices
 a.close()
 DevicesStore(wdb).close()
 
@@ -204,7 +204,7 @@ def op_login(user, pw):
     cj = http.cookiejar.CookieJar()
     op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
     op.open(urllib.request.Request(B + "/login", data=urllib.parse.urlencode(
-        {"username": user, "password": pw}).encode()), timeout=5)
+        {"email": user, "password": pw}).encode()), timeout=5)
     op.cj = cj
     return op
 
@@ -244,7 +244,7 @@ def post(op, path, data):
 
 
 try:
-    admin = op_login("admin", "admin123")
+    admin = op_login("admin@acme.test", "admin123")
     st, body = get(admin, "/devices")
     check("admin GET /devices", st == 200 and "Add a device" in body)
     csrf = re.search(r'name="csrf" value="([^"]+)"', body).group(1)
@@ -313,7 +313,7 @@ try:
     check("backup dry-run preview works without a router",
           st == 200 and "Dry run" in body and "unittest" in body
           and "Confirm" in body)
-    nobody = op_login("bob", "bob123")
+    nobody = op_login("bob@acme.test", "bob123")
     st, _ = get(nobody, "/device?name=WebR1&tab=backups")
     check("non-admin blocked from the Backups tab (403)", st == 403)
     st, _ = post(nobody, "/device/backup", {"csrf": "x", "device": "WebR1"})
@@ -404,7 +404,7 @@ try:
     check("delete purges the device's saved monitoring state",
           "WebR1" not in state_after.get("devices", {}))
     # non-admin is blocked
-    bob = op_login("bob", "bob123")
+    bob = op_login("bob@acme.test", "bob123")
     st, _ = get(bob, "/devices")
     check("non-admin blocked from /devices (403)", st == 403)
     st, _ = post(bob, "/devices/save", {"csrf": "x", "name": "X", "host": "1.1.1.1"})

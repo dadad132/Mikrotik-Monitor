@@ -227,17 +227,20 @@ def demo_devices(config):
 def seed_demo_users(auth_db: str):
     """Create demo accounts so the login + per-user scoping can be shown.
 
-    admin/admin123   -> sees both devices, can manage users.
-    branch/branch123 -> sees only DEMO-Router-Branch.
+    admin@demo.local/admin123   -> owner: sees both devices, manages the team.
+    branch@demo.local/branch123 -> member: sees only DEMO-Router-Branch.
     """
     from .auth import AuthStore
 
     store = AuthStore(auth_db)
     try:
-        if not store.get_user("admin"):
-            store.add_user("admin", "admin123", role="admin", devices="*")
-        if not store.get_user("branch"):
-            store.add_user("branch", "branch123", role="user",
-                           devices=["DEMO-Router-Branch"])
+        if not store.get_user("admin@demo.local"):
+            org_id = store.signup("admin@demo.local", "admin123", "Demo Co",
+                                  role="owner")
+        else:
+            org_id = store.get_user("admin@demo.local")["org_id"]
+        if not store.get_user("branch@demo.local"):
+            store.add_member(org_id, "branch@demo.local", "branch123",
+                             role="member", devices=["DEMO-Router-Branch"])
     finally:
         store.close()

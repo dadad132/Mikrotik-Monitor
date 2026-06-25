@@ -303,29 +303,38 @@ seed the database; after that the database is the source of truth.
 
 ## Users & access control
 
-Set `auth_db:` in the config and the dashboard requires a **login**, with each
-user restricted to the devices an admin grants — users never see each other's
-routers.
+Set `auth_db:` in the config and the dashboard requires a **login**. The model
+is multi-tenant: each account belongs to a **company** and is identified by its
+**email** (there is no separate username). Companies are isolated — nobody ever
+sees another company's devices or team.
 
-**Getting started — create the first admin in the browser.** With no users yet,
-opening the dashboard redirects to a one-time **`/setup`** page to create the
-initial administrator. After that, `/setup` is disabled and you manage everyone
-from the **`/admin`** page (or the CLI below). No command line needed to start.
+**Getting started — sign up in the browser.** With no accounts yet, opening the
+dashboard redirects to **`/signup`**: enter a company name, your email and a
+password and you become that company's **owner**. Anyone can sign up; each
+signup creates a new company. No command line needed to start.
 
-CLI user management (equivalent to the `/admin` page):
+- **owner** → sees every device in their company, manages the team and which
+  devices each member sees at **`/admin`** (the *Team* page), and edits their
+  own email/password at **`/account`**.
+- **member** → sees only the devices the owner allocated (a list, or `*` for
+  all of the company's devices); can edit their own email/password at `/account`.
+
+CLI user management (equivalent to the Team page):
 
 ```bash
-python -m mikromon useradd --user admin --password 'strong-pass' --role admin --devices '*' -c config.yaml
-python -m mikromon useradd --user branch1 --password 'pass' --devices 'Branch-1,Branch-2' -c config.yaml
+# Create a new company with its owner:
+python -m mikromon useradd --user owner@acme.com --password 'strong-pass' --company 'Acme' --role owner -c config.yaml
+# Add a member to an existing company (use the id shown by userlist):
+python -m mikromon useradd --user tech@acme.com --password 'pass' --org 1 --devices 'Branch-1,Branch-2' -c config.yaml
 python -m mikromon userlist -c config.yaml
-python -m mikromon set-devices --user branch1 --devices '*' -c config.yaml
-python -m mikromon userdel --user branch1 -c config.yaml
+python -m mikromon set-devices --user tech@acme.com --devices '*' -c config.yaml
+python -m mikromon userdel --user tech@acme.com -c config.yaml
 ```
 
-- **admin** role → sees all devices, can manage users at `/admin`.
-- **user** role → sees only `--devices` (a list, or `*` for all).
 - Passwords are PBKDF2-hashed; sessions are cookie-based with CSRF protection on
-  admin actions. `auth.db` is gitignored.
+  management actions. `auth.db` is gitignored. An existing single-tenant
+  `auth.db` is migrated automatically on first start: all users move into one
+  *Default* company (old admins become owners).
 
 ### Access it from anywhere (securely)
 

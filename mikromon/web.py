@@ -248,7 +248,7 @@ _PAGE_CSS = """
  .actions{display:flex;gap:8px;align-items:center}
  .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;
    font-weight:700;text-transform:uppercase;letter-spacing:.03em}
- .pill.admin{background:#ede9fe;color:#6d28d9}.pill.user{background:#e0f2fe;color:#0369a1}
+ .pill.owner{background:#ede9fe;color:#6d28d9}.pill.member{background:#e0f2fe;color:#0369a1}
  /* NOC charts */
  .charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
    gap:14px;padding:14px 20px 0}
@@ -318,9 +318,10 @@ def _nav(user, active) -> str:
     if not user:
         return ""
     items = [("/", "Dashboard"), ("/inventory", "Inventory")]
-    if user.get("role") == "admin":
+    if user.get("role") == "owner":
         items += [("/devices", "Devices"), ("/logs", "Activity"),
                   ("/admin", "Users")]
+    items += [("/account", "Account")]
     links = "".join(
         f'<a href="{href}" class="{"on" if href == active else ""}">{label}</a>'
         for href, label in items)
@@ -331,8 +332,10 @@ def _header(user, active="/") -> str:
     brand = '<div class="brand"><span class="logo">&#9670;</span>mikromon</div>'
     if not user:
         return f"<header>{brand}</header>"
-    chip = (f'<span class="who">{esc(user["username"])}'
-            f'<small>{esc(user["role"])}</small></span>')
+    org = user.get("org_name", "")
+    sub = f'{esc(org)} &middot; {esc(user["role"])}' if org else esc(user["role"])
+    chip = (f'<span class="who">{esc(user["email"])}'
+            f'<small>{sub}</small></span>')
     return (f"<header>{brand}{_nav(user, active)}"
             f'<div class="right">{chip}<a class="logout" href="/logout">Log out</a>'
             f"</div></header>")
@@ -1736,28 +1739,54 @@ def _render_login(error: str = "") -> str:
     return _auth_page("Sign in",
             f'<h2 style="margin-top:0">Sign in</h2>{msg}'
             f'<form method="POST" action="/login">'
-            f'<p><input name="username" placeholder="Username" autofocus '
+            f'<p><input name="email" type="email" placeholder="Email" autofocus '
             f'style="width:100%"></p>'
             f'<p><input name="password" type="password" placeholder="Password" '
             f'style="width:100%"></p>'
             f'<button class="btn" type="submit" style="width:100%">Sign in</button>'
-            f'</form>')
+            f'</form>'
+            f'<p class="muted" style="margin:14px 0 0;text-align:center">'
+            f'New here? <a href="/signup">Create a company account</a></p>')
 
 
-def _render_setup(error: str = "") -> str:
+def _render_signup(error: str = "", values=None) -> str:
+    v = values or {}
     msg = (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
-    return _auth_page("First-run setup",
-            f'<h2 style="margin-top:0">Welcome</h2>'
-            f'<p>Create the first <b>administrator</b> account to get started. '
-            f'You can add more users (and limit which devices they see) from the '
-            f'Users page afterwards.</p>{msg}'
-            f'<form method="POST" action="/setup">'
-            f'<p><input name="username" placeholder="Admin username" autofocus '
-            f'style="width:100%"></p>'
+    return _auth_page("Create account",
+            f'<h2 style="margin-top:0">Create your company account</h2>'
+            f'<p class="muted" style="margin-top:0">You\'ll be the owner: you can '
+            f'invite team members and choose which devices each one can see.</p>{msg}'
+            f'<form method="POST" action="/signup">'
+            f'<p><input name="company" placeholder="Company name" autofocus '
+            f'value="{esc(v.get("company", ""))}" style="width:100%"></p>'
+            f'<p><input name="email" type="email" placeholder="Your email" '
+            f'value="{esc(v.get("email", ""))}" style="width:100%"></p>'
             f'<p><input name="password" type="password" '
             f'placeholder="Password (min 6 characters)" style="width:100%"></p>'
             f'<button class="btn" type="submit" style="width:100%">'
-            f'Create admin account</button></form>')
+            f'Create account</button></form>'
+            f'<p class="muted" style="margin:14px 0 0;text-align:center">'
+            f'Already have an account? <a href="/login">Sign in</a></p>')
+
+
+def _render_account(user, csrf: str, msg: str = "", error: str = "") -> str:
+    note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
+           (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
+    org = user.get("org_name", "")
+    inner = (
+        f'<div class="wrap"><h1>My account</h1>{note}'
+        f'<div class="box"><p class="muted" style="margin-top:0">'
+        f'Company: <b>{esc(org)}</b> &middot; Role: <b>{esc(user["role"])}</b></p>'
+        f'<form method="POST" action="/account">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<p>Email<br><input name="email" type="email" '
+        f'value="{esc(user["email"])}" style="width:100%;max-width:360px"></p>'
+        f'<p>New password <span class="muted">(leave blank to keep current)</span>'
+        f'<br><input name="password" type="password" placeholder="min 6 characters" '
+        f'style="width:100%;max-width:360px"></p>'
+        f'<button class="btn" type="submit">Save changes</button>'
+        f'</form></div></div>')
+    return _page("My account", _header(user, "/account") + inner)
 
 
 _ADMIN_JS = """
@@ -1788,53 +1817,55 @@ def _device_chips(known_devices, selected, all_on) -> str:
 
 def _render_admin(auth: AuthStore, known_devices, csrf: str, user) -> str:
     rows = []
-    for u in auth.list_users():
+    for u in auth.list_users(user["org_id"]):
         is_all = u["devices"] == "*"
         selected = set() if is_all else set(u["devices"])
+        is_self = u["email"] == user["email"]
         rows.append(f"""<tr>
-          <td><b>{esc(u['username'])}</b></td>
+          <td><b>{esc(u['email'])}</b></td>
           <td><span class="pill {esc(u['role'])}">{esc(u['role'])}</span></td>
           <td>
             <form method="POST" action="/admin/update">
               <input type="hidden" name="csrf" value="{csrf}">
-              <input type="hidden" name="username" value="{esc(u['username'])}">
+              <input type="hidden" name="email" value="{esc(u['email'])}">
               <div class="actions" style="margin-bottom:8px">
                 <select name="role">
-                  <option{' selected' if u['role']=='user' else ''}>user</option>
-                  <option{' selected' if u['role']=='admin' else ''}>admin</option>
+                  <option value="member"{' selected' if u['role']=='member' else ''}>member</option>
+                  <option value="owner"{' selected' if u['role']=='owner' else ''}>owner</option>
                 </select>
                 <button class="btn" type="submit">Save changes</button>
               </div>
               {_device_chips(known_devices, selected, is_all)}
             </form>
           </td>
-          <td>
+          <td>{'' if is_self else f'''
             <form method="POST" action="/admin/delete"
-              onsubmit="return confirm('Delete user {esc(u['username'])}?')">
+              onsubmit="return confirm('Delete user {esc(u['email'])}?')">
               <input type="hidden" name="csrf" value="{csrf}">
-              <input type="hidden" name="username" value="{esc(u['username'])}">
+              <input type="hidden" name="email" value="{esc(u['email'])}">
               <button class="btn red" type="submit">Delete</button>
-            </form>
+            </form>'''}
           </td></tr>""")
     inner = (
-        f'<div class="wrap"><h1>User management</h1>'
+        f'<div class="wrap"><h1>Team &mdash; {esc(user.get("org_name", ""))}</h1>'
         f'<div class="box"><table>'
-        f'<tr><th>User</th><th>Role</th><th>Allowed devices</th><th></th></tr>'
+        f'<tr><th>Email</th><th>Role</th><th>Allowed devices</th><th></th></tr>'
         f'{"".join(rows)}</table></div>'
-        f'<div class="box"><h2>Add a user</h2>'
+        f'<div class="box"><h2>Add a team member</h2>'
         f'<form method="POST" action="/admin/add">'
         f'<input type="hidden" name="csrf" value="{csrf}">'
         f'<div class="actions" style="margin-bottom:12px;flex-wrap:wrap">'
-        f'<input name="username" placeholder="username">'
+        f'<input name="email" type="email" placeholder="email">'
         f'<input name="password" type="password" placeholder="password (min 6)">'
-        f'<select name="role"><option>user</option><option>admin</option></select>'
+        f'<select name="role"><option value="member">member</option>'
+        f'<option value="owner">owner</option></select>'
         f'</div>'
-        f'<p class="muted" style="margin:0 0 6px">Which devices may this user see?</p>'
+        f'<p class="muted" style="margin:0 0 6px">Which devices may this member see?</p>'
         f'{_device_chips(known_devices, set(), False)}'
         f'<div style="margin-top:14px">'
-        f'<button class="btn" type="submit">Create user</button></div>'
+        f'<button class="btn" type="submit">Add member</button></div>'
         f'</form></div></div>')
-    return _page("Users", _header(user, "/admin") + inner + _ADMIN_JS)
+    return _page("Team", _header(user, "/admin") + inner + _ADMIN_JS)
 
 
 def _page(title: str, body: str) -> str:
@@ -2006,9 +2037,9 @@ class SessionManager:
     def __init__(self):
         self._s: dict[str, dict] = {}
 
-    def create(self, username: str) -> str:
+    def create(self, email: str) -> str:
         token = secrets.token_urlsafe(32)
-        self._s[token] = {"username": username, "expires": time.time() + _SESSION_TTL,
+        self._s[token] = {"email": email, "expires": time.time() + _SESSION_TTL,
                           "csrf": secrets.token_urlsafe(16)}
         return token
 
@@ -2079,7 +2110,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
         def _user(self):
             s = self._session()
-            return auth.get_user(s["username"]) if s else None
+            if not s:
+                return None
+            user = auth.get_user(s["email"])
+            if user:
+                user["org_name"] = auth.org_name(user.get("org_id"))
+            return user
 
         def _form(self):
             length = int(self.headers.get("Content-Length", 0) or 0)
@@ -2111,21 +2147,21 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 allowed = sorted(known) if managed else None
                 return self._serve_data(path, url, user=None, allowed=allowed)
 
-            # First-run bootstrap: with no admin yet, force creating one.
-            needs_setup = auth.count_admins() == 0
-            if path == "/setup":
-                if not needs_setup:
-                    return self._redirect("/login")
+            # Open self-signup: anyone can create a company account.
+            if path == "/signup":
+                if self._session():
+                    return self._redirect("/")
                 err = parse_qs(url.query).get("error", [""])[0]
-                return self._send(200, _render_setup(err),
+                return self._send(200, _render_signup(err),
                                   "text/html; charset=utf-8")
-            if needs_setup:
-                return self._redirect("/setup")
+            # With no accounts yet, send first-time visitors to sign up.
+            if auth.count_users() == 0 and path not in ("/login",):
+                return self._redirect("/signup")
 
             if path == "/login":
                 if self._session():
                     return self._redirect("/")
-                err = {"1": "Invalid username or password."}.get(
+                err = {"1": "Invalid email or password."}.get(
                     parse_qs(url.query).get("error", [""])[0], "")
                 return self._send(200, _render_login(err), "text/html; charset=utf-8")
             if path == "/logout":
@@ -2140,6 +2176,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._send(401, '{"error":"unauthorized"}',
                                       "application/json")
                 return self._redirect("/login")
+            if path == "/account":
+                q = parse_qs(url.query)
+                return self._send(200, _render_account(
+                    user, self._session()["csrf"],
+                    msg=q.get("ok", [""])[0], error=q.get("error", [""])[0]),
+                    "text/html; charset=utf-8")
             if path == "/admin":
                 return self._serve_admin(user)
             if path == "/devices":
@@ -2152,10 +2194,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # In web-managed mode show only devices still in the DB (hide
             # orphans left in metrics/state); fall back to known in YAML mode.
             known = _visible_device_names(store, _load_state(state_file), ds)
+            # Scope to the user's company: only devices their org owns.
+            org_names = (set(ds.names_for_org(user["org_id"]))
+                         if ds is not None else None)
             if ds:
                 ds.close()
             store.close()
-            allowed = AuthStore.allowed_devices(user, sorted(known))
+            scope = sorted(known & org_names) if org_names is not None \
+                else sorted(known)
+            allowed = AuthStore.allowed_devices(user, scope)
             return self._serve_data(path, url, user=user, allowed=allowed)
 
         def _serve_data(self, path, url, user, allowed):
@@ -2240,9 +2287,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
         def _serve_admin(self, user):
             if not AuthStore.is_admin(user):
                 return self._send(403, "forbidden")
-            store = self._store()
-            known = _known_devices(store, _load_state(state_file))
-            store.close()
+            ds = self._devstore()
+            if ds is not None:
+                known = ds.names_for_org(user["org_id"])
+                ds.close()
+            else:
+                store = self._store()
+                known = _known_devices(store, _load_state(state_file))
+                store.close()
             return self._send(200, _render_admin(
                 auth, known, self._session()["csrf"], user),
                 "text/html; charset=utf-8")
@@ -2473,7 +2525,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 else ""
             cfg = build_device(raw, defaults)
             audit = self._auditlog()
-            actor = (user or {}).get("username", "")
+            actor = (user or {}).get("email", "")
             dev = rw_device(cfg)
             api = PushApi(dev)
             result, err = None, None
@@ -2566,7 +2618,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 plan = Pusher(cfg, None, dry_run=True).plan_backup(bkname)
                 return self._device_backups_page(name, user, dry_plan=plan)
             # Restore / delete / create — actually talk to the router.
-            uname = (user or {}).get("username", "")
+            uname = (user or {}).get("email", "")
             audit = self._auditlog()
             dev = rw_device(cfg)
             api = PushApi(dev)
@@ -2710,7 +2762,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(403, "forbidden")
             cfg = build_device(raw, defaults)
             commit = flat.get("apply") == "1"
-            uname = (user or {}).get("username", "")
+            uname = (user or {}).get("email", "")
             audit = self._auditlog()
             dev = rw_device(cfg)
             api = PushApi(dev)
@@ -2758,7 +2810,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(403, "forbidden")
             cfg = build_device(raw, defaults)
             commit = flat.get("apply") == "1"
-            uname = (user or {}).get("username", "")
+            uname = (user or {}).get("email", "")
             audit = self._auditlog()
             dev = rw_device(cfg)
             api = PushApi(dev)
@@ -2826,7 +2878,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(404, "no such device")
             cfg = build_device(raw, defaults)
             audit = self._auditlog()
-            uname = (user or {}).get("username", "")
+            uname = (user or {}).get("email", "")
             dev = rw_device(cfg)
             api = PushApi(dev)
             pusher = Pusher(cfg, api, dry_run=False, audit=audit, user=uname)
@@ -2893,7 +2945,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if raw is None:
                 return self._send(404, "no such device")
             cfg = build_device(raw, defaults)
-            actor = (user or {}).get("username", "")
+            actor = (user or {}).get("email", "")
             dev = rw_device(cfg)
             api = PushApi(dev)
             report, err = None, None
@@ -2956,7 +3008,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if path == "/devices/save":
                     raw = self._device_form_to_raw(store, flat, multi)
                     store.upsert(raw, defaults,
-                                 original_name=flat.get("original_name") or None)
+                                 original_name=flat.get("original_name") or None,
+                                 org_id=user["org_id"])
                     return self._redirect("/devices")
                 return self._send(404, "not found")
             except Exception as exc:  # noqa: BLE001 — surface validation errors
@@ -3049,20 +3102,26 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if auth is None:
                 return self._send(404, "not found")
             path = urlparse(self.path).path
-            if path == "/setup":
-                return self._post_setup()
+            if path == "/signup":
+                return self._post_signup()
             if path == "/login":
                 return self._post_login()
             if path == "/logout":
                 sessions.destroy(self._token())
                 return self._redirect("/login", self._cookie_header("", clear=True))
-            # Everything below requires an admin + a valid CSRF token.
+            # /account: any logged-in user edits their own email/password.
+            if path == "/account":
+                return self._post_account()
+            # Everything below requires an owner + a valid CSRF token.
             user = self._user()
             if not AuthStore.is_admin(user or {}):
                 return self._send(403, "forbidden")
             flat, multi = self._form()
             if flat.get("csrf") != self._session()["csrf"]:
                 return self._send(400, "bad csrf token")
+            # Org isolation: an owner may only touch devices their company owns.
+            if not self._owns_target(flat, user):
+                return self._send(403, "forbidden")
             if path.startswith("/devices/"):
                 return self._devices_post(path, flat, multi, user)
             if path == "/device/backup":
@@ -3083,21 +3142,54 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._device_reboot_post(flat, user)
             try:
                 if path == "/admin/add":
-                    auth.add_user(flat.get("username", ""), flat.get("password", ""),
-                                  role=flat.get("role", "user"),
-                                  devices=self._devices(flat, multi))
+                    auth.add_member(user["org_id"], flat.get("email", ""),
+                                    flat.get("password", ""),
+                                    role=flat.get("role", "member"),
+                                    devices=self._devices(flat, multi))
                 elif path == "/admin/update":
-                    auth.set_role(flat["username"], flat.get("role", "user"))
-                    auth.set_devices(flat["username"], self._devices(flat, multi))
+                    if not self._same_org(flat.get("email", ""), user):
+                        return self._send(403, "forbidden")
+                    auth.set_role(flat["email"], flat.get("role", "member"))
+                    auth.set_devices(flat["email"], self._devices(flat, multi))
                 elif path == "/admin/delete":
-                    if flat["username"] == user["username"]:
+                    if not self._same_org(flat.get("email", ""), user):
+                        return self._send(403, "forbidden")
+                    if flat["email"] == user["email"]:
                         return self._send(400, "cannot delete yourself")
-                    auth.delete_user(flat["username"])
+                    auth.delete_user(flat["email"])
                 else:
                     return self._send(404, "not found")
             except Exception as exc:  # noqa: BLE001 — surface as a simple message
                 return self._send(400, f"Error: {exc}")
             return self._redirect("/admin")
+
+        def _same_org(self, email, user) -> bool:
+            """True if `email` is a user in the acting owner's company."""
+            target = auth.get_user(email) if email else None
+            return bool(target) and target.get("org_id") == user.get("org_id")
+
+        def _owns_target(self, flat, user) -> bool:
+            """For device-targeted POSTs, every *existing* device the request
+            names must belong to the owner's company. New (not-yet-stored)
+            names pass through — they'll be stamped with the owner's org.
+            Non-device actions (admin/*) carry no device field and pass; they
+            are scoped separately by _same_org."""
+            if not devices_db:
+                return True
+            names = {flat.get(k, "") for k in
+                     ("device", "name", "original_name")} - {""}
+            if not names:
+                return True
+            ds = self._devstore()
+            try:
+                for n in names:
+                    org = ds.org_of(n) if ds else None
+                    if org is not None and org != user.get("org_id"):
+                        return False
+            finally:
+                if ds:
+                    ds.close()
+            return True
 
         @staticmethod
         def _devices(flat, multi):
@@ -3105,27 +3197,48 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return "*"
             return multi.get("devices", [])
 
-        def _post_setup(self):
-            # Only valid while no admin exists (prevents abuse after setup).
-            if auth.count_admins() > 0:
-                return self._redirect("/login")
+        def _post_signup(self):
             flat, _ = self._form()
+            email = flat.get("email", "").strip().lower()
             try:
-                auth.add_user(flat.get("username", ""), flat.get("password", ""),
-                              role="admin", devices="*")
+                auth.signup(email, flat.get("password", ""),
+                            flat.get("company", ""))
             except Exception as exc:  # noqa: BLE001 — show the reason on the form
-                return self._redirect("/setup?error=" + quote(str(exc)))
-            token = sessions.create(flat["username"].strip())
+                return self._redirect("/signup?error=" + quote(str(exc)))
+            token = sessions.create(email)
             return self._redirect("/", self._cookie_header(token))
 
         def _post_login(self):
             flat, _ = self._form()
-            user = auth.verify(flat.get("username", ""), flat.get("password", ""))
+            user = auth.verify(flat.get("email", ""), flat.get("password", ""))
             if not user:
                 time.sleep(0.5)  # mild brute-force friction
                 return self._redirect("/login?error=1")
-            token = sessions.create(user["username"])
+            token = sessions.create(user["email"])
             return self._redirect("/", self._cookie_header(token))
+
+        def _post_account(self):
+            user = self._user()
+            if not user:
+                return self._redirect("/login")
+            flat, _ = self._form()
+            if flat.get("csrf") != self._session()["csrf"]:
+                return self._send(400, "bad csrf token")
+            new_email = flat.get("email", "").strip().lower()
+            new_pw = flat.get("password", "")
+            try:
+                if new_pw:
+                    auth.set_password(user["email"], new_pw)
+                if new_email and new_email != user["email"]:
+                    auth.set_email(user["email"], new_email)
+                    # The session is keyed by email — repoint it so the user
+                    # stays logged in under the new address.
+                    sess = self._session()
+                    if sess:
+                        sess["email"] = new_email
+            except Exception as exc:  # noqa: BLE001
+                return self._redirect("/account?error=" + quote(str(exc)))
+            return self._redirect("/account?ok=" + quote("Saved."))
 
     return Handler
 
@@ -3166,9 +3279,9 @@ def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,
         log.warning("metrics DB %s not found yet — start the monitor first",
                     metrics_db)
     auth = AuthStore(auth_db) if auth_db else None
-    if auth and not auth.count_admins():
-        log.info("No admin yet — open the dashboard to create the first admin "
-                 "at /setup.")
+    if auth and not auth.count_users():
+        log.info("No accounts yet — open the dashboard and create a company "
+                 "account at /signup.")
     sessions = SessionManager()
     httpd = ThreadingHTTPServer(
         (host, port), make_handler(metrics_db, state_file, auth, sessions,
