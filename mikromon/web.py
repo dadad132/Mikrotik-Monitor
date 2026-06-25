@@ -289,7 +289,6 @@ _PAGE_CSS = """
  .tabs a.soon::after{content:" · soon";font-size:10px}
  .tabdrop{position:relative}
  .tabdrop>.dropbtn{cursor:pointer}
- .tabdrop>.dropbtn::after{content:" \25be";font-size:11px}
  .tabdrop:hover>.tabmenu,.tabdrop:focus-within>.tabmenu{display:block}
  .tabmenu{display:none;position:absolute;top:100%;left:0;z-index:30;background:#fff;
    border:1px solid #e2e8f0;border-radius:8px;box-shadow:0 6px 18px rgba(15,23,42,.12);
