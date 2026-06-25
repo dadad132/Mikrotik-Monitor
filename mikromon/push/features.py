@@ -158,7 +158,7 @@ def sdwan_plan(pusher, cfg, flat, multi):
         _ROUTE, "comment", route_desired,
         owns=_prefix_owner(_RT_TAG), label="policy route")
     return Plan(cfg.name, ops + mangle_plan.ops + route_plan.ops,
-                summary=f"sd-wan {mode}")
+                summary=f"wan {mode}")
 
 
 # ===========================================================================
@@ -1642,7 +1642,7 @@ def adopt_plan(pusher, cfg, feature, row_id):
 # Registry — keyed by URL slug; order follows the device tab bar.
 # ===========================================================================
 FEATURES = {
-    "sdwan": {"title": "SD-WAN — failover & load balancing", "write": True,
+    "sdwan": {"title": "WAN — failover & load balancing", "write": True,
               "read": sdwan_read, "summary": sdwan_summary, "form": sdwan_form,
               "plan": sdwan_plan},
     "security": {"title": "Security", "write": True, "read": security_read,
@@ -1685,7 +1685,7 @@ FEATURES = {
 }
 
 # tab label -> url slug (Overview/Backups handled elsewhere)
-TAB_SLUGS = {"SD-WAN": "sdwan", "Security": "security",
+TAB_SLUGS = {"WAN": "sdwan", "Security": "security",
              "Restrict access": "harden", "DNS": "nextdns",
              "QoS": "qos", "Port forwarding": "portfwd", "Interfaces": "interfaces",
              "Remote access": "remote", "Tunnel": "tunnel",

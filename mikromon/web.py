@@ -287,6 +287,21 @@ _PAGE_CSS = """
  .tabs a.on{color:#2563eb;border-bottom-color:#2563eb;font-weight:600}
  .tabs a.soon{color:#cbd5e1;cursor:not-allowed}
  .tabs a.soon::after{content:" · soon";font-size:10px}
+ .tabdrop{position:relative}
+ .tabdrop>.dropbtn{cursor:pointer}
+ .tabdrop>.dropbtn::after{content:" \25be";font-size:11px}
+ .tabdrop:hover>.tabmenu,.tabdrop:focus-within>.tabmenu{display:block}
+ .tabmenu{display:none;position:absolute;top:100%;left:0;z-index:30;background:#fff;
+   border:1px solid #e2e8f0;border-radius:8px;box-shadow:0 6px 18px rgba(15,23,42,.12);
+   min-width:175px;padding:5px}
+ .tabmenu a,.tabmenu button{display:block;width:100%;box-sizing:border-box;
+   text-align:left;padding:8px 12px;font-size:14px;color:#475569;text-decoration:none;
+   background:none;border:0;border-radius:6px;cursor:pointer;margin:0}
+ .tabmenu a:hover,.tabmenu button:hover{background:#f1f5f9;color:#0f172a}
+ .tabmenu a.on{color:#2563eb;font-weight:600}
+ .tabmenu form{margin:0}
+ .tabmenu button.reboot{color:#dc2626}
+ .tabmenu button.reboot:hover{background:#fef2f2}
  .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
  .badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;
    font-weight:700}
@@ -527,25 +542,28 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
             f'<div class="grid">{grid}</div>{empty}{_DASH_JS}</body></html>')
 
 
-_DEVICE_TABS = ["Overview", "Provision", "SD-WAN", "Security",
+# Flat tabs on the device bar. Update + Backups live under the Maintenance
+# dropdown (see _MAINT_ITEMS / _device_tabbar), not in this list.
+_DEVICE_TABS = ["Overview", "Provision", "WAN", "Security",
                 "Restrict access", "DNS", "QoS", "Port forwarding",
-                "Interfaces", "Remote access", "Tunnel", "Hub tunnel", "Scripts",
-                "Update", "Backups"]
+                "Interfaces", "Remote access", "Tunnel", "Hub tunnel", "Scripts"]
 # label -> url slug (all tabs are wired to the engine now)
 _LIVE_TABS = {"Overview": "", "Provision": "provision",
-              "SD-WAN": "sdwan",
+              "WAN": "sdwan",
               "Security": "security", "Restrict access": "harden",
               "DNS": "nextdns", "QoS": "qos", "Port forwarding": "portfwd",
               "Interfaces": "interfaces", "Remote access": "remote",
               "Tunnel": "tunnel", "Hub tunnel": "hubtunnel", "Scripts": "scripts",
               "Update": "update", "Backups": "backups"}
+# grouped under the "Maintenance" dropdown on the device tab bar
+_MAINT_ITEMS = [("Update", "update"), ("Backups", "backups")]
 # tabs that WRITE to the router (admins only); Overview + Interfaces are read-only
 _ADMIN_TABS = {"provision", "sdwan", "security", "harden", "nextdns",
                "qos", "portfwd", "remote", "tunnel", "hubtunnel", "scripts",
                "update", "backups"}
 
 
-def _device_tabbar(name, active, is_admin=True) -> str:
+def _device_tabbar(name, active, is_admin=True, csrf="") -> str:
     q = quote(name)
     out = []
     for t in _DEVICE_TABS:
@@ -557,7 +575,28 @@ def _device_tabbar(name, active, is_admin=True) -> str:
             out.append(f'<a class="{cls}" href="{href}">{esc(t)}</a>')
         else:
             out.append(f'<a class="soon">{esc(t)}</a>')
+    if is_admin:
+        out.append(_maintenance_menu(name, active, csrf))
     return f'<div class="tabs">{"".join(out)}</div>'
+
+
+def _maintenance_menu(name, active, csrf) -> str:
+    """The Maintenance dropdown on the device tab bar: Update, Backups, Reboot."""
+    q = quote(name)
+    on = active in [slug for _l, slug in _MAINT_ITEMS]
+    items = "".join(
+        f'<a class="{"on" if slug == active else ""}" '
+        f'href="/device?name={q}&tab={slug}">{esc(label)}</a>'
+        for label, slug in _MAINT_ITEMS)
+    reboot = (
+        f'<form method="POST" action="/device/reboot" onsubmit="return confirm('
+        f"'Reboot {esc(name)} now? It will go offline for ~1–2 minutes.')\">"
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<input type="hidden" name="device" value="{esc(name)}">'
+        f'<button type="submit" class="reboot">Reboot</button></form>'
+    ) if csrf else ""
+    return (f'<div class="tabdrop"><a class="dropbtn{" on" if on else ""}">'
+            f'Maintenance</a><div class="tabmenu">{items}{reboot}</div></div>')
 
 
 def _facts_strip(f) -> str:
@@ -620,7 +659,7 @@ def _render_device(store, state, name, user, csrf="") -> str:
              "crit": ("crit", "Offline / Error")}[sev]
     m = d["metrics"]
 
-    tabbar = _device_tabbar(name, "overview", AuthStore.is_admin(user or {}))
+    tabbar = _device_tabbar(name, "overview", AuthStore.is_admin(user or {}), csrf)
     facts_html = _facts_strip(f)
 
     # gauges (live latest values)
@@ -955,7 +994,7 @@ def _connect_box(name, raw) -> str:
 
 def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
                              creds=None, msg="", error="") -> str:
-    tabbar = _device_tabbar(name, "provision", True)
+    tabbar = _device_tabbar(name, "provision", True, csrf)
     q = quote(name)
     banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
               f'</div>' if msg else "")
@@ -985,8 +1024,11 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
         f'<option value="wg" selected>WireGuard (RouterOS 7.1+)</option>'
         f'<option value="">None (just user + API)</option></select></div>'
         f'<div class="f"><label class="f">Hub address (this server\'s IP)</label>'
-        f'<input name="hub" value="{esc(hub_ip)}" placeholder="102.36.140.219">'
-        f'</div>'
+        f'<input type="hidden" name="hub" value="{esc(hub_ip)}">'
+        f'<div class="muted" style="padding:7px 0">'
+        f'<code>{esc(hub_ip) or "(auto-detected)"}</code> '
+        f'<span style="font-size:11px">— set by the server, not editable</span>'
+        f'</div></div>'
         f'<div class="f"><label class="chk"><input type="checkbox" '
         f'name="enable_api" value="1" class="switch" checked> Enable the API '
         f'service (needed for mikromon to connect over the API)</label></div>'
@@ -1057,10 +1099,21 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
     return _page(esc(name) + " · Provision", _header(user, "/") + inner)
 
 
+def _fmt_backup_date(bname, ctime) -> str:
+    """A human-friendly created date. mikromon backups embed a YYYYMMDD-HHMMSS
+    stamp in the name (reliable, server-time), so prefer that; otherwise fall
+    back to the router's own creation-time (which depends on the router clock)."""
+    m = re.search(r"(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})", bname or "")
+    if m:
+        y, mo, d, hh, mm, _ss = m.groups()
+        return f"{y}-{mo}-{d} {hh}:{mm}"
+    return str(ctime or "—")
+
+
 def _render_device_backups(name, user, facts, csrf, *, backups=None,
                            error="", msg="", dry_plan=None) -> str:
     """The Backups tab — wired to the real config-push engine (admin-only)."""
-    tabbar = _device_tabbar(name, "backups", True)
+    tabbar = _device_tabbar(name, "backups", True, csrf)
     q = quote(name)
     banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
               f'</div>' if msg else "")
@@ -1106,7 +1159,8 @@ def _render_device_backups(name, user, facts, csrf, *, backups=None,
                                     f"Delete {bn} from the router?"))
             rows += (f'<tr><td><b>{esc(bn)}</b></td>'
                      f'<td class="muted">{esc(str(b.get("size", "")))}</td>'
-                     f'<td class="muted">{esc(str(b.get("time", "")))}</td>'
+                     f'<td class="muted">'
+                     f'{esc(_fmt_backup_date(bn, b.get("time")))}</td>'
                      f'<td>{acts}</td></tr>')
         if not rows and not error:
             rows = '<tr><td colspan="4" class="muted">No backup files on the router yet.</td></tr>'
@@ -1597,7 +1651,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                         msg="", recent=None, facts=None, unmanaged=None,
                         confirm_action="/device/push", cfg=None,
                         extra_html="", report_html="") -> str:
-    tabbar = _device_tabbar(name, slug, AuthStore.is_admin(user or {}))
+    tabbar = _device_tabbar(name, slug, AuthStore.is_admin(user or {}), csrf)
     q = quote(name)
     banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
               f'</div>' if msg else "")
@@ -2761,6 +2815,55 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if audit:
                     audit.close()
 
+        def _device_reboot_post(self, flat, user):
+            """Reboot the router now (/system reboot). Detached run — the API
+            session drops as the box restarts, which counts as submitted. We do
+            NOT re-read the (now offline) router; just confirm the command went."""
+            from .config import build_device
+            from .device import DeviceError
+            from .push import Pusher, PushError, rw_device
+            from .push.api import PushApi
+            from .push.plan import Operation, Plan
+
+            name = flat.get("device", "")
+            raw = self._device_raw(name)
+            if raw is None:
+                return self._send(404, "no such device")
+            cfg = build_device(raw, defaults)
+            audit = self._auditlog()
+            uname = (user or {}).get("username", "")
+            dev = rw_device(cfg)
+            api = PushApi(dev)
+            pusher = Pusher(cfg, api, dry_run=False, audit=audit, user=uname)
+            err = None
+            try:
+                api.connect()
+                op = Operation("run", ("system",), {"_cmd": "reboot"},
+                               desc="reboot the router now (/system reboot)",
+                               detach=True)
+                pusher.apply(Plan(cfg.name, [op], summary="reboot"),
+                             feature="reboot")
+            except (DeviceError, PushError) as exc:
+                err = str(exc)
+            finally:
+                dev.close()
+                if audit:
+                    audit.close()
+            q = quote(name)
+            if err is not None:
+                box = (f'<div class="box" style="border-left:4px solid #dc2626">'
+                       f'<h2>Reboot failed</h2><p>{esc(err)}</p>'
+                       f'<a class="btn" href="/device?name={q}">Back</a></div>')
+            else:
+                box = (f'<div class="box" style="border-left:4px solid #16a34a">'
+                       f'<h2>Reboot sent to {esc(name)}</h2><p>The router is '
+                       f'restarting and will be offline for ~1–2 minutes.</p>'
+                       f'<a class="btn" href="/device?name={q}">Back to {esc(name)}'
+                       f'</a></div>')
+            return self._send(200, _page(esc(name) + " · Reboot",
+                              _header(user, "/") + f'<div class="wrap">{box}</div>'),
+                              "text/html; charset=utf-8")
+
         def _device_forget_post(self, flat, user):
             """Remove a device from the dashboard entirely: delete it from the
             devices DB (if managed) and purge its metrics + saved state. Works
@@ -2981,6 +3084,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._device_adopt_post(flat, user)
             if path == "/device/wan":
                 return self._device_wan_post(flat, multi, user)
+            if path == "/device/reboot":
+                return self._device_reboot_post(flat, user)
             try:
                 if path == "/admin/add":
                     auth.add_user(flat.get("username", ""), flat.get("password", ""),

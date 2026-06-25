@@ -108,6 +108,23 @@ check("reorder JS is defined on feature tabs", "function pushMoveRow" in web._FE
 check("toggles render as on/off sliders",
       'class="switch"' in web._field_html(
           {"type": "toggle", "name": "opt", "value": "x", "label": "L"}))
+# device tab bar: SD-WAN renamed to WAN; Update/Backups moved under a
+# Maintenance dropdown that also has a CSRF-guarded Reboot button (admin only)
+bar = web._device_tabbar("R", "overview", True, "CSRF1")
+check("tab bar shows WAN, not SD-WAN",
+      ">WAN<" in bar and "SD-WAN" not in bar)
+check("Maintenance dropdown groups Update + Backups + a Reboot form",
+      'class="tabdrop"' in bar and ">Maintenance" in bar
+      and "tab=update" in bar and "tab=backups" in bar
+      and '/device/reboot' in bar and 'value="CSRF1"' in bar)
+check("non-admin tab bar has no Maintenance dropdown / reboot",
+      "Maintenance" not in web._device_tabbar("R", "overview", False, "CSRF1"))
+# backup 'Created' date: prefer the YYYYMMDD-HHMMSS stamp in mikromon names,
+# else the router's creation-time
+check("backup date parsed from the mikromon backup name",
+      web._fmt_backup_date("before-r-20260625-143005.backup", "") == "2026-06-25 14:30")
+check("backup date falls back to the router creation-time",
+      web._fmt_backup_date("hand.backup", "jun/01/2026") == "jun/01/2026")
 # hub SSTP-secret registry: stable per-device tunnel IPs + chap-secrets writing
 hub = {}
 ip1 = web._alloc_tunnel_ip(hub, "A")
