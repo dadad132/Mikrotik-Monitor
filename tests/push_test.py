@@ -353,9 +353,79 @@ sops = [o for o in en.ops if o.path == ("ip", "service")]
 check("SSH toggle off while ssh disabled re-enables it (disabled=no)",
       len(sops) == 1 and sops[0].params == {".id": "*ssh", "disabled": "no"})
 # the form reflects the live SSH state so re-applying never fights the user
-frm = F.security_form({"rules": [], "ssh_disabled": True}, devcfg)
+frm = F.security_form({"rules": [], "ssh_disabled": True, "syn_cookies": True},
+                      devcfg)
 check("Security form shows a 'Disable the SSH service' toggle, on when disabled",
       any(f.get("value") == "disable_ssh" and f.get("on") is True for f in frm))
+check("Security form shows the SYN-cookies toggle, on when enabled",
+      any(f.get("value") == "syn_cookies" and f.get("on") is True for f in frm))
+
+
+def _sec(opts, state=None):
+    st = {("ip", "firewall", "filter"): [], ("ip", "firewall", "raw"): [],
+          ("ip", "settings"): [{"tcp-syncookies": "no"}]}
+    st.update(state or {})
+    return F.security_plan(Pusher(devcfg, FakeApi(st), dry_run=True), devcfg, {},
+                           {"opt": opts})
+
+
+# SYN attack: /ip settings tcp-syncookies as a reversible, churn-free toggle
+sset = [o for o in _sec(["syn_cookies"]).ops if o.path == ("ip", "settings")]
+check("SYN-cookies on sets /ip settings tcp-syncookies=yes (reversible)",
+      len(sset) == 1 and sset[0].params.get("tcp-syncookies") == "yes"
+      and sset[0].inverse.params.get("tcp-syncookies") == "no")
+check("SYN-cookies already on (true) = no /ip settings churn",
+      not any(o.path == ("ip", "settings") for o in
+              _sec(["syn_cookies"],
+                   {("ip", "settings"): [{"tcp-syncookies": "true"}]}).ops))
+
+# DDoS auto-detect: detect-ddos chain + forward jump (filter) + raw drop
+ddp = _sec(["ddos_detect"])
+fadds = [o for o in ddp.ops if o.path == ("ip", "firewall", "filter")
+         and o.action == "add"]
+radds = [o for o in ddp.ops if o.path == ("ip", "firewall", "raw")
+         and o.action == "add"]
+check("DDoS detect builds the detect-ddos chain + a forward jump",
+      any(o.params.get("chain") == "detect-ddos"
+          and o.params.get("action") == "return" for o in fadds)
+      and any(o.params.get("address-list") == "ddos-attackers" for o in fadds)
+      and any(o.params.get("action") == "jump"
+              and o.params.get("jump-target") == "detect-ddos" for o in fadds))
+check("DDoS detect adds a raw/prerouting drop for flagged attacker->target",
+      len(radds) == 1 and radds[0].params.get("chain") == "prerouting"
+      and radds[0].params.get("src-address-list") == "ddos-attackers"
+      and radds[0].params.get("dst-address-list") == "ddos-targets")
+ddoff = F.security_plan(Pusher(devcfg, FakeApi({
+    ("ip", "firewall", "filter"): [
+        {".id": "*j", "chain": "forward", "action": "jump",
+         "comment": "mikromon:sec:ddos_detect-4jump"}],
+    ("ip", "firewall", "raw"): [
+        {".id": "*r", "chain": "prerouting",
+         "comment": "mikromon:sec:ddos_detect-raw"}],
+    ("ip", "settings"): [{"tcp-syncookies": "no"}]}), dry_run=True),
+    devcfg, {}, {"opt": []})
+check("turning DDoS detect off removes its filter + raw rules",
+      {o.params.get(".id") for o in ddoff.ops if o.action == "remove"} == {"*j", "*r"})
+
+# SSH staged blacklist: 5 input rules on port 22, single src-address-list each
+sadds = [o for o in _sec(["ssh_blacklist"]).ops
+         if o.path == ("ip", "firewall", "filter") and o.action == "add"]
+check("SSH staged blacklist adds a drop + 4 staging rules on port 22",
+      len(sadds) == 5
+      and all(o.params.get("dst-port") == "22" for o in sadds)
+      and any(o.params.get("action") == "drop"
+              and o.params.get("src-address-list") == "bruteforce_blacklist"
+              for o in sadds)
+      and any(o.params.get("address-list") == "connection1" for o in sadds))
+check("SSH staged blacklist never uses an invalid two-list matcher",
+      all("," not in (o.params.get("src-address-list") or "") for o in sadds))
+
+# the multi-rule ddos_detect must NOT also light the separate 'ddos' toggle
+ddform = {f["value"]: f["on"] for f in F.security_form(
+    {"rules": [{"comment": "mikromon:sec:ddos_detect-1return"}],
+     "ssh_disabled": False, "syn_cookies": False}, devcfg)}
+check("ddos_detect rules light only the ddos_detect toggle, not 'ddos'",
+      ddform.get("ddos_detect") is True and ddform.get("ddos") is False)
 
 # qos rows -> simple queues
 api = FakeApi({("queue", "simple"): []})

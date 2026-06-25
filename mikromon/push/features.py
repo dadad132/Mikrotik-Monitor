@@ -169,6 +169,8 @@ _SEC_TAG = "mikromon:sec:"
 
 
 _IP_SERVICE = ("ip", "service")
+_IP_SETTINGS = ("ip", "settings")
+_RAW = ("ip", "firewall", "raw")
 
 
 def _service_disabled(pusher, name) -> bool:
@@ -178,9 +180,18 @@ def _service_disabled(pusher, name) -> bool:
     return row is not None and _norm(row.get("disabled", "")) == "true"
 
 
+def _syn_cookies_on(pusher) -> bool:
+    """True if /ip settings tcp-syncookies is enabled (kernel SYN-flood guard).
+    Tolerant of yes/no vs true/false so it never falsely reports a change."""
+    s = pusher.api.fetch(_IP_SETTINGS)
+    row = s[0] if s else {}
+    return _norm(row.get("tcp-syncookies", "")) in ("true", "yes")
+
+
 def security_read(pusher, cfg):
     rules = [r for r in pusher.api.fetch(_FILTER) if _prefix_owner(_SEC_TAG)(r)]
-    return {"rules": rules, "ssh_disabled": _service_disabled(pusher, "ssh")}
+    return {"rules": rules, "ssh_disabled": _service_disabled(pusher, "ssh"),
+            "syn_cookies": _syn_cookies_on(pusher)}
 
 
 def security_unmanaged(pusher, cfg):
@@ -200,6 +211,8 @@ def security_summary(current, cfg):
              f"{r.get('action')}" for r in rules]
     if not lines:
         lines = ["No mikromon security rules on the router yet."]
+    lines.append("TCP SYN-cookies: "
+                 + ("ON." if current.get("syn_cookies") else "off."))
     lines.append("SSH service is currently "
                  + ("DISABLED." if current.get("ssh_disabled") else "enabled."))
     return lines
@@ -208,7 +221,10 @@ def security_summary(current, cfg):
 def security_form(current, cfg):
     have = {r.get("comment", "") for r in current.get("rules", [])}
     def on(key):
-        return any(c.startswith(_SEC_TAG + key) for c in have)
+        # exact match or "<key>-<suffix>" so e.g. "ddos" doesn't also match the
+        # multi-rule "ddos_detect-*" comments.
+        pre = _SEC_TAG + key
+        return any(c == pre or c.startswith(pre + "-") for c in have)
     wan = ", ".join(e.interface for e in cfg.wan.links if e.interface) or "WAN"
     return [{"type": "toggle", "name": "opt", "value": "drop_invalid",
              "label": "Drop invalid connections", "on": on("drop_invalid"),
@@ -223,14 +239,31 @@ def security_form(current, cfg):
              "label": "SYN-flood protection", "on": on("synflood"),
              "desc": "Drop a source opening too many half-open TCP (SYN) "
                      "connections (connection-limit 30/src)."},
+            {"type": "toggle", "name": "opt", "value": "syn_cookies",
+             "label": "SYN attack — TCP SYN-cookies",
+             "on": bool(current.get("syn_cookies")),
+             "desc": "Kernel-level SYN-flood defence (/ip settings "
+                     "tcp-syncookies=yes). Lets the router weather a SYN flood "
+                     "without exhausting connection memory."},
             {"type": "toggle", "name": "opt", "value": "ddos",
              "label": "DDoS / connection-flood protection", "on": on("ddos"),
              "desc": "Limit concurrent forwarded connections per source IP "
                      "(connection-limit 100/src) and drop the excess."},
+            {"type": "toggle", "name": "opt", "value": "ddos_detect",
+             "label": "DDoS attack — auto-detect & blacklist",
+             "on": on("ddos_detect"),
+             "desc": "Rate-detects DDoS in a detect-ddos chain, flags the "
+                     "attacker + target IPs for 10 min, and drops them early in "
+                     "raw/prerouting. Adds a forward jump so the detector runs."},
             {"type": "toggle", "name": "opt", "value": "ssh_bruteforce",
-             "label": "Block SSH/Telnet brute-force", "on": on("ssh_bruteforce"),
+             "label": "Block SSH/Telnet brute-force (rate)", "on": on("ssh_bruteforce"),
              "desc": "Drop new SSH/Telnet sessions once a source exceeds "
                      "10 concurrent (connection-limit)."},
+            {"type": "toggle", "name": "opt", "value": "ssh_blacklist",
+             "label": "SSH brute-force — staged blacklist", "on": on("ssh_blacklist"),
+             "desc": "Escalating tarpit on SSH (port 22): repeat attempts move a "
+                     "source through connection1→2→3, then a 1-day "
+                     "bruteforce_blacklist that is dropped."},
             {"type": "toggle", "name": "opt", "value": "port_scan",
              "label": "Port-scanner protection", "on": on("port_scan"),
              "desc": "Drop hosts detected port-scanning the router (PSD)."},
@@ -279,10 +312,82 @@ def security_plan(pusher, cfg, flat, multi):
         desired.append({"chain": "input", "protocol": "tcp",
                         "psd": "21,3s,3,1", "action": "drop",
                         "comment": _SEC_TAG + "port_scan"})
+    if "ddos_detect" in opts:
+        # A dedicated detect-ddos chain: rule 1 lets traffic under the rate pass
+        # (return); over the rate, the source + target get flagged for 10 min.
+        # A forward jump feeds new connections in (the snippet on its own would
+        # never run without it). The raw/prerouting drop (below) blocks flagged
+        # attacker→target traffic before connection tracking, where it's cheap.
+        desired += [
+            {"chain": "detect-ddos", "action": "return",
+             "dst-limit": "32,32,src-and-dst-addresses/10s",
+             "comment": _SEC_TAG + "ddos_detect-1return"},
+            {"chain": "detect-ddos", "action": "add-dst-to-address-list",
+             "address-list": "ddos-targets", "address-list-timeout": "10m",
+             "comment": _SEC_TAG + "ddos_detect-2target"},
+            {"chain": "detect-ddos", "action": "add-src-to-address-list",
+             "address-list": "ddos-attackers", "address-list-timeout": "10m",
+             "comment": _SEC_TAG + "ddos_detect-3src"},
+            {"chain": "forward", "connection-state": "new", "action": "jump",
+             "jump-target": "detect-ddos",
+             "comment": _SEC_TAG + "ddos_detect-4jump"},
+        ]
+    if "ssh_blacklist" in opts:
+        # Staged SSH (port 22) brute-force tarpit: each repeat NEW attempt moves
+        # the source connection1 -> 2 -> 3 -> bruteforce_blacklist, then dropped.
+        # (Dropped the snippet's `,!secured` two-list matcher — not valid RouterOS
+        # syntax and `secured` was never defined — and used a drop instead of the
+        # accept rule so it actually blocks regardless of the input policy.)
+        ssh_base = {"chain": "input", "protocol": "tcp", "dst-port": "22",
+                    "connection-state": "new"}
+        desired += [
+            {"chain": "input", "protocol": "tcp", "dst-port": "22",
+             "src-address-list": "bruteforce_blacklist", "action": "drop",
+             "comment": _SEC_TAG + "ssh_blacklist-1drop"},
+            {**ssh_base, "src-address-list": "connection3",
+             "action": "add-src-to-address-list",
+             "address-list": "bruteforce_blacklist", "address-list-timeout": "1d",
+             "comment": _SEC_TAG + "ssh_blacklist-2block"},
+            {**ssh_base, "src-address-list": "connection2",
+             "action": "add-src-to-address-list",
+             "address-list": "connection3", "address-list-timeout": "1h",
+             "comment": _SEC_TAG + "ssh_blacklist-3stage3"},
+            {**ssh_base, "src-address-list": "connection1",
+             "action": "add-src-to-address-list",
+             "address-list": "connection2", "address-list-timeout": "15m",
+             "comment": _SEC_TAG + "ssh_blacklist-4stage2"},
+            {**ssh_base, "action": "add-src-to-address-list",
+             "address-list": "connection1", "address-list-timeout": "5m",
+             "comment": _SEC_TAG + "ssh_blacklist-5stage1"},
+        ]
     fw_plan = pusher.plan_managed_list(_FILTER, "comment", desired,
                                        owns=_prefix_owner(_SEC_TAG),
                                        label="security rule")
-    ops = list(fw_plan.ops)
+    # DDoS auto-detect also needs a raw/prerouting drop (a different menu).
+    raw_desired = []
+    if "ddos_detect" in opts:
+        raw_desired.append({"chain": "prerouting", "action": "drop",
+                            "src-address-list": "ddos-attackers",
+                            "dst-address-list": "ddos-targets",
+                            "comment": _SEC_TAG + "ddos_detect-raw"})
+    raw_plan = pusher.plan_managed_list(_RAW, "comment", raw_desired,
+                                        owns=_prefix_owner(_SEC_TAG),
+                                        label="raw rule")
+    ops = list(fw_plan.ops) + raw_plan.ops
+    # SYN attack — the kernel TCP SYN-cookies setting (/ip settings). Reversible
+    # set, only emitted when the desired state differs from the router's, so the
+    # toggle (which mirrors the live state) never churns.
+    want_syn = "syn_cookies" in opts
+    srow = next(iter(pusher.api.fetch(_IP_SETTINGS)), {})
+    if srow and (_norm(srow.get("tcp-syncookies", "")) in ("true", "yes")) != want_syn:
+        ops.append(Operation(
+            "set", _IP_SETTINGS, {"tcp-syncookies": "yes" if want_syn else "no"},
+            desc=("enable TCP SYN-cookies" if want_syn
+                  else "disable TCP SYN-cookies"),
+            inverse=Operation(
+                "set", _IP_SETTINGS,
+                {"tcp-syncookies": srow.get("tcp-syncookies", "no")},
+                desc="restore the TCP SYN-cookies setting")))
     # Disable/enable the SSH service — a reversible `set` on the /ip service ssh
     # row. Only emitted when the desired state differs from what's on the router,
     # so leaving the toggle as-is (it mirrors the live state) never churns or
