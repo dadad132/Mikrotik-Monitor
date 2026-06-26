@@ -332,7 +332,7 @@ CONF
 [Unit]
 Description=Apply mikromon WireGuard peers to wg0
 After=wg-quick@wg0.service
-Requires=wg-quick@wg0.service
+PartOf=wg-quick@wg0.service
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/bash -c 'wg syncconf wg0 <(grep -vE "^[[:space:]]*(Address|DNS|MTU|Table|PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=" /etc/wireguard/wg0.conf; cat ${WG_PEERS} 2>/dev/null || true)'
@@ -419,12 +419,15 @@ fi
 
 # ---------------------------------------------------------------------------
 # On-demand WebFig/Winbox remote access (Option A) — an nginx reverse proxy on
-# the hub that exposes a per-device port (HTTPS for WebFig, raw TCP for Winbox)
-# only while a grant is open. Enabled when ACCESS_HOST is set (the public
-# hostname customers connect to, e.g. ACCESS_HOST=access.example.com). Skipped
-# otherwise so installs that don't want it are unaffected. See REMOTE-ACCESS.md.
+# the hub. ACCESS_HOST is auto-detected from the server's public IP if not set
+# explicitly. Set ACCESS_HOST=your.domain to use a hostname instead of an IP.
 # ---------------------------------------------------------------------------
-ACCESS_HOST="${ACCESS_HOST:-}"
+if [[ -z "${ACCESS_HOST:-}" ]]; then
+  # Try public IP first (works on OVHcloud, Hetzner, etc.), fall back to local.
+  ACCESS_HOST="$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null \
+    || hostname -I 2>/dev/null | awk '{print $1}')"
+  ACCESS_HOST="${ACCESS_HOST:-}"
+fi
 if [[ -n "${ACCESS_HOST}" ]]; then
   step "Setting up remote access (nginx) for ${ACCESS_HOST}"
   ACCESS_LOG="${APP_DIR}/access-install-error.log"

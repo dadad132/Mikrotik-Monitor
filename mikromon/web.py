@@ -33,25 +33,22 @@ from .auth import AuthStore
 from .config import DEFAULT_CHECKS
 from .metrics import MetricsStore
 from .util import human_bps
+from .web_shared import (
+    esc, _BRAND, _REVERT_MINUTES, _PAGE_CSS,
+    _nav, _who, _header, _page,
+)
+from .web_auth import (
+    _render_login, _render_signup, _render_account,
+    _render_admin, _device_chips, _ADMIN_JS,
+)
 
 _CLIENT_SOURCES = ["dhcp", "wireless", "arp", "hotspot"]
-esc = html.escape
 
 log = logging.getLogger(__name__)
 
 _PROM_SAFE = re.compile(r"[^a-zA-Z0-9_]")
 _COOKIE = "mikromon_session"
 _SESSION_TTL = 12 * 3600
-
-# The product name shown in the UI. Internal identifiers (on-router rule tags
-# "mikromon:…", the WireGuard interface name, the Prometheus metric prefix, the
-# package, the systemd units and file paths) stay "mikromon" on purpose —
-# changing them would break already-deployed routers and the server install.
-_BRAND = "easymikrotik"
-
-# Commit-confirm window: how long the router waits for you to approve a pushed
-# change before it auto-reverts to the pre-change backup.
-_REVERT_MINUTES = 2
 
 
 # ============================ data assembly ================================
@@ -150,213 +147,7 @@ def _sparkline(points, width=160, height=36) -> str:
             f'points="{coords}"/></svg>')
 
 
-_PAGE_CSS = """
- *{box-sizing:border-box}
- body{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f1f5f9;color:#0f172a}
- a{color:#2563eb}
- h1{font-size:22px;margin:0 0 16px}
- /* top nav */
- header{background:#0f172a;color:#fff;padding:0 20px;display:flex;align-items:center;
-   gap:6px;height:54px;box-shadow:0 1px 4px rgba(0,0,0,.2)}
- .brand{font-weight:700;font-size:17px;display:flex;align-items:center;gap:8px}
- .brand .logo{color:#38bdf8;font-size:18px}
- nav{display:flex;gap:4px;margin-left:20px}
- nav a{color:#cbd5e1;text-decoration:none;padding:8px 13px;border-radius:7px;
-   font-size:14px}
- nav a:hover{background:#1e293b;color:#fff}
- nav a.on{background:#2563eb;color:#fff}
- header .right{margin-left:auto;display:flex;align-items:center;gap:14px;font-size:13px}
- .who{display:flex;flex-direction:column;line-height:1.15;text-align:right}
- .who small{color:#94a3b8;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
- .logout{color:#93c5fd;text-decoration:none}.logout:hover{text-decoration:underline}
- /* device card grid */
- .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));
-   gap:16px;padding:18px 20px}
- .card{background:#fff;border-radius:10px;padding:14px 18px;
-   box-shadow:0 1px 3px rgba(0,0,0,.1);border-left:4px solid #16a34a}
- .card h2{font-size:16px;margin:0 0 10px;display:flex;align-items:center;gap:8px}
- .card.warn{border-left-color:#d97706}.card.crit{border-left-color:#dc2626}
- .dot{width:11px;height:11px;border-radius:50%;display:inline-block}
- .state{margin-left:auto;font-size:11px;color:#64748b;font-weight:600}
- /* NOC summary bar */
- .noc{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));
-   gap:12px;padding:18px 20px 0}
- .tile{background:#fff;border-radius:10px;padding:12px 14px;
-   box-shadow:0 1px 3px rgba(0,0,0,.1);border-top:3px solid #94a3b8;cursor:default}
- .tile.click{cursor:pointer}.tile.click:hover{box-shadow:0 2px 8px rgba(0,0,0,.18)}
- .tile .num{font-size:28px;font-weight:700;line-height:1}
- .tile .lbl{font-size:11px;color:#64748b;text-transform:uppercase;
-   letter-spacing:.04em;margin-top:6px}
- .tile.green{border-top-color:#16a34a}.tile.green .num{color:#16a34a}
- .tile.red{border-top-color:#dc2626}.tile.red .num{color:#dc2626}
- .tile.amber{border-top-color:#d97706}.tile.amber .num{color:#d97706}
- .tile.planned{border-top-color:#cbd5e1}.tile.planned .num{color:#94a3b8;font-size:20px}
- .tile.planned .lbl::after{content:" · soon";color:#94a3b8}
- /* filter / search bar */
- .fbar{display:flex;gap:8px;align-items:center;padding:16px 20px 0;flex-wrap:wrap}
- .fbar input{flex:1;min-width:200px}
- .fbtn{background:#e2e8f0;border:0;padding:7px 13px;border-radius:7px;cursor:pointer;
-   font-size:13px;color:#0f172a}.fbtn:hover{background:#cbd5e1}
- .fbtn.on{background:#2563eb;color:#fff}
- .muted{color:#64748b;font-size:12px}
- /* tables */
- table{width:100%;border-collapse:collapse;font-size:13px}
- th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;
-   border-bottom:2px solid #e2e8f0}
- td,th{padding:8px 8px;border-bottom:1px solid #eef2f6;text-align:left;
-   vertical-align:middle}
- tr:last-child td{border-bottom:0}
- .probs{margin-top:8px;color:#b91c1c;font-size:13px}.probs ul{margin:4px 0 0 18px}
- .ok{margin-top:8px;color:#16a34a;font-size:13px}
- /* layout + forms */
- .wrap{max-width:960px;margin:26px auto;padding:0 20px}
- .box{background:#fff;border-radius:10px;padding:20px;margin:16px 0;
-   box-shadow:0 1px 3px rgba(0,0,0,.1)}
- .box h2{font-size:16px;margin:0 0 14px}
- form.inline{display:inline}
- input,select{font:inherit;padding:7px 9px;border:1px solid #cbd5e1;border-radius:7px;
-   background:#fff;color:#0f172a}
- input:focus,select:focus{outline:2px solid #bfdbfe;border-color:#2563eb}
- .fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));
-   gap:14px 16px}
- .fields label.f{display:block;font-size:12px;color:#475569;font-weight:600;
-   margin-bottom:4px}
- .fields .f input:not([type=checkbox]):not([type=radio]),
- .fields .f select{width:100%}
- .full{grid-column:1/-1}
- .chkrow{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;
-   min-height:38px}
- .chips{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0}
- .chips label{background:#f1f5f9;border:1px solid #e2e8f0;border-radius:999px;
-   padding:4px 11px;font-size:12px;cursor:pointer;user-select:none}
- .chips label:hover{background:#e2e8f0}
- .chips input{margin:0 5px 0 0;vertical-align:middle}
- .chk{display:inline-flex;align-items:center;gap:6px;margin-right:12px;font-size:13px}
- input.switch{appearance:none;-webkit-appearance:none;width:38px;height:20px;
-   background:#dc2626;border-radius:999px;position:relative;cursor:pointer;
-   vertical-align:middle;transition:.15s;flex:none}
- input.switch:checked{background:#16a34a}
- input.switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;
-   height:16px;background:#fff;border-radius:50%;transition:.15s}
- input.switch:checked::after{left:20px}
- .chk:has(.switch){display:inline-flex;align-items:center;gap:8px}
- .wanrow{display:flex;gap:8px;align-items:center;margin-bottom:7px}
- .wanrow .prio{width:24px;height:24px;border-radius:50%;background:#2563eb;color:#fff;
-   display:flex;align-items:center;justify-content:center;font-size:12px;
-   font-weight:700;flex-shrink:0}
- .wanrow input{flex:1;min-width:90px}
- .wanrow .wandel{padding:4px 10px;line-height:1}
- .rowtbl{width:100%;margin-top:6px}
- .rowtbl th{font-size:11px;color:#64748b;text-transform:uppercase;
-   letter-spacing:.03em;padding:4px 6px;border-bottom:1px solid #e2e8f0}
- .rowtbl td{padding:4px 6px;border-bottom:1px solid #f1f5f9}
- .rowtbl input{padding:6px 8px}
- .btn{background:#2563eb;color:#fff;border:0;padding:8px 15px;border-radius:7px;
-   cursor:pointer;font:inherit;font-weight:600}.btn:hover{background:#1d4ed8}
- .btn.red{background:#dc2626}.btn.red:hover{background:#b91c1c}
- .btn.ghost{background:#e2e8f0;color:#0f172a}.btn.ghost:hover{background:#cbd5e1}
- .actions{display:flex;gap:8px;align-items:center}
- .pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;
-   font-weight:700;text-transform:uppercase;letter-spacing:.03em}
- .pill.owner{background:#ede9fe;color:#6d28d9}.pill.member{background:#e0f2fe;color:#0369a1}
- /* NOC charts */
- .charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
-   gap:14px;padding:14px 20px 0}
- .chart{background:#fff;border-radius:10px;padding:14px;box-shadow:0 1px 3px
-   rgba(0,0,0,.1);display:flex;flex-direction:column;align-items:center}
- .chart.wide{align-items:stretch}
- .chart .ct{font-size:12px;font-weight:700;color:#475569;text-transform:uppercase;
-   letter-spacing:.04em;margin-bottom:8px;align-self:flex-start}
- .legend{margin-top:8px;width:100%}
- .lg{display:flex;align-items:center;gap:6px;font-size:12px;color:#334155;
-   margin:2px 0}
- .sw{width:10px;height:10px;border-radius:2px;display:inline-block}
- .lg b{margin-left:auto}
- .vlist{display:flex;flex-direction:column;gap:8px}
- .vrow{display:flex;align-items:center;gap:10px;font-size:13px}
- .vlabel{width:150px;flex-shrink:0}
- .vbar{flex:1;height:10px;background:#eef2f6;border-radius:6px;overflow:hidden}
- .vbar i{display:block;height:100%}
- .vn{width:24px;text-align:right;font-weight:700}
- .up{background:#fef3c7;color:#92400e;font-size:10px;font-weight:700;padding:1px 6px;
-   border-radius:999px;text-transform:uppercase}
- /* gauges + device overview */
- .gauge{margin:8px 0}
- .gl{display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px}
- .gl span{font-weight:700}
- .gbar{height:12px;background:#eef2f6;border-radius:7px;overflow:hidden}
- .gbar i{display:block;height:100%}
- .factgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
-   gap:12px}
- .fact .k{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.03em}
- .fact .val{font-size:15px;font-weight:600;margin-top:2px}
- .tabs{display:flex;gap:4px;flex-wrap:wrap;border-bottom:2px solid #e2e8f0;
-   margin-bottom:16px}
- .tabs a{padding:8px 13px;font-size:14px;color:#475569;text-decoration:none;
-   border-bottom:2px solid transparent;margin-bottom:-2px}
- .tabs a.on{color:#2563eb;border-bottom-color:#2563eb;font-weight:600}
- .tabs a.soon{color:#cbd5e1;cursor:not-allowed}
- .tabs a.soon::after{content:" · soon";font-size:10px}
- .tabdrop{position:relative}
- .tabdrop>.dropbtn{cursor:pointer}
- .tabdrop:hover>.tabmenu,.tabdrop:focus-within>.tabmenu{display:block}
- .tabmenu{display:none;position:absolute;top:100%;left:0;z-index:30;background:#fff;
-   border:1px solid #e2e8f0;border-radius:8px;box-shadow:0 6px 18px rgba(15,23,42,.12);
-   min-width:175px;padding:5px}
- .tabmenu a,.tabmenu button{display:block;width:100%;box-sizing:border-box;
-   text-align:left;padding:8px 12px;font-size:14px;color:#475569;text-decoration:none;
-   background:none;border:0;border-radius:6px;cursor:pointer;margin:0}
- .tabmenu a:hover,.tabmenu button:hover{background:#f1f5f9;color:#0f172a}
- .tabmenu a.on{color:#2563eb;font-weight:600}
- .tabmenu form{margin:0}
- .tabmenu button.reboot{color:#dc2626}
- .tabmenu button.reboot:hover{background:#fef2f2}
- .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
- .badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;
-   font-weight:700}
- .badge.ok{background:#dcfce7;color:#166534}.badge.warn{background:#fef3c7;color:#92400e}
- .badge.crit{background:#fee2e2;color:#991b1b}
- .linkrow{display:flex;align-items:center;gap:10px;padding:8px 0;
-   border-bottom:1px solid #eef2f6}
- .linkrow .prio{width:22px;height:22px;border-radius:50%;background:#1e293b;
-   color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;
-   font-weight:700;flex-shrink:0}
-"""
-
-
-def _nav(user, active) -> str:
-    if not user:
-        return ""
-    items = [("/", "Dashboard"), ("/inventory", "Inventory")]
-    if user.get("role") == "owner":
-        items += [("/devices", "Devices"), ("/logs", "Activity"),
-                  ("/admin", "Users")]
-    items += [("/account", "Account")]
-    links = "".join(
-        f'<a href="{href}" class="{"on" if href == active else ""}">{label}</a>'
-        for href, label in items)
-    return f"<nav>{links}</nav>"
-
-
-def _who(user) -> str:
-    """The account's display/login name — its email, or a legacy username."""
-    return (user.get("email") or user.get("username")
-            or user.get("login") or "")
-
-
-def _header(user, active="/") -> str:
-    brand = (f'<div class="brand"><span class="logo">&#9670;</span>'
-             f'{esc(_BRAND)}</div>')
-    if not user:
-        return f"<header>{brand}</header>"
-    org = user.get("org_name", "")
-    sub = f'{esc(org)} &middot; {esc(user["role"])}' if org else esc(user["role"])
-    chip = (f'<span class="who">{esc(_who(user))}'
-            f'<small>{sub}</small></span>')
-    return (f"<header>{brand}{_nav(user, active)}"
-            f'<div class="right">{chip}<a class="logout" href="/logout">Log out</a>'
-            f"</div></header>")
-
+# _PAGE_CSS, _nav, _who, _header, _page — imported from web_shared
 
 def _severity(d) -> str:
     """Worst-first ordering key: offline = crit, any problem = warn, else ok."""
@@ -395,7 +186,7 @@ def _diagnose(up, internet_down, mins_since_change, others_down):
                     f"This router went unreachable about {mins_since_change} min "
                     "after a configuration change was pushed to it — that change "
                     "is the most likely cause. If Safe mode was on it auto-reverts "
-                    "within 2 minutes; otherwise restore the latest backup from "
+                    f"within {_REVERT_MINUTES} minutes; otherwise restore the latest backup from "
                     "Maintenance → Backups.")
         return ("offline",
                 "The router isn't responding and nothing points to a recent "
@@ -1992,173 +1783,6 @@ def _render_logs(user, rows) -> str:
              f'failure) across all devices. Expand a row for the full diff and '
              f'any error.</p>{_recent_log_box(rows, device=None)}</div>')
     return _page("Activity log", _header(user, "/logs") + inner)
-
-
-_AUTH_BRAND = ('<div class="brand" style="justify-content:center;color:#0f172a;'
-               'font-size:22px;margin-bottom:6px">'
-               '<span class="logo" style="color:#2563eb">&#9670;</span>'
-               + _BRAND + '</div>')
-
-
-def _auth_page(title, body) -> str:
-    return (f'<!doctype html><html><head><meta charset="utf-8"><title>{esc(title)}'
-            f'</title><style>{_PAGE_CSS}</style></head><body>'
-            f'<div class="wrap" style="max-width:400px;margin-top:9vh">'
-            f'{_AUTH_BRAND}<div class="box">{body}</div></div></body></html>')
-
-
-def _render_login(error: str = "") -> str:
-    msg = (f'<p style="color:#dc2626;margin-top:0">{esc(error)}</p>'
-           if error else "")
-    return _auth_page("Sign in",
-            f'<h2 style="margin-top:0">Sign in</h2>{msg}'
-            f'<form method="POST" action="/login">'
-            f'<p><input name="email" placeholder="Email" autofocus '
-            f'style="width:100%"></p>'
-            f'<p class="muted" style="margin:-6px 0 8px;font-size:12px">'
-            f'Existing account? You can sign in with your username too.</p>'
-            f'<p><input name="password" type="password" placeholder="Password" '
-            f'style="width:100%"></p>'
-            f'<button class="btn" type="submit" style="width:100%">Sign in</button>'
-            f'</form>'
-            f'<p class="muted" style="margin:14px 0 0;text-align:center">'
-            f'New here? <a href="/signup">Create a company account</a></p>')
-
-
-def _render_signup(error: str = "", values=None) -> str:
-    v = values or {}
-    msg = (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
-    return _auth_page("Create account",
-            f'<h2 style="margin-top:0">Create your company account</h2>'
-            f'<p class="muted" style="margin-top:0">You\'ll be the owner: you can '
-            f'invite team members and choose which devices each one can see.</p>{msg}'
-            f'<form method="POST" action="/signup">'
-            f'<p><input name="company" placeholder="Company name" autofocus '
-            f'value="{esc(v.get("company", ""))}" style="width:100%"></p>'
-            f'<p><input name="email" type="email" placeholder="Your email" '
-            f'value="{esc(v.get("email", ""))}" style="width:100%"></p>'
-            f'<p><input name="password" type="password" '
-            f'placeholder="Password (min 6 characters)" style="width:100%"></p>'
-            f'<button class="btn" type="submit" style="width:100%">'
-            f'Create account</button></form>'
-            f'<p class="muted" style="margin:14px 0 0;text-align:center">'
-            f'Already have an account? <a href="/login">Sign in</a></p>')
-
-
-def _render_account(user, csrf: str, msg: str = "", error: str = "") -> str:
-    note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
-           (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
-    org = user.get("org_name", "")
-    # Legacy accounts have a username and can ADD an email here; either signs in.
-    uname_row = (f'<p>Username <span class="muted">(your existing login — you can '
-                 f'keep using it)</span><br><input value="{esc(user["username"])}" '
-                 f'disabled style="width:100%;max-width:360px;background:#f1f5f9">'
-                 f'</p>') if user.get("username") else ""
-    email_hint = ("Add an email to sign in with it too"
-                  if user.get("username") and not user.get("email")
-                  else "Used to sign in")
-    inner = (
-        f'<div class="wrap"><h1>My account</h1>{note}'
-        f'<div class="box"><p class="muted" style="margin-top:0">'
-        f'Company: <b>{esc(org)}</b> &middot; Role: <b>{esc(user["role"])}</b></p>'
-        f'<form method="POST" action="/account">'
-        f'<input type="hidden" name="csrf" value="{csrf}">'
-        f'{uname_row}'
-        f'<p>Email <span class="muted">({email_hint})</span><br>'
-        f'<input name="email" type="email" value="{esc(user.get("email") or "")}" '
-        f'style="width:100%;max-width:360px"></p>'
-        f'<p>New password <span class="muted">(leave blank to keep current)</span>'
-        f'<br><input name="password" type="password" placeholder="min 6 characters" '
-        f'style="width:100%;max-width:360px"></p>'
-        f'<button class="btn" type="submit">Save changes</button>'
-        f'</form></div></div>')
-    return _page("My account", _header(user, "/account") + inner)
-
-
-_ADMIN_JS = """
-<script>
- // When "All devices" is ticked, grey out + ignore the individual chips.
- // Exclude .allbox itself so name="all" is still submitted with the form.
- function syncAll(box){
-   var grp=box.closest('.devsel');
-   grp.querySelectorAll('.chips input:not(.allbox)').forEach(function(c){
-     c.disabled=box.checked; c.closest('label').style.opacity=box.checked?.45:1;});
- }
- document.querySelectorAll('.allbox').forEach(function(b){
-   syncAll(b); b.addEventListener('change',function(){syncAll(b);});});
-</script>"""
-
-
-def _device_chips(known_devices, selected, all_on) -> str:
-    """A wrapped set of device toggles + an 'All devices' master toggle."""
-    chips = "".join(
-        f'<label><input type="checkbox" name="devices" value="{esc(d)}"'
-        f'{" checked" if all_on or d in selected else ""}> {esc(d)}</label>'
-        for d in known_devices) or '<span class="muted">no devices yet</span>'
-    return (f'<div class="devsel"><div class="chips">'
-            f'<label style="background:#eef2ff"><input type="checkbox" name="all" '
-            f'class="allbox"{" checked" if all_on else ""}> <b>All devices</b></label>'
-            f'{chips}</div></div>')
-
-
-def _render_admin(auth: AuthStore, known_devices, csrf: str, user) -> str:
-    rows = []
-    for u in auth.list_users(user["org_id"]):
-        is_all = u["devices"] == "*"
-        selected = set() if is_all else set(u["devices"])
-        acct = u["login"]                         # email, or legacy username
-        is_self = acct == user["login"]
-        rows.append(f"""<tr>
-          <td><b>{esc(_who(u))}</b></td>
-          <td><span class="pill {esc(u['role'])}">{esc(u['role'])}</span></td>
-          <td>
-            <form method="POST" action="/admin/update">
-              <input type="hidden" name="csrf" value="{csrf}">
-              <input type="hidden" name="account" value="{esc(acct)}">
-              <div class="actions" style="margin-bottom:8px">
-                <select name="role">
-                  <option value="member"{' selected' if u['role']=='member' else ''}>member</option>
-                  <option value="owner"{' selected' if u['role']=='owner' else ''}>owner</option>
-                </select>
-                <button class="btn" type="submit">Save changes</button>
-              </div>
-              {_device_chips(known_devices, selected, is_all)}
-            </form>
-          </td>
-          <td>{'' if is_self else f'''
-            <form method="POST" action="/admin/delete"
-              onsubmit="return confirm('Delete user {esc(_who(u))}?')">
-              <input type="hidden" name="csrf" value="{csrf}">
-              <input type="hidden" name="account" value="{esc(acct)}">
-              <button class="btn red" type="submit">Delete</button>
-            </form>'''}
-          </td></tr>""")
-    inner = (
-        f'<div class="wrap"><h1>Team &mdash; {esc(user.get("org_name", ""))}</h1>'
-        f'<div class="box"><table>'
-        f'<tr><th>Email</th><th>Role</th><th>Allowed devices</th><th></th></tr>'
-        f'{"".join(rows)}</table></div>'
-        f'<div class="box"><h2>Add a team member</h2>'
-        f'<form method="POST" action="/admin/add">'
-        f'<input type="hidden" name="csrf" value="{csrf}">'
-        f'<div class="actions" style="margin-bottom:12px;flex-wrap:wrap">'
-        f'<input name="email" type="email" placeholder="email">'
-        f'<input name="password" type="password" placeholder="password (min 6)">'
-        f'<select name="role"><option value="member">member</option>'
-        f'<option value="owner">owner</option></select>'
-        f'</div>'
-        f'<p class="muted" style="margin:0 0 6px">Which devices may this member see?</p>'
-        f'{_device_chips(known_devices, set(), False)}'
-        f'<div style="margin-top:14px">'
-        f'<button class="btn" type="submit">Add member</button></div>'
-        f'</form></div></div>')
-    return _page("Team", _header(user, "/admin") + inner + _ADMIN_JS)
-
-
-def _page(title: str, body: str) -> str:
-    return (f'<!doctype html><html><head><meta charset="utf-8">'
-            f'<title>{esc(title)}</title><style>{_PAGE_CSS}</style></head>'
-            f'<body>{body}</body></html>')
 
 
 def _render_devices(store, csrf, user, edit_name=None, msg="") -> str:
