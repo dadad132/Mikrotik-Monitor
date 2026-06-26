@@ -2062,10 +2062,9 @@ def _render_devices(store, csrf, user, edit_name=None, msg="") -> str:
                 f'value="{esc(str(pre.get("api_port", 8728)))}">')
         + field("API timeout <span class='muted'>(seconds; raise for slow boxes "
                 "/ long scripts)</span>", f'<input name="timeout" '
-                f'value="{esc(str(pre.get("timeout", 10)))}">')
-        + field("Username", f'<input name="username" value="{v("username")}">')
-        + field("Password", f'<input name="password" type="password" '
-                f'placeholder="{"(unchanged)" if edit_name else ""}">')
+                f'value="{esc(str(pre.get("timeout", 60)))}">')
+        # No username/password here — the provisioning script creates the login
+        # for you. (Existing creds are preserved untouched when you edit.)
         + field("Security",
                 f'<div class="chkrow">'
                 f'<label class="chk"><input type="checkbox" name="use_ssl"'
@@ -3244,11 +3243,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
         def _device_form_to_raw(store, flat, multi):
             def csv(s):
                 return [x.strip() for x in (s or "").split(",") if x.strip()]
-            pwd = flat.get("password", "")
             orig = flat.get("original_name") or None
             orig_raw = (store.raw(orig) or {}) if orig else {}
-            if not pwd and orig_raw:  # keep existing password when blank on edit
-                pwd = orig_raw.get("password", "")
+            # The add/edit form no longer has username/password fields — the
+            # provisioning script creates the login. Keep whatever the device
+            # already has (so editing never wipes its credentials); provisioning
+            # overwrites them with the generated user afterwards.
+            uname = flat.get("username", "").strip() or orig_raw.get("username", "")
+            pwd = flat.get("password", "") or orig_raw.get("password", "")
             # The form no longer has separate push-user fields — one full-access
             # login does both monitoring and config-push. Preserve any push creds
             # an older device still has (so editing it doesn't break pushing);
@@ -3277,13 +3279,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 "name": flat.get("name", "").strip(),
                 "host": flat.get("host", "").strip(),
                 "api_port": int(api_port),
-                "username": flat.get("username", ""),
+                "username": uname,
                 "password": pwd,
                 "push_username": push_user,
                 "push_password": push_pwd,
                 "use_ssl": "use_ssl" in flat,
                 "verify_ssl": "verify_ssl" in flat,
-                "timeout": int(flat.get("timeout") or 10),
+                "timeout": int(flat.get("timeout") or 60),
                 "lan_subnets": csv(flat.get("lan_subnets")),
                 "wan": {"links": links},
                 "monitor_interfaces": csv(flat.get("monitor_interfaces")),

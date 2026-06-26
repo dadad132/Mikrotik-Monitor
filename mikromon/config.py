@@ -113,7 +113,7 @@ class DeviceConfig:
     password: str = ""
     use_ssl: bool = False
     verify_ssl: bool = False
-    timeout: int = 10
+    timeout: int = 60
     # Optional SEPARATE read-write credentials for config-push (provisioning,
     # backups, firewall/QoS). The monitor user above should stay read-only;
     # pushes use these when set, otherwise fall back to the monitor user.
@@ -271,7 +271,7 @@ def build_device(d: dict, defaults: dict, where: str = "device") -> DeviceConfig
         password=str(d.get("password", "")),
         use_ssl=bool(d.get("use_ssl", False)),
         verify_ssl=bool(d.get("verify_ssl", False)),
-        timeout=int(d.get("timeout", 10) or 10),
+        timeout=int(d.get("timeout", 60) or 60),
         push_username=str(d.get("push_username", "")),
         push_password=str(d.get("push_password", "")),
         lan_subnets=list(d.get("lan_subnets") or []),

@@ -148,7 +148,7 @@ devices_example:
     password: "change-me"
     use_ssl: false
     verify_ssl: false        # set true if the router has a valid certificate
-    timeout: 10
+    timeout: 60
 
     # LAN subnets — logins/activity sourced from OUTSIDE these are treated as
     # higher-risk (e.g. an admin login from a public IP).
