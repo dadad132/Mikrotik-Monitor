@@ -1902,24 +1902,19 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
             f'</form>')
     msg_html = f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else ""
 
-    at_limit = (org_plan == "free" and org_count >= _FREE_PLAN_DEVICE_LIMIT)
-    if at_limit and not edit_name:
-        add_box = (
-            f'<div class="box" style="text-align:center;padding:32px 24px">'
-            f'<div style="font-size:40px;margin-bottom:12px">&#128274;</div>'
-            f'<h2 style="margin-top:0">Free plan: {_FREE_PLAN_DEVICE_LIMIT} device included</h2>'
-            f'<p class="muted">You\'ve used your free device slot. Cloud and '
-            f'Enterprise plans (coming soon) remove this limit.</p>'
-            f'</div>')
-    else:
-        add_box = f'<div class="box"><h2>{"Edit device" if edit_name else "Add a device"}</h2>{form}</div>'
+    # TODO: re-enable after testing
+    # at_limit = (org_plan == "free" and org_count >= _FREE_PLAN_DEVICE_LIMIT)
+    # if at_limit and not edit_name:
+    #     add_box = (locked wall html)
+    # else:
+    add_box = f'<div class="box"><h2>{"Edit device" if edit_name else "Add a device"}</h2>{form}</div>'
 
     plan_banner = ""
-    if org_plan == "free":
-        used = org_count
-        if used < _FREE_PLAN_DEVICE_LIMIT:
-            plan_banner = (f'<p style="color:#2563eb;margin:0 0 12px;font-size:13px">'
-                           f'&#9432; Free plan: {used}/{_FREE_PLAN_DEVICE_LIMIT} device used.</p>')
+    # TODO: re-enable after testing
+    # if org_plan == "free":
+    #     used = org_count
+    #     if used < _FREE_PLAN_DEVICE_LIMIT:
+    #         plan_banner = (...)
 
     inner = (f'<div class="wrap"><h1>Devices</h1>{msg_html}{plan_banner}'
              f'<div class="box"><table><tr><th>Name</th><th>Host</th>'
@@ -3115,14 +3110,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if path == "/devices/save":
                     raw = self._device_form_to_raw(store, flat, multi)
                     orig = flat.get("original_name") or None
-                    # Enforce per-org device limit for free plan (new devices only).
-                    if not orig and auth:
-                        org_count = store.count_for_org(user["org_id"])
-                        org_plan = (auth.org(user["org_id"]) or {}).get("plan", "free")
-                        if org_plan == "free" and org_count >= _FREE_PLAN_DEVICE_LIMIT:
-                            return self._send(200,
-                                _render_upgrade_wall(user, org_count),
-                                "text/html; charset=utf-8")
+                    # TODO: re-enable after testing
+                    # if not orig and auth:
+                    #     org_count = store.count_for_org(user["org_id"])
+                    #     org_plan = (auth.org(user["org_id"]) or {}).get("plan", "free")
+                    #     if org_plan == "free" and org_count >= _FREE_PLAN_DEVICE_LIMIT:
+                    #         return self._send(200,
+                    #             _render_upgrade_wall(user, org_count),
+                    #             "text/html; charset=utf-8")
                     # Script-first add: no public IP entered -> provision over
                     # the tunnel. Pre-assign a stable tunnel IP now so the record
                     # is valid; the router dials home when the generated script
