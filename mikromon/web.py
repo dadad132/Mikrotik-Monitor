@@ -2056,6 +2056,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if path == "/health":
                 return self._send(200, "ok")
 
+            # Preview the landing page without wiring it to /.
+            if path == "/landing":
+                from .web_landing import render_landing
+                return self._send(200, render_landing(), "text/html; charset=utf-8")
+
             # No auth configured -> open dashboard (back-compat / demo without auth).
             if auth is None:
                 store = self._store()
