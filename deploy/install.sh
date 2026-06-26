@@ -521,6 +521,159 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Domain reverse proxy — point easymikrotik.com (or any domain) at this box.
+# Set DOMAIN= as an env var, e.g.:
+#   DOMAIN=easymikrotik.com sudo bash deploy/install.sh
+# Or add  web.domain: easymikrotik.com  to config.yaml and re-run.
+# The installer: installs nginx, gets a Let's Encrypt TLS cert for the domain,
+# writes an HTTPS reverse-proxy config (port 443 → localhost:8080), redirects
+# HTTP 80 → HTTPS, and sets web.secure_cookies: true in config.yaml.
+# Safe to re-run — idempotent.
+# ---------------------------------------------------------------------------
+DOMAIN="${DOMAIN:-}"
+if [[ -z "${DOMAIN}" ]] && [[ -f "${APP_DIR}/config.yaml" ]] \
+   && [[ -x "${APP_DIR}/.venv/bin/python" ]]; then
+  DOMAIN="$("${APP_DIR}/.venv/bin/python" - "${APP_DIR}/config.yaml" <<'PY'
+import sys
+try:
+    import yaml
+    with open(sys.argv[1]) as f:
+        c = yaml.safe_load(f) or {}
+    print((c.get("web") or {}).get("domain", ""))
+except Exception:
+    pass
+PY
+  )" || DOMAIN=""
+fi
+
+if [[ -n "${DOMAIN}" ]]; then
+  step "Setting up HTTPS domain: ${DOMAIN}"
+  DOMAIN_LOG="${APP_DIR}/domain-install-error.log"
+  set +e
+  (
+    set -e
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        nginx certbot python3-certbot-nginx
+
+    # UFW: allow HTTP and HTTPS so certbot and the browser can reach the server.
+    if command -v ufw &>/dev/null; then
+      ufw allow 80/tcp  comment "HTTP (Let's Encrypt + redirect)"  || true
+      ufw allow 443/tcp comment "HTTPS (${DOMAIN})"               || true
+    fi
+
+    # Minimal HTTP-only server block so certbot's HTTP-01 challenge works.
+    NGINX_CONF="/etc/nginx/sites-available/easymikrotik"
+    cat > "${NGINX_CONF}" <<NGX
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN} www.${DOMAIN};
+    location / { return 301 https://\$host\$request_uri; }
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+}
+NGX
+    ln -sf "${NGINX_CONF}" /etc/nginx/sites-enabled/easymikrotik 2>/dev/null || true
+    # Remove the default site so it doesn't conflict on port 80.
+    rm -f /etc/nginx/sites-enabled/default
+    nginx -t && { systemctl reload nginx || systemctl restart nginx; }
+
+    # Obtain/renew the TLS cert.  --nginx plugin handles the verification.
+    certbot certonly --nginx \
+        -d "${DOMAIN}" -d "www.${DOMAIN}" \
+        --non-interactive --agree-tos \
+        -m "admin@${DOMAIN}" \
+        --deploy-hook "systemctl reload nginx" || true
+
+    CERT="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+    KEY="/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+    if [[ ! -f "${CERT}" ]]; then
+      echo "Let's Encrypt cert not obtained — using self-signed (browser will warn)."
+      CERT="/etc/ssl/easymikrotik-${DOMAIN}.crt"
+      KEY="/etc/ssl/easymikrotik-${DOMAIN}.key"
+      [[ -f "${CERT}" ]] || openssl req -x509 -newkey rsa:2048 -nodes \
+          -keyout "${KEY}" -out "${CERT}" -days 825 \
+          -subj "/CN=${DOMAIN}" >/dev/null 2>&1
+    fi
+
+    # Full HTTPS reverse-proxy config.
+    cat > "${NGINX_CONF}" <<NGX
+# HTTP → HTTPS redirect
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN} www.${DOMAIN};
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://\$host\$request_uri; }
+}
+
+# HTTPS dashboard proxy
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${DOMAIN} www.${DOMAIN};
+
+    ssl_certificate     ${CERT};
+    ssl_certificate_key ${KEY};
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+    ssl_session_cache   shared:SSL:10m;
+
+    # Security headers
+    add_header X-Frame-Options        SAMEORIGIN;
+    add_header X-Content-Type-Options nosniff;
+    add_header Referrer-Policy        strict-origin-when-cross-origin;
+
+    # Proxy to the Python dashboard
+    location / {
+        proxy_pass         http://127.0.0.1:${WEB_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header   Host              \$host;
+        proxy_set_header   X-Real-IP         \$remote_addr;
+        proxy_set_header   X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 120s;
+        proxy_buffering    off;
+    }
+}
+NGX
+    nginx -t && { systemctl reload nginx || systemctl restart nginx; }
+
+    # Save domain to config.yaml + enable secure cookies (HTTPS).
+    "${APP_DIR}/.venv/bin/python" - "${APP_DIR}/config.yaml" "${DOMAIN}" <<'PY'
+import sys
+try:
+    import yaml
+    path, domain = sys.argv[1], sys.argv[2]
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+    web = data.setdefault("web", {})
+    web["domain"] = domain
+    web["secure_cookies"] = True
+    with open(path, "w") as f:
+        yaml.safe_dump(data, f, sort_keys=False)
+    print("config.yaml updated: web.domain + secure_cookies = true")
+except Exception as e:
+    print(f"config.yaml update failed: {e}")
+PY
+    chown "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}/config.yaml"
+  ) >"${DOMAIN_LOG}" 2>&1
+  DOM_OK=$?
+  set -e
+  if [[ ${DOM_OK} -eq 0 ]]; then
+    log "HTTPS domain ready: https://${DOMAIN}"
+    log "HTTP redirects to HTTPS automatically."
+    log "Cert auto-renews via certbot systemd timer."
+  else
+    log "WARN: domain setup failed. Check: cat ${DOMAIN_LOG}"
+    log "      Make sure ${DOMAIN} DNS A record points to this server first."
+  fi
+else
+  log "Domain proxy not configured. To enable HTTPS on your domain:"
+  log "  DOMAIN=easymikrotik.com sudo bash deploy/install.sh"
+  log "  (DNS A record must already point to this server)"
+fi
+
+# ---------------------------------------------------------------------------
 # Restart any services we stopped, now running the freshly-synced code. (On a
 # first install nothing was running yet, so this is skipped and the user starts
 # them via the "Next steps" below.) Start mikromon before mikromon-web, since
@@ -553,7 +706,11 @@ cat <<EOF
 ============================================================
 
 Dashboard will be available at:
-  http://${SERVER_IP}:${WEB_PORT}
+$(if [[ -n "${DOMAIN}" ]]; then
+    echo "  https://${DOMAIN}  (landing: https://${DOMAIN}/landing)"
+  else
+    echo "  http://${SERVER_IP}:${WEB_PORT}  (landing preview: http://${SERVER_IP}:${WEB_PORT}/landing)"
+  fi)
 
 Next steps:
 

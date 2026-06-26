@@ -30,6 +30,9 @@ web:
   host: 127.0.0.1     # 0.0.0.0 to expose on the network — see "access anywhere" below
   port: 8080
   secure_cookies: false   # set true when serving over HTTPS (behind a proxy/tunnel)
+  # domain: easymikrotik.com   # your public domain — the installer sets up nginx +
+  #                            # Let's Encrypt TLS automatically when this is set.
+  #                            # Or pass as env var: DOMAIN=easymikrotik.com sudo bash deploy/install.sh
   # Token for Prometheus/Grafana to scrape /metrics without a login. Generate a
   # random one, e.g.  python -c "import secrets;print(secrets.token_urlsafe(24))"
   # metrics_token: "paste-a-long-random-token-here"
