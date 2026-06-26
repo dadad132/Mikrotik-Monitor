@@ -218,18 +218,21 @@ check("plan_delete_backup on a missing file is an empty (safe) plan",
 print("commit-confirm auto-revert:")
 api = FakeApi({("system", "scheduler"): []})
 p = Pusher(cfg, api, dry_run=True)
-arm = p.plan_arm_revert("before-scripts-20260101-101010", minutes=2)
+arm = p.plan_arm_revert("before-scripts-20260101-101010", minutes=2,
+                        hub_ip="10.10.0.1")
 op = arm.ops[0]
+ev = op.params.get("on-event", "")
 check("arm adds a scheduler named mikromon-autorevert",
       op.action == "add" and op.path == ("system", "scheduler")
       and op.params.get("name") == "mikromon-autorevert")
-check("arm fires after the window and loads the pre-change backup",
+check("arm fires after the window and can load the pre-change backup",
       op.params.get("interval") == "2m"
-      and "/system backup load name=\"before-scripts-20260101-101010.backup\""
-      in op.params.get("on-event", ""))
-check("arm's scheduler removes itself first (one-shot, never loops)",
-      'scheduler remove [find name="mikromon-autorevert"]'
-      in op.params.get("on-event", ""))
+      and '/system backup load name="before-scripts-20260101-101010.backup"' in ev)
+check("revert is gated on a hub connectivity check (not a human guess)",
+      "/ping 10.10.0.1 count=4" in ev and ":if (" in ev)
+check("when the router can still reach the hub, the scheduler just clears itself",
+      'else={' in ev
+      and 'scheduler remove [find name="mikromon-autorevert"]' in ev)
 # disarm finds the armed scheduler by name and removes it by id
 api2 = FakeApi({("system", "scheduler"): [
     {".id": "*9", "name": "mikromon-autorevert"},

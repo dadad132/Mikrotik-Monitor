@@ -86,26 +86,35 @@ class Pusher:
         return Plan(self.cfg.name, [op], summary=f"delete {name}")
 
     # ----- commit-confirm auto-revert (safe mode) ---------------------------
-    def plan_arm_revert(self, backup_name: str, minutes: int = 2) -> Plan:
-        """Arm a local scheduler on the router that restores `backup_name` after
-        `minutes` UNLESS it's cancelled first. Because the scheduler runs on the
-        router itself, it fires even if the change just made the box unreachable
-        — so a change that breaks management auto-reverts with no site visit.
+    def plan_arm_revert(self, backup_name: str, minutes: int = 2,
+                        hub_ip: str = "10.10.0.1") -> Plan:
+        """Arm a local scheduler that, `minutes` after a change, VERIFIES the
+        router can still reach the management hub and reverts to `backup_name`
+        if it can't.
 
-        The on-event removes the scheduler first (so it never loops) then loads
-        the backup (which reboots into the pre-change config)."""
+        Why connectivity-checked rather than "revert unless a human cancels":
+        a bad change often only bites a minute or two later, so a human clicking
+        'approve' early would cancel the net before the failure shows. Here the
+        router itself decides — at the mark it pings the hub; if it gets NO
+        replies the change cut us off, so it restores the backup (reboot into the
+        pre-change config); if it can still reach the hub the change is safe and
+        the scheduler just removes itself. Runs on the router, so it works even
+        when the box is otherwise unreachable from outside."""
         if not backup_name.endswith(".backup"):
             backup_name += ".backup"
-        event = (f'/system scheduler remove [find name="{_REVERT_SCHED}"]; '
-                 f'/system backup load name="{backup_name}"')
+        event = (f':if ([/ping {hub_ip} count=4] = 0) do={{'
+                 f'/system backup load name="{backup_name}"'
+                 f'}} else={{'
+                 f'/system scheduler remove [find name="{_REVERT_SCHED}"]'
+                 f'}}')
         op = Operation(
             "add", ("system", "scheduler"),
             {"name": _REVERT_SCHED, "interval": f"{int(minutes)}m",
              "on-event": event, "comment": "mikromon:autorevert",
              "policy": "ftp,reboot,read,write,policy,test,password,"
                        "sensitive,romon"},
-            desc=f"arm auto-revert to {backup_name} in {minutes} min "
-                 f"(cancel within the window to keep the change)")
+            desc=f"arm auto-revert to {backup_name} in {minutes} min unless the "
+                 f"router can still reach the hub ({hub_ip})")
         return Plan(self.cfg.name, [op], summary="arm auto-revert")
 
     def plan_disarm_revert(self) -> Plan:

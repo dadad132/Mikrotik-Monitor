@@ -970,6 +970,14 @@ def _access_grants_path(devices_db) -> str:
     return os.path.join(d, "access-grants.json")
 
 
+def _hub_tunnel_ip(hub) -> str:
+    """The hub's own address inside the tunnel (the .1 of the WG subnet) — what
+    a router pings to prove it still has management connectivity."""
+    subnet = (hub or {}).get("subnet", _HUB_SUBNET_DEFAULT)
+    base = subnet.split("/")[0].rsplit(".", 1)[0]
+    return f"{base}.1"
+
+
 def _device_tunnel_ip(name, devices_db) -> str:
     """The device's tunnel IP (10.10.0.x) — from its saved host if that's
     already a tunnel address, else from the hub lease table in hub.json."""
@@ -1836,38 +1844,42 @@ _TAB_INTRO = {
 }
 
 
-def _render_confirm_page(name, user, slug, minutes, backup, csrf) -> str:
-    """Shown right after a safe-mode change is applied: the router will auto-
-    revert unless the user approves within the window. A live countdown + a
-    'Keep changes' button that cancels the revert."""
+def _render_confirm_page(name, user, slug, minutes, backup, hub_ip, csrf) -> str:
+    """Shown right after a safe-mode change is applied. The router itself
+    verifies, in `minutes`, that it can still reach the hub — and auto-reverts
+    if it can't. The human doesn't have to judge whether it'll break; the
+    'Keep now' button is only an early opt-out of that self-check."""
     q = quote(name)
     secs = int(minutes) * 60
     inner = (
         f'<div class="wrap" style="max-width:760px">'
-        f'<div class="box" style="border-left:4px solid #f59e0b">'
-        f'<h1 style="margin-top:0">Approve the change to {esc(name)}</h1>'
-        f'<p>The change was applied <b>and a safety net is armed</b>. If you do '
-        f'nothing, the router will <b>automatically revert</b> to the backup '
-        f'taken just before this change '
-        f'(<code>{esc(backup)}</code>) and reboot — so a change that locks you '
-        f'out fixes itself with no site visit.</p>'
-        f'<p style="font-size:28px;font-weight:700;margin:6px 0" '
-        f'data-countdown="{secs}">{minutes}:00</p>'
-        f'<p class="muted">Check that you can still reach the router (and that '
-        f'its internet is up). If everything looks good, keep the change:</p>'
+        f'<div class="box" style="border-left:4px solid #16a34a">'
+        f'<h1 style="margin-top:0">Change applied to {esc(name)} — safety net armed'
+        f'</h1>'
+        f'<p>You don\'t need to do anything. In about <b>{minutes} minutes</b> the '
+        f'router will check whether it can still reach the hub '
+        f'(<code>{esc(hub_ip)}</code>):</p>'
+        f'<ul><li>If it <b>can</b> — the change is safe and is kept.</li>'
+        f'<li>If it <b>can\'t</b> — the change cut it off, so it automatically '
+        f'restores the pre-change backup (<code>{esc(backup)}</code>) and reboots, '
+        f'and comes back on the old config. No site visit.</li></ul>'
+        f'<p class="muted">The check runs <b>on the router</b>, so it works even '
+        f'if the change made the box unreachable from here. Because it waits the '
+        f'full window and tests real connectivity, a change that only breaks a '
+        f'minute later is still caught.</p>'
+        f'<p style="font-size:24px;font-weight:700;margin:6px 0" '
+        f'data-countdown="{secs}">self-check in {minutes}:00</p>'
+        f'<p class="muted">Already verified it\'s fine and don\'t want to wait? '
+        f'You can keep it now (this skips the self-check):</p>'
         f'<form method="POST" action="/device/confirm" class="actions">'
         f'<input type="hidden" name="csrf" value="{csrf}">'
         f'<input type="hidden" name="device" value="{esc(name)}">'
         f'<input type="hidden" name="feature" value="{esc(slug)}">'
-        f'<button class="btn" type="submit">Keep changes (cancel auto-revert)'
-        f'</button>'
-        f'<a class="btn ghost" href="/device?name={q}&tab={slug}">I\'ll decide on '
-        f'the tab</a></form>'
-        f'<p class="muted" style="margin-top:14px">If you <b>can\'t</b> reach the '
-        f'router, don\'t worry — leave it, and it will roll back on its own when '
-        f'the timer ends.</p></div></div>'
+        f'<button class="btn" type="submit">Keep now (skip the self-check)</button>'
+        f'<a class="btn ghost" href="/device?name={q}&tab={slug}">Go to the tab</a>'
+        f'</form></div></div>'
         f'{_CONFIRM_JS}')
-    return _page(esc(name) + " · Approve change", _header(user, "/") + inner)
+    return _page(esc(name) + " · Change armed", _header(user, "/") + inner)
 
 
 _CONFIRM_JS = """
@@ -1878,12 +1890,12 @@ _CONFIRM_JS = """
    function tick(){
      var s=Math.max(0,Math.round((end-Date.now())/1000));
      var m=Math.floor(s/60);
-     el.textContent=m+':' + ('0'+(s%60)).slice(-2);
-     if(s<=0){el.textContent='reverting…';
+     if(s<=0){el.textContent='running the self-check…';
        el.parentNode.insertAdjacentHTML('beforeend',
-         '<p style=\"color:#b91c1c\">The window has passed — if the change broke '+
-         'the router it is reverting now. Reload in a minute.</p>');
+         '<p style=\"color:#475569\">The router is now testing hub connectivity. '+
+         'If it lost contact it is reverting + rebooting; reload in a minute.</p>');
        return;}
+     el.textContent='self-check in '+m+':' + ('0'+(s%60)).slice(-2);
      setTimeout(tick,1000);
    }
    tick();
@@ -1913,10 +1925,12 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
         safe = ("" if slug == "update" else
                 f'<label class="chk" style="display:block;margin:10px 0">'
                 f'<input type="checkbox" name="safe_revert" value="1" checked> '
-                f'<b>Safe mode</b> — if the router stops responding, automatically '
-                f'revert to the backup taken just now (you get {_REVERT_MINUTES} '
-                f'minutes to approve afterwards). Protects against a change that '
-                f'locks you out.</label>')
+                f'<b>Safe mode</b> — {_REVERT_MINUTES} min after applying, the '
+                f'router checks it can still reach the hub and <b>auto-reverts to '
+                f'the backup if it can\'t</b>. The router decides from real '
+                f'connectivity (not a guess), so a change that only breaks a '
+                f'minute later is still caught. Protects against locking yourself '
+                f'out.</label>')
         body = (f'<div class="box"><h2>Dry run — nothing has been written yet</h2>'
                 f'<pre style="background:#f8fafc;padding:12px;border-radius:8px;'
                 f'white-space:pre-wrap">{esc(preview.diff_text())}</pre>'
@@ -3185,12 +3199,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # the change still stands (just without the safety net).
                 if (bkname and flat.get("safe_revert") == "1"
                         and slug != "update"):
+                    hub_ip = _hub_tunnel_ip(_hub_load(_hub_path(devices_db)))
                     try:
-                        pusher.apply(pusher.plan_arm_revert(bkname, _REVERT_MINUTES),
-                                     feature=slug + ":arm-revert")
+                        pusher.apply(
+                            pusher.plan_arm_revert(bkname, _REVERT_MINUTES,
+                                                   hub_ip=hub_ip),
+                            feature=slug + ":arm-revert")
                         sess = self._session()
                         return self._send(200, _render_confirm_page(
-                            name, user, slug, _REVERT_MINUTES, bkname,
+                            name, user, slug, _REVERT_MINUTES, bkname, hub_ip,
                             sess["csrf"] if sess else ""),
                             "text/html; charset=utf-8")
                     except PushError:
