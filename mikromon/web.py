@@ -1050,7 +1050,15 @@ def _provision_script(name, raw, pwuser, pwd, *,
           'comment="mikromon:tunnel:fw"]] = 0) do={')
         a('  /ip firewall filter add chain=input in-interface=mikromon '
           'action=accept comment="mikromon:tunnel:fw"')
+        a("  # put it FIRST so a default input drop can't block tunnel access")
+        a('  /ip firewall filter move [find comment="mikromon:tunnel:fw"] '
+          "destination=0")
         a("}")
+        a("")
+        a("# 5b) make sure WebFig + Winbox are on, so you can manage this router")
+        a("#     remotely over the tunnel (from the dashboard's Remote access)")
+        a("/ip service set www disabled=no")
+        a("/ip service set winbox disabled=no")
         if lock_api:
             a("")
             a("# 6) Lock the API to the VPN tunnel - no public exposure. WireGuard")

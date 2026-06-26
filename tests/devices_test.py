@@ -154,6 +154,11 @@ check("lock-API binds api + api-ssl to the tunnel subnet (plain API, no cert)",
       and "/ip service set api-ssl address=10.10.0.0/24" in locked
       and "certificate add" not in locked
       and "api-ssl certificate=" not in locked)
+check("tunnel-accept firewall rule is moved FIRST so a drop can't block it",
+      'move [find comment="mikromon:tunnel:fw"] destination=0' in locked)
+check("provisioning enables WebFig + Winbox for remote management over tunnel",
+      "/ip service set www disabled=no" in locked
+      and "/ip service set winbox disabled=no" in locked)
 unlocked = web._provision_script(
     "R", {"host": "1.1.1.1"}, "mon", "pw1234567890", hub_ip="102.36.140.219",
     hub_pubkey="HUBKEY=", wg_priv="PRIV=", tunnel_ip="10.10.0.2",
