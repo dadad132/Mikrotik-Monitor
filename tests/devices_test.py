@@ -171,6 +171,16 @@ oneu = web._provision_script(
 check("script creates exactly one full-access user (no second read-only user)",
       "/user add name=mikromon " in oneu and "group=full" in oneu
       and "group=read" not in oneu and oneu.count("/user add name=") == 1)
+# diagnosis: tell a self-inflicted change from an ISP / wider-area outage
+check("healthy device -> no diagnosis", web._diagnose(True, False, None, 0) is None)
+check("down right after a change -> blames the change",
+      web._diagnose(False, False, 3, 0)[0] == "change")
+check("down with several others down -> wider/area outage",
+      web._diagnose(False, False, 3, 2)[0] == "area")
+check("up but WAN down -> ISP/internet problem, not the change",
+      web._diagnose(True, True, None, 0)[0] == "internet")
+check("down with no recent change or outage -> generic offline",
+      web._diagnose(False, False, 999, 0)[0] == "offline")
 # dashboard hides devices with no data (added but never successfully polled)
 check("dashboard hides a device with no data, shows one with telemetry",
       not web._device_has_data({"metrics": {}, "problems": [], "facts": {}})

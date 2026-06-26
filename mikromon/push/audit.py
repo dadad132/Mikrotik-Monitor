@@ -81,5 +81,23 @@ class AuditLog:
         finally:
             con.close()
 
+    def last_change(self, device):
+        """Timestamp + feature of the most recent SUCCESSFUL real config change
+        to a device (excludes the auto-backup / arm-revert / confirm sub-steps).
+        Used to tell whether a router that just went down was likely broken by a
+        change someone pushed. Returns (ts, feature) or (None, None)."""
+        con = self._con()
+        try:
+            row = con.execute(
+                "SELECT ts, feature FROM push_log WHERE device = ? AND "
+                "mode = 'apply' AND status = 'ok' "
+                "AND feature NOT LIKE '%:backup' "
+                "AND feature NOT LIKE '%:arm-revert' "
+                "AND feature NOT LIKE '%:confirm' "
+                "ORDER BY id DESC LIMIT 1", (device,)).fetchone()
+            return (row["ts"], row["feature"]) if row else (None, None)
+        finally:
+            con.close()
+
     def close(self) -> None:  # symmetry with the other stores (no-op here)
         pass

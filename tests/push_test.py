@@ -320,6 +320,15 @@ check("failure logged with error status + detail",
       logged["status"] == "error" and "FAILED" in logged["detail"])
 check("recent() filters by device",
       all(r["device"] == "R1" for r in audit.recent(device="R1")))
+# last_change: most recent REAL apply, ignoring backup/arm/confirm sub-steps
+audit.append("R1", "alice", "scripts:backup", "apply", "ok", "snap")
+audit.append("R1", "alice", "scripts", "apply", "ok", "the change")
+audit.append("R1", "alice", "scripts:arm-revert", "apply", "ok", "armed")
+ts, feat = audit.last_change("R1")
+check("last_change finds the real change, not its backup/arm sub-steps",
+      feat == "scripts" and ts is not None)
+check("last_change is empty for a device with no applied changes",
+      audit.last_change("ghost") == (None, None))
 
 
 # ---- 9. feature plan builders produce sane RouterOS rows -------------------

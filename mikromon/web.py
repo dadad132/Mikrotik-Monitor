@@ -365,6 +365,57 @@ def _severity(d) -> str:
     return "warn" if d["problems"] else "ok"
 
 
+# How recent a config change must be to be blamed for a router going offline.
+_CHANGE_BLAME_MINUTES = 10
+# How many OTHER routers must be down at the same time to call it a wider outage.
+_AREA_OUTAGE_MIN = 2
+
+
+def _diagnose(up, internet_down, mins_since_change, others_down):
+    """Best-effort verdict for WHY a device looks unhealthy, so the owner can
+    tell a self-inflicted change from an ISP/area problem. Returns
+    (kind, message) or None when there's nothing to flag.
+
+      * "change"   — went down right after a config push (likely the push)
+      * "internet" — router is up but its own WAN/uplink is down (ISP)
+      * "area"     — several routers down at once (wider/regional outage)
+      * "offline"  — down, but nothing points to a cause
+    """
+    if up and not internet_down:
+        return None
+    if not up:
+        if others_down >= _AREA_OUTAGE_MIN:
+            return ("area",
+                    f"{others_down} other routers are offline at the same time — "
+                    "this looks like a wider network or ISP outage in the area, "
+                    "not a change you made. Wait for the upstream to recover.")
+        if mins_since_change is not None \
+                and mins_since_change <= _CHANGE_BLAME_MINUTES:
+            return ("change",
+                    f"This router went unreachable about {mins_since_change} min "
+                    "after a configuration change was pushed to it — that change "
+                    "is the most likely cause. If Safe mode was on it auto-reverts "
+                    "within 2 minutes; otherwise restore the latest backup from "
+                    "Maintenance → Backups.")
+        return ("offline",
+                "The router isn't responding and nothing points to a recent "
+                "change or a wider outage — most likely its power, the device "
+                "itself, or its internet uplink being down.")
+    return ("internet",
+            "The router itself is reachable, but its internet / WAN link is down "
+            "— that's an upstream (ISP) problem, not a configuration change.")
+
+
+def _diagnosis_box(diag) -> str:
+    if not diag:
+        return ""
+    kind, msg = diag
+    color = {"change": "#dc2626", "internet": "#0369a1", "area": "#7c3aed",
+             "offline": "#b45309"}.get(kind, "#475569")
+    return (f'<div class="box" style="border-left:4px solid {color}">'
+            f'<h2>What\'s likely wrong</h2><p>{esc(msg)}</p></div>')
+
+
 def _wan_unhealthy(d) -> bool:
     keys = {p["key"] for p in d["problems"]}
     return (not d["up"]) or any("wan" in k or "internet" in k for k in keys)
@@ -670,7 +721,8 @@ def _render_inventory(store, state, user, allowed) -> str:
     return _page("Inventory", _header(user, "/inventory") + inner)
 
 
-def _render_device(store, state, name, user, csrf="", access_html="") -> str:
+def _render_device(store, state, name, user, csrf="", access_html="",
+                   last_change=None, others_down=0) -> str:
     d = _device_view(store, state, name)
     f = d["facts"]
     sev = _severity(d)
@@ -731,6 +783,14 @@ def _render_device(store, state, name, user, csrf="", access_html="") -> str:
     else:
         probs_html = '<p class="ok">No active problems.</p>'
 
+    # diagnosis: change vs ISP/WAN vs wider area outage
+    internet_down = any(p["key"] in ("internet_down", "wan_failover")
+                        for p in d["problems"])
+    mins = (max(0, int((time.time() - last_change) / 60))
+            if last_change else None)
+    diag_html = _diagnosis_box(_diagnose(d["up"], internet_down, mins,
+                                         others_down))
+
     inner = (
         f'<div class="wrap" style="max-width:1100px">'
         f'<h1 style="display:flex;align-items:center;gap:12px">{esc(name)}'
@@ -745,6 +805,7 @@ def _render_device(store, state, name, user, csrf="", access_html="") -> str:
         f'{spark or "<p class=muted>No throughput data yet.</p>"}</div>'
         f'<div class="box"><h2>Active problems</h2>{probs_html}</div>'
         f'</div>'
+        f'{diag_html}'
         f'{access_html if AuthStore.is_admin(user or {}) else ""}'
         f'{_device_forget_box(name, csrf) if AuthStore.is_admin(user or {}) else ""}'
         f'<p><a href="/">&larr; dashboard</a> &nbsp; '
@@ -2470,8 +2531,18 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     csrf = sess["csrf"] if sess else ""
                     access_html = (self._access_box_html(dev, csrf)
                                    if AuthStore.is_admin(user or {}) else "")
+                    # Diagnosis inputs: when did this device last change, and how
+                    # many OTHER devices are down right now (wider-outage signal).
+                    last_change = None
+                    al = self._auditlog()
+                    if al is not None:
+                        last_change = al.last_change(dev)[0]
+                    others_down = sum(
+                        1 for dd in _all_devices(store, state, allowed)
+                        if dd.get("device") != dev and not dd.get("up", True))
                     return self._send(200, _render_device(store, state, dev, user,
-                                      csrf, access_html),
+                                      csrf, access_html, last_change=last_change,
+                                      others_down=others_down),
                                       "text/html; charset=utf-8")
                 if path == "/api/devices":
                     return self._send(200, json.dumps(
