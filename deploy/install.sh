@@ -418,6 +418,106 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# On-demand WebFig/Winbox remote access (Option A) — an nginx reverse proxy on
+# the hub that exposes a per-device port (HTTPS for WebFig, raw TCP for Winbox)
+# only while a grant is open. Enabled when ACCESS_HOST is set (the public
+# hostname customers connect to, e.g. ACCESS_HOST=access.example.com). Skipped
+# otherwise so installs that don't want it are unaffected. See REMOTE-ACCESS.md.
+# ---------------------------------------------------------------------------
+ACCESS_HOST="${ACCESS_HOST:-}"
+if [[ -n "${ACCESS_HOST}" ]]; then
+  step "Setting up remote access (nginx) for ${ACCESS_HOST}"
+  ACCESS_LOG="${APP_DIR}/access-install-error.log"
+  set +e
+  (
+    set -e
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        nginx libnginx-mod-stream openssl
+    mkdir -p /etc/nginx/streams.d /etc/nginx/conf.d
+    # Ensure nginx loads the stream include (WebFig uses http/conf.d, already
+    # included by default; Winbox needs a top-level stream{} block).
+    if ! grep -q "streams.d/\*.conf" /etc/nginx/nginx.conf; then
+      cat >> /etc/nginx/nginx.conf <<'NGX'
+
+# easymikrotik on-demand Winbox proxies (raw TCP)
+stream {
+    include /etc/nginx/streams.d/*.conf;
+}
+NGX
+    fi
+    # Empty include files so `nginx -t` passes before any grant exists.
+    : > /etc/nginx/conf.d/easymikrotik-access.conf
+    : > /etc/nginx/streams.d/easymikrotik-access.conf
+
+    # TLS for the WebFig leg. Try Let's Encrypt; fall back to a self-signed cert
+    # so nginx still starts (replace it with a real cert later).
+    CERT="/etc/letsencrypt/live/${ACCESS_HOST}/fullchain.pem"
+    KEY="/etc/letsencrypt/live/${ACCESS_HOST}/privkey.pem"
+    if [[ ! -f "${CERT}" ]]; then
+      if command -v certbot >/dev/null 2>&1 || \
+         DEBIAN_FRONTEND=noninteractive apt-get install -y certbot >/dev/null 2>&1; then
+        certbot certonly --nginx -d "${ACCESS_HOST}" --non-interactive \
+            --agree-tos -m "admin@${ACCESS_HOST}" || true
+      fi
+    fi
+    if [[ ! -f "${CERT}" ]]; then
+      CERT="/etc/ssl/easymikrotik-${ACCESS_HOST}.crt"
+      KEY="/etc/ssl/easymikrotik-${ACCESS_HOST}.key"
+      [[ -f "${CERT}" ]] || openssl req -x509 -newkey rsa:2048 -nodes \
+          -keyout "${KEY}" -out "${CERT}" -days 825 \
+          -subj "/CN=${ACCESS_HOST}" >/dev/null 2>&1
+      echo "NOTE: using a self-signed cert for ${ACCESS_HOST} (browser will warn)."
+    fi
+
+    # Write the access: block into config.yaml (PyYAML ships in the venv).
+    "${APP_DIR}/.venv/bin/python" - "${CONFIG_FILE}" "${ACCESS_HOST}" \
+        "${APP_DIR}/access-grants.json" "${CERT}" "${KEY}" <<'PY'
+import sys, yaml
+path, host, grants, cert, key = sys.argv[1:6]
+try:
+    with open(path) as f: data = yaml.safe_load(f) or {}
+except Exception:
+    data = {}
+data["access"] = {
+    "hub_host": host, "ttl_minutes": 15, "grants_file": grants,
+    "tls_cert": cert, "tls_key": key,
+    "nginx_http_conf": "/etc/nginx/conf.d/easymikrotik-access.conf",
+    "nginx_stream_conf": "/etc/nginx/streams.d/easymikrotik-access.conf"}
+with open(path, "w") as f: yaml.safe_dump(data, f, sort_keys=False)
+print("access config written to", path)
+PY
+
+    # Grants file (owned by the web service so it can record open/close).
+    [ -f "${APP_DIR}/access-grants.json" ] || echo '{"grants":{}}' \
+        > "${APP_DIR}/access-grants.json"
+    chown "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}/access-grants.json"
+
+    # Reload units: .path applies on open/close, .timer expires grants (auto-close).
+    cp "${SRC_DIR}/deploy/easymikrotik-access-reload."* /etc/systemd/system/
+    systemctl daemon-reload
+    systemctl enable --now easymikrotik-access-reload.path
+    systemctl enable --now easymikrotik-access-reload.timer
+
+    if command -v ufw >/dev/null 2>&1; then
+      ufw allow 20000:24999/tcp comment 'easymikrotik WebFig'
+      ufw allow 25000:29999/tcp comment 'easymikrotik Winbox'
+    fi
+    nginx -t && { systemctl reload nginx || systemctl restart nginx; }
+    "${APP_DIR}/.venv/bin/python" -m mikromon access-apply -c "${CONFIG_FILE}"
+  ) >"${ACCESS_LOG}" 2>&1
+  if [ $? -eq 0 ]; then
+    log "Remote access ready on ${ACCESS_HOST} (per-device WebFig/Winbox)."
+  else
+    log "WARN: remote-access (nginx) setup failed — see ${ACCESS_LOG} and"
+    log "      deploy/REMOTE-ACCESS.md. The rest of the install is unaffected."
+  fi
+  set -e
+else
+  log "Remote access (WebFig/Winbox) not configured — re-run with"
+  log "ACCESS_HOST=your.public.hostname to enable it (see deploy/REMOTE-ACCESS.md)."
+fi
+
+# ---------------------------------------------------------------------------
 # Restart any services we stopped, now running the freshly-synced code. (On a
 # first install nothing was running yet, so this is skipped and the user starts
 # them via the "Next steps" below.) Start mikromon before mikromon-web, since

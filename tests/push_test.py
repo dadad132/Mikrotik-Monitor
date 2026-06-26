@@ -214,6 +214,35 @@ check("plan_delete_backup removes the file by id",
 check("plan_delete_backup on a missing file is an empty (safe) plan",
       p.plan_delete_backup("nope.backup").empty)
 
+# ---- 5b. commit-confirm auto-revert (safe mode) ---------------------------
+print("commit-confirm auto-revert:")
+api = FakeApi({("system", "scheduler"): []})
+p = Pusher(cfg, api, dry_run=True)
+arm = p.plan_arm_revert("before-scripts-20260101-101010", minutes=2)
+op = arm.ops[0]
+check("arm adds a scheduler named mikromon-autorevert",
+      op.action == "add" and op.path == ("system", "scheduler")
+      and op.params.get("name") == "mikromon-autorevert")
+check("arm fires after the window and loads the pre-change backup",
+      op.params.get("interval") == "2m"
+      and "/system backup load name=\"before-scripts-20260101-101010.backup\""
+      in op.params.get("on-event", ""))
+check("arm's scheduler removes itself first (one-shot, never loops)",
+      'scheduler remove [find name="mikromon-autorevert"]'
+      in op.params.get("on-event", ""))
+# disarm finds the armed scheduler by name and removes it by id
+api2 = FakeApi({("system", "scheduler"): [
+    {".id": "*9", "name": "mikromon-autorevert"},
+    {".id": "*8", "name": "something-else"}]})
+p2 = Pusher(cfg, api2, dry_run=True)
+dis = p2.plan_disarm_revert()
+check("disarm removes the autorevert scheduler by id",
+      len(dis.ops) == 1 and dis.ops[0].action == "remove"
+      and dis.ops[0].params.get(".id") == "*9")
+check("disarm is an empty (safe) plan when nothing is armed",
+      Pusher(cfg, FakeApi({("system", "scheduler"): []}), dry_run=True)
+      .plan_disarm_revert().empty)
+
 # ---- 6. ownership by comment PREFIX (multi-rule features) ------------------
 print("ownership by prefix:")
 from mikromon.push.reconcile import reconcile_list as rl

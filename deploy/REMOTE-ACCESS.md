@@ -22,6 +22,21 @@ a root reload unit renders them into nginx config and reloads nginx.
 > validated on a live server from the build environment — test it on your
 > Ubuntu hub. The dashboard/grant logic is covered by `tests/access_test.py`.
 
+## Easiest: let install.sh do it
+
+Re-run the installer with `ACCESS_HOST` set to the public hostname customers
+will connect to. It installs nginx + the stream module, sets up the stream
+include, gets a Let's Encrypt cert (falling back to self-signed), writes the
+`access:` config, installs + enables the reload units, and opens the firewall
+port ranges:
+
+```bash
+sudo ACCESS_HOST=access.example.com bash deploy/install.sh
+```
+
+Point `access.example.com`'s DNS at this server first (and have port 80 open) so
+certbot can issue a real certificate. Everything below is the manual equivalent.
+
 ## Prerequisites on the hub (Ubuntu)
 
 1. **nginx with the stream module** (Ubuntu's `nginx` package includes it):

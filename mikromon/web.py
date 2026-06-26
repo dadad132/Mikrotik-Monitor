@@ -49,6 +49,10 @@ _SESSION_TTL = 12 * 3600
 # changing them would break already-deployed routers and the server install.
 _BRAND = "easymikrotik"
 
+# Commit-confirm window: how long the router waits for you to approve a pushed
+# change before it auto-reverts to the pre-change backup.
+_REVERT_MINUTES = 2
+
 
 # ============================ data assembly ================================
 def _load_state(path: str) -> dict:
@@ -1771,6 +1775,61 @@ _TAB_INTRO = {
 }
 
 
+def _render_confirm_page(name, user, slug, minutes, backup, csrf) -> str:
+    """Shown right after a safe-mode change is applied: the router will auto-
+    revert unless the user approves within the window. A live countdown + a
+    'Keep changes' button that cancels the revert."""
+    q = quote(name)
+    secs = int(minutes) * 60
+    inner = (
+        f'<div class="wrap" style="max-width:760px">'
+        f'<div class="box" style="border-left:4px solid #f59e0b">'
+        f'<h1 style="margin-top:0">Approve the change to {esc(name)}</h1>'
+        f'<p>The change was applied <b>and a safety net is armed</b>. If you do '
+        f'nothing, the router will <b>automatically revert</b> to the backup '
+        f'taken just before this change '
+        f'(<code>{esc(backup)}</code>) and reboot — so a change that locks you '
+        f'out fixes itself with no site visit.</p>'
+        f'<p style="font-size:28px;font-weight:700;margin:6px 0" '
+        f'data-countdown="{secs}">{minutes}:00</p>'
+        f'<p class="muted">Check that you can still reach the router (and that '
+        f'its internet is up). If everything looks good, keep the change:</p>'
+        f'<form method="POST" action="/device/confirm" class="actions">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="device" value="{esc(name)}">'
+        f'<input type="hidden" name="feature" value="{esc(slug)}">'
+        f'<button class="btn" type="submit">Keep changes (cancel auto-revert)'
+        f'</button>'
+        f'<a class="btn ghost" href="/device?name={q}&tab={slug}">I\'ll decide on '
+        f'the tab</a></form>'
+        f'<p class="muted" style="margin-top:14px">If you <b>can\'t</b> reach the '
+        f'router, don\'t worry — leave it, and it will roll back on its own when '
+        f'the timer ends.</p></div></div>'
+        f'{_CONFIRM_JS}')
+    return _page(esc(name) + " · Approve change", _header(user, "/") + inner)
+
+
+_CONFIRM_JS = """
+<script>
+ (function(){
+   var el=document.querySelector('[data-countdown]'); if(!el) return;
+   var end=Date.now()+ (+el.getAttribute('data-countdown'))*1000;
+   function tick(){
+     var s=Math.max(0,Math.round((end-Date.now())/1000));
+     var m=Math.floor(s/60);
+     el.textContent=m+':' + ('0'+(s%60)).slice(-2);
+     if(s<=0){el.textContent='reverting…';
+       el.parentNode.insertAdjacentHTML('beforeend',
+         '<p style=\"color:#b91c1c\">The window has passed — if the change broke '+
+         'the router it is reverting now. Reload in a minute.</p>');
+       return;}
+     setTimeout(tick,1000);
+   }
+   tick();
+ })();
+</script>"""
+
+
 def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                         fields=None, preview=None, submitted=None, error="",
                         msg="", recent=None, facts=None, unmanaged=None,
@@ -1787,17 +1846,29 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
            f'</span></div>' if error else "")
 
     if preview is not None:
+        # Safe mode (commit-confirm): offered for changes that could lock you
+        # out. Not for 'update' (its reboot is intentional and would fight the
+        # revert).
+        safe = ("" if slug == "update" else
+                f'<label class="chk" style="display:block;margin:10px 0">'
+                f'<input type="checkbox" name="safe_revert" value="1" checked> '
+                f'<b>Safe mode</b> — if the router stops responding, automatically '
+                f'revert to the backup taken just now (you get {_REVERT_MINUTES} '
+                f'minutes to approve afterwards). Protects against a change that '
+                f'locks you out.</label>')
         body = (f'<div class="box"><h2>Dry run — nothing has been written yet</h2>'
                 f'<pre style="background:#f8fafc;padding:12px;border-radius:8px;'
                 f'white-space:pre-wrap">{esc(preview.diff_text())}</pre>'
-                f'<form method="POST" action="{confirm_action}" class="actions">'
+                f'<form method="POST" action="{confirm_action}">'
                 f'<input type="hidden" name="csrf" value="{csrf}">'
                 f'<input type="hidden" name="apply" value="1">'
                 f'{_hidden_from_multi(submitted or {})}'
+                f'{safe}'
+                f'<div class="actions">'
                 f'<button class="btn" type="submit">Confirm &amp; apply to the '
                 f'router</button>'
                 f'<a class="btn ghost" href="/device?name={q}&tab={slug}">Cancel'
-                f'</a></form></div>')
+                f'</a></div></form></div>')
     elif error:
         body = ""
     else:
@@ -3015,6 +3086,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # Backups tab if the change breaks something. Skipped on dry-run
                 # previews and no-op plans. If the snapshot can't be made we do
                 # NOT proceed — better to fail safe than change without a backup.
+                bkname = ""
                 if commit and not plan.empty:
                     bkname = f"before-{slug}-{time.strftime('%Y%m%d-%H%M%S')}"
                     try:
@@ -3037,6 +3109,21 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # WireGuard public key as a peer on this server automatically.
                 if slug == "hubtunnel" and devices_db:
                     _register_hub_peer(name, pusher.api, flat, devices_db)
+                # Safe mode (commit-confirm): arm a local auto-revert so a change
+                # that locks us out heals itself. Best-effort — if arming fails
+                # the change still stands (just without the safety net).
+                if (bkname and flat.get("safe_revert") == "1"
+                        and slug != "update"):
+                    try:
+                        pusher.apply(pusher.plan_arm_revert(bkname, _REVERT_MINUTES),
+                                     feature=slug + ":arm-revert")
+                        sess = self._session()
+                        return self._send(200, _render_confirm_page(
+                            name, user, slug, _REVERT_MINUTES, bkname,
+                            sess["csrf"] if sess else ""),
+                            "text/html; charset=utf-8")
+                    except PushError:
+                        pass  # couldn't arm; fall through to the normal result
                 return self._redirect(
                     f"/device?name={quote(name)}&tab={slug}&msg=" +
                     quote("Changes applied to the router."))
@@ -3120,6 +3207,57 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             except (ValueError, RuntimeError) as exc:
                 return self._send(400, f"Error: {exc}")
             return self._redirect(f"/device?name={q}")
+
+        def _device_confirm_post(self, flat, user):
+            """Approve a safe-mode change: connect and cancel the pending
+            auto-revert scheduler. If the router can't be reached, the change
+            evidently broke connectivity — so we leave the revert armed and tell
+            the user it will roll back on its own."""
+            from .config import build_device
+            from .device import DeviceError
+            from .push import Pusher, PushError, rw_device
+            from .push.api import PushApi
+
+            if not AuthStore.is_admin(user or {}):
+                return self._send(403, "forbidden")
+            name = flat.get("device", "")
+            slug = flat.get("feature", "")
+            raw = self._device_raw(name)
+            if raw is None:
+                return self._send(404, "no such device")
+            cfg = build_device(raw, defaults)
+            audit = self._auditlog()
+            dev = rw_device(cfg)
+            api = PushApi(dev)
+            err = None
+            try:
+                api.connect()
+                pusher = Pusher(cfg, api, dry_run=False, audit=audit,
+                                user=(user or {}).get("login", ""))
+                pusher.apply(pusher.plan_disarm_revert(), feature=slug + ":confirm")
+            except (DeviceError, PushError) as exc:
+                err = str(exc)
+            finally:
+                dev.close()
+                if audit:
+                    audit.close()
+            if err is None:
+                return self._redirect(
+                    f"/device?name={quote(name)}&tab={quote(slug)}&msg=" +
+                    quote("Change kept — auto-revert cancelled."))
+            q = quote(name)
+            box = (f'<div class="box" style="border-left:4px solid #dc2626">'
+                   f'<h2>Could not reach {esc(name)} to confirm</h2>'
+                   f'<p>{esc(err)}</p><p>If the change broke the router\'s '
+                   f'connectivity, <b>leave it</b> — the safety net will revert it '
+                   f'to the pre-change backup and reboot within the timer, and it '
+                   f'should come back on the old config. Try the dashboard again in '
+                   f'a couple of minutes.</p>'
+                   f'<a class="btn" href="/device?name={q}">Back to {esc(name)}</a>'
+                   f'</div>')
+            return self._send(200, _page(esc(name) + " · Confirm",
+                              _header(user, "/") + f'<div class="wrap">{box}</div>'),
+                              "text/html; charset=utf-8")
 
         def _device_forget_post(self, flat, user):
             """Remove a device from the dashboard entirely: delete it from the
@@ -3375,6 +3513,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._device_reboot_post(flat, user)
             if path == "/device/access":
                 return self._device_access_post(flat, user)
+            if path == "/device/confirm":
+                return self._device_confirm_post(flat, user)
             try:
                 if path == "/admin/add":
                     auth.add_member(user["org_id"], flat.get("email", ""),

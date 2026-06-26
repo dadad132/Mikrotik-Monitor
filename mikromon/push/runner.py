@@ -16,6 +16,9 @@ from .reconcile import _norm, reconcile_list
 
 log = logging.getLogger(__name__)
 
+# Name of the on-router scheduler that performs the commit-confirm auto-revert.
+_REVERT_SCHED = "mikromon-autorevert"
+
 
 def rw_device(cfg):
     """Build a Device that authenticates with the read-write push credentials
@@ -81,6 +84,39 @@ class Pusher:
         op = Operation("remove", ("file",), {".id": fid},
                        desc=f"delete backup file '{name}'")
         return Plan(self.cfg.name, [op], summary=f"delete {name}")
+
+    # ----- commit-confirm auto-revert (safe mode) ---------------------------
+    def plan_arm_revert(self, backup_name: str, minutes: int = 2) -> Plan:
+        """Arm a local scheduler on the router that restores `backup_name` after
+        `minutes` UNLESS it's cancelled first. Because the scheduler runs on the
+        router itself, it fires even if the change just made the box unreachable
+        — so a change that breaks management auto-reverts with no site visit.
+
+        The on-event removes the scheduler first (so it never loops) then loads
+        the backup (which reboots into the pre-change config)."""
+        if not backup_name.endswith(".backup"):
+            backup_name += ".backup"
+        event = (f'/system scheduler remove [find name="{_REVERT_SCHED}"]; '
+                 f'/system backup load name="{backup_name}"')
+        op = Operation(
+            "add", ("system", "scheduler"),
+            {"name": _REVERT_SCHED, "interval": f"{int(minutes)}m",
+             "on-event": event, "comment": "mikromon:autorevert",
+             "policy": "ftp,reboot,read,write,policy,test,password,"
+                       "sensitive,romon"},
+            desc=f"arm auto-revert to {backup_name} in {minutes} min "
+                 f"(cancel within the window to keep the change)")
+        return Plan(self.cfg.name, [op], summary="arm auto-revert")
+
+    def plan_disarm_revert(self) -> Plan:
+        """Cancel the pending auto-revert (the user approved the change)."""
+        sid = next((s.get(".id") for s in self.api.fetch(("system", "scheduler"))
+                    if s.get("name") == _REVERT_SCHED), None)
+        if sid is None:
+            return Plan(self.cfg.name, [], summary="auto-revert already cleared")
+        op = Operation("remove", ("system", "scheduler"), {".id": sid},
+                       desc="confirm change — cancel the pending auto-revert")
+        return Plan(self.cfg.name, [op], summary="confirm (cancel auto-revert)")
 
     # ----- generic managed-list reconcile (firewall, NAT, queues, …) --------
     def plan_managed_list(self, path, key, desired, *, manage_tag=None,
