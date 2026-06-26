@@ -1785,7 +1785,27 @@ def _render_logs(user, rows) -> str:
     return _page("Activity log", _header(user, "/logs") + inner)
 
 
-def _render_devices(store, csrf, user, edit_name=None, msg="") -> str:
+_FREE_PLAN_DEVICE_LIMIT = 1
+
+
+def _render_upgrade_wall(user, current_count: int = 0) -> str:
+    inner = (
+        '<div class="wrap"><h1>Upgrade required</h1>'
+        '<div class="box" style="text-align:center;padding:40px 24px">'
+        '<div style="font-size:48px;margin-bottom:16px">&#128274;</div>'
+        '<h2 style="margin-top:0">Free plan: 1 device included</h2>'
+        f'<p class="muted">Your account has {current_count} device'
+        f'{"s" if current_count != 1 else ""} — the free plan allows '
+        f'{_FREE_PLAN_DEVICE_LIMIT}. Cloud and Enterprise plans '
+        f'(coming soon) remove this limit and unlock additional features.</p>'
+        '<p style="margin-top:24px">'
+        '<a class="btn ghost" href="/devices">Back to devices</a>'
+        '</p></div></div>')
+    return _page("Upgrade required", _header(user, "/devices") + inner)
+
+
+def _render_devices(store, csrf, user, edit_name=None, msg="",
+                    org_count: int = 0, org_plan: str = "free") -> str:
     if store is None:
         return _page("Devices", _header(user, "/devices") + '<div class="wrap">'
                      '<h1>Devices</h1><div class="box">Device management is not '
@@ -1881,11 +1901,30 @@ def _render_devices(store, csrf, user, edit_name=None, msg="") -> str:
             f'<button class="btn" type="submit">{save_lbl}</button>{cancel}</div>'
             f'</form>')
     msg_html = f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else ""
-    inner = (f'<div class="wrap"><h1>Devices</h1>{msg_html}'
+
+    at_limit = (org_plan == "free" and org_count >= _FREE_PLAN_DEVICE_LIMIT)
+    if at_limit and not edit_name:
+        add_box = (
+            f'<div class="box" style="text-align:center;padding:32px 24px">'
+            f'<div style="font-size:40px;margin-bottom:12px">&#128274;</div>'
+            f'<h2 style="margin-top:0">Free plan: {_FREE_PLAN_DEVICE_LIMIT} device included</h2>'
+            f'<p class="muted">You\'ve used your free device slot. Cloud and '
+            f'Enterprise plans (coming soon) remove this limit.</p>'
+            f'</div>')
+    else:
+        add_box = f'<div class="box"><h2>{"Edit device" if edit_name else "Add a device"}</h2>{form}</div>'
+
+    plan_banner = ""
+    if org_plan == "free":
+        used = org_count
+        if used < _FREE_PLAN_DEVICE_LIMIT:
+            plan_banner = (f'<p style="color:#2563eb;margin:0 0 12px;font-size:13px">'
+                           f'&#9432; Free plan: {used}/{_FREE_PLAN_DEVICE_LIMIT} device used.</p>')
+
+    inner = (f'<div class="wrap"><h1>Devices</h1>{msg_html}{plan_banner}'
              f'<div class="box"><table><tr><th>Name</th><th>Host</th>'
              f'<th>Actions</th></tr>{trows}</table></div>'
-             f'<div class="box"><h2>{"Edit device" if edit_name else "Add a device"}'
-             f'</h2>{form}</div></div>')
+             f'{add_box}</div>')
     return _page("Devices", _header(user, "/devices") + inner + _WAN_JS)
 
 
@@ -2247,8 +2286,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             edit = parse_qs(url.query).get("edit", [None])[0]
             store = self._devstore()
             try:
+                org_count = store.count_for_org(user["org_id"]) if store else 0
+                org_plan = (auth.org(user["org_id"]) or {}).get("plan", "free") if auth else "free"
                 page = _render_devices(store, self._session()["csrf"], user,
-                                       edit_name=edit)
+                                       edit_name=edit, org_count=org_count,
+                                       org_plan=org_plan)
             finally:
                 if store:
                     store.close()
@@ -3073,6 +3115,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if path == "/devices/save":
                     raw = self._device_form_to_raw(store, flat, multi)
                     orig = flat.get("original_name") or None
+                    # Enforce per-org device limit for free plan (new devices only).
+                    if not orig and auth:
+                        org_count = store.count_for_org(user["org_id"])
+                        org_plan = (auth.org(user["org_id"]) or {}).get("plan", "free")
+                        if org_plan == "free" and org_count >= _FREE_PLAN_DEVICE_LIMIT:
+                            return self._send(200,
+                                _render_upgrade_wall(user, org_count),
+                                "text/html; charset=utf-8")
                     # Script-first add: no public IP entered -> provision over
                     # the tunnel. Pre-assign a stable tunnel IP now so the record
                     # is valid; the router dials home when the generated script
@@ -3295,9 +3345,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
         def _post_signup(self):
             flat, _ = self._form()
             email = flat.get("email", "").strip().lower()
+            phone = flat.get("phone", "").strip()
+            import re as _re
+            if len(_re.sub(r"\D", "", phone)) < 7:
+                return self._redirect("/signup?error=" + quote(
+                    "A valid mobile number is required (at least 7 digits)."))
             try:
                 auth.signup(email, flat.get("password", ""),
-                            flat.get("company", ""))
+                            flat.get("company", ""), phone=phone)
             except Exception as exc:  # noqa: BLE001 — show the reason on the form
                 return self._redirect("/signup?error=" + quote(str(exc)))
             token = sessions.create(email)

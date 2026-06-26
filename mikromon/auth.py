@@ -34,11 +34,13 @@ import time
 _ITERATIONS = 200_000
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PHONE_DIGITS_RE = re.compile(r"\d")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS orgs (
     id      INTEGER PRIMARY KEY,
     name    TEXT NOT NULL,
+    plan    TEXT NOT NULL DEFAULT 'free',
     created REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS users (
@@ -47,6 +49,7 @@ CREATE TABLE IF NOT EXISTS users (
                                                   -- new (email-only) accounts
     email      TEXT UNIQUE,                       -- login id for new accounts;
                                                   -- legacy accounts may add one
+    phone      TEXT,                              -- collected at signup to deter abuse
     pw_hash    TEXT NOT NULL,
     salt       TEXT NOT NULL,
     iterations INTEGER NOT NULL,
@@ -99,6 +102,14 @@ class AuthStore:
                 self._migrate_intermediate()  # email-keyed multi-tenant build
         self.db.executescript(_SCHEMA)
         self.db.commit()
+        # Additive column migrations — safe to run every startup.
+        self._add_col_if_missing("users", "phone", "TEXT")
+        self._add_col_if_missing("orgs", "plan", "TEXT NOT NULL DEFAULT 'free'")
+
+    def _add_col_if_missing(self, table: str, col: str, col_def: str) -> None:
+        if col not in self._columns(table):
+            self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
+            self.db.commit()
 
     def _migrate_legacy(self) -> None:
         """Upgrade the original single-tenant schema (username-keyed, role
@@ -145,7 +156,7 @@ class AuthStore:
 
     # ----- mutations --------------------------------------------------------
     def signup(self, email: str, password: str, company: str,
-               role: str = "owner") -> int:
+               role: str = "owner", phone: str = "") -> int:
         """Self-service registration: create a new company + its owner.
 
         Returns the new org id.
@@ -155,18 +166,19 @@ class AuthStore:
         if not company:
             raise AuthError("Company name cannot be empty.")
         self._check_new_user(email, password)
+        phone = _norm_phone(phone)
         salt, pw_hash, iters = hash_password(password)
         with self._lock:
             cur = self.db.execute(
-                "INSERT INTO orgs (name, created) VALUES (?, ?)",
+                "INSERT INTO orgs (name, plan, created) VALUES (?, 'free', ?)",
                 (company, time.time()))
             org_id = cur.lastrowid
             self.db.execute(
-                "INSERT INTO users (username, email, pw_hash, salt, iterations, "
-                "role, org_id, devices, created) "
-                "VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (email, pw_hash, salt, iters, _norm_role(role), org_id,
-                 _dump_devices("*" if _norm_role(role) == "owner" else None),
+                "INSERT INTO users (username, email, phone, pw_hash, salt, "
+                "iterations, role, org_id, devices, created) "
+                "VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (email, phone or None, pw_hash, salt, iters, _norm_role(role),
+                 org_id, _dump_devices("*" if _norm_role(role) == "owner" else None),
                  time.time()))
             self.db.commit()
         return org_id
@@ -252,7 +264,7 @@ class AuthStore:
         if not ident:
             return None
         cur = self.db.execute(
-            "SELECT id, username, email, pw_hash, salt, iterations, role, "
+            "SELECT id, username, email, phone, pw_hash, salt, iterations, role, "
             "org_id, devices, created FROM users "
             "WHERE lower(email) = ? OR lower(username) = ? LIMIT 1",
             (ident, ident))
@@ -260,9 +272,9 @@ class AuthStore:
         if not row:
             return None
         return {"id": row[0], "username": row[1], "email": row[2],
-                "pw_hash": row[3], "salt": row[4], "iterations": row[5],
-                "role": row[6], "org_id": row[7],
-                "devices": _load_devices(row[8]), "created": row[9],
+                "phone": row[3], "pw_hash": row[4], "salt": row[5],
+                "iterations": row[6], "role": row[7], "org_id": row[8],
+                "devices": _load_devices(row[9]), "created": row[10],
                 "login": row[2] or row[1]}     # email preferred, else username
 
     def list_users(self, org_id: int | None = None) -> list:
@@ -286,9 +298,14 @@ class AuthStore:
         return self.db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
 
     def org(self, org_id: int) -> dict | None:
-        row = self.db.execute("SELECT id, name, created FROM orgs WHERE id = ?",
-                              (int(org_id),)).fetchone()
-        return {"id": row[0], "name": row[1], "created": row[2]} if row else None
+        row = self.db.execute(
+            "SELECT id, name, plan, created FROM orgs WHERE id = ?",
+            (int(org_id),)).fetchone()
+        return ({"id": row[0], "name": row[1], "plan": row[2], "created": row[3]}
+                if row else None)
+
+    def set_phone(self, identifier: str, phone: str) -> None:
+        self._update(self._require(identifier)["id"], phone=_norm_phone(phone) or None)
 
     def org_name(self, org_id) -> str:
         org = self.org(org_id) if org_id is not None else None
@@ -345,6 +362,10 @@ def _norm_role(role: str) -> str:
 
 def _norm_email(email: str) -> str:
     return (email or "").strip().lower()
+
+
+def _norm_phone(phone: str) -> str:
+    return (phone or "").strip()
 
 
 def _dump_devices(devices) -> str:

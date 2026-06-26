@@ -90,6 +90,11 @@ class DevicesStore:
     def count(self) -> int:
         return self.db.execute("SELECT COUNT(*) FROM devices").fetchone()[0]
 
+    def count_for_org(self, org_id: int) -> int:
+        return self.db.execute(
+            "SELECT COUNT(*) FROM devices WHERE org_id = ?",
+            (int(org_id),)).fetchone()[0]
+
     def raw(self, name: str) -> dict | None:
         row = self.db.execute("SELECT config FROM devices WHERE name = ?",
                               (name,)).fetchone()
