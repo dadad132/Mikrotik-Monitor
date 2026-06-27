@@ -436,6 +436,8 @@ if [[ -n "${ACCESS_HOST}" ]]; then
     set -e
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         nginx libnginx-mod-stream openssl
+    # Remove the default nginx welcome page so it never shows instead of the dashboard.
+    rm -f /etc/nginx/sites-enabled/default
     mkdir -p /etc/nginx/streams.d /etc/nginx/conf.d
     # Ensure nginx loads the stream include (WebFig uses http/conf.d, already
     # included by default; Winbox needs a top-level stream{} block).
@@ -530,7 +532,7 @@ fi
 # HTTP 80 → HTTPS, and sets web.secure_cookies: true in config.yaml.
 # Safe to re-run — idempotent.
 # ---------------------------------------------------------------------------
-DOMAIN="${DOMAIN:-}"
+DOMAIN="${DOMAIN:-easymikrotik.com}"
 if [[ -z "${DOMAIN}" ]] && [[ -f "${APP_DIR}/config.yaml" ]] \
    && [[ -x "${APP_DIR}/.venv/bin/python" ]]; then
   DOMAIN="$("${APP_DIR}/.venv/bin/python" - "${APP_DIR}/config.yaml" <<'PY'
