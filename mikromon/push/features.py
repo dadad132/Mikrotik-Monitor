@@ -1690,7 +1690,7 @@ FEATURES = {
     "nextdns": {"title": "DNS", "write": True,
                 "read": nextdns_read, "summary": nextdns_summary,
                 "form": nextdns_form, "plan": nextdns_plan},
-    "qos": {"title": "QoS — bandwidth limits", "write": True, "read": qos_read,
+    "qos": {"title": "Queues", "write": True, "read": qos_read,
             "summary": qos_summary, "form": qos_form, "plan": qos_plan,
             "unmanaged": qos_unmanaged, "adopt": True, "path": _QUEUE,
             "prefix": _QOS_TAG, "adopt_name": _qos_adopt_name},

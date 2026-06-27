@@ -405,13 +405,13 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
 
 # Flat tabs on the device bar.
 _DEVICE_TABS = ["Overview", "Provision", "WAN", "Security",
-                "DNS", "QoS", "Port forwarding",
+                "DNS", "Queues", "Port forwarding",
                 "Tunnel", "Scripts", "Update", "Backups"]
 # label -> url slug (all tabs are wired to the engine now)
 _LIVE_TABS = {"Overview": "", "Provision": "provision",
               "WAN": "sdwan",
               "Security": "security", "Restrict access": "harden",
-              "DNS": "nextdns", "QoS": "qos", "Port forwarding": "portfwd",
+              "DNS": "nextdns", "Queues": "qos", "QoS": "qos", "Port forwarding": "portfwd",
               "Interfaces": "interfaces", "Remote access": "remote",
               "Tunnel": "tunnel", "Scripts": "scripts",
               "Update": "update", "Backups": "backups"}
@@ -1346,6 +1346,35 @@ def _adopt_box(name, slug, feature, csrf, unmanaged) -> str:
     return (f'<div class="box"><h2>Existing on the router (unmanaged)</h2>'
             f'<p class="muted">{note}</p><table><tr><th>Rule</th><th></th></tr>'
             f'{rows}</table></div>')
+
+
+def _queue_script_box(name, csrf) -> str:
+    """A paste-and-run script box shown on the Queues tab.
+    Submits to the scripts feature so it goes through the full dry-run pipeline."""
+    q = esc(name)
+    return (f'<div class="box"><h2>Run a queue script</h2>'
+            f'<p class="muted">Paste any RouterOS commands that manage queues — '
+            f'e.g. bulk resets, policy-based limits, or anything the table above '
+            f'can\'t express. The script is saved to /system/script, previewed, '
+            f'then run. Use the Scripts tab to manage or remove saved scripts.</p>'
+            f'<form method="POST" action="/device/push">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            f'<input type="hidden" name="device" value="{q}">'
+            f'<input type="hidden" name="feature" value="scripts">'
+            f'<div class="fields">'
+            f'<div class="f"><label class="f">Script name</label>'
+            f'<input name="new_name" value="queue-script" '
+            f'placeholder="queue-script"></div>'
+            f'<div class="f full"><label class="f">Script source (RouterOS commands)'
+            f'</label><textarea name="new_source" rows="8" '
+            f'style="width:100%;font-family:ui-monospace,Consolas,monospace;'
+            f'font-size:13px;padding:8px;border:1px solid #cbd5e1;border-radius:7px"'
+            f' placeholder="/queue simple set [find name=&quot;office&quot;] '
+            f'max-limit=20M/10M"></textarea></div>'
+            f'</div>'
+            f'<div class="actions" style="margin-top:12px">'
+            f'<button class="btn" type="submit">Preview &amp; save script</button>'
+            f'</div></form></div>')
 
 
 def _scripts_box(name, csrf, scripts) -> str:
@@ -2799,6 +2828,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         unmanaged = feature["unmanaged"](pusher, cfg)
                     if slug == "scripts":
                         extra_html = _scripts_box(name, csrf, current)
+                    elif slug == "qos":
+                        extra_html = _queue_script_box(name, csrf)
                     elif slug == "hubtunnel":
                         extra_html = _hubtunnel_box(name, current, csrf)
                     elif slug == "update":
