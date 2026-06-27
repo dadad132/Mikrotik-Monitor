@@ -162,8 +162,12 @@ _PAGE_CSS = """
  .tabs a.on{color:#2563eb;border-bottom-color:#2563eb;font-weight:600}
  .tabs a.soon{color:#cbd5e1;cursor:not-allowed}
  .tabs a.soon::after{content:" · soon";font-size:10px}
- .tabdrop{position:relative}
- .tabdrop>.dropbtn{cursor:pointer}
+ .tabdrop{position:relative;display:flex;align-items:stretch}
+ .tabdrop>.dropbtn{padding:8px 13px;font-size:14px;color:#475569;text-decoration:none;
+   border-bottom:2px solid transparent;margin-bottom:-2px;cursor:pointer;
+   user-select:none;display:flex;align-items:center}
+ .tabdrop>.dropbtn.on{color:#2563eb;border-bottom-color:#2563eb;font-weight:600}
+ .tabdrop>.dropbtn:hover{color:#0f172a}
  .tabdrop:hover>.tabmenu,.tabdrop:focus-within>.tabmenu{display:block}
  .tabmenu{display:none;position:absolute;top:100%;left:0;z-index:30;background:#fff;
    border:1px solid #e2e8f0;border-radius:8px;box-shadow:0 6px 18px rgba(15,23,42,.12);
