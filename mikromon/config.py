@@ -48,7 +48,7 @@ DEFAULT_CHECKS = {
     "security": True,
     "dhcp_new_clients": False,
     "client_count": False,      # abnormally many connected devices
-    "wan_traffic": False,       # abnormal WAN throughput / data usage
+    "wan_traffic": True,        # throughput sampling + abnormal-traffic alerts
     "client_usage": False,      # per-client top-talkers
 }
 
