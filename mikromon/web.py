@@ -994,7 +994,7 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
     err = (f'<div class="box" style="border-left:4px solid #dc2626">{esc(error)}'
            f'</div>' if error else "")
     pwuser = ((raw or {}).get("push_username") or (raw or {}).get("username")
-              or _user_slug(name))
+              or "mikromonitor")
     intro = ('<p class="muted" style="margin:-6px 0 14px">Generate a one-paste '
              'script for a new router. It creates a management user with a strong '
              'password (saved here), optionally enables the API, and adds a '
@@ -2430,7 +2430,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             hub_pubkey = hub.get("hub_pubkey", "")
             hub_port = hub.get("listen_port", _WG_PORT_DEFAULT)
             peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
-            uname = flat.get("pwuser", "").strip() or _user_slug(name)
+            uname = flat.get("pwuser", "").strip() or "mikromonitor"
             pwd = _gen_password()
             want_tunnel = flat.get("transport", "wg").strip() == "wg"
             lock_api = flat.get("lock_api") == "1"
@@ -2522,7 +2522,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             hub_pubkey = hub.get("hub_pubkey", "")
             hub_port = hub.get("listen_port", _WG_PORT_DEFAULT)
             peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
-            uname = flat.get("pwuser", "").strip() or _user_slug(name)
+            uname = flat.get("pwuser", "").strip() or "mikromonitor"
             pwd = _gen_password()
             want_tunnel = flat.get("transport", "wg").strip() == "wg"
             lock_api = flat.get("lock_api") == "1"
