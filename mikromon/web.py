@@ -406,7 +406,8 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
 # Flat tabs on the device bar.
 _DEVICE_TABS = ["Overview", "Provision", "WAN", "Security",
                 "DNS", "Queues", "Port forwarding",
-                "Tunnel", "Scripts", "Update", "Backups"]
+                "Tunnel", "Scripts"]
+_MAINT_ITEMS = [("Update", "update"), ("Backups", "backups")]
 # label -> url slug (all tabs are wired to the engine now)
 _LIVE_TABS = {"Overview": "", "Provision": "provision",
               "WAN": "sdwan",
@@ -433,17 +434,27 @@ def _device_tabbar(name, active, is_admin=True, csrf="") -> str:
             out.append(f'<a class="{cls}" href="{href}">{esc(t)}</a>')
         else:
             out.append(f'<a class="soon">{esc(t)}</a>')
-    if is_admin and csrf:
-        reboot = (
-            f'<form method="POST" action="/device/reboot" class="inline" '
-            f'onsubmit="return confirm('
-            f"'Reboot {esc(name)} now? It will go offline for ~1–2 minutes.')\">"
-            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
-            f'<input type="hidden" name="device" value="{esc(name)}">'
-            f'<button type="submit" class="reboot" '
-            f'style="padding:6px 12px;font-size:13px">Reboot</button></form>')
-        out.append(reboot)
+    if is_admin:
+        out.append(_maintenance_menu(name, active, csrf))
     return f'<div class="tabs">{"".join(out)}</div>'
+
+
+def _maintenance_menu(name, active, csrf) -> str:
+    q = quote(name)
+    on = active in {slug for _l, slug in _MAINT_ITEMS}
+    items = "".join(
+        f'<a class="{"on" if slug == active else ""}" '
+        f'href="/device?name={q}&tab={slug}">{esc(label)}</a>'
+        for label, slug in _MAINT_ITEMS)
+    reboot = (
+        f'<form method="POST" action="/device/reboot" onsubmit="return confirm('
+        f"'Reboot {esc(name)} now? It will go offline for ~1–2 minutes.')\">"
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<input type="hidden" name="device" value="{esc(name)}">'
+        f'<button type="submit" class="reboot">Reboot</button></form>'
+    ) if csrf else ""
+    return (f'<div class="tabdrop"><a class="dropbtn{" on" if on else ""}">'
+            f'Maintenance</a><div class="tabmenu">{items}{reboot}</div></div>')
 
 
 def _facts_strip(f) -> str:
@@ -1846,10 +1857,15 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
         ver_html = (esc(ver) + (
             f' <a class="up" href="/device?name={quote(n)}&tab=update">'
             f'upgrade</a>' if old else ""))
-        wl = f.get("wan_links") or []
-        links = ", ".join(esc(x) for x in wl) if wl else '<span class="muted">—</span>'
         host = f.get("host") or (store.raw(n) or {}).get("host", "—")
         badge_lbl = "online" if d.get("up") else "offline"
+        upd = f.get("update_available")
+        if upd is True:
+            upd_html = '<span class="badge warn">Yes</span>'
+        elif upd is False:
+            upd_html = '<span class="muted">No</span>'
+        else:
+            upd_html = '<span class="muted">—</span>'
         trows += (
             f'<tr>'
             f'<td><span class="dot" style="background:{dot}"></span> '
@@ -1858,7 +1874,7 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
             f'<td>{ver_html}</td>'
             f'<td class="muted">{esc(f.get("serial", "—"))}</td>'
             f'<td class="muted">{esc(host)}</td>'
-            f'<td>{links}</td>'
+            f'<td>{upd_html}</td>'
             f'<td><span class="badge {sev}">{badge_lbl}</span></td>'
             f'<td><div class="actions">'
             f'<a class="btn ghost" href="/device?name={quote(n)}">Open</a>'
@@ -2016,7 +2032,7 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
         f'Add device</button></div>'
         f'<table id="invt" style="width:100%">'
         f'<tr><th>Name</th><th>Model</th><th>RouterOS</th><th>Serial</th>'
-        f'<th>Host / IP</th><th>WAN uplinks</th><th>Status</th><th>Actions</th></tr>'
+        f'<th>Host / IP</th><th>Update available</th><th>Status</th><th>Actions</th></tr>'
         f'{trows}</table></div>')
 
     auto_open = (f'<script>document.getElementById("edit-modal")'

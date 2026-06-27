@@ -86,6 +86,15 @@ class Engine:
                 facts[key] = str(val) if isinstance(val, (str, int)) else val
         if any(v not in (None, "", []) for v in wanted.values()):
             facts["updated"] = now
+        # Cache update availability (reads current router state, no network check).
+        try:
+            upd = snap.first("pkg_update")
+            latest = str(upd.get("latest-version", "")).strip()
+            installed = str(upd.get("installed-version", "")).strip()
+            if latest and installed:
+                facts["update_available"] = latest != installed
+        except Exception:
+            pass
 
     def _flush_metrics(self, ctx) -> None:
         if self.metrics and ctx.samples:
@@ -155,7 +164,7 @@ class Engine:
         # 2) Connect + pull the datasets the enabled checks need (plus a little
         #    inventory metadata for the dashboard's device list / version stats).
         datasets = set(required_datasets(cfg)) | {"resource", "identity",
-                                                  "routerboard"}
+                                                  "routerboard", "pkg_update"}
         try:
             device.connect()
             snap = device.fetch(datasets)

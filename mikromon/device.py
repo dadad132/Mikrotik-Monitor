@@ -20,6 +20,7 @@ DATASETS = {
     "resource": ("system", "resource"),
     "identity": ("system", "identity"),
     "routerboard": ("system", "routerboard"),
+    "pkg_update": ("system", "package", "update"),
     "route": ("ip", "route"),
     "interface": ("interface",),
     "ip_address": ("ip", "address"),
