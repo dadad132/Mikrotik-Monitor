@@ -1537,14 +1537,7 @@ def _queue_script_box(name, csrf, facts=None) -> str:
     """Interactive queue setup builder shown on the Queues tab.
     Generates a RouterOS :for-loop script from form fields; submits via scripts pipeline."""
     qn = esc(name)
-    host = (facts or {}).get("host", "")
-    default_base = ""
-    if host:
-        parts = host.split(".")
-        if len(parts) == 4 and all(p.isdigit() for p in parts):
-            default_base = ".".join(parts[:3])
-    base_attr = (f'value="{esc(default_base)}"' if default_base
-                 else 'placeholder="10.0.2"')
+    base_attr = 'placeholder="leave blank to auto-detect"'
     return (
         f'<div class="box"><h2>Queue Setup Builder</h2>'
         f'<p class="muted">Set the IP range, name prefix, and speeds — the '
