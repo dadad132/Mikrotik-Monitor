@@ -222,23 +222,28 @@ def _throughput_chart(rx_pts, tx_pts, width=284) -> str:
         f'<text id="{cid}tul" x="8" y="42" font-size="10.5" fill="#fb923c" '
         f'font-weight="600" font-family="system-ui,sans-serif"></text>'
         f'</g>')
-    # transparent overlay captures the mouse
+    # overlay captures mouse events (fill="none" + pointer-events="all" is
+    # more reliable than fill="transparent" across browsers)
     overlay = (
         f'<rect id="{cid}ov" x="0" y="{pad_t}" width="{width}" height="{plot_h}" '
-        f'fill="transparent" cursor="crosshair"/>')
+        f'fill="none" pointer-events="all" cursor="crosshair"/>')
 
     rx_json = json.dumps([[ts, v] for ts, v in rx_pts])
     tx_json = json.dumps([[ts, v] for ts, v in tx_pts])
+
+    # Script goes AFTER </svg> so it runs in normal HTML context, not SVG
+    # foreign-content mode where script execution is unreliable.
     script = (
-        f'<script>(function(){{'
+        f'<script type="text/javascript">(function(){{'
         f'var C="{cid}",W={width},PT={pad_t},PH={plot_h},'
         f'ST={since_t:.3f},HI={hi:.6f};'
         f'var RX={rx_json},TX={tx_json};'
-        f'function xp(ts){{return Math.max(0,Math.min(W,(ts-ST)/3600*W));}} '
-        f'function yp(v){{return PT+PH-v/HI*PH;}} '
-        f'function near(d,ts){{'
+        f'function xp(ts){{return Math.max(0,Math.min(W,(ts-ST)/3600*W));}}'
+        f'function yp(v){{return PT+PH-v/HI*PH;}}'
+        f'function near(data,ts){{'
         f'var b=null,bd=1e18;'
-        f'for(var i=0;i<d.length;i++){{var dt=Math.abs(d[i][0]-ts);if(dt<bd){{bd=dt;b=d[i];}}}} '
+        f'for(var i=0;i<data.length;i++){{'
+        f'var dd=Math.abs(data[i][0]-ts);if(dd<bd){{bd=dd;b=data[i];}}}}'
         f'return b;}}'
         f'function hbps(v){{'
         f'if(v>=1e9)return (v/1e9).toFixed(2)+" Gbit/s";'
@@ -248,37 +253,43 @@ def _throughput_chart(rx_pts, tx_pts, width=284) -> str:
         f'var ov=document.getElementById(C+"ov");'
         f'if(!ov)return;'
         f'var xh=document.getElementById(C+"h"),'
-        f'dr=document.getElementById(C+"dr"),'
-        f'dt=document.getElementById(C+"dt"),'
+        f'elDR=document.getElementById(C+"dr"),'
+        f'elDT=document.getElementById(C+"dt"),'
         f'tip=document.getElementById(C+"tip"),'
         f'bg=document.getElementById(C+"bg"),'
-        f'tt=document.getElementById(C+"tt"),'
-        f'tdl=document.getElementById(C+"tdl"),'
-        f'tul=document.getElementById(C+"tul");'
+        f'elTT=document.getElementById(C+"tt"),'
+        f'elDL=document.getElementById(C+"tdl"),'
+        f'elUL=document.getElementById(C+"tul");'
+        f'function show(){{'
+        f'xh.setAttribute("opacity","1");'
+        f'tip.setAttribute("opacity","1");}}'
+        f'function hide(){{'
+        f'xh.setAttribute("opacity","0");'
+        f'elDR.setAttribute("opacity","0");'
+        f'elDT.setAttribute("opacity","0");'
+        f'tip.setAttribute("opacity","0");}}'
         f'ov.addEventListener("mousemove",function(e){{'
-        f'var r=ov.getBoundingClientRect(),rx=e.clientX-r.left;'
-        f'var ts=ST+rx/W*3600;'
+        f'var r=ov.getBoundingClientRect(),mx=e.clientX-r.left;'
+        f'var ts=ST+mx/W*3600;'
         f'var p0=near(RX,ts),p1=near(TX,ts);'
-        f'xh.setAttribute("x1",rx);xh.setAttribute("x2",rx);xh.style.opacity=1;'
-        f'if(p0){{dr.setAttribute("cx",xp(p0[0]));dr.setAttribute("cy",yp(p0[1]));dr.style.opacity=1;}} '
-        f'if(p1){{dt.setAttribute("cx",xp(p1[0]));dt.setAttribute("cy",yp(p1[1]));dt.style.opacity=1;}} '
-        f'var d=new Date(ts*1000),'
-        f'hh=d.getHours().toString().padStart(2,"0"),'
-        f'mm=d.getMinutes().toString().padStart(2,"0");'
-        f'tt.textContent=hh+":"+mm;'
-        f'tdl.textContent="↓ "+(p0?hbps(p0[1]):"—");'
-        f'tul.textContent="↑ "+(p1?hbps(p1[1]):"—");'
-        f'var tx2=rx+8,ty2=PT;'
-        f'if(tx2+120>W)tx2=rx-122;'
+        f'xh.setAttribute("x1",mx);xh.setAttribute("x2",mx);'
+        f'if(p0){{elDR.setAttribute("cx",xp(p0[0]));elDR.setAttribute("cy",yp(p0[1]));elDR.setAttribute("opacity","1");}}'
+        f'if(p1){{elDT.setAttribute("cx",xp(p1[0]));elDT.setAttribute("cy",yp(p1[1]));elDT.setAttribute("opacity","1");}}'
+        f'var dd=new Date(ts*1000),'
+        f'hh=dd.getHours().toString().padStart(2,"0"),'
+        f'mn=dd.getMinutes().toString().padStart(2,"0");'
+        f'elTT.textContent=hh+":"+mn;'
+        f'elDL.textContent="↓ "+(p0?hbps(p0[1]):"—");'
+        f'elUL.textContent="↑ "+(p1?hbps(p1[1]):"—");'
+        f'var tx2=mx+8,ty2=PT;'
+        f'if(tx2+120>W)tx2=mx-122;'
         f'bg.setAttribute("x",tx2);bg.setAttribute("y",ty2);'
-        f'tt.setAttribute("x",tx2+8);tt.setAttribute("y",ty2+13);'
-        f'tdl.setAttribute("x",tx2+8);tdl.setAttribute("y",ty2+28);'
-        f'tul.setAttribute("x",tx2+8);tul.setAttribute("y",ty2+42);'
-        f'tip.style.opacity=1;'
+        f'elTT.setAttribute("x",tx2+8);elTT.setAttribute("y",ty2+13);'
+        f'elDL.setAttribute("x",tx2+8);elDL.setAttribute("y",ty2+28);'
+        f'elUL.setAttribute("x",tx2+8);elUL.setAttribute("y",ty2+42);'
+        f'show();'
         f'}});'
-        f'ov.addEventListener("mouseleave",function(){{'
-        f'xh.style.opacity=0;dr.style.opacity=0;dt.style.opacity=0;tip.style.opacity=0;'
-        f'}});'
+        f'ov.addEventListener("mouseleave",hide);'
         f'}})();</script>')
 
     return (
@@ -288,8 +299,8 @@ def _throughput_chart(rx_pts, tx_pts, width=284) -> str:
         + polyline(rx_pts, "#2563eb") + polyline(tx_pts, "#f97316")
         + peak_html
         + crosshair + dot_rx + dot_tx + tooltip + overlay
+        + '</svg>'   # ← SVG closes here; script is in HTML context below
         + script
-        + '</svg>'
     )
 
 
