@@ -403,11 +403,10 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
             f'<div class="grid">{grid}</div>{empty}{_DASH_JS}</body></html>')
 
 
-# Flat tabs on the device bar. Update + Backups live under the Maintenance
-# dropdown (see _MAINT_ITEMS / _device_tabbar), not in this list.
+# Flat tabs on the device bar.
 _DEVICE_TABS = ["Overview", "Provision", "WAN", "Security",
-                "Restrict access", "DNS", "QoS", "Port forwarding",
-                "Interfaces", "Remote access", "Tunnel", "Scripts"]
+                "DNS", "QoS", "Port forwarding",
+                "Tunnel", "Scripts", "Update", "Backups"]
 # label -> url slug (all tabs are wired to the engine now)
 _LIVE_TABS = {"Overview": "", "Provision": "provision",
               "WAN": "sdwan",
@@ -416,12 +415,10 @@ _LIVE_TABS = {"Overview": "", "Provision": "provision",
               "Interfaces": "interfaces", "Remote access": "remote",
               "Tunnel": "tunnel", "Scripts": "scripts",
               "Update": "update", "Backups": "backups"}
-# grouped under the "Maintenance" dropdown on the device tab bar
-_MAINT_ITEMS = [("Update", "update"), ("Backups", "backups")]
-# tabs that WRITE to the router (admins only); Overview + Interfaces are read-only
+# tabs that WRITE to the router (admins only); Overview is read-only
 _ADMIN_TABS = {"provision", "sdwan", "security", "harden", "nextdns",
                "qos", "portfwd", "remote", "tunnel", "scripts",
-               "update", "backups"}
+               "update", "backups", "interfaces"}
 
 
 def _device_tabbar(name, active, is_admin=True, csrf="") -> str:
@@ -436,28 +433,17 @@ def _device_tabbar(name, active, is_admin=True, csrf="") -> str:
             out.append(f'<a class="{cls}" href="{href}">{esc(t)}</a>')
         else:
             out.append(f'<a class="soon">{esc(t)}</a>')
-    if is_admin:
-        out.append(_maintenance_menu(name, active, csrf))
+    if is_admin and csrf:
+        reboot = (
+            f'<form method="POST" action="/device/reboot" class="inline" '
+            f'onsubmit="return confirm('
+            f"'Reboot {esc(name)} now? It will go offline for ~1–2 minutes.')\">"
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="device" value="{esc(name)}">'
+            f'<button type="submit" class="reboot" '
+            f'style="padding:6px 12px;font-size:13px">Reboot</button></form>')
+        out.append(reboot)
     return f'<div class="tabs">{"".join(out)}</div>'
-
-
-def _maintenance_menu(name, active, csrf) -> str:
-    """The Maintenance dropdown on the device tab bar: Update, Backups, Reboot."""
-    q = quote(name)
-    on = active in [slug for _l, slug in _MAINT_ITEMS]
-    items = "".join(
-        f'<a class="{"on" if slug == active else ""}" '
-        f'href="/device?name={q}&tab={slug}">{esc(label)}</a>'
-        for label, slug in _MAINT_ITEMS)
-    reboot = (
-        f'<form method="POST" action="/device/reboot" onsubmit="return confirm('
-        f"'Reboot {esc(name)} now? It will go offline for ~1–2 minutes.')\">"
-        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
-        f'<input type="hidden" name="device" value="{esc(name)}">'
-        f'<button type="submit" class="reboot">Reboot</button></form>'
-    ) if csrf else ""
-    return (f'<div class="tabdrop"><a class="dropbtn{" on" if on else ""}">'
-            f'Maintenance</a><div class="tabmenu">{items}{reboot}</div></div>')
 
 
 def _facts_strip(f) -> str:
@@ -512,7 +498,7 @@ def _render_inventory(store, state, user, allowed) -> str:
     return _page("Inventory", _header(user, "/inventory") + inner)
 
 
-def _render_device(store, state, name, user, csrf="", access_html="",
+def _render_device(store, state, name, user, csrf="",
                    last_change=None, others_down=0) -> str:
     d = _device_view(store, state, name)
     f = d["facts"]
@@ -582,6 +568,11 @@ def _render_device(store, state, name, user, csrf="", access_html="",
     diag_html = _diagnosis_box(_diagnose(d["up"], internet_down, mins,
                                          others_down))
 
+    q = quote(name)
+    iface_card = (f'<div class="box"><h2>Interfaces</h2>'
+                  f'<p class="muted">Port list, VLANs, bridges and IP addresses.</p>'
+                  f'<a class="btn ghost" href="/device?name={q}&tab=interfaces">'
+                  f'View interfaces</a></div>')
     inner = (
         f'<div class="wrap" style="max-width:1100px">'
         f'<h1 style="display:flex;align-items:center;gap:12px">{esc(name)}'
@@ -597,8 +588,7 @@ def _render_device(store, state, name, user, csrf="", access_html="",
         f'<div class="box"><h2>Active problems</h2>{probs_html}</div>'
         f'</div>'
         f'{diag_html}'
-        f'{access_html if AuthStore.is_admin(user or {}) else ""}'
-        f'{_device_forget_box(name, csrf) if AuthStore.is_admin(user or {}) else ""}'
+        f'{iface_card}'
         f'<p><a href="/">&larr; dashboard</a></p></div>')
     return _page(esc(name), _header(user, "/") + inner)
 
@@ -1843,7 +1833,14 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
             f'<td><span class="badge {sev}">{badge_lbl}</span></td>'
             f'<td><div class="actions">'
             f'<a class="btn ghost" href="/device?name={quote(n)}">Open</a>'
-            f'<a class="btn ghost" href="/devices?edit={quote(n)}">Edit</a>'
+            f'<a class="btn ghost" href="/devices?edit={quote(n)}" '
+            f'onclick="event.preventDefault();'
+            f'fetch(\'/devices?edit={quote(n)}\').then(r=>r.text()).then(function(h){{'
+            f'var p=new DOMParser().parseFromString(h,\'text/html\');'
+            f'var src=p.getElementById(\'edit-modal\');'
+            f'var dst=document.getElementById(\'edit-modal\');'
+            f'if(src&&dst){{dst.innerHTML=src.innerHTML;}}'
+            f'document.getElementById(\'edit-modal\').classList.add(\'open\');}})">Edit</a>'
             f'{_mini_form("/devices/test", csrf, n, "Test", "btn ghost")}'
             f'{_mini_form("/devices/delete", csrf, n, "Delete", "btn red", n)}'
             f'</div></td>'
@@ -1910,42 +1907,75 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
 
     msg_html = f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else ""
 
-    # Edit form — shown inline below table (scrolled to automatically)
-    edit_box = ""
-    if edit_name:
-        edit_form = (
-            f'<form method="POST" action="/devices/save">'
+    def _device_modal(modal_id, title, form_action, original_name, submit_lbl,
+                      form_fields, intro=""):
+        close_js = f"document.getElementById('{modal_id}').classList.remove('open')"
+        return (
+            f'<div id="{modal_id}" class="modal-backdrop">'
+            f'<div class="modal">'
+            f'<button class="modal-close" type="button" '
+            f'onclick="{close_js}">&times;</button>'
+            f'<h2>{title}</h2>'
+            f'{intro}'
+            f'<form method="POST" action="{form_action}">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
-            f'<input type="hidden" name="original_name" value="{esc(edit_name)}">'
-            f'<div class="fields">{fields}</div>'
+            f'<input type="hidden" name="original_name" value="{esc(original_name)}">'
+            f'<div class="fields">{form_fields}</div>'
             f'<div class="actions" style="margin-top:16px">'
-            f'<button class="btn" type="submit">Save changes</button>'
-            f'<a class="btn ghost" href="/devices">Cancel</a></div>'
-            f'</form>')
-        edit_box = (f'<div class="box" id="edit-box"><h2>Edit: {esc(edit_name)}</h2>'
-                    f'{edit_form}</div>')
+            f'<button class="btn" type="submit">{submit_lbl}</button>'
+            f'<button type="button" class="btn ghost" onclick="{close_js}">Cancel</button>'
+            f'</div></form></div></div>')
 
-    # Add device form — always in the DOM, shown as a modal
     add_intro = ('<p class="muted" style="margin-top:0">Enter a <b>name</b> and click '
                  '<b>Add device</b> — you\'ll be taken to the Provision tab to generate '
                  'a script or connect directly.</p>')
-    add_form = (add_intro +
-                f'<form method="POST" action="/devices/save">'
-                f'<input type="hidden" name="csrf" value="{csrf}">'
-                f'<input type="hidden" name="original_name" value="">'
-                f'<div class="fields">{fields}</div>'
-                f'<div class="actions" style="margin-top:16px">'
-                f'<button class="btn" type="submit">Add device</button>'
-                f'<button type="button" class="btn ghost" '
-                f'onclick="document.getElementById(\'add-modal\').classList.remove(\'open\')">'
-                f'Cancel</button></div></form>')
-    add_modal = (
-        f'<div id="add-modal" class="modal-backdrop">'
-        f'<div class="modal">'
-        f'<button class="modal-close" type="button" '
-        f'onclick="document.getElementById(\'add-modal\').classList.remove(\'open\')">'
-        f'&times;</button>'
-        f'<h2>Add a device</h2>{add_form}</div></div>')
+
+    # Separate fields without pre-filled values for Add modal
+    pre_add = {}
+    wan_add = {}
+    sources_add = set(["dhcp", "wireless"])
+    src_add = "".join(
+        f'<label><input type="checkbox" name="sources" value="{s}"'
+        f'{" checked" if s in sources_add else ""}> {s}</label>'
+        for s in _CLIENT_SOURCES)
+    chk_add = "".join(
+        f'<label><input type="checkbox" name="checks" value="{k}"'
+        f'{" checked" if DEFAULT_CHECKS[k] else ""}> {k}</label>'
+        for k in DEFAULT_CHECKS)
+
+    def vv(key, d="", p=None):
+        return esc((p or {}).get(key, d))
+
+    def field_add(label, inner_html, full=False):
+        cls = "f full" if full else "f"
+        return f'<div class="{cls}"><label class="f">{label}</label>{inner_html}</div>'
+
+    add_fields = (
+        field_add("Name", '<input name="name" value="">')
+        + field_add("Host / IP <span class='muted'>(leave BLANK to provision over the tunnel)</span>",
+                    '<input name="host" placeholder="leave blank to provision" value="">')
+        + field_add(f"API port <span class='muted'>(blank = 8728)</span>",
+                    '<input name="api_port" placeholder="8728" value="8728">')
+        + field_add("API timeout <span class='muted'>(seconds)</span>",
+                    '<input name="timeout" value="60">')
+        + field_add("Security",
+                    '<div class="chkrow"><label class="chk"><input type="checkbox" '
+                    'name="use_ssl"> API-SSL</label><label class="chk"><input type="checkbox" '
+                    'name="verify_ssl"> verify cert</label></div>')
+        + field_add("WAN uplinks", _wan_editor([]), full=True)
+        + field_add("LAN subnets <span class='muted'>(comma-separated)</span>",
+                    '<input name="lan_subnets" value="">', full=True)
+        + field_add("Monitor interfaces <span class='muted'>(comma; blank = auto)</span>",
+                    '<input name="monitor_interfaces" value="">', full=True)
+        + field_add("Client-count sources", f'<div class="chips">{src_add}</div>', full=True)
+        + field_add("Enabled checks", f'<div class="chips">{chk_add}</div>', full=True))
+
+    add_modal = _device_modal("add-modal", "Add a device", "/devices/save", "",
+                              "Add device", add_fields, add_intro)
+    edit_modal = _device_modal("edit-modal",
+                               f"Edit: {esc(edit_name)}" if edit_name else "Edit device",
+                               "/devices/save", edit_name or "",
+                               "Save changes", fields)
 
     inv_table = (
         f'<div class="box">'
@@ -1960,15 +1990,18 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
         f'<th>Host / IP</th><th>WAN uplinks</th><th>Status</th><th>Actions</th></tr>'
         f'{trows}</table></div>')
 
+    auto_open = (f'<script>document.getElementById("edit-modal")'
+                 f'.classList.add("open");</script>') if edit_name else ""
+
     inv_js = ('<script>'
               'function invFilter(){var t=document.getElementById("iq")'
               '.value.toLowerCase();document.querySelectorAll("#invt tr").forEach('
               'function(r,i){if(i===0)return;r.style.display='
               'r.textContent.toLowerCase().indexOf(t)>=0?"":"none";});}'
-              # close modal on backdrop click
               'document.addEventListener("click",function(e){'
-              'var m=document.getElementById("add-modal");'
-              'if(e.target===m)m.classList.remove("open");});'
+              '["add-modal","edit-modal"].forEach(function(id){'
+              'var m=document.getElementById(id);'
+              'if(m&&e.target===m)m.classList.remove("open");});});'
               '</script>')
 
     plan_banner = ""
@@ -1976,7 +2009,8 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
     # if org_plan == "free": ...
 
     inner = (f'<div class="wrap" style="max-width:1200px"><h1>Devices</h1>'
-             f'{msg_html}{plan_banner}{inv_table}{edit_box}</div>{add_modal}')
+             f'{msg_html}{plan_banner}{inv_table}</div>'
+             f'{add_modal}{edit_modal}{auto_open}')
     return _page("Devices", _header(user, "/devices") + inner + _WAN_JS + inv_js)
 
 
@@ -2263,8 +2297,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                 dev, user, tab, msg=q.get("msg", [""])[0])
                     sess = self._session()
                     csrf = sess["csrf"] if sess else ""
-                    access_html = (self._access_box_html(dev, csrf)
-                                   if AuthStore.is_admin(user or {}) else "")
                     # Diagnosis inputs: when did this device last change, and how
                     # many OTHER devices are down right now (wider-outage signal).
                     last_change = None
@@ -2275,7 +2307,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         1 for dd in _all_devices(store, state, allowed)
                         if dd.get("device") != dev and not dd.get("up", True))
                     return self._send(200, _render_device(store, state, dev, user,
-                                      csrf, access_html, last_change=last_change,
+                                      csrf, last_change=last_change,
                                       others_down=others_down),
                                       "text/html; charset=utf-8")
                 if path == "/api/devices":
