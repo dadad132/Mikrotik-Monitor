@@ -599,8 +599,7 @@ def _render_device(store, state, name, user, csrf="", access_html="",
         f'{diag_html}'
         f'{access_html if AuthStore.is_admin(user or {}) else ""}'
         f'{_device_forget_box(name, csrf) if AuthStore.is_admin(user or {}) else ""}'
-        f'<p><a href="/">&larr; dashboard</a> &nbsp; '
-        f'<a href="/inventory">inventory</a></p></div>')
+        f'<p><a href="/">&larr; dashboard</a></p></div>')
     return _page(esc(name), _header(user, "/") + inner)
 
 
@@ -2204,9 +2203,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if path == "/":
                     return self._send(200, _render_dashboard(store, state, user,
                                       allowed), "text/html; charset=utf-8")
-                if path == "/inventory":
-                    return self._send(200, _render_inventory(store, state, user,
-                                      allowed), "text/html; charset=utf-8")
+                # if path == "/inventory":
+                #     return self._send(200, _render_inventory(store, state, user,
+                #                       allowed), "text/html; charset=utf-8")
                 if path == "/device":
                     q = parse_qs(url.query)
                     dev = q.get("name", [""])[0]
