@@ -1476,8 +1476,10 @@ def _wg_repair_box(name, csrf) -> str:
             f'Diagnose &amp; repair now</button></div></form></div>')
 
 
-def _update_box(name, csrf, current) -> str:
-    """Check-for-updates / Install (+reboot) / RouterBOOT firmware buttons."""
+def _update_box(name, csrf, current):
+    """Returns (extra_html, extra_actions) for the update feature tab.
+    extra_actions are injected into the top form's actions row.
+    extra_html holds the reboot box shown below."""
     from .push.features import firmware_available, update_available
 
     q = esc(name)
@@ -1491,30 +1493,34 @@ def _update_box(name, csrf, current) -> str:
                 f'<input type="hidden" name="update_action" value="{action}">'
                 f'<button class="btn {cls}" type="submit"{oc}>{label}</button>'
                 f'</form>')
+
     avail = update_available(current)
     install_cls = "" if avail else "ghost"
-    note = ('<p class="muted" style="border-left:3px solid #d97706;padding-left:8px">'
-            '⚠ <b>Check &amp; install</b> checks for a new version, then downloads '
-            'and installs it — the router <b>reboots</b> to apply (~1–2 min offline). '
-            'If the router is already on the latest version, nothing happens. '
-            'You get a dry-run preview and a confirm step before anything is '
-            'written.</p>')
-    buttons = (act("check", "Check &amp; install update + reboot", "") + " "
-               + act("install", "Download &amp; install + reboot", install_cls,
-                     confirm="This reboots the router now. Continue?"))
+
+    # Buttons that live in the top form's actions row
+    actions = (act("install", "Download &amp; install + reboot", install_cls))
     if firmware_available(current):
-        buttons += " " + act("firmware", "Upgrade RouterBOOT firmware", "ghost",
-                             confirm="Schedules a firmware upgrade. Continue?")
+        actions += " " + act("firmware", "Upgrade RouterBOOT firmware", "ghost",
+                              confirm="Schedules a firmware upgrade. Continue?")
+
     avail_line = ('<p><span class="badge warn">update available</span></p>'
                   if avail else "")
+    note = ('<p class="muted" style="border-left:3px solid #d97706;'
+            'padding-left:8px;margin-top:12px">'
+            '⚠ <b>Download &amp; install + reboot</b> checks for the latest '
+            'version, downloads and installs it, then <b>reboots</b> (~1–2 min '
+            'offline). If the router is already current, nothing happens. '
+            'You get a dry-run preview and confirm step first.</p>')
+
     reboot = ('<div class="box"><h2>Reboot</h2><p class="muted">Manually reboot '
               'this router now — it will be offline ~1–2 minutes. Previewed and '
               'confirmed first.</p><div class="actions">'
               + act("reboot", "Reboot router now", "ghost",
                     confirm="Reboot the router now? It will go offline ~1–2 min.")
               + '</div></div>')
-    return (f'<div class="box"><h2>Run an update</h2>{avail_line}{note}'
-            f'<div class="actions">{buttons}</div></div>{reboot}')
+
+    extra_html = avail_line + note + reboot
+    return extra_html, actions
 
 
 def _interfaces_table(current) -> str:
@@ -1692,7 +1698,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                         fields=None, preview=None, submitted=None, error="",
                         msg="", recent=None, facts=None, unmanaged=None,
                         confirm_action="/device/push", cfg=None,
-                        extra_html="", report_html="") -> str:
+                        extra_html="", extra_actions="", report_html="") -> str:
     tabbar = _device_tabbar(name, slug, AuthStore.is_admin(user or {}), csrf)
     q = quote(name)
     banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
@@ -1746,7 +1752,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                     f'<input type="hidden" name="feature" value="{esc(slug)}">'
                     f'<div class="fields">{ff}</div>'
                     f'<div class="actions" style="margin-top:14px">{preview_btn}'
-                    f'</div></form></div>')
+                    f'{extra_actions}</div></form></div>')
         else:
             form = ""  # read-only feature (e.g. Interfaces)
         body = (state + form + extra_html
@@ -2743,7 +2749,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
             cfg = build_device(raw, defaults)  # device metadata (no router needed)
             summary_lines = fields = unmanaged = None
-            extra_html = ""
+            extra_html = extra_actions = ""
             if preview is None and not error:
                 from .device import DeviceError
                 from .push import Pusher, PushError, rw_device
@@ -2765,7 +2771,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     elif slug == "hubtunnel":
                         extra_html = _hubtunnel_box(name, current, csrf)
                     elif slug == "update":
-                        extra_html = _update_box(name, csrf, current)
+                        extra_html, extra_actions = _update_box(name, csrf, current)
                     elif slug == "interfaces":
                         extra_html = _interfaces_table(current)
                 except (DeviceError, PushError) as exc:
@@ -2777,7 +2783,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 fields=fields, preview=preview, submitted=submitted, error=error,
                 msg=msg, recent=recent, facts=facts, unmanaged=unmanaged,
                 confirm_action=confirm_action, cfg=cfg, extra_html=extra_html,
-                report_html=report_html)
+                extra_actions=extra_actions, report_html=report_html)
             return self._send(200, page, "text/html; charset=utf-8")
 
         def _device_wan_post(self, flat, multi, user):
