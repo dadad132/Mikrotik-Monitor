@@ -219,15 +219,12 @@ step "Registering systemd services"
 
 WEB_UNIT=/etc/systemd/system/mikromon-web.service
 
-# Stop running services before replacing their unit files. Remember which were
-# running so we can bring them back up with the freshly-synced code at the end
-# (so a `git pull` + re-run of this script actually deploys the new code).
-RESTART_SVCS=""
+# Stop running services before replacing their unit files so the new code
+# is fully in place before anything restarts.
 for svc in mikromon-web mikromon; do
     if systemctl is-active --quiet "${svc}" 2>/dev/null; then
         systemctl stop "${svc}"
-        RESTART_SVCS="${RESTART_SVCS} ${svc}"
-        log "Stopped ${svc} for upgrade (will restart with the new code)"
+        log "Stopped ${svc} for upgrade"
     fi
 done
 
@@ -717,23 +714,20 @@ except Exception as e:
 PY
 
 # ---------------------------------------------------------------------------
-# Restart any services we stopped, now running the freshly-synced code. (On a
-# first install nothing was running yet, so this is skipped and the user starts
-# them via the "Next steps" below.) Start mikromon before mikromon-web, since
-# the web unit BindsTo / After the monitor.
+# Enable and start both services — always, not just on upgrade.
+# mikromon first (monitor daemon), then mikromon-web (dashboard).
 # ---------------------------------------------------------------------------
-if [[ -n "${RESTART_SVCS}" ]]; then
-    step "Restarting mikromon services with the updated code"
-    for svc in mikromon mikromon-web; do
-        if [[ " ${RESTART_SVCS} " == *" ${svc} "* ]]; then
-            if systemctl start "${svc}"; then
-                log "Started ${svc}"
-            else
-                log "WARN: could not start ${svc} — check: journalctl -u ${svc} -e"
-            fi
-        fi
-    done
-fi
+step "Enabling and starting mikromon services"
+for svc in mikromon mikromon-web; do
+    systemctl enable "${svc}" 2>/dev/null || true
+    if systemctl is-active --quiet "${svc}" 2>/dev/null; then
+        systemctl restart "${svc}" && log "Restarted ${svc}" \
+            || log "WARN: could not restart ${svc} — check: journalctl -u ${svc} -e"
+    else
+        systemctl start "${svc}" && log "Started ${svc}" \
+            || log "WARN: could not start ${svc} — check: journalctl -u ${svc} -e"
+    fi
+done
 
 # Resolve the server's primary IP for the final message.
 SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
