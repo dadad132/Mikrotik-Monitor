@@ -132,19 +132,83 @@ def _all_devices(store, state, allowed=None) -> list:
 
 
 # ============================ rendering ====================================
-def _sparkline(points, width=160, height=36) -> str:
-    vals = [v for _, v in points]
-    if len(vals) < 2:
-        return f'<svg width="{width}" height="{height}"></svg>'
-    lo, hi = min(vals), max(vals)
-    rng = (hi - lo) or 1.0
-    step = width / (len(vals) - 1)
-    coords = " ".join(
-        f"{i * step:.1f},{height - 2 - (v - lo) / rng * (height - 4):.1f}"
-        for i, v in enumerate(vals))
-    return (f'<svg width="{width}" height="{height}" style="vertical-align:middle">'
-            f'<polyline fill="none" stroke="#2563eb" stroke-width="1.5" '
-            f'points="{coords}"/></svg>')
+def _throughput_chart(rx_pts, tx_pts, width=284) -> str:
+    """SVG throughput chart: RX (blue) + TX (orange) lines, time axis, peak marker."""
+    all_vals = [v for _, v in rx_pts + tx_pts]
+    if not all_vals:
+        return ""
+    plot_h = 52
+    pad_t, pad_b = 14, 22
+    total_h = plot_h + pad_t + pad_b
+    now_t = time.time()
+    win = 3600.0
+    since_t = now_t - win
+    hi = max(all_vals) or 1.0
+
+    def xp(ts):
+        return max(0.0, min(float(width), (ts - since_t) / win * width))
+
+    def yp(v):
+        return pad_t + plot_h - v / hi * plot_h
+
+    def polyline(pts, color):
+        visible = [(ts, v) for ts, v in pts if since_t - 120 <= ts <= now_t + 60]
+        if len(visible) < 2:
+            return ""
+        coords = " ".join(f"{xp(ts):.1f},{yp(v):.1f}" for ts, v in visible)
+        return (f'<polyline fill="none" stroke="{color}" stroke-width="1.5" '
+                f'stroke-linejoin="round" stroke-linecap="round" points="{coords}"/>')
+
+    # grid lines at 25 / 50 / 75 %
+    grid = "".join(
+        f'<line x1="0" y1="{yp(hi * f):.1f}" x2="{width}" y2="{yp(hi * f):.1f}" '
+        f'stroke="#f1f5f9" stroke-width="1"/>'
+        for f in (0.25, 0.5, 0.75, 1.0))
+
+    # peak marker (RX only)
+    peak_html = ""
+    if rx_pts:
+        peak_ts, peak_v = max(rx_pts, key=lambda p: p[1])
+        if peak_v > 0 and since_t <= peak_ts <= now_t:
+            px, py = xp(peak_ts), yp(peak_v)
+            t_s = time.localtime(peak_ts)
+            t_lbl = f"{t_s.tm_hour:02d}:{t_s.tm_min:02d}"
+            v_lbl = human_bps(peak_v)
+            # place label left-of-marker on right half, right-of-marker on left half
+            if px >= width / 2:
+                anch, label_x = "end", min(px - 4, float(width) - 2)
+            else:
+                anch, label_x = "start", max(px + 4, 2.0)
+            peak_html = (
+                f'<line x1="{px:.1f}" y1="{pad_t}" x2="{px:.1f}" y2="{pad_t + plot_h}" '
+                f'stroke="#2563eb" stroke-width="0.8" stroke-dasharray="3,2" opacity="0.45"/>'
+                f'<circle cx="{px:.1f}" cy="{py:.1f}" r="3" fill="#2563eb"/>'
+                f'<text x="{label_x:.1f}" y="{pad_t - 3}" text-anchor="{anch}" '
+                f'font-size="9" fill="#2563eb" font-family="system-ui,sans-serif">'
+                f'{t_lbl} {v_lbl}</text>')
+
+    # x-axis
+    axis = (f'<line x1="0" y1="{pad_t + plot_h + 1}" x2="{width}" '
+            f'y2="{pad_t + plot_h + 1}" stroke="#e2e8f0" stroke-width="1"/>')
+    for mins_ago, lbl in [(60, "-1h"), (45, "-45m"), (30, "-30m"), (15, "-15m"), (0, "now")]:
+        lx = xp(now_t - mins_ago * 60)
+        anch = "start" if mins_ago == 60 else ("end" if mins_ago == 0 else "middle")
+        axis += (
+            f'<line x1="{lx:.1f}" y1="{pad_t + plot_h}" x2="{lx:.1f}" '
+            f'y2="{pad_t + plot_h + 3}" stroke="#cbd5e1" stroke-width="1"/>'
+            f'<text x="{lx:.1f}" y="{pad_t + plot_h + 14}" text-anchor="{anch}" '
+            f'font-size="9" fill="#94a3b8" font-family="system-ui,sans-serif">{lbl}</text>')
+
+    return (
+        f'<svg viewBox="0 0 {width} {total_h}" width="{width}" height="{total_h}" '
+        f'style="display:block">'
+        f'{grid}'
+        f'{axis}'
+        f'{polyline(rx_pts, "#2563eb")}'
+        f'{polyline(tx_pts, "#f97316")}'
+        f'{peak_html}'
+        f'</svg>'
+    )
 
 
 # _PAGE_CSS, _nav, _who, _header, _page — imported from web_shared
@@ -669,18 +733,26 @@ def _render_device(store, state, name, user, csrf="",
 
     # ── center: throughput sparklines ──────────────────────────────────────────
     spark_rows = ""
+    _since = time.time() - 3600
     for iface, t in sorted(d["throughput"].items()):
-        sp = _sparkline(store.series(name, "rx_bps", label=iface,
-                                     since=time.time() - 3600), width=260, height=44)
+        rx_pts = store.series(name, "rx_bps", label=iface, since=_since)
+        tx_pts = store.series(name, "tx_bps", label=iface, since=_since)
+        sp = _throughput_chart(rx_pts, tx_pts)
+        # find peak across the same series we just fetched
+        peak_rx = max((v for _, v in rx_pts), default=0)
         spark_rows += (
             f'<div style="margin-bottom:14px;padding-bottom:14px;'
             f'border-bottom:1px solid #f1f5f9">'
             f'<div style="display:flex;justify-content:space-between;'
             f'align-items:center;margin-bottom:6px">'
             f'<b style="font-size:13px;color:#334155">{esc(iface)}</b>'
-            f'<span style="font-size:12px;color:#64748b">'
-            f'&darr;&nbsp;{human_bps(t.get("rx_bps", 0))}&nbsp;'
-            f'&uarr;&nbsp;{human_bps(t.get("tx_bps", 0))}</span></div>'
+            f'<span style="font-size:12px">'
+            f'<span style="color:#2563eb">&darr;&nbsp;{human_bps(t.get("rx_bps", 0))}</span>'
+            f'&nbsp;&nbsp;'
+            f'<span style="color:#f97316">&uarr;&nbsp;{human_bps(t.get("tx_bps", 0))}</span>'
+            f'&nbsp;&nbsp;'
+            f'<span style="color:#94a3b8">peak&nbsp;{human_bps(peak_rx)}</span>'
+            f'</span></div>'
             f'{sp}</div>')
     center_throughput = (
         f'<div class="box"><h2 style="margin-bottom:14px">Network Throughput '
