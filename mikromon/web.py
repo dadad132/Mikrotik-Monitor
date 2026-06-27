@@ -1495,10 +1495,9 @@ def _update_box(name, csrf, current):
                 f'</form>')
 
     avail = update_available(current)
-    install_cls = "" if avail else "ghost"
 
     # Buttons that live in the top form's actions row
-    actions = (act("install", "Download &amp; install + reboot", install_cls))
+    actions = ""
     if firmware_available(current):
         actions += " " + act("firmware", "Upgrade RouterBOOT firmware", "ghost",
                               confirm="Schedules a firmware upgrade. Continue?")
