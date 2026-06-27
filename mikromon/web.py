@@ -521,11 +521,11 @@ def _render_device(store, state, name, user, csrf="",
 
     tabbar = _device_tabbar(name, "overview", AuthStore.is_admin(user or {}), csrf)
 
-    # ── arc gauge helper (semi-circle, sweep counterclockwise = top arc) ──────
-    def _arc(pct, color):
+    # ── arc gauge helper (semi-circle, value embedded inside SVG) ───────────
+    def gauge_card(label, val_str, pct, color):
         p = max(0.0, min(0.999, pct))
-        cx, cy, r, sw = 55, 56, 44, 11
-        # Background: two explicit quarter-arcs to unambiguously draw top half
+        cx, cy, r, sw = 75, 78, 58, 15
+        # Two quarter-arcs ensure the top semi-circle is drawn unambiguously
         bg_d = (f"M {cx - r} {cy} A {r} {r} 0 0 0 {cx} {cy - r} "
                 f"A {r} {r} 0 0 0 {cx + r} {cy}")
         if p > 0:
@@ -536,18 +536,18 @@ def _render_device(store, state, name, user, csrf="",
                   f'stroke="{color}" stroke-width="{sw}" fill="none" stroke-linecap="round"/>')
         else:
             fg = ""
-        return (f'<svg viewBox="0 0 110 66" width="110" height="60" '
-                f'style="display:block;margin:0 auto">'
-                f'<path d="{bg_d}" stroke="#e2e8f0" stroke-width="{sw}" fill="none" '
-                f'stroke-linecap="round"/>{fg}</svg>')
-
-    def gauge_card(label, val_str, pct, color):
-        return (f'<div class="box" style="padding:18px 14px;text-align:center">'
-                f'<div style="font-size:11px;font-weight:600;text-transform:uppercase;'
-                f'letter-spacing:.06em;color:#94a3b8;margin-bottom:10px">{label}</div>'
-                f'{_arc(pct, color)}'
-                f'<div style="font-size:26px;font-weight:700;color:{color};'
-                f'margin-top:5px">{val_str}</div></div>')
+        # Value text sits centered just inside the open mouth of the arc
+        txt = (f'<text x="{cx}" y="{cy + 4}" text-anchor="middle" dominant-baseline="middle" '
+               f'font-size="22" font-weight="700" fill="{color}" '
+               f'font-family="system-ui,sans-serif">{val_str}</text>')
+        svg = (f'<svg viewBox="0 0 150 92" width="148" height="88" '
+               f'style="display:block;margin:0 auto">'
+               f'<path d="{bg_d}" stroke="#e8edf5" stroke-width="{sw}" fill="none" '
+               f'stroke-linecap="round"/>{fg}{txt}</svg>')
+        return (f'<div class="box" style="padding:16px 12px 12px;text-align:center">'
+                f'<div style="font-size:10px;font-weight:700;text-transform:uppercase;'
+                f'letter-spacing:.08em;color:#94a3b8;margin-bottom:6px">{label}</div>'
+                f'{svg}</div>')
 
     # ── top facts bar ──────────────────────────────────────────────────────────
     fi = []
