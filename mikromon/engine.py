@@ -95,6 +95,15 @@ class Engine:
                 facts["update_available"] = latest != installed
         except Exception:
             pass
+        # Cache disk usage percentage.
+        try:
+            free_hdd = int(res.get("free-hdd-space", 0))
+            total_hdd = int(res.get("total-hdd-space", 0))
+            if total_hdd > 0:
+                facts["disk_used_pct"] = round(
+                    (1.0 - free_hdd / total_hdd) * 100, 1)
+        except (ValueError, TypeError):
+            pass
 
     def _flush_metrics(self, ctx) -> None:
         if self.metrics and ctx.samples:

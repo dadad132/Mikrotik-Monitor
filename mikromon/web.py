@@ -517,90 +517,221 @@ def _render_device(store, state, name, user, csrf="",
     badge = {"ok": ("ok", "Healthy"), "warn": ("warn", "Warning"),
              "crit": ("crit", "Offline / Error")}[sev]
     m = d["metrics"]
+    q = quote(name)
 
     tabbar = _device_tabbar(name, "overview", AuthStore.is_admin(user or {}), csrf)
-    facts_html = _facts_strip(f)
 
-    # gauges (live latest values)
-    gauges = ""
+    # ── arc gauge helper (semi-circle, sweep counterclockwise = top arc) ──────
+    def _arc(pct, color):
+        p = max(0.0, min(0.999, pct))
+        cx, cy, r, sw = 55, 56, 44, 11
+        # Background: two explicit quarter-arcs to unambiguously draw top half
+        bg_d = (f"M {cx - r} {cy} A {r} {r} 0 0 0 {cx} {cy - r} "
+                f"A {r} {r} 0 0 0 {cx + r} {cy}")
+        if p > 0:
+            a = math.pi * (1.0 - p)
+            ex = cx + r * math.cos(a)
+            ey = cy - r * math.sin(a)
+            fg = (f'<path d="M {cx - r} {cy} A {r} {r} 0 0 0 {ex:.2f} {ey:.2f}" '
+                  f'stroke="{color}" stroke-width="{sw}" fill="none" stroke-linecap="round"/>')
+        else:
+            fg = ""
+        return (f'<svg viewBox="0 0 110 66" width="110" height="60" '
+                f'style="display:block;margin:0 auto">'
+                f'<path d="{bg_d}" stroke="#e2e8f0" stroke-width="{sw}" fill="none" '
+                f'stroke-linecap="round"/>{fg}</svg>')
+
+    def gauge_card(label, val_str, pct, color):
+        return (f'<div class="box" style="padding:18px 14px;text-align:center">'
+                f'<div style="font-size:11px;font-weight:600;text-transform:uppercase;'
+                f'letter-spacing:.06em;color:#94a3b8;margin-bottom:10px">{label}</div>'
+                f'{_arc(pct, color)}'
+                f'<div style="font-size:26px;font-weight:700;color:{color};'
+                f'margin-top:5px">{val_str}</div></div>')
+
+    # ── top facts bar ──────────────────────────────────────────────────────────
+    fi = []
+    if f.get("uptime"):   fi.append(("Uptime",       f["uptime"]))
+    if f.get("model"):    fi.append(("Model",         f["model"]))
+    if f.get("serial"):   fi.append(("Serial",        f["serial"]))
+    if f.get("host"):     fi.append(("Management IP", f["host"]))
+    if f.get("version"):  fi.append(("RouterOS",      f["version"]))
+    if "temp_c" in m:     fi.append(("Temperature",   f'{m["temp_c"]:.0f}°C'))
+    fact_cells = "".join(
+        f'<div style="flex:1;min-width:130px;padding:11px 16px;'
+        f'border-right:1px solid #f0f4f8">'
+        f'<div style="font-size:10px;color:#94a3b8;text-transform:uppercase;'
+        f'letter-spacing:.06em;margin-bottom:3px">{esc(k)}</div>'
+        f'<div style="font-size:13px;font-weight:600;color:#0f172a">{esc(v)}</div>'
+        f'</div>'
+        for k, v in fi)
+    facts_bar = (f'<div style="display:flex;flex-wrap:wrap;background:#fff;'
+                 f'border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.08);'
+                 f'margin-bottom:16px;overflow:hidden">{fact_cells}</div>')
+
+    # ── left column: gauges ────────────────────────────────────────────────────
+    left_col = ""
     if "cpu" in m:
-        gauges += _gauge("CPU load", m["cpu"])
+        cpu = m["cpu"]
+        cc = "#dc2626" if cpu > 80 else "#f97316"
+        left_col += gauge_card("CPU Usage", f"{cpu:.0f}%", cpu / 100, cc)
     if "mem_free_pct" in m:
-        gauges += _gauge("Memory used", 100 - m["mem_free_pct"])
+        mu = 100 - m["mem_free_pct"]
+        mc = "#dc2626" if mu > 85 else "#3b82f6"
+        left_col += gauge_card("Memory", f"{mu:.0f}%", mu / 100, mc)
+    if f.get("disk_used_pct") is not None:
+        du = f["disk_used_pct"]
+        dc = "#dc2626" if du > 85 else "#8b5cf6"
+        left_col += gauge_card("Disk", f"{du:.0f}%", du / 100, dc)
     if "temp_c" in m:
-        gauges += _gauge("Temperature", m["temp_c"], unit="°C")
+        t = m["temp_c"]
+        tc = "#dc2626" if t > 70 else "#f97316" if t > 50 else "#16a34a"
+        left_col += (f'<div class="box" style="padding:18px 14px;text-align:center">'
+                     f'<div style="font-size:11px;font-weight:600;text-transform:uppercase;'
+                     f'letter-spacing:.06em;color:#94a3b8;margin-bottom:12px">'
+                     f'Temperature</div>'
+                     f'<div style="font-size:38px;font-weight:700;color:{tc};'
+                     f'padding:8px 0">{t:.0f}°C</div></div>')
     if "client_count" in m:
-        gauges += (f'<div class="gauge"><div class="gl">Connected devices'
-                   f'<span>{m["client_count"]:.0f}</span></div></div>')
-    gauges = gauges or '<p class="muted">No telemetry collected yet.</p>'
+        left_col += (f'<div class="box" style="padding:18px 14px;text-align:center">'
+                     f'<div style="font-size:11px;font-weight:600;text-transform:uppercase;'
+                     f'letter-spacing:.06em;color:#94a3b8;margin-bottom:12px">'
+                     f'Connected</div>'
+                     f'<div style="font-size:38px;font-weight:700;color:#2563eb;'
+                     f'padding:8px 0">{m["client_count"]:.0f}</div>'
+                     f'<div style="font-size:12px;color:#94a3b8;margin-top:4px">'
+                     f'devices</div></div>')
+    if not left_col:
+        left_col = '<div class="box"><p class="muted">No telemetry yet.</p></div>'
 
-    # WAN uplinks with live throughput + role
+    # ── center: WAN status circles ─────────────────────────────────────────────
     wl = f.get("wan_links") or []
-    cur_link = next((p for p in d["problems"] if p["key"] == "wan_failover"), None)
-    link_rows = ""
-    for i, name_lbl in enumerate(wl):
-        role = "primary" if i == 0 else "backup"
-        tp = ""
-        # match throughput by interface label if present
-        for iface, t in d["throughput"].items():
-            if iface and (iface == name_lbl):
-                tp = (f' &nbsp;&darr;{human_bps(t.get("rx_bps", 0))} '
-                      f'&uarr;{human_bps(t.get("tx_bps", 0))}')
-        link_rows += (f'<div class="linkrow"><span class="prio">{i + 1}</span>'
-                      f'<b>{esc(name_lbl)}</b> <span class="muted">{role}</span>'
-                      f'{tp}</div>')
-    if not link_rows:
-        link_rows = '<p class="muted">No WAN uplinks configured for this device.</p>'
-    wan_note = ('<p class="muted" style="margin-top:10px">Per-link latency / jitter / '
-                'packet-loss graphs arrive with the SLA-probing phase.</p>')
+    circles_html = ""
+    for i, wname in enumerate(wl):
+        if not d["up"]:
+            cc = "#dc2626"
+            label = "Offline"
+        elif d["wan_health"] == "partial" and i == 0:
+            cc = "#f97316"
+            label = "Failover"
+        else:
+            cc = "#16a34a"
+            label = "Online"
+        circles_html += (
+            f'<div style="display:flex;flex-direction:column;align-items:center;gap:8px">'
+            f'<div style="width:52px;height:52px;border-radius:50%;'
+            f'border:3px solid {cc};background:{cc}18;display:flex;'
+            f'align-items:center;justify-content:center;font-size:20px;'
+            f'font-weight:700;color:{cc}">{i + 1}</div>'
+            f'<div style="font-size:12px;color:#334155;font-weight:500;text-align:center;'
+            f'max-width:80px;word-break:break-all">{esc(wname)}</div>'
+            f'<div style="font-size:11px;color:{cc};font-weight:600">{label}</div>'
+            f'</div>')
+    if circles_html:
+        center_wan = (f'<div class="box"><h2 style="margin-bottom:14px">WAN Status</h2>'
+                      f'<div style="display:flex;gap:24px;flex-wrap:wrap">'
+                      f'{circles_html}</div></div>')
+    else:
+        center_wan = (f'<div class="box"><h2>WAN Status</h2>'
+                      f'<p class="muted">No WAN uplinks configured.</p></div>')
 
-    # throughput sparklines
-    spark = ""
+    # ── center: throughput sparklines ──────────────────────────────────────────
+    spark_rows = ""
     for iface, t in sorted(d["throughput"].items()):
         sp = _sparkline(store.series(name, "rx_bps", label=iface,
-                                     since=time.time() - 3600), width=240, height=44)
-        spark += (f'<div style="margin:6px 0"><b>{esc(iface)}</b> '
-                  f'&darr;{human_bps(t.get("rx_bps", 0))} '
-                  f'&uarr;{human_bps(t.get("tx_bps", 0))}<br>{sp}</div>')
+                                     since=time.time() - 3600), width=260, height=44)
+        spark_rows += (
+            f'<div style="margin-bottom:14px;padding-bottom:14px;'
+            f'border-bottom:1px solid #f1f5f9">'
+            f'<div style="display:flex;justify-content:space-between;'
+            f'align-items:center;margin-bottom:6px">'
+            f'<b style="font-size:13px;color:#334155">{esc(iface)}</b>'
+            f'<span style="font-size:12px;color:#64748b">'
+            f'&darr;&nbsp;{human_bps(t.get("rx_bps", 0))}&nbsp;'
+            f'&uarr;&nbsp;{human_bps(t.get("tx_bps", 0))}</span></div>'
+            f'{sp}</div>')
+    center_throughput = (
+        f'<div class="box"><h2 style="margin-bottom:14px">Network Throughput '
+        f'<span style="font-size:12px;color:#94a3b8;font-weight:400">'
+        f'(last hour)</span></h2>'
+        f'{spark_rows or "<p class=muted>No throughput data yet.</p>"}'
+        f'</div>')
 
-    # active problems
+    # ── right: online availability (24 h bar chart) ────────────────────────────
+    avail_box = ""
+    up_series = store.series(name, "up", since=time.time() - 86400)
+    if up_series:
+        n = len(up_series)
+        up_n = sum(1 for _, v in up_series if v > 0)
+        avail = (up_n / n * 100) if n else 100.0
+        acol = "#16a34a" if avail >= 99 else "#d97706" if avail >= 90 else "#dc2626"
+        now_t = time.time()
+        buckets: list = [[] for _ in range(24)]
+        for ts, v in up_series:
+            h = int((now_t - ts) / 3600)
+            if 0 <= h < 24:
+                buckets[23 - h].append(v)
+        bars_h = "".join(
+            '<div style="flex:1;height:28px;background:'
+            + ("#e2e8f0" if not b
+               else "#16a34a" if (sum(b) / len(b)) >= 0.9
+               else "#dc2626" if (sum(b) / len(b)) < 0.1
+               else "#f97316")
+            + ';border-radius:2px;min-width:2px"></div>'
+            for b in buckets)
+        avail_box = (
+            f'<div class="box"><h2 style="margin-bottom:12px">Online Availability</h2>'
+            f'<div style="display:flex;gap:2px;margin-bottom:8px">{bars_h}</div>'
+            f'<div style="display:flex;justify-content:space-between;'
+            f'font-size:12px;color:#64748b">'
+            f'<span>24h ago</span>'
+            f'<span style="font-weight:700;color:{acol}">{avail:.1f}% uptime</span>'
+            f'<span>now</span></div></div>')
+
+    # ── right: active problems ─────────────────────────────────────────────────
+    _lc = {"warn": "#d97706", "crit": "#dc2626"}
     if d["problems"]:
-        probs = "".join(f'<li><b>{esc(p["key"])}</b> ({esc(str(p["level"]))})</li>'
-                        for p in d["problems"])
-        probs_html = f'<ul style="margin:6px 0 0 18px;color:#b91c1c">{probs}</ul>'
+        phtml = "".join(
+            f'<div style="padding:8px 10px;margin:4px 0;border-radius:6px;'
+            f'border-left:3px solid {_lc.get(str(p["level"]), "#dc2626")};'
+            f'background:{_lc.get(str(p["level"]), "#dc2626")}15">'
+            f'<span style="font-weight:600;font-size:13px;'
+            f'color:{_lc.get(str(p["level"]), "#dc2626")}">'
+            f'{esc(p["key"])}</span></div>'
+            for p in d["problems"])
     else:
-        probs_html = '<p class="ok">No active problems.</p>'
+        phtml = ('<p style="color:#16a34a;font-weight:600;padding:4px 0">'
+                 'No active problems</p>')
+    probs_box = (f'<div class="box"><h2 style="margin-bottom:12px">'
+                 f'Active Problems</h2>{phtml}</div>')
 
-    # diagnosis: change vs ISP/WAN vs wider area outage
+    # ── right: diagnosis ───────────────────────────────────────────────────────
     internet_down = any(p["key"] in ("internet_down", "wan_failover")
                         for p in d["problems"])
-    mins = (max(0, int((time.time() - last_change) / 60))
-            if last_change else None)
-    diag_html = _diagnosis_box(_diagnose(d["up"], internet_down, mins,
-                                         others_down))
+    mins = (max(0, int((time.time() - last_change) / 60)) if last_change else None)
+    diag_html = _diagnosis_box(_diagnose(d["up"], internet_down, mins, others_down))
 
-    q = quote(name)
     iface_card = (f'<div class="box"><h2>Interfaces</h2>'
                   f'<p class="muted">Port list, VLANs, bridges and IP addresses.</p>'
                   f'<a class="btn ghost" href="/device?name={q}&tab=interfaces">'
                   f'View interfaces</a></div>')
+
+    # ── assemble ───────────────────────────────────────────────────────────────
     inner = (
-        f'<div class="wrap" style="max-width:1100px">'
+        f'<div class="wrap" style="max-width:1300px">'
         f'<h1 style="display:flex;align-items:center;gap:12px">{esc(name)}'
-        f'<span class="badge {badge[0]}">{badge[1]}</span></h1>{tabbar}'
-        f'{facts_html}'
-        f'<div class="cols">'
-        f'<div class="box"><h2>System</h2>{gauges}</div>'
-        f'<div class="box"><h2>WAN uplinks</h2>{link_rows}{wan_note}</div>'
+        f'<span class="badge {badge[0]}">{badge[1]}</span></h1>'
+        f'{tabbar}{facts_bar}'
+        f'<div style="display:grid;grid-template-columns:220px 1fr 280px;'
+        f'gap:16px;align-items:start">'
+        f'<div style="display:flex;flex-direction:column;gap:16px">{left_col}</div>'
+        f'<div style="display:flex;flex-direction:column;gap:16px">'
+        f'{center_wan}{center_throughput}</div>'
+        f'<div style="display:flex;flex-direction:column;gap:16px">'
+        f'{avail_box}{probs_box}{diag_html or ""}{iface_card}</div>'
         f'</div>'
-        f'<div class="cols">'
-        f'<div class="box"><h2>Throughput (last hour)</h2>'
-        f'{spark or "<p class=muted>No throughput data yet.</p>"}</div>'
-        f'<div class="box"><h2>Active problems</h2>{probs_html}</div>'
-        f'</div>'
-        f'{diag_html}'
-        f'{iface_card}'
-        f'<p><a href="/">&larr; dashboard</a></p></div>')
+        f'<p style="margin-top:16px"><a href="/">&larr; dashboard</a></p>'
+        f'</div>')
     return _page(esc(name), _header(user, "/") + inner)
 
 
@@ -1359,33 +1490,100 @@ def _adopt_box(name, slug, feature, csrf, unmanaged) -> str:
             f'{rows}</table></div>')
 
 
-def _queue_script_box(name, csrf) -> str:
-    """A paste-and-run script box shown on the Queues tab.
-    Submits to the scripts feature so it goes through the full dry-run pipeline."""
-    q = esc(name)
-    return (f'<div class="box"><h2>Run a queue script</h2>'
-            f'<p class="muted">Paste any RouterOS commands that manage queues — '
-            f'e.g. bulk resets, policy-based limits, or anything the table above '
-            f'can\'t express. The script is saved to /system/script, previewed, '
-            f'then run. Use the Scripts tab to manage or remove saved scripts.</p>'
-            f'<form method="POST" action="/device/push">'
-            f'<input type="hidden" name="csrf" value="{csrf}">'
-            f'<input type="hidden" name="device" value="{q}">'
-            f'<input type="hidden" name="feature" value="scripts">'
-            f'<div class="fields">'
-            f'<div class="f"><label class="f">Script name</label>'
-            f'<input name="new_name" value="queue-script" '
-            f'placeholder="queue-script"></div>'
-            f'<div class="f full"><label class="f">Script source (RouterOS commands)'
-            f'</label><textarea name="new_source" rows="8" '
-            f'style="width:100%;font-family:ui-monospace,Consolas,monospace;'
-            f'font-size:13px;padding:8px;border:1px solid #cbd5e1;border-radius:7px"'
-            f' placeholder="/queue simple set [find name=&quot;office&quot;] '
-            f'max-limit=20M/10M"></textarea></div>'
-            f'</div>'
-            f'<div class="actions" style="margin-top:12px">'
-            f'<button class="btn" type="submit">Preview &amp; save script</button>'
-            f'</div></form></div>')
+_QUEUE_BUILDER_JS = '''<script>
+function qbGen(){
+  var from=parseInt(document.getElementById('qb-from').value)||40;
+  var to=parseInt(document.getElementById('qb-to').value)||60;
+  var pfx=document.getElementById('qb-pfx').value||'User';
+  var dl=document.getElementById('qb-dl').value||'3';
+  var ul=document.getElementById('qb-ul').value||'3';
+  var base=document.getElementById('qb-base').value.trim();
+  if(to<from)to=from;
+  var lim=dl+'M/'+ul+'M';
+  var L=['# Queue setup: '+pfx+'-'+from+' to '+pfx+'-'+to+', '+lim,
+         '# Generated by MikroMon — review before applying',''];
+  if(base){
+    L.push('/queue simple');
+    L.push(':for i from='+from+' to='+to+' do={');
+    L.push('    add name=("'+pfx+'-$i") target=("'+base+'.$i") max-limit='+lim);
+    L.push('    }');
+  }else{
+    L.push('# Auto-detect LAN subnet from bridge interface');
+    L.push(':local subnet ""');
+    L.push(':foreach a in=[/ip address find where interface~"bridge"] do={');
+    L.push('  :if ($subnet="") do={');
+    L.push('    :local addr [/ip address get $a address]');
+    L.push('    :local ip [:pick $addr 0 [:find $addr "/"]]');
+    L.push('    :local d1 [:find $ip "."]');
+    L.push('    :local d2 [:find $ip "." ($d1+1)]');
+    L.push('    :local d3 [:find $ip "." ($d2+1)]');
+    L.push('    :set subnet [:pick $ip 0 $d3]');
+    L.push('  }');
+    L.push('}');
+    L.push(':if ($subnet="") do={ :error "Could not detect bridge subnet" }');
+    L.push('');
+    L.push('/queue simple');
+    L.push(':for i from='+from+' to='+to+' do={');
+    L.push('    add name=("'+pfx+'-$i") target=($subnet . ".$i") max-limit='+lim);
+    L.push('    }');
+  }
+  document.getElementById('qb-out').value=L.join('\n');
+}
+window.addEventListener('DOMContentLoaded',qbGen);
+</script>'''
+
+
+def _queue_script_box(name, csrf, facts=None) -> str:
+    """Interactive queue setup builder shown on the Queues tab.
+    Generates a RouterOS :for-loop script from form fields; submits via scripts pipeline."""
+    qn = esc(name)
+    host = (facts or {}).get("host", "")
+    default_base = ""
+    if host:
+        parts = host.split(".")
+        if len(parts) == 4 and all(p.isdigit() for p in parts):
+            default_base = ".".join(parts[:3])
+    base_attr = (f'value="{esc(default_base)}"' if default_base
+                 else 'placeholder="10.0.2"')
+    return (
+        f'<div class="box"><h2>Queue Setup Builder</h2>'
+        f'<p class="muted">Set the IP range, name prefix, and speeds — the '
+        f'RouterOS script is generated live below. Leave the LAN subnet blank '
+        f'to auto-detect from the router\'s bridge interface at run time.</p>'
+        f'<div class="fields">'
+        f'<div class="f"><label class="f">Range from (host #)</label>'
+        f'<input id="qb-from" type="number" min="1" max="254" value="40" oninput="qbGen()"></div>'
+        f'<div class="f"><label class="f">Range to (host #)</label>'
+        f'<input id="qb-to" type="number" min="1" max="254" value="60" oninput="qbGen()"></div>'
+        f'<div class="f"><label class="f">Name prefix (e.g. User)</label>'
+        f'<input id="qb-pfx" type="text" value="User" oninput="qbGen()"></div>'
+        f'<div class="f"><label class="f">Download limit (Mbps)</label>'
+        f'<input id="qb-dl" type="number" min="1" value="3" oninput="qbGen()"></div>'
+        f'<div class="f"><label class="f">Upload limit (Mbps)</label>'
+        f'<input id="qb-ul" type="number" min="1" value="3" oninput="qbGen()"></div>'
+        f'<div class="f"><label class="f">LAN subnet (first 3 octets)</label>'
+        f'<input id="qb-base" type="text" {base_attr} oninput="qbGen()"></div>'
+        f'</div>'
+        f'<hr style="margin:14px 0;border:none;border-top:1px solid #e2e8f0">'
+        f'<form method="POST" action="/device/push">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="device" value="{qn}">'
+        f'<input type="hidden" name="feature" value="scripts">'
+        f'<div class="fields">'
+        f'<div class="f"><label class="f">Script name</label>'
+        f'<input name="new_name" value="queue-setup" placeholder="queue-setup"></div>'
+        f'<div class="f full"><label class="f">'
+        f'Generated RouterOS script (review before submitting)</label>'
+        f'<textarea id="qb-out" name="new_source" rows="10"'
+        f' style="width:100%;font-family:ui-monospace,Consolas,monospace;'
+        f'font-size:13px;padding:8px;border:1px solid #cbd5e1;border-radius:7px"'
+        f'></textarea></div>'
+        f'</div>'
+        f'<div class="actions" style="margin-top:12px">'
+        f'<button class="btn" type="submit">Preview &amp; save script</button>'
+        f'</div></form>'
+        + _QUEUE_BUILDER_JS + '</div>'
+    )
 
 
 def _scripts_box(name, csrf, scripts) -> str:
@@ -2845,7 +3043,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     if slug == "scripts":
                         extra_html = _scripts_box(name, csrf, current)
                     elif slug == "qos":
-                        extra_html = _queue_script_box(name, csrf)
+                        extra_html = _queue_script_box(name, csrf, facts)
                     elif slug == "hubtunnel":
                         extra_html = _hubtunnel_box(name, current, csrf)
                     elif slug == "update":
