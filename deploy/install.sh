@@ -684,6 +684,39 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Auto-correct secure_cookies in config.yaml.
+# Rule: true only when a real Let's Encrypt cert exists for the domain.
+# This self-heals on every re-run so the user never has to edit the file.
+# ---------------------------------------------------------------------------
+step "Checking secure_cookies setting"
+"${APP_DIR}/.venv/bin/python" - "${APP_DIR}/config.yaml" <<'PY'
+import sys, os
+try:
+    import yaml
+    path = sys.argv[1]
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+    web    = data.get("web") or {}
+    domain = web.get("domain", "")
+    current = web.get("secure_cookies", False)
+    # A real cert exists when certbot put it here.
+    le_cert = f"/etc/letsencrypt/live/{domain}/fullchain.pem" if domain else ""
+    should_be = bool(domain and le_cert and os.path.isfile(le_cert))
+    if current != should_be:
+        web["secure_cookies"] = should_be
+        data["web"] = web
+        with open(path, "w") as f:
+            yaml.safe_dump(data, f, sort_keys=False)
+        print(f"  secure_cookies: {current} → {should_be}" +
+              ("" if should_be else
+               "  (no Let's Encrypt cert yet — login will work over HTTP)"))
+    else:
+        print(f"  secure_cookies already correct ({current})")
+except Exception as e:
+    print(f"  WARNING: could not check secure_cookies: {e}")
+PY
+
+# ---------------------------------------------------------------------------
 # Restart any services we stopped, now running the freshly-synced code. (On a
 # first install nothing was running yet, so this is skipped and the user starts
 # them via the "Next steps" below.) Start mikromon before mikromon-web, since
