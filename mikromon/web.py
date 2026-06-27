@@ -799,18 +799,39 @@ def _hub_save(path, data) -> None:
 
 
 def _alloc_tunnel_ip(hub, name) -> str:
-    """A stable per-device tunnel IP from the hub subnet (.2-.254)."""
+    """Random stable per-device tunnel IP across the 10.10.x.y /16 space.
+
+    Third octet (0-254) and fourth octet (2-254) are both chosen randomly so
+    sequential device registration produces no detectable pattern.  The pool
+    has ~64k addresses; if random probing keeps hitting collisions (dense
+    allocation) it falls back to a shuffled exhaustive scan.
+    """
+    import random
     leases = hub.setdefault("leases", {})
     if name in leases:
         return leases[name]
-    base = hub.get("subnet", _HUB_SUBNET_DEFAULT).split("/")[0].rsplit(".", 1)[0]
-    used = set(leases.values())
-    for i in range(2, 255):
-        ip = f"{base}.{i}"
+    subnet = hub.get("subnet", _HUB_SUBNET_DEFAULT)
+    base = ".".join(subnet.split("/")[0].split(".")[:2])   # "10.10"
+    hub_ip = f"{base}.0.1"
+    used = set(leases.values()) | {hub_ip}
+    # Fast path: random probing succeeds almost instantly when allocation is sparse
+    for _ in range(500):
+        ip = f"{base}.{random.randint(0, 254)}.{random.randint(2, 254)}"
         if ip not in used:
             leases[name] = ip
             return ip
-    return f"{base}.2"
+    # Fallback: shuffled exhaustive scan for dense allocations
+    thirds = list(range(0, 255))
+    random.shuffle(thirds)
+    for third in thirds:
+        fourths = list(range(2, 255))
+        random.shuffle(fourths)
+        for fourth in fourths:
+            ip = f"{base}.{third}.{fourth}"
+            if ip not in used:
+                leases[name] = ip
+                return ip
+    return f"{base}.0.2"
 
 
 def _wg_keypair():
@@ -892,7 +913,8 @@ def _provision_script(name, raw, pwuser, pwd, *,
         a("/ip service set ftp disabled=yes")
     if hub_ip and hub_pubkey and wg_priv and tunnel_ip:
         port = hub_port or "51820"
-        net = subnet or "10.10.0.0/24"
+        _sn_base = ".".join((subnet or _HUB_SUBNET_DEFAULT).split("/")[0].split(".")[:2])
+        net = f"{_sn_base}.0.0/16"   # cover all sub-/24 ranges so hub is reachable
         a("")
         a("# 5) WireGuard dial-home tunnel (RouterOS 7.1+) - add only if absent")
         a(":if ([:len [/interface wireguard find name=mikromon]] = 0) do={")
@@ -900,7 +922,7 @@ def _provision_script(name, raw, pwuser, pwd, *,
           'private-key="' + wg_priv + '" comment="mikromon:tunnel:if"')
         a("}")
         a(":if ([:len [/ip address find interface=mikromon]] = 0) do={")
-        a("  /ip address add address=" + tunnel_ip + "/24 interface=mikromon "
+        a("  /ip address add address=" + tunnel_ip + "/16 interface=mikromon "
           'comment="mikromon:tunnel:addr"')
         a("}")
         a(":if ([:len [/interface wireguard peers find "
