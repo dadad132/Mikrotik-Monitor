@@ -133,7 +133,8 @@ def _all_devices(store, state, allowed=None) -> list:
 
 # ============================ rendering ====================================
 def _throughput_chart(rx_pts, tx_pts, width=284) -> str:
-    """SVG throughput chart: RX (blue) + TX (orange) lines, time axis, peak marker."""
+    """SVG throughput chart: RX (blue) + TX (orange) lines, time axis, peak marker,
+    and hover tooltip showing exact values at the cursor position."""
     all_vals = [v for _, v in rx_pts + tx_pts]
     if not all_vals:
         return ""
@@ -144,6 +145,7 @@ def _throughput_chart(rx_pts, tx_pts, width=284) -> str:
     win = 3600.0
     since_t = now_t - win
     hi = max(all_vals) or 1.0
+    cid = f"tc{id(rx_pts) & 0xFFFFFFFF:08x}"  # unique per chart on the page
 
     def xp(ts):
         return max(0.0, min(float(width), (ts - since_t) / win * width))
@@ -165,7 +167,7 @@ def _throughput_chart(rx_pts, tx_pts, width=284) -> str:
         f'stroke="#f1f5f9" stroke-width="1"/>'
         for f in (0.25, 0.5, 0.75, 1.0))
 
-    # peak marker (RX only)
+    # static peak marker (RX only)
     peak_html = ""
     if rx_pts:
         peak_ts, peak_v = max(rx_pts, key=lambda p: p[1])
@@ -174,7 +176,6 @@ def _throughput_chart(rx_pts, tx_pts, width=284) -> str:
             t_s = time.localtime(peak_ts)
             t_lbl = f"{t_s.tm_hour:02d}:{t_s.tm_min:02d}"
             v_lbl = human_bps(peak_v)
-            # place label left-of-marker on right half, right-of-marker on left half
             if px >= width / 2:
                 anch, label_x = "end", min(px - 4, float(width) - 2)
             else:
@@ -199,15 +200,96 @@ def _throughput_chart(rx_pts, tx_pts, width=284) -> str:
             f'<text x="{lx:.1f}" y="{pad_t + plot_h + 14}" text-anchor="{anch}" '
             f'font-size="9" fill="#94a3b8" font-family="system-ui,sans-serif">{lbl}</text>')
 
+    # ── hover: crosshair + tooltip ────────────────────────────────────────────
+    crosshair = (
+        f'<line id="{cid}h" x1="0" y1="{pad_t}" x2="0" y2="{pad_t + plot_h}" '
+        f'stroke="#64748b" stroke-width="0.8" stroke-dasharray="3,2" '
+        f'opacity="0" pointer-events="none"/>')
+    # dots on each line at the hover position
+    dot_rx = (f'<circle id="{cid}dr" cx="0" cy="0" r="3.5" fill="#2563eb" '
+              f'opacity="0" pointer-events="none"/>')
+    dot_tx = (f'<circle id="{cid}dt" cx="0" cy="0" r="3.5" fill="#f97316" '
+              f'opacity="0" pointer-events="none"/>')
+    # tooltip box: time + DL + UL
+    tooltip = (
+        f'<g id="{cid}tip" opacity="0" pointer-events="none">'
+        f'<rect id="{cid}bg" x="0" y="0" width="116" height="46" rx="5" '
+        f'fill="#1e293b" opacity="0.9"/>'
+        f'<text id="{cid}tt" x="8" y="13" font-size="9" fill="#94a3b8" '
+        f'font-family="system-ui,sans-serif"></text>'
+        f'<text id="{cid}tdl" x="8" y="28" font-size="10.5" fill="#60a5fa" '
+        f'font-weight="600" font-family="system-ui,sans-serif"></text>'
+        f'<text id="{cid}tul" x="8" y="42" font-size="10.5" fill="#fb923c" '
+        f'font-weight="600" font-family="system-ui,sans-serif"></text>'
+        f'</g>')
+    # transparent overlay captures the mouse
+    overlay = (
+        f'<rect id="{cid}ov" x="0" y="{pad_t}" width="{width}" height="{plot_h}" '
+        f'fill="transparent" cursor="crosshair"/>')
+
+    rx_json = json.dumps([[ts, v] for ts, v in rx_pts])
+    tx_json = json.dumps([[ts, v] for ts, v in tx_pts])
+    script = (
+        f'<script>(function(){{'
+        f'var C="{cid}",W={width},PT={pad_t},PH={plot_h},'
+        f'ST={since_t:.3f},HI={hi:.6f};'
+        f'var RX={rx_json},TX={tx_json};'
+        f'function xp(ts){{return Math.max(0,Math.min(W,(ts-ST)/3600*W));}} '
+        f'function yp(v){{return PT+PH-v/HI*PH;}} '
+        f'function near(d,ts){{'
+        f'var b=null,bd=1e18;'
+        f'for(var i=0;i<d.length;i++){{var dt=Math.abs(d[i][0]-ts);if(dt<bd){{bd=dt;b=d[i];}}}} '
+        f'return b;}}'
+        f'function hbps(v){{'
+        f'if(v>=1e9)return (v/1e9).toFixed(2)+" Gbit/s";'
+        f'if(v>=1e6)return (v/1e6).toFixed(2)+" Mbit/s";'
+        f'if(v>=1e3)return (v/1e3).toFixed(0)+" Kbit/s";'
+        f'return v.toFixed(0)+" bit/s";}}'
+        f'var ov=document.getElementById(C+"ov");'
+        f'if(!ov)return;'
+        f'var xh=document.getElementById(C+"h"),'
+        f'dr=document.getElementById(C+"dr"),'
+        f'dt=document.getElementById(C+"dt"),'
+        f'tip=document.getElementById(C+"tip"),'
+        f'bg=document.getElementById(C+"bg"),'
+        f'tt=document.getElementById(C+"tt"),'
+        f'tdl=document.getElementById(C+"tdl"),'
+        f'tul=document.getElementById(C+"tul");'
+        f'ov.addEventListener("mousemove",function(e){{'
+        f'var r=ov.getBoundingClientRect(),rx=e.clientX-r.left;'
+        f'var ts=ST+rx/W*3600;'
+        f'var p0=near(RX,ts),p1=near(TX,ts);'
+        f'xh.setAttribute("x1",rx);xh.setAttribute("x2",rx);xh.style.opacity=1;'
+        f'if(p0){{dr.setAttribute("cx",xp(p0[0]));dr.setAttribute("cy",yp(p0[1]));dr.style.opacity=1;}} '
+        f'if(p1){{dt.setAttribute("cx",xp(p1[0]));dt.setAttribute("cy",yp(p1[1]));dt.style.opacity=1;}} '
+        f'var d=new Date(ts*1000),'
+        f'hh=d.getHours().toString().padStart(2,"0"),'
+        f'mm=d.getMinutes().toString().padStart(2,"0");'
+        f'tt.textContent=hh+":"+mm;'
+        f'tdl.textContent="↓ "+(p0?hbps(p0[1]):"—");'
+        f'tul.textContent="↑ "+(p1?hbps(p1[1]):"—");'
+        f'var tx2=rx+8,ty2=PT;'
+        f'if(tx2+120>W)tx2=rx-122;'
+        f'bg.setAttribute("x",tx2);bg.setAttribute("y",ty2);'
+        f'tt.setAttribute("x",tx2+8);tt.setAttribute("y",ty2+13);'
+        f'tdl.setAttribute("x",tx2+8);tdl.setAttribute("y",ty2+28);'
+        f'tul.setAttribute("x",tx2+8);tul.setAttribute("y",ty2+42);'
+        f'tip.style.opacity=1;'
+        f'}});'
+        f'ov.addEventListener("mouseleave",function(){{'
+        f'xh.style.opacity=0;dr.style.opacity=0;dt.style.opacity=0;tip.style.opacity=0;'
+        f'}});'
+        f'}})();</script>')
+
     return (
-        f'<svg viewBox="0 0 {width} {total_h}" width="{width}" height="{total_h}" '
-        f'style="display:block">'
-        f'{grid}'
-        f'{axis}'
-        f'{polyline(rx_pts, "#2563eb")}'
-        f'{polyline(tx_pts, "#f97316")}'
-        f'{peak_html}'
-        f'</svg>'
+        f'<svg id="{cid}" viewBox="0 0 {width} {total_h}" '
+        f'width="{width}" height="{total_h}" style="display:block;overflow:visible">'
+        + grid + axis
+        + polyline(rx_pts, "#2563eb") + polyline(tx_pts, "#f97316")
+        + peak_html
+        + crosshair + dot_rx + dot_tx + tooltip + overlay
+        + script
+        + '</svg>'
     )
 
 
