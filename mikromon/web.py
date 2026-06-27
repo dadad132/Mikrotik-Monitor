@@ -521,33 +521,35 @@ def _render_device(store, state, name, user, csrf="",
 
     tabbar = _device_tabbar(name, "overview", AuthStore.is_admin(user or {}), csrf)
 
-    # ── arc gauge helper (semi-circle, value embedded inside SVG) ───────────
+    # ── donut gauge helper (ring chart, value centred inside) ────────────────
     def gauge_card(label, val_str, pct, color):
-        p = max(0.0, min(0.999, pct))
-        cx, cy, r, sw = 75, 78, 58, 15
-        # Two quarter-arcs ensure the top semi-circle is drawn unambiguously
-        bg_d = (f"M {cx - r} {cy} A {r} {r} 0 0 0 {cx} {cy - r} "
-                f"A {r} {r} 0 0 0 {cx + r} {cy}")
-        if p > 0:
-            a = math.pi * (1.0 - p)
-            ex = cx + r * math.cos(a)
-            ey = cy - r * math.sin(a)
-            fg = (f'<path d="M {cx - r} {cy} A {r} {r} 0 0 0 {ex:.2f} {ey:.2f}" '
-                  f'stroke="{color}" stroke-width="{sw}" fill="none" stroke-linecap="round"/>')
-        else:
-            fg = ""
-        # Value text sits centered just inside the open mouth of the arc
-        txt = (f'<text x="{cx}" y="{cy + 4}" text-anchor="middle" dominant-baseline="middle" '
-               f'font-size="22" font-weight="700" fill="{color}" '
-               f'font-family="system-ui,sans-serif">{val_str}</text>')
-        svg = (f'<svg viewBox="0 0 150 92" width="148" height="88" '
-               f'style="display:block;margin:0 auto">'
-               f'<path d="{bg_d}" stroke="#e8edf5" stroke-width="{sw}" fill="none" '
-               f'stroke-linecap="round"/>{fg}{txt}</svg>')
-        return (f'<div class="box" style="padding:16px 12px 12px;text-align:center">'
-                f'<div style="font-size:10px;font-weight:700;text-transform:uppercase;'
-                f'letter-spacing:.08em;color:#94a3b8;margin-bottom:6px">{label}</div>'
-                f'{svg}</div>')
+        p = max(0.0, min(1.0, pct))
+        r, sw = 40, 12
+        cx = cy = r + sw + 4          # 56
+        size = cx * 2                  # 112
+        circ = 2 * math.pi * r        # ≈ 251.3
+        dash = p * circ
+        offset = circ * 0.75          # rotate start to 12 o'clock
+        return (
+            f'<div class="box" style="padding:16px 12px 14px;text-align:center">'
+            f'<div style="font-size:10px;font-weight:700;text-transform:uppercase;'
+            f'letter-spacing:.08em;color:#94a3b8;margin-bottom:8px">{label}</div>'
+            f'<svg width="{size}" height="{size}" viewBox="0 0 {size} {size}" '
+            f'style="display:block;margin:0 auto">'
+            # background ring
+            f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" '
+            f'stroke="#e8edf5" stroke-width="{sw}"/>'
+            # filled arc
+            f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" '
+            f'stroke="{color}" stroke-width="{sw}" '
+            f'stroke-dasharray="{dash:.1f} {circ:.1f}" '
+            f'stroke-dashoffset="{offset:.1f}" stroke-linecap="round"/>'
+            # centred value
+            f'<text x="{cx}" y="{cy}" text-anchor="middle" '
+            f'dominant-baseline="middle" font-size="19" font-weight="700" '
+            f'fill="{color}" font-family="system-ui,sans-serif">{val_str}</text>'
+            f'</svg></div>'
+        )
 
     # ── top facts bar ──────────────────────────────────────────────────────────
     fi = []
