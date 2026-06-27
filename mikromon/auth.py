@@ -107,9 +107,14 @@ class AuthStore:
         self._add_col_if_missing("orgs", "plan", "TEXT NOT NULL DEFAULT 'free'")
 
     def _add_col_if_missing(self, table: str, col: str, col_def: str) -> None:
-        if col not in self._columns(table):
-            self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
-            self.db.commit()
+        try:
+            if col not in self._columns(table):
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
+                self.db.commit()
+        except Exception as exc:
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                "Could not add column %s.%s: %s", table, col, exc)
 
     def _migrate_legacy(self) -> None:
         """Upgrade the original single-tenant schema (username-keyed, role
@@ -264,7 +269,7 @@ class AuthStore:
         if not ident:
             return None
         cur = self.db.execute(
-            "SELECT id, username, email, phone, pw_hash, salt, iterations, role, "
+            "SELECT id, username, email, pw_hash, salt, iterations, role, "
             "org_id, devices, created FROM users "
             "WHERE lower(email) = ? OR lower(username) = ? LIMIT 1",
             (ident, ident))
@@ -272,9 +277,9 @@ class AuthStore:
         if not row:
             return None
         return {"id": row[0], "username": row[1], "email": row[2],
-                "phone": row[3], "pw_hash": row[4], "salt": row[5],
-                "iterations": row[6], "role": row[7], "org_id": row[8],
-                "devices": _load_devices(row[9]), "created": row[10],
+                "pw_hash": row[3], "salt": row[4], "iterations": row[5],
+                "role": row[6], "org_id": row[7],
+                "devices": _load_devices(row[8]), "created": row[9],
                 "login": row[2] or row[1]}     # email preferred, else username
 
     def list_users(self, org_id: int | None = None) -> list:
@@ -298,11 +303,19 @@ class AuthStore:
         return self.db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
 
     def org(self, org_id: int) -> dict | None:
-        row = self.db.execute(
-            "SELECT id, name, plan, created FROM orgs WHERE id = ?",
-            (int(org_id),)).fetchone()
-        return ({"id": row[0], "name": row[1], "plan": row[2], "created": row[3]}
-                if row else None)
+        try:
+            row = self.db.execute(
+                "SELECT id, name, plan, created FROM orgs WHERE id = ?",
+                (int(org_id),)).fetchone()
+            return ({"id": row[0], "name": row[1], "plan": row[2], "created": row[3]}
+                    if row else None)
+        except Exception:
+            # plan column not migrated yet — fall back to old query
+            row = self.db.execute(
+                "SELECT id, name, created FROM orgs WHERE id = ?",
+                (int(org_id),)).fetchone()
+            return ({"id": row[0], "name": row[1], "plan": "free", "created": row[2]}
+                    if row else None)
 
     def set_phone(self, identifier: str, phone: str) -> None:
         self._update(self._require(identifier)["id"], phone=_norm_phone(phone) or None)
