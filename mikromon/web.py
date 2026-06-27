@@ -1659,7 +1659,7 @@ def _render_confirm_page(name, user, slug, minutes, backup, hub_ip, csrf) -> str
         f'<input type="hidden" name="csrf" value="{csrf}">'
         f'<input type="hidden" name="device" value="{esc(name)}">'
         f'<input type="hidden" name="feature" value="{esc(slug)}">'
-        f'<button class="btn" type="submit">Keep now (skip the self-check)</button>'
+        f'<button class="btn" type="submit">Confirm (skip the self-check)</button>'
         f'<a class="btn ghost" href="/device?name={q}&tab={slug}">Go to the tab</a>'
         f'</form></div></div>'
         f'{_CONFIRM_JS}')
