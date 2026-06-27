@@ -44,12 +44,15 @@ class DevicesStore:
         self._migrate_checks()
 
     def _migrate_checks(self) -> None:
-        """Strip check values that now match the current DEFAULT_CHECKS.
+        """Strip stored check values that are redundant or stale.
 
-        When a default flips (e.g. wan_traffic False→True), every device that
-        had the old default stored explicitly keeps the stale value. This pass
-        removes any stored check entry whose value equals the current default,
-        so devices automatically inherit the new default on the next poll."""
+        Two cases:
+        - Stored value matches current default → remove (redundant; device
+          inherits the default anyway).
+        - Stored value is False but current default is True → remove (this was
+          the old default before a False→True flip; keeping it would silently
+          override the new default and prevent the check from running).
+        Any other stored value (a genuine user override) is left untouched."""
         changed = False
         with self._lock:
             rows = self.db.execute(
@@ -57,8 +60,11 @@ class DevicesStore:
             for name, blob in rows:
                 raw = json.loads(blob)
                 checks = raw.get("checks") or {}
-                pruned = {k: v for k, v in checks.items()
-                          if v != DEFAULT_CHECKS.get(k)}
+                pruned = {
+                    k: v for k, v in checks.items()
+                    if v != DEFAULT_CHECKS.get(k)                    # not redundant
+                    and not (v is False and DEFAULT_CHECKS.get(k) is True)  # not stale False
+                }
                 if pruned != checks:
                     raw["checks"] = pruned
                     self.db.execute(
