@@ -982,31 +982,6 @@ def _secret_field(lbl, val, fid):
             f'onclick="mmReveal(this,\'{fid}\')">Show</button></div></div>')
 
 
-def _connect_box(name, raw) -> str:
-    """WinBox connect helper: a winbox:// launch link + the saved credentials.
-    Username and password are HIDDEN until Show is clicked. Admin-only."""
-    if not raw:
-        return ""
-    host = raw.get("host", "")
-    user = raw.get("push_username") or raw.get("username", "")
-    pwd = raw.get("push_password") or raw.get("password", "")
-    if not host:
-        return ""
-    wb = f"winbox://{esc(host)}"
-    creds = (_plain_field("Host", host) + _plain_field("WinBox port", "8291")
-             + _secret_field("Username", user, "cu")
-             + _secret_field("Password", pwd, "cp"))
-    return (f'<div class="box"><h2>Connect (WinBox)</h2>'
-            f'<p><a class="btn" href="{wb}">Open in WinBox</a> '
-            f'<span class="muted">launches WinBox at this router (needs WinBox '
-            f'installed with the <code>winbox://</code> handler)</span></p>'
-            f'<div class="fields">{creds}</div>'
-            f'<p class="muted">Username and password are hidden — click <b>Show</b> '
-            f'to reveal, then click the field to select and copy. WinBox can\'t be '
-            f'auto-filled with the password from a browser link, so paste it after '
-            f'WinBox opens.</p></div>')
-
-
 def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
                              creds=None, msg="", error="") -> str:
     tabbar = _device_tabbar(name, "provision", True, csrf)
@@ -1030,10 +1005,11 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
         f'<input type="hidden" name="csrf" value="{csrf}">'
         f'<input type="hidden" name="device" value="{esc(name)}">'
         f'<div class="fields">'
+        f'<input type="hidden" name="pwuser" value="{esc(pwuser)}">'
         f'<div class="f"><label class="f">Username <span class="muted">'
-        f'(the {esc(_BRAND)} login — full access, used for monitoring &amp; '
-        f'changes)</span></label>'
-        f'<input name="pwuser" value="{esc(pwuser)}"></div>'
+        f'(the {esc(_BRAND)} management login)</span></label>'
+        f'<div class="muted" style="padding:7px 0"><code>{esc(pwuser)}</code> '
+        f'<span style="font-size:11px">— fixed, not editable</span></div></div>'
         f'<div class="f"><label class="f">Dial-home tunnel</label>'
         f'<select name="transport">'
         f'<option value="wg" selected>WireGuard (RouterOS 7.1+)</option>'
@@ -1102,10 +1078,9 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
                f'{_secret_field("Username", c.get("user", ""), "su")}'
                f'{_secret_field("Password", c.get("pwd", ""), "sp")}'
                f'</div></div>')
-    connect = _connect_box(name, raw)
     inner = (f'<div class="wrap" style="max-width:1100px">'
              f'<h1>{esc(name)} &middot; Provision &amp; connect</h1>{tabbar}{intro}'
-             f'{banner}{err}{connect}{form}{out}'
+             f'{banner}{err}{form}{out}'
              f'<p><a href="/device?name={q}">&larr; overview</a></p></div>'
              f'{_REVEAL_JS}')
     return _page(esc(name) + " · Provision", _header(user, "/") + inner)
@@ -1823,8 +1798,8 @@ def _render_upgrade_wall(user, current_count: int = 0) -> str:
     return _page("Upgrade required", _header(user, "/devices") + inner)
 
 
-def _render_devices(store, csrf, user, edit_name=None, msg="",
-                    org_count: int = 0, org_plan: str = "free") -> str:
+def _render_devices(store, csrf, user, edit_name=None, show_add=False, msg="",
+                    all_devs=None, org_count: int = 0, org_plan: str = "free") -> str:
     if store is None:
         return _page("Devices", _header(user, "/devices") + '<div class="wrap">'
                      '<h1>Devices</h1><div class="box">Device management is not '
@@ -1832,20 +1807,45 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
     pre = (store.raw(edit_name) or {}) if edit_name else {}
     wan = pre.get("wan") or {}
 
+    # Build inventory-style rows with live state merged in
+    devs_by_name = {d["device"]: d for d in (all_devs or [])}
+    all_names = sorted(set(store.names()) | set(devs_by_name.keys()),
+                       key=lambda x: x.lower())
     trows = ""
-    for n in store.names():
-        host = (store.raw(n) or {}).get("host", "")
+    for n in all_names:
+        d = devs_by_name.get(n, {})
+        f = d.get("facts") or {}
+        sev = _severity(d) if d else "crit"
+        dot = {"ok": "#16a34a", "warn": "#d97706", "crit": "#dc2626"}[sev]
+        ver = f.get("version", "—")
+        old = ver[:1] in ("5", "6")
+        ver_html = (esc(ver) + (
+            f' <a class="up" href="/device?name={quote(n)}&tab=update">'
+            f'upgrade</a>' if old else ""))
+        wl = f.get("wan_links") or []
+        links = ", ".join(esc(x) for x in wl) if wl else '<span class="muted">—</span>'
+        host = f.get("host") or (store.raw(n) or {}).get("host", "—")
+        badge_lbl = "online" if d.get("up") else "offline"
         trows += (
-            f'<tr><td><b>{esc(n)}</b></td><td class="muted">{esc(host)}</td>'
+            f'<tr>'
+            f'<td><span class="dot" style="background:{dot}"></span> '
+            f'<a href="/device?name={quote(n)}"><b>{esc(n)}</b></a></td>'
+            f'<td>{esc(f.get("model", "—"))}</td>'
+            f'<td>{ver_html}</td>'
+            f'<td class="muted">{esc(f.get("serial", "—"))}</td>'
+            f'<td class="muted">{esc(host)}</td>'
+            f'<td>{links}</td>'
+            f'<td><span class="badge {sev}">{badge_lbl}</span></td>'
             f'<td><div class="actions">'
             f'<a class="btn ghost" href="/device?name={quote(n)}">Open</a>'
             f'<a class="btn ghost" href="/devices?edit={quote(n)}">Edit</a>'
             f'{_mini_form("/devices/test", csrf, n, "Test", "btn ghost")}'
             f'{_mini_form("/devices/delete", csrf, n, "Delete", "btn red", n)}'
-            f'</div></td></tr>')
+            f'</div></td>'
+            f'</tr>')
     if not trows:
-        trows = ('<tr><td colspan="3" class="muted">No devices yet — '
-                 'add your first one below.</td></tr>')
+        trows = ('<tr><td colspan="8" class="muted" style="padding:16px">No devices '
+                 'yet — click <b>Add device</b> to get started.</td></tr>')
 
     sources_sel = set(pre.get("client_count_sources") or ["dhcp", "wireless"])
     src_boxes = "".join(
@@ -1903,15 +1903,13 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
                 f'<div class="chips">{src_boxes}</div>', full=True)
         + field("Enabled checks", f'<div class="chips">{chk_boxes}</div>', full=True))
 
-    save_lbl = "Save changes" if edit_name else "Add device & get script"
-    cancel = ('<a class="btn ghost" href="/devices">Cancel</a>' if edit_name else "")
+    save_lbl = "Save changes" if edit_name else "Add device"
+    cancel = '<a class="btn ghost" href="/devices">Cancel</a>'
     intro = ("" if edit_name else
-             '<p class="muted" style="margin-top:0">Just enter a <b>name</b> and '
-             'click <b>Add device &amp; get script</b> — you\'ll get a script to '
-             'paste into the router\'s terminal (New Terminal in WinBox/WebFig). '
-             'The router dials home over the tunnel and the device syncs here on '
-             'its own — no public IP needed. (Advanced: enter a Host/IP only for a '
-             'router this server can already reach directly.)</p>')
+             '<p class="muted" style="margin-top:0">Enter a <b>name</b> and click '
+             '<b>Add device</b> — you\'ll be taken to the Provision tab to generate '
+             'a script or connect directly. The router dials home over the WireGuard '
+             'tunnel on its own — no public IP needed.</p>')
     form = (intro + f'<form method="POST" action="/devices/save">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="original_name" value="{esc(edit_name or "")}">'
@@ -1921,25 +1919,38 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
             f'</form>')
     msg_html = f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else ""
 
+    show_form = edit_name or show_add
     # TODO: re-enable after testing
     # at_limit = (org_plan == "free" and org_count >= _FREE_PLAN_DEVICE_LIMIT)
-    # if at_limit and not edit_name:
-    #     add_box = (locked wall html)
-    # else:
-    add_box = f'<div class="box"><h2>{"Edit device" if edit_name else "Add a device"}</h2>{form}</div>'
+    form_box = (f'<div class="box"><h2>{"Edit: " + esc(edit_name) if edit_name else "Add a device"}</h2>'
+                f'{form}</div>') if show_form else ""
+
+    add_btn = ('' if show_form else
+               f'<a class="btn" href="/devices?add=1">Add device</a>')
+
+    inv_table = (
+        f'<div class="box" style="max-width:1100px">'
+        f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">'
+        f'<input id="iq" placeholder="Search by name, model, version, serial…" '
+        f'style="flex:1" onkeyup="invFilter()">'
+        f'{add_btn}</div>'
+        f'<table id="invt" style="width:100%">'
+        f'<tr><th>Name</th><th>Model</th><th>RouterOS</th><th>Serial</th>'
+        f'<th>Host / IP</th><th>WAN uplinks</th><th>Status</th><th>Actions</th></tr>'
+        f'{trows}</table></div>')
+
+    inv_js = ('<script>function invFilter(){var t=document.getElementById("iq")'
+              '.value.toLowerCase();document.querySelectorAll("#invt tr").forEach('
+              'function(r,i){if(i===0)return;r.style.display='
+              'r.textContent.toLowerCase().indexOf(t)>=0?"":"none";});}</script>')
 
     plan_banner = ""
     # TODO: re-enable after testing
-    # if org_plan == "free":
-    #     used = org_count
-    #     if used < _FREE_PLAN_DEVICE_LIMIT:
-    #         plan_banner = (...)
+    # if org_plan == "free": ...
 
-    inner = (f'<div class="wrap"><h1>Devices</h1>{msg_html}{plan_banner}'
-             f'<div class="box"><table><tr><th>Name</th><th>Host</th>'
-             f'<th>Actions</th></tr>{trows}</table></div>'
-             f'{add_box}</div>')
-    return _page("Devices", _header(user, "/devices") + inner + _WAN_JS)
+    inner = (f'<div class="wrap" style="max-width:1200px"><h1>Devices</h1>'
+             f'{msg_html}{plan_banner}{inv_table}{form_box}</div>')
+    return _page("Devices", _header(user, "/devices") + inner + _WAN_JS + inv_js)
 
 
 def _wan_link_row(idx, ep=None) -> str:
@@ -2297,17 +2308,27 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
         def _serve_devices(self, url, user):
             if not AuthStore.is_admin(user):
                 return self._send(403, "forbidden")
-            edit = parse_qs(url.query).get("edit", [None])[0]
+            q = parse_qs(url.query)
+            edit = q.get("edit", [None])[0]
+            show_add = "add" in q
             store = self._devstore()
+            main_store = self._store()
             try:
+                state = _load_state(state_file)
+                org_names = (set(store.names_for_org(user["org_id"])) if store else None)
+                scope = sorted(org_names) if org_names is not None else []
+                all_devs = _all_devices(main_store, state, scope if scope else None)
                 org_count = store.count_for_org(user["org_id"]) if store else 0
                 org_plan = (auth.org(user["org_id"]) or {}).get("plan", "free") if auth else "free"
                 page = _render_devices(store, self._session()["csrf"], user,
-                                       edit_name=edit, org_count=org_count,
-                                       org_plan=org_plan)
+                                       edit_name=edit, show_add=show_add,
+                                       all_devs=all_devs,
+                                       org_count=org_count, org_plan=org_plan)
             finally:
                 if store:
                     store.close()
+                if main_store:
+                    main_store.close()
             return self._send(200, page, "text/html; charset=utf-8")
 
         def _devstore(self):
