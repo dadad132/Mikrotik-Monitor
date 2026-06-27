@@ -17,7 +17,7 @@ import sqlite3
 import threading
 import time
 
-from .config import ConfigError, build_device, device_to_dict
+from .config import ConfigError, DEFAULT_CHECKS, build_device, device_to_dict
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
@@ -41,6 +41,32 @@ class DevicesStore:
             self.db.execute(
                 "ALTER TABLE devices ADD COLUMN org_id INTEGER NOT NULL DEFAULT 1")
         self.db.commit()
+        self._migrate_checks()
+
+    def _migrate_checks(self) -> None:
+        """Strip check values that now match the current DEFAULT_CHECKS.
+
+        When a default flips (e.g. wan_traffic False→True), every device that
+        had the old default stored explicitly keeps the stale value. This pass
+        removes any stored check entry whose value equals the current default,
+        so devices automatically inherit the new default on the next poll."""
+        changed = False
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT name, config FROM devices").fetchall()
+            for name, blob in rows:
+                raw = json.loads(blob)
+                checks = raw.get("checks") or {}
+                pruned = {k: v for k, v in checks.items()
+                          if v != DEFAULT_CHECKS.get(k)}
+                if pruned != checks:
+                    raw["checks"] = pruned
+                    self.db.execute(
+                        "UPDATE devices SET config = ? WHERE name = ?",
+                        (json.dumps(raw), name))
+                    changed = True
+            if changed:
+                self.db.commit()
 
     # ----- mutations --------------------------------------------------------
     def upsert(self, raw: dict, defaults: dict, original_name: str | None = None,

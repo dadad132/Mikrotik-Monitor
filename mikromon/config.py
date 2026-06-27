@@ -305,6 +305,9 @@ def device_to_dict(cfg: DeviceConfig) -> dict:
         "monitor_interfaces": list(cfg.monitor_interfaces),
         "client_count_sources": list(cfg.client_count_sources),
         "traffic_interfaces": list(cfg.traffic_interfaces),
-        "checks": dict(cfg.checks),
+        # Only persist checks that differ from the current default so that
+        # raising a default from False→True automatically applies to all devices.
+        "checks": {k: v for k, v in cfg.checks.items()
+                   if v != DEFAULT_CHECKS.get(k)},
         "thresholds": dict(cfg.thresholds),
     }
