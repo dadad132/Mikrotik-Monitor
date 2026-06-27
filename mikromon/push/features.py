@@ -191,7 +191,9 @@ def _syn_cookies_on(pusher) -> bool:
 def security_read(pusher, cfg):
     rules = [r for r in pusher.api.fetch(_FILTER) if _prefix_owner(_SEC_TAG)(r)]
     return {"rules": rules, "ssh_disabled": _service_disabled(pusher, "ssh"),
-            "syn_cookies": _syn_cookies_on(pusher)}
+            "syn_cookies": _syn_cookies_on(pusher),
+            "telnet_disabled": _service_disabled(pusher, "telnet"),
+            "ftp_disabled": _service_disabled(pusher, "ftp")}
 
 
 def security_unmanaged(pusher, cfg):
@@ -215,6 +217,10 @@ def security_summary(current, cfg):
                  + ("ON." if current.get("syn_cookies") else "off."))
     lines.append("SSH service is currently "
                  + ("DISABLED." if current.get("ssh_disabled") else "enabled."))
+    lines.append("Telnet service is currently "
+                 + ("DISABLED." if current.get("telnet_disabled") else "enabled."))
+    lines.append("FTP service is currently "
+                 + ("DISABLED." if current.get("ftp_disabled") else "enabled."))
     return lines
 
 
@@ -225,7 +231,13 @@ def security_form(current, cfg):
         # multi-rule "ddos_detect-*" comments.
         pre = _SEC_TAG + key
         return any(c == pre or c.startswith(pre + "-") for c in have)
-    return [{"type": "toggle", "name": "opt", "value": "syn_cookies",
+    return [{"type": "toggle", "name": "opt", "value": "disable_telnet_ftp",
+             "label": "Disable Telnet & FTP services",
+             "on": bool(current.get("telnet_disabled") and current.get("ftp_disabled")),
+             "desc": "Turn off the router's Telnet and FTP servers (/ip service). "
+                     "These are legacy plaintext protocols — disable them unless "
+                     "you specifically need them."},
+            {"type": "toggle", "name": "opt", "value": "syn_cookies",
              "label": "SYN attack — TCP SYN-cookies",
              "on": bool(current.get("syn_cookies")),
              "desc": "Kernel-level SYN-flood defence (/ip settings "
@@ -347,6 +359,21 @@ def security_plan(pusher, cfg, flat, multi):
                 "set", _IP_SERVICE,
                 {".id": ssh[".id"], "disabled": ssh.get("disabled", "no")},
                 desc="restore the SSH service to its previous state")))
+    want_tf_disabled = "disable_telnet_ftp" in opts
+    all_services = pusher.api.fetch(_IP_SERVICE)
+    for svc_name in ("telnet", "ftp"):
+        svc = next((s for s in all_services if s.get("name") == svc_name), None)
+        if svc is not None and _norm(svc.get("disabled", "")) != (
+                "true" if want_tf_disabled else "false"):
+            ops.insert(0, Operation(
+                "set", _IP_SERVICE,
+                {".id": svc[".id"], "disabled": "yes" if want_tf_disabled else "no"},
+                desc=(f"disable the {svc_name.upper()} service" if want_tf_disabled
+                      else f"enable the {svc_name.upper()} service"),
+                inverse=Operation(
+                    "set", _IP_SERVICE,
+                    {".id": svc[".id"], "disabled": svc.get("disabled", "no")},
+                    desc=f"restore the {svc_name.upper()} service to its previous state")))
     return Plan(cfg.name, ops, summary="security")
 
 

@@ -1047,9 +1047,6 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
         f'<div class="f"><label class="chk"><input type="checkbox" '
         f'name="enable_api" value="1" class="switch" checked> Enable the API '
         f'service (needed for {esc(_BRAND)} to connect over the API)</label></div>'
-        f'<div class="f"><label class="chk"><input type="checkbox" name="harden" '
-        f'value="1" class="switch" checked> Disable Telnet/FTP (basic hardening)'
-        f'</label></div>'
         f'<div class="f"><label class="chk"><input type="checkbox" '
         f'name="lock_api" value="1" class="switch" checked> Lock the API to the '
         f'VPN tunnel (no public exposure — WireGuard encrypts it, so no API-SSL '
@@ -2497,7 +2494,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 hub_ip=hub_ip, hub_port=hub_port,
                 hub_pubkey=hub_pubkey if tunnel_ip else "", wg_priv=wg_priv,
                 tunnel_ip=tunnel_ip, subnet=hub.get("subnet"),
-                harden=flat.get("harden") == "1",
+                harden=True,
                 enable_api=flat.get("enable_api") == "1", lock_api=lock_api)
             creds = {"user": uname, "pwd": pwd, "ip": tunnel_ip, "hub": hub_ip,
                      "pubkey": dev_pub, "reg_ok": reg_ok, "reg_err": reg_err,
@@ -2560,7 +2557,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 api.connect()
                 result = provision_apply(
                     api, name, uname, pwd,
-                    harden=flat.get("harden") == "1",
+                    harden=True,
                     enable_api=flat.get("enable_api") == "1",
                     lock_api=lock_api,
                     hub_pubkey=hub_pubkey,
