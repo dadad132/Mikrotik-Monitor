@@ -186,13 +186,24 @@ _PAGE_CSS = """
  .linkrow .prio{width:22px;height:22px;border-radius:50%;background:#1e293b;
    color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;
    font-weight:700;flex-shrink:0}
+ /* modal overlay */
+ .modal-backdrop{display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);
+   z-index:200;align-items:flex-start;justify-content:center;padding:60px 20px 20px;
+   overflow-y:auto}
+ .modal-backdrop.open{display:flex}
+ .modal{background:#fff;border-radius:12px;padding:28px 28px 22px;width:100%;
+   max-width:720px;box-shadow:0 12px 40px rgba(0,0,0,.25);position:relative}
+ .modal h2{font-size:17px;margin:0 0 18px}
+ .modal-close{position:absolute;top:14px;right:16px;background:none;border:0;
+   font-size:20px;cursor:pointer;color:#64748b;line-height:1;padding:2px 6px}
+ .modal-close:hover{color:#0f172a}
 """
 
 
 def _nav(user, active) -> str:
     if not user:
         return ""
-    items = [("/", "Dashboard"), ("/inventory", "Inventory")]
+    items = [("/", "Dashboard")]
     if user.get("role") == "owner":
         items += [("/devices", "Devices"), ("/logs", "Activity"),
                   ("/admin", "Users")]

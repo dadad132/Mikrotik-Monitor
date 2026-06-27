@@ -1797,7 +1797,7 @@ def _render_upgrade_wall(user, current_count: int = 0) -> str:
     return _page("Upgrade required", _header(user, "/devices") + inner)
 
 
-def _render_devices(store, csrf, user, edit_name=None, show_add=False, msg="",
+def _render_devices(store, csrf, user, edit_name=None, msg="",
                     all_devs=None, org_count: int = 0, org_plan: str = "free") -> str:
     if store is None:
         return _page("Devices", _header(user, "/devices") + '<div class="wrap">'
@@ -1902,53 +1902,75 @@ def _render_devices(store, csrf, user, edit_name=None, show_add=False, msg="",
                 f'<div class="chips">{src_boxes}</div>', full=True)
         + field("Enabled checks", f'<div class="chips">{chk_boxes}</div>', full=True))
 
-    save_lbl = "Save changes" if edit_name else "Add device"
-    cancel = '<a class="btn ghost" href="/devices">Cancel</a>'
-    intro = ("" if edit_name else
-             '<p class="muted" style="margin-top:0">Enter a <b>name</b> and click '
-             '<b>Add device</b> — you\'ll be taken to the Provision tab to generate '
-             'a script or connect directly. The router dials home over the WireGuard '
-             'tunnel on its own — no public IP needed.</p>')
-    form = (intro + f'<form method="POST" action="/devices/save">'
-            f'<input type="hidden" name="csrf" value="{csrf}">'
-            f'<input type="hidden" name="original_name" value="{esc(edit_name or "")}">'
-            f'<div class="fields">{fields}</div>'
-            f'<div class="actions" style="margin-top:16px">'
-            f'<button class="btn" type="submit">{save_lbl}</button>{cancel}</div>'
-            f'</form>')
     msg_html = f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else ""
 
-    show_form = edit_name or show_add
-    # TODO: re-enable after testing
-    # at_limit = (org_plan == "free" and org_count >= _FREE_PLAN_DEVICE_LIMIT)
-    form_box = (f'<div class="box"><h2>{"Edit: " + esc(edit_name) if edit_name else "Add a device"}</h2>'
-                f'{form}</div>') if show_form else ""
+    # Edit form — shown inline below table (scrolled to automatically)
+    edit_box = ""
+    if edit_name:
+        edit_form = (
+            f'<form method="POST" action="/devices/save">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            f'<input type="hidden" name="original_name" value="{esc(edit_name)}">'
+            f'<div class="fields">{fields}</div>'
+            f'<div class="actions" style="margin-top:16px">'
+            f'<button class="btn" type="submit">Save changes</button>'
+            f'<a class="btn ghost" href="/devices">Cancel</a></div>'
+            f'</form>')
+        edit_box = (f'<div class="box" id="edit-box"><h2>Edit: {esc(edit_name)}</h2>'
+                    f'{edit_form}</div>')
 
-    add_btn = ('' if show_form else
-               f'<a class="btn" href="/devices?add=1">Add device</a>')
+    # Add device form — always in the DOM, shown as a modal
+    add_intro = ('<p class="muted" style="margin-top:0">Enter a <b>name</b> and click '
+                 '<b>Add device</b> — you\'ll be taken to the Provision tab to generate '
+                 'a script or connect directly.</p>')
+    add_form = (add_intro +
+                f'<form method="POST" action="/devices/save">'
+                f'<input type="hidden" name="csrf" value="{csrf}">'
+                f'<input type="hidden" name="original_name" value="">'
+                f'<div class="fields">{fields}</div>'
+                f'<div class="actions" style="margin-top:16px">'
+                f'<button class="btn" type="submit">Add device</button>'
+                f'<button type="button" class="btn ghost" '
+                f'onclick="document.getElementById(\'add-modal\').classList.remove(\'open\')">'
+                f'Cancel</button></div></form>')
+    add_modal = (
+        f'<div id="add-modal" class="modal-backdrop">'
+        f'<div class="modal">'
+        f'<button class="modal-close" type="button" '
+        f'onclick="document.getElementById(\'add-modal\').classList.remove(\'open\')">'
+        f'&times;</button>'
+        f'<h2>Add a device</h2>{add_form}</div></div>')
 
     inv_table = (
-        f'<div class="box" style="max-width:1100px">'
+        f'<div class="box">'
         f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">'
         f'<input id="iq" placeholder="Search by name, model, version, serial…" '
         f'style="flex:1" onkeyup="invFilter()">'
-        f'{add_btn}</div>'
+        f'<button class="btn" type="button" '
+        f'onclick="document.getElementById(\'add-modal\').classList.add(\'open\')">'
+        f'Add device</button></div>'
         f'<table id="invt" style="width:100%">'
         f'<tr><th>Name</th><th>Model</th><th>RouterOS</th><th>Serial</th>'
         f'<th>Host / IP</th><th>WAN uplinks</th><th>Status</th><th>Actions</th></tr>'
         f'{trows}</table></div>')
 
-    inv_js = ('<script>function invFilter(){var t=document.getElementById("iq")'
+    inv_js = ('<script>'
+              'function invFilter(){var t=document.getElementById("iq")'
               '.value.toLowerCase();document.querySelectorAll("#invt tr").forEach('
               'function(r,i){if(i===0)return;r.style.display='
-              'r.textContent.toLowerCase().indexOf(t)>=0?"":"none";});}</script>')
+              'r.textContent.toLowerCase().indexOf(t)>=0?"":"none";});}'
+              # close modal on backdrop click
+              'document.addEventListener("click",function(e){'
+              'var m=document.getElementById("add-modal");'
+              'if(e.target===m)m.classList.remove("open");});'
+              '</script>')
 
     plan_banner = ""
     # TODO: re-enable after testing
     # if org_plan == "free": ...
 
     inner = (f'<div class="wrap" style="max-width:1200px"><h1>Devices</h1>'
-             f'{msg_html}{plan_banner}{inv_table}{form_box}</div>')
+             f'{msg_html}{plan_banner}{inv_table}{edit_box}</div>{add_modal}')
     return _page("Devices", _header(user, "/devices") + inner + _WAN_JS + inv_js)
 
 
@@ -2307,9 +2329,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
         def _serve_devices(self, url, user):
             if not AuthStore.is_admin(user):
                 return self._send(403, "forbidden")
-            q = parse_qs(url.query)
-            edit = q.get("edit", [None])[0]
-            show_add = "add" in q
+            edit = parse_qs(url.query).get("edit", [None])[0]
             store = self._devstore()
             main_store = self._store()
             try:
@@ -2320,7 +2340,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 org_count = store.count_for_org(user["org_id"]) if store else 0
                 org_plan = (auth.org(user["org_id"]) or {}).get("plan", "free") if auth else "free"
                 page = _render_devices(store, self._session()["csrf"], user,
-                                       edit_name=edit, show_add=show_add,
+                                       edit_name=edit,
                                        all_devs=all_devs,
                                        org_count=org_count, org_plan=org_plan)
             finally:
