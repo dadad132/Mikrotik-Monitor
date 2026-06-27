@@ -640,20 +640,28 @@ server {
 NGX
     nginx -t && { systemctl reload nginx || systemctl restart nginx; }
 
-    # Save domain to config.yaml + enable secure cookies (HTTPS).
-    "${APP_DIR}/.venv/bin/python" - "${APP_DIR}/config.yaml" "${DOMAIN}" <<'PY'
+    # Save domain to config.yaml.
+    # Only enable secure_cookies when we have a real Let's Encrypt cert —
+    # a self-signed cert still serves HTTPS but the browser won't trust it
+    # for cookie purposes until the user explicitly accepts it, so keeping
+    # secure_cookies=false until a real cert is in place avoids a login loop.
+    LE_CERT="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+    REAL_CERT="false"
+    [[ -f "${LE_CERT}" ]] && REAL_CERT="true"
+    "${APP_DIR}/.venv/bin/python" - "${APP_DIR}/config.yaml" "${DOMAIN}" "${REAL_CERT}" <<'PY'
 import sys
 try:
     import yaml
-    path, domain = sys.argv[1], sys.argv[2]
+    path, domain, real_cert = sys.argv[1], sys.argv[2], sys.argv[3]
     with open(path) as f:
         data = yaml.safe_load(f) or {}
     web = data.setdefault("web", {})
     web["domain"] = domain
-    web["secure_cookies"] = True
+    web["secure_cookies"] = (real_cert == "true")
     with open(path, "w") as f:
         yaml.safe_dump(data, f, sort_keys=False)
-    print("config.yaml updated: web.domain + secure_cookies = true")
+    status = "true" if real_cert == "true" else "false (self-signed cert — re-run after DNS propagates)"
+    print(f"config.yaml updated: web.domain={domain}, secure_cookies={status}")
 except Exception as e:
     print(f"config.yaml update failed: {e}")
 PY
