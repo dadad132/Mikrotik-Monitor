@@ -1723,3 +1723,87 @@ TAB_SLUGS = {"WAN": "sdwan", "Security": "security",
              "QoS": "qos", "Port forwarding": "portfwd", "Interfaces": "interfaces",
              "Remote access": "remote", "Tunnel": "tunnel",
              "Scripts": "scripts", "Update": "update"}
+
+
+# ===========================================================================
+# Device decommission — remove the hub tunnel and monitoring user when a
+# device is deleted from the dashboard so the router stops dialling home.
+# ===========================================================================
+
+def device_offboard(api, cfg):
+    """Remove the hub WireGuard tunnel and monitoring user from the router.
+
+    Called automatically when a device is deleted from the dashboard.
+    Each step is independent — one failure does not abort the rest.
+    Returns a list of step dicts: {"level": "ok"|"warn"|"error", "msg": str}
+    """
+    steps = []
+
+    def note(level, msg):
+        steps.append({"level": level, "msg": msg})
+
+    # 1. Hub tunnel WireGuard peer (comment tagged "mikromon:tunnel:")
+    try:
+        peers = api.fetch(_HUB_PEERS)
+        hub_peers = [p for p in peers
+                     if str(p.get("comment", "")).startswith(_HUB_TAG)]
+        for p in hub_peers:
+            api.execute(Operation("remove", _HUB_PEERS, {".id": p[".id"]},
+                                  desc="remove hub tunnel WireGuard peer"))
+        if hub_peers:
+            ep = hub_peers[0].get("endpoint-address", "")
+            note("ok", "Removed hub tunnel peer"
+                       + (f" (endpoint {ep})" if ep else ""))
+        else:
+            note("warn", "No hub tunnel peer found (already removed?)")
+    except Exception as exc:  # noqa: BLE001
+        note("error", f"Could not remove hub tunnel peer: {exc}")
+
+    # 2. Hub tunnel IP address on the 'mikromon' interface
+    try:
+        addrs = api.fetch(_HUB_ADDR)
+        hub_addrs = [a for a in addrs
+                     if a.get("interface") == _HUB_NAME
+                     or str(a.get("comment", "")).startswith(_HUB_TAG)]
+        for a in hub_addrs:
+            api.execute(Operation("remove", _HUB_ADDR, {".id": a[".id"]},
+                                  desc=f"remove tunnel IP {a.get('address', '')}"))
+        if hub_addrs:
+            note("ok", "Removed tunnel IP: "
+                       + ", ".join(a.get("address", "?") for a in hub_addrs))
+    except Exception as exc:  # noqa: BLE001
+        note("error", f"Could not remove tunnel IP address: {exc}")
+
+    # 3. WireGuard interface named 'mikromon' (taking the tunnel fully down)
+    try:
+        ifaces = api.fetch(_HUB_WG)
+        hub_ifaces = [i for i in ifaces if i.get("name") == _HUB_NAME]
+        for i in hub_ifaces:
+            api.execute(Operation("remove", _HUB_WG, {".id": i[".id"]},
+                                  desc=f"remove WireGuard interface '{_HUB_NAME}'"))
+        if hub_ifaces:
+            note("ok", f"Removed WireGuard interface '{_HUB_NAME}' — tunnel is down")
+        else:
+            note("warn", f"WireGuard interface '{_HUB_NAME}' not found "
+                         f"(not provisioned, or already removed)")
+    except Exception as exc:  # noqa: BLE001
+        note("error", f"Could not remove WireGuard interface: {exc}")
+
+    # 4. Monitoring user
+    username = cfg.username
+    if username:
+        try:
+            users = api.fetch(("user",))
+            target = next((u for u in users
+                           if str(u.get("name", "")) == username), None)
+            if target:
+                api.execute(Operation("remove", ("user",), {".id": target[".id"]},
+                                      desc=f"remove monitoring user '{username}'"))
+                note("ok", f"Removed monitoring user '{username}'")
+            else:
+                note("warn", f"Monitoring user '{username}' not found "
+                             f"(already removed?)")
+        except Exception as exc:  # noqa: BLE001
+            note("error", f"Could not remove monitoring user '{username}': {exc}")
+
+    return steps

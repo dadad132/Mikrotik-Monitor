@@ -521,34 +521,61 @@ def _render_device(store, state, name, user, csrf="",
 
     tabbar = _device_tabbar(name, "overview", AuthStore.is_admin(user or {}), csrf)
 
-    # ── speedometer gauge (0 = bottom-left, 100% = bottom-right, via top) ───
+    # ── speedometer gauge (220° arc, 0% at lower-left, 100% at lower-right) ──
     def gauge_card(label, val_str, pct, color):
         p = max(0.0, min(0.999, pct))
-        cx, cy, r, sw = 55, 54, 44, 12
-        # Background: two quarter-arcs with butt line-caps so they meet cleanly
-        # at the top without a visible bump.
-        bg_d = (f"M {cx - r} {cy} A {r} {r} 0 0 0 {cx} {cy - r} "
-                f"A {r} {r} 0 0 0 {cx + r} {cy}")
+        cx, cy = 56, 60      # SVG circle centre
+        r, sw = 42, 11       # radius, track stroke width
+
+        # Angles in standard math convention (CCW from east, y-up).
+        # Arc spans 220° symmetrically: starts at 200° (lower-left ≈ 7:40 on a
+        # clock), sweeps CW over the top (90°), ends at 340° (lower-right ≈ 4:20).
+        # 50% lands exactly at 90° = the top.  CW = decreasing standard angle.
+        a_start = math.radians(200)
+        a_end   = math.radians(340)
+        span    = math.radians(220)
+
+        def pt(a):
+            return cx + r * math.cos(a), cy - r * math.sin(a)
+
+        sx, sy = pt(a_start)
+        ex, ey = pt(a_end)
+
+        # Background track: one large CW arc (220° > 180° → large-arc=1, sweep=1)
+        bg_d = f"M {sx:.2f} {sy:.2f} A {r} {r} 0 1 1 {ex:.2f} {ey:.2f}"
+
+        # Rounded end-cap discs so the butt-capped track has tidy terminations
+        dot = sw // 2
+        caps = (f'<circle cx="{sx:.2f}" cy="{sy:.2f}" r="{dot}" fill="#e8edf5"/>'
+                f'<circle cx="{ex:.2f}" cy="{ey:.2f}" r="{dot}" fill="#e8edf5"/>')
+
+        # Fill arc: CW from start, spanning p × 220°
+        fg = ""
         if p > 0:
-            a = math.pi * (1.0 - p)
-            ex = cx + r * math.cos(a)
-            ey = cy - r * math.sin(a)
-            fg = (f'<path d="M {cx - r} {cy} A {r} {r} 0 0 0 {ex:.2f} {ey:.2f}" '
+            a_tip = a_start - p * span          # CW = decreasing angle
+            tx, ty = pt(a_tip)
+            large = 1 if p * span > math.pi else 0   # > 180° needs large-arc=1
+            fg = (f'<path d="M {sx:.2f} {sy:.2f} '
+                  f'A {r} {r} 0 {large} 1 {tx:.2f} {ty:.2f}" '
                   f'stroke="{color}" stroke-width="{sw}" fill="none" '
                   f'stroke-linecap="round"/>')
-        else:
-            fg = ""
-        # Value text sits in the open gap at the bottom of the arc
+
+        # ViewBox: full width, just tall enough to show arc bottom + a sliver
+        vb_w = cx * 2                        # 112
+        vb_h = int(sy + dot + 6)             # ≈ 85
+
         return (
             f'<div class="box" style="padding:16px 12px 14px;text-align:center">'
             f'<div style="font-size:10px;font-weight:700;text-transform:uppercase;'
             f'letter-spacing:.08em;color:#94a3b8;margin-bottom:8px">{label}</div>'
-            f'<svg viewBox="0 0 110 78" width="110" height="78" '
+            f'<svg viewBox="0 0 {vb_w} {vb_h}" width="{vb_w}" height="{vb_h}" '
             f'style="display:block;margin:0 auto">'
             f'<path d="{bg_d}" stroke="#e8edf5" stroke-width="{sw}" fill="none" '
             f'stroke-linecap="butt"/>'
+            f'{caps}'
             f'{fg}'
-            f'<text x="{cx}" y="{cy + 17}" text-anchor="middle" '
+            # Value sits at the arc centre — like a speedometer readout
+            f'<text x="{cx}" y="{cy}" text-anchor="middle" '
             f'dominant-baseline="middle" font-size="20" font-weight="700" '
             f'fill="{color}" font-family="system-ui,sans-serif">{val_str}</text>'
             f'</svg></div>'
@@ -826,17 +853,66 @@ def _device_forget_box(name, csrf) -> str:
     return (f'<div class="box" style="border-left:4px solid #dc2626">'
             f'<h2>Remove from dashboard</h2>'
             f'<p class="muted">Deletes <b>{q}</b> from the device list and purges '
-            f'its metrics history and saved state. It disappears from the '
-            f'dashboard. If the router is still configured to dial in / be polled '
-            f'it can reappear — remove it on the Devices page or stop polling it '
-            f'too.</p>'
+            f'its metrics history and saved state.</p>'
+            f'<p class="muted">Before deleting, mikromon will attempt to connect '
+            f'to the router and <b>remove the WireGuard hub tunnel and monitoring '
+            f'user</b> so it stops dialling home. This requires the push/admin '
+            f'credentials to be set on the Devices page.</p>'
             f'<form method="POST" action="/device/forget" '
-            f'onsubmit="return confirm(\'Remove {q} and all its data from the '
-            f'dashboard?\')">'
+            f'onsubmit="return confirm(\'Remove {q} from the dashboard and '
+            f'decommission its router config?\')">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="device" value="{q}">'
             f'<div class="actions"><button class="btn red" type="submit">'
-            f'Remove this device</button></div></form></div>')
+            f'Decommission &amp; remove</button></div></form></div>')
+
+
+def _render_offboard_page(name, result, back_url, user) -> str:
+    """Summary page shown after a device is deleted, describing what was cleaned
+    up on the router (or why cleanup could not run)."""
+    q = esc(name)
+    steps = result.get("steps", [])
+    conn_err = result.get("error")
+    _icon = {"ok": "✓", "warn": "⚠", "error": "✗", "fixed": "✓"}
+    _col = {"ok": "#16a34a", "warn": "#d97706", "error": "#dc2626",
+            "fixed": "#16a34a"}
+    if conn_err:
+        router_box = (
+            f'<div class="box" style="border-left:4px solid #d97706;margin-top:16px">'
+            f'<b style="color:#d97706">Router could not be reached</b>'
+            f'<p class="muted" style="margin-top:6px">{esc(conn_err)}</p>'
+            f'<p class="muted">The device has been removed from the dashboard. '
+            f'You will need to manually log in to the router and:<br>'
+            f'&nbsp;• Remove the <code>mikromon</code> WireGuard interface<br>'
+            f'&nbsp;• Delete the <code>{esc(result.get("username","mkmonitor"))}'
+            f'</code> user</p></div>')
+    elif steps:
+        rows = "".join(
+            f'<div style="padding:3px 0;color:{_col.get(s["level"],"#374151")}">'
+            f'<b>{_icon.get(s["level"], "·")}</b>&nbsp;{esc(s["msg"])}</div>'
+            for s in steps)
+        has_err = any(s["level"] == "error" for s in steps)
+        border = "#dc2626" if has_err else "#16a34a"
+        router_box = (
+            f'<div class="box" style="border-left:4px solid {border};margin-top:16px">'
+            f'<b>Router cleanup</b>'
+            f'<div style="margin-top:8px;font-size:14px">{rows}</div>'
+            + (f'<p class="muted" style="margin-top:8px">Some steps failed — '
+               f'check the router manually if the tunnel or user persists.</p>'
+               if has_err else "")
+            + f'</div>')
+    else:
+        router_box = ""
+    body = (
+        f'<div class="wrap">'
+        f'<h1 style="margin-bottom:6px">{q} removed</h1>'
+        f'<p class="muted">Removed from the dashboard and its metrics history '
+        f'cleared.</p>'
+        f'{router_box}'
+        f'<div class="actions" style="margin-top:20px">'
+        f'<a class="btn" href="{esc(back_url)}">Done</a>'
+        f'</div></div>')
+    return _page(f"{q} · Removed", _header(user, "/") + body)
 
 
 _PWALPHABET = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -2687,6 +2763,44 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 except Exception:  # noqa: BLE001
                     log.exception("could not purge state for %s", name)
 
+        def _try_offboard(self, raw, name, uname):
+            """Best-effort: connect to the router and run device_offboard().
+
+            Always returns a result dict — never raises. If the router cannot
+            be reached the dict carries an "error" string so the caller can
+            tell the user to clean up manually."""
+            if not raw:
+                return {"steps": [], "error": "device config not found",
+                        "username": ""}
+            from .config import build_device
+            from .device import DeviceError
+            from .push import PushError, device_offboard, rw_device
+            from .push.api import PushApi
+            username = raw.get("username", "")
+            try:
+                cfg = build_device(raw, defaults)
+                dev = rw_device(cfg)
+                api = PushApi(dev)
+                try:
+                    api.connect()
+                    steps = device_offboard(api, cfg)
+                finally:
+                    dev.close()
+            except (DeviceError, PushError) as exc:
+                return {"steps": [], "error": str(exc), "username": username}
+            except Exception as exc:  # noqa: BLE001
+                return {"steps": [], "error": f"Unexpected error: {exc}",
+                        "username": username}
+            audit = self._auditlog()
+            if audit:
+                has_err = any(s["level"] == "error" for s in steps)
+                detail = "; ".join(s["msg"] for s in steps) or "no changes"
+                audit.append(name, uname, "device", "offboard",
+                             "error" if has_err else "ok",
+                             f"offboard on delete", detail)
+                audit.close()
+            return {"steps": steps, "error": None, "username": username}
+
         # ---- Backups tab (config-push engine, admin only) ----
         def _device_raw(self, name):
             store = self._devstore()
@@ -3356,19 +3470,26 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
         def _device_forget_post(self, flat, user):
             """Remove a device from the dashboard entirely: delete it from the
             devices DB (if managed) and purge its metrics + saved state. Works
-            for orphan devices that are no longer in the DB too (just purges)."""
+            for orphan devices that are no longer in the DB too (just purges).
+            Also attempts to decommission the router (remove WG tunnel + monitor user)."""
             if not AuthStore.is_admin(user or {}):
                 return self._send(403, "forbidden")
             name = flat.get("device", "")
-            if name:
-                store = self._devstore()
-                if store is not None:
-                    try:
-                        store.delete(name)
-                    finally:
-                        store.close()
-                self._purge_device_data(name)
-            return self._redirect("/")
+            if not name:
+                return self._redirect("/")
+            uname = (user or {}).get("login", "system")
+            raw = None
+            store = self._devstore()
+            if store is not None:
+                try:
+                    raw = store.raw(name)
+                    store.delete(name)
+                finally:
+                    store.close()
+            result = self._try_offboard(raw, name, uname)
+            self._purge_device_data(name)
+            page = _render_offboard_page(name, result, "/", user)
+            return self._send(200, page, "text/html; charset=utf-8")
 
         def _device_wg_repair_post(self, flat, user):
             """Connect to the router, diagnose + self-repair the WireGuard tunnel,
@@ -3437,14 +3558,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             try:
                 if path == "/devices/delete":
                     name = flat.get("name", "")
+                    raw = store.raw(name)
+                    uname = (user or {}).get("login", "system")
+                    result = self._try_offboard(raw, name, uname)
                     store.delete(name)
-                    # Purge the device everywhere it lingers, or it keeps showing
-                    # on the dashboard from stale metrics/state: its time-series
-                    # samples and its saved monitoring state. (The engine also
-                    # drops it from polling on its next cycle now it's gone from
-                    # the store.)
                     self._purge_device_data(name)
-                    return self._redirect("/devices")
+                    page = _render_offboard_page(name, result, "/devices", user)
+                    return self._send(200, page, "text/html; charset=utf-8")
                 if path == "/devices/test":
                     return self._device_test(store, flat.get("name", ""), user)
                 if path == "/devices/save":
