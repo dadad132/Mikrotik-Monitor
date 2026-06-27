@@ -1606,9 +1606,18 @@ def update_form(current, cfg):
 def update_plan(pusher, cfg, flat, multi):
     action = flat.get("update_action", "")
     if action == "check":
-        op = Operation("run", _PKG_UPDATE, {"_cmd": "check-for-updates"},
-                       desc="check for RouterOS updates (no reboot)")
-        return Plan(cfg.name, [op], summary="check for updates")
+        cur = update_read(pusher, cfg).get("update", {})
+        latest = cur.get("latest-version", "") or "latest"
+        installed = cur.get("installed-version", "?")
+        ops = [
+            Operation("run", _PKG_UPDATE, {"_cmd": "check-for-updates"},
+                      desc="check for RouterOS updates"),
+            Operation("run", _PKG_UPDATE, {"_cmd": "install"},
+                      desc=f"download & install RouterOS {latest} "
+                           f"(currently {installed}) — router will reboot",
+                      detach=True),
+        ]
+        return Plan(cfg.name, ops, summary="check + download & install + reboot")
     if action == "install":
         cur = update_read(pusher, cfg).get("update", {})
         latest = cur.get("latest-version", "") or "latest"

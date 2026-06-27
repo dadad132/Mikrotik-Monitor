@@ -1494,13 +1494,12 @@ def _update_box(name, csrf, current) -> str:
     avail = update_available(current)
     install_cls = "" if avail else "ghost"
     note = ('<p class="muted" style="border-left:3px solid #d97706;padding-left:8px">'
-            '⚠ <b>Install</b> downloads the new RouterOS and <b>reboots</b> to apply '
-            'it — the router goes offline ~1–2 min and briefly shows as down. '
-            '<b>Install only reboots when an update is actually available</b>; if the '
-            "box is already current it does nothing. Run <b>Check for updates</b> "
-            'first to be sure. You get a dry-run preview and a confirm step before '
-            'anything happens.</p>')
-    buttons = (act("check", "Check for updates", "ghost") + " "
+            '⚠ <b>Check &amp; install</b> checks for a new version, then downloads '
+            'and installs it — the router <b>reboots</b> to apply (~1–2 min offline). '
+            'If the router is already on the latest version, nothing happens. '
+            'You get a dry-run preview and a confirm step before anything is '
+            'written.</p>')
+    buttons = (act("check", "Check &amp; install update + reboot", "") + " "
                + act("install", "Download &amp; install + reboot", install_cls,
                      confirm="This reboots the router now. Continue?"))
     if firmware_available(current):
