@@ -1290,7 +1290,7 @@ def hubtunnel_form(current, cfg):
          "value": addr.get("address", ""), "placeholder": "10.10.0.2/24"},
         {"type": "text", "name": "allowed",
          "label": "Route to the hub (allowed-address)",
-         "value": peer.get("allowed-address", "") or "10.10.0.0/24"},
+         "value": peer.get("allowed-address", "") or "10.10.0.0/16"},
         {"type": "text", "name": "keepalive", "label": "Persistent keepalive",
          "value": peer.get("persistent-keepalive", "") or "25s",
          "hint": "Keeps the NAT hole open so the hub can reach back (CGNAT)."},
@@ -1302,7 +1302,7 @@ def hubtunnel_plan(pusher, cfg, flat, multi):
     hub_pubkey = flat.get("hub_pubkey", "").strip()
     tunnel_ip = flat.get("tunnel_ip", "").strip()
     port = (flat.get("port", "") or "51820").strip()
-    allowed = (flat.get("allowed", "") or "10.10.0.0/24").strip()
+    allowed = (flat.get("allowed", "") or "10.10.0.0/16").strip()
     if not (endpoint and hub_pubkey and tunnel_ip):
         return Plan(cfg.name, [],
                     summary="tunnel (need hub IP, hub key and tunnel IP)")
@@ -1511,17 +1511,21 @@ def provision_apply(api, name, pwuser, pwd, *, harden=True, enable_api=True,
             wg = next((w for w in api.fetch(_HUB_WG)
                        if w.get("name") == _HUB_NAME), None)
         router_pub = (wg or {}).get("public-key", "")
+        # Use /16 so that any 10.10.x.x device IP works regardless of the third
+        # octet that _alloc_tunnel_ip randomises.
+        _sn_base = ".".join(subnet.split("/")[0].split(".")[:2])  # "10.10"
+        _net16 = f"{_sn_base}.0.0/16"
         if not any(a.get("interface") == _HUB_NAME
                    for a in api.fetch(_HUB_ADDR)):
             do(Operation("add", _HUB_ADDR,
-                         {"address": tunnel_ip + "/24", "interface": _HUB_NAME,
+                         {"address": tunnel_ip + "/16", "interface": _HUB_NAME,
                           "comment": _HUB_TAG + "addr"}, desc="add tunnel address"))
         if not any(str(p.get("comment", "")).startswith(_HUB_TAG)
                    for p in api.fetch(_HUB_PEERS)):
             do(Operation("add", _HUB_PEERS,
                          {"interface": _HUB_NAME, "public-key": hub_pubkey,
                           "endpoint-address": hub_ip, "endpoint-port": port,
-                          "allowed-address": subnet, "persistent-keepalive": "25s",
+                          "allowed-address": _net16, "persistent-keepalive": "25s",
                           "comment": _HUB_TAG + "hub"}, desc="add hub peer"))
 
     # 5) Lock the API to the VPN tunnel — bind the api / api-ssl services to the
@@ -1531,19 +1535,21 @@ def provision_apply(api, name, pwuser, pwd, *, harden=True, enable_api=True,
     # expected — mikromon reconnects over the tunnel afterwards. Captured in the
     # steps either way so the outcome is visible in the activity log.
     if lock_api and tunnel_ip:
+        _sn_base = ".".join(subnet.split("/")[0].split(".")[:2])
+        _net16 = f"{_sn_base}.0.0/16"
         for svc in ("api", "api-ssl"):
             row = next((s for s in api.fetch(("ip", "service"))
                         if s.get("name") == svc), None)
-            if row is None or _norm(row.get("address", "")) == _norm(subnet):
+            if row is None or _norm(row.get("address", "")) == _norm(_net16):
                 continue
             try:
                 api.execute(Operation(
                     "set", ("ip", "service"),
-                    {".id": row[".id"], "address": subnet},
-                    desc=f"bind {svc} to the tunnel {subnet}"))
-                steps.append(f"bind {svc} to the tunnel {subnet}")
+                    {".id": row[".id"], "address": _net16},
+                    desc=f"bind {svc} to the tunnel {_net16}"))
+                steps.append(f"bind {svc} to the tunnel {_net16}")
             except Exception as exc:  # noqa: BLE001 — disconnect is expected
-                steps.append(f"bind {svc} to the tunnel {subnet} "
+                steps.append(f"bind {svc} to the tunnel {_net16} "
                              f"(session dropped as expected: {exc})")
     return {"router_pubkey": router_pub, "steps": steps}
 
