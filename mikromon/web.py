@@ -1931,7 +1931,7 @@ def _hubtunnel_box(name, current, csrf="", devices_db=None) -> str:
           "sudo apt install wireguard wireguard-tools\n"
           "# /etc/wireguard/wg0.conf — peers are applied automatically by\n"
           "#   mikromon-wg-reload.service (triggered when the peers file changes):\n"
-          "[Interface]\nPrivateKey = <hub private key>\nAddress = 10.10.0.1/24\n"
+          "[Interface]\nPrivateKey = <hub private key>\nAddress = 10.10.0.1/16\n"
           "ListenPort = 51820")
 
     peer_html = ""

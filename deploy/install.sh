@@ -246,7 +246,7 @@ log "Web unit     : ${WEB_UNIT}"
 step "Setting up the WireGuard dial-home hub"
 WG_PEERS="/etc/wireguard/wg-peers.conf"
 WG_PORT=51820
-WG_SUBNET="10.10.0.0/24"
+WG_SUBNET="10.10.0.0/16"
 WG_LOG="${APP_DIR}/wg-install-error.log"
 set +e
 (
@@ -309,7 +309,7 @@ set +e
   cat > /etc/wireguard/wg0.conf <<CONF
 [Interface]
 PrivateKey = ${HUB_PRIV}
-Address = 10.10.0.1/24
+Address = 10.10.0.1/16
 ListenPort = ${WG_PORT}
 CONF
   chmod 600 /etc/wireguard/wg0.conf
@@ -321,10 +321,14 @@ CONF
   #
   # IMPORTANT: `wg syncconf` speaks the low-level wg config format, which does
   # NOT understand wg-quick-only directives (Address/DNS/MTU/Table/Pre*/Post*/
-  # SaveConfig). wg0.conf has `Address = 10.10.0.1/24`, so feeding it raw makes
+  # SaveConfig). wg0.conf has `Address = 10.10.0.1/16`, so feeding it raw makes
   # `wg syncconf` reject the WHOLE config and load NO peers — the hub then
   # silently drops every router handshake (router dials, server never replies).
   # Strip those wg-quick-only lines first, keeping PrivateKey/ListenPort + peers.
+  #
+  # After syncing peers, also ensure the /16 kernel route exists.  wg syncconf
+  # updates the WireGuard peer table but does NOT add kernel IP routes, so
+  # devices allocated outside 10.10.0.0/24 would otherwise be unreachable.
   cat > /etc/systemd/system/mikromon-wg-reload.service <<UNIT
 [Unit]
 Description=Apply mikromon WireGuard peers to wg0
@@ -332,7 +336,7 @@ After=wg-quick@wg0.service
 PartOf=wg-quick@wg0.service
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/bash -c 'wg syncconf wg0 <(grep -vE "^[[:space:]]*(Address|DNS|MTU|Table|PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=" /etc/wireguard/wg0.conf; cat ${WG_PEERS} 2>/dev/null || true)'
+ExecStart=/usr/bin/bash -c 'wg syncconf wg0 <(grep -vE "^[[:space:]]*(Address|DNS|MTU|Table|PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=" /etc/wireguard/wg0.conf; cat ${WG_PEERS} 2>/dev/null || true); ip -4 route replace ${WG_SUBNET} dev wg0 2>/dev/null || true'
 [Install]
 WantedBy=multi-user.target
 UNIT
