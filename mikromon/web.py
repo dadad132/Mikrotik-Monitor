@@ -1307,22 +1307,33 @@ def _provision_script(name, raw, pwuser, pwd, *,
         _sn_base = ".".join((subnet or _HUB_SUBNET_DEFAULT).split("/")[0].split(".")[:2])
         net = f"{_sn_base}.0.0/16"   # cover all sub-/24 ranges so hub is reachable
         a("")
-        a("# 5) WireGuard dial-home tunnel (RouterOS 7.1+) - add only if absent")
+        a("# 5) WireGuard dial-home tunnel (RouterOS 7.1+)")
+        a("# Add interface if absent, then always sync settings so re-running")
+        a("# this script picks up a new key (generated each time you provision).")
         a(":if ([:len [/interface wireguard find name=mikromon]] = 0) do={")
         a('  /interface wireguard add name=mikromon listen-port=13231 '
           'private-key="' + wg_priv + '" comment="mikromon:tunnel:if"')
         a("}")
+        a("/interface wireguard set [/interface wireguard find name=mikromon] "
+          'private-key="' + wg_priv + '"')
         a(":if ([:len [/ip address find interface=mikromon]] = 0) do={")
         a("  /ip address add address=" + tunnel_ip + "/16 interface=mikromon "
           'comment="mikromon:tunnel:addr"')
         a("}")
+        a("/ip address set [/ip address find interface=mikromon] "
+          "address=" + tunnel_ip + "/16")
         a(":if ([:len [/interface wireguard peers find "
-          "interface=mikromon]] = 0) do={")
+          'comment="mikromon:tunnel:hub"]] = 0) do={')
         a('  /interface wireguard peers add interface=mikromon public-key="'
           + hub_pubkey + '" endpoint-address=' + hub_ip + " endpoint-port="
           + port + " allowed-address=" + net
           + ' persistent-keepalive=25s comment="mikromon:tunnel:hub"')
         a("}")
+        a('/interface wireguard peers set '
+          '[/interface wireguard peers find comment="mikromon:tunnel:hub"] '
+          'public-key="' + hub_pubkey + '" endpoint-address=' + hub_ip
+          + " endpoint-port=" + port + " allowed-address=" + net
+          + " persistent-keepalive=25s")
         a(":if ([:len [/ip firewall filter find "
           'comment="mikromon:tunnel:fw"]] = 0) do={')
         a('  /ip firewall filter add chain=input in-interface=mikromon '
