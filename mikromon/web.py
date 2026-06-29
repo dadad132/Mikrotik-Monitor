@@ -1111,7 +1111,7 @@ def _user_slug(s) -> str:
 # into a peers file that the hub's wg0 reads (set up by deploy/install.sh). That
 # way the provisioning script is filled with the SERVER's real details and the
 # hub already accepts the peer — no manual entry, no mismatch.
-_HUB_SUBNET_DEFAULT = "10.10.0.0/24"
+_HUB_SUBNET_DEFAULT = "10.10.0.0/16"
 _WG_PEERS_DEFAULT = "/etc/wireguard/wg-peers.conf"
 _WG_PORT_DEFAULT = "51820"
 
@@ -1240,6 +1240,20 @@ def _write_wg_peers(path, leases):
         return True, ""
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
+
+
+def _hub_peers_status(peers_path: str) -> dict:
+    """Read wg-peers.conf and return which devices are registered (no root needed)."""
+    try:
+        with open(peers_path, encoding="utf-8") as f:
+            content = f.read()
+    except FileNotFoundError:
+        return {"ok": False, "error": "file not found", "names": []}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc), "names": []}
+    names = [line[2:].strip() for line in content.splitlines()
+             if line.startswith("# ") and line[2:].strip()]
+    return {"ok": True, "error": "", "names": names}
 
 
 def _provision_script(name, raw, pwuser, pwd, *,
@@ -1899,16 +1913,71 @@ def _wg_repair_report_html(report) -> str:
             f'{applied_html}</div>')
 
 
-def _hubtunnel_box(name, current, csrf="") -> str:
+def _hubtunnel_box(name, current, csrf="", devices_db=None) -> str:
     """Hub-side (Ubuntu WireGuard server) setup help. deploy/install.sh sets this
     up automatically; the Provision tab registers each device as a peer."""
     wg = ("# Ubuntu hub - WireGuard server (deploy/install.sh does this for you):\n"
           "sudo apt install wireguard wireguard-tools\n"
-          "# /etc/wireguard/wg0.conf — NO PostUp; peers are applied by\n"
-          "#   mikromon-wg-reload.service (a separate systemd unit that runs\n"
-          "#   outside wg-quick's AppArmor confinement):\n"
+          "# /etc/wireguard/wg0.conf — peers are applied automatically by\n"
+          "#   mikromon-wg-reload.service (triggered when the peers file changes):\n"
           "[Interface]\nPrivateKey = <hub private key>\nAddress = 10.10.0.1/24\n"
           "ListenPort = 51820")
+
+    peer_html = ""
+    if devices_db:
+        hub = _hub_load(_hub_path(devices_db))
+        peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
+        st = _hub_peers_status(peers_path)
+        if st["ok"]:
+            registered = name in st["names"]
+            count = len(st["names"])
+            dot_col = "#16a34a" if registered else "#dc2626"
+            dot_icon = "✓" if registered else "✗"
+            status_msg = (f"<b>{esc(name)}</b> is registered as a hub peer."
+                          if registered else
+                          f"<b>{esc(name)}</b> is NOT in the hub peers file — "
+                          f"re-run <b>Provision</b> or click <b>Reload peers</b> below.")
+            name_list = "".join(f'<li><code>{esc(n)}</code></li>'
+                                for n in st["names"])
+            list_html = (f'<ul style="margin:4px 0 10px 18px;font-size:12px;'
+                         f'color:#475569">{name_list}</ul>'
+                         if name_list else
+                         '<p class="muted" style="font-size:12px">'
+                         'No peers registered yet.</p>')
+            reload_form = ""
+            if csrf:
+                reload_form = (
+                    f'<form method="POST" action="/hub/reload-peers">'
+                    f'<input type="hidden" name="csrf" value="{csrf}">'
+                    f'<input type="hidden" name="device" value="{esc(name)}">'
+                    f'<button class="btn ghost" type="submit">Reload hub peers now</button>'
+                    f'</form>'
+                    f'<p class="muted" style="font-size:12px;margin-top:4px">'
+                    f'Rewrites <code>{esc(peers_path)}</code> from the saved leases and '
+                    f'triggers <code>wg syncconf</code> via the '
+                    f'<code>mikromon-wg-reload.path</code> unit. Use this if a device '
+                    f'was provisioned but the tunnel has not established.</p>')
+            peer_html = (
+                f'<h3 style="margin:16px 0 8px">Hub peer status</h3>'
+                f'<p style="color:{dot_col};margin-bottom:6px">'
+                f'{dot_icon} {status_msg}</p>'
+                f'<p class="muted" style="font-size:12px;margin-bottom:2px">'
+                f'{count} device(s) in <code>{esc(peers_path)}</code>:</p>'
+                f'{list_html}{reload_form}')
+        else:
+            reload_form = ""
+            if csrf:
+                reload_form = (
+                    f'<form method="POST" action="/hub/reload-peers">'
+                    f'<input type="hidden" name="csrf" value="{csrf}">'
+                    f'<input type="hidden" name="device" value="{esc(name)}">'
+                    f'<button class="btn ghost" type="submit">Create peers file</button>'
+                    f'</form>')
+            peer_html = (
+                f'<h3 style="margin:16px 0 8px">Hub peer status</h3>'
+                f'<p style="color:#dc2626">Cannot read <code>{esc(peers_path)}</code>: '
+                f'{esc(st["error"])}</p>{reload_form}')
+
     return (f'<div class="box"><h2>Hub (Ubuntu WireGuard server) setup</h2>'
             f'<p class="muted">Every device dials home with <b>WireGuard</b> '
             f'(needs RouterOS 7.1+). Run <code>sudo bash deploy/install.sh</code> '
@@ -1918,9 +1987,10 @@ def _hubtunnel_box(name, current, csrf="") -> str:
             f'it as a peer on the hub, and fills the script automatically — no '
             f'manual steps. For reference, the hub interface looks like:</p>'
             f'<pre style="{_PRE}">{esc(wg)}</pre>'
-            f'<p class="muted">After a device is up, set its <b>Host</b> (Devices '
-            f'page) to its tunnel IP and use <b>Restrict access</b> to lock the API '
-            f'to <code>10.10.0.0/24</code> and close the public port.</p></div>'
+            f'<p class="muted">After provisioning, the device\'s <b>Host</b> is set '
+            f'to its tunnel IP and the API is locked to <code>10.10.0.0/16</code> '
+            f'(no public exposure).</p>'
+            f'{peer_html}</div>'
             + _wg_repair_box(name, csrf))
 
 
@@ -3301,6 +3371,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             cfg = build_device(raw, defaults)  # device metadata (no router needed)
             summary_lines = fields = unmanaged = None
             extra_html = extra_actions = ""
+            _report_html = report_html  # local copy; may be overridden below
             if preview is None and not error:
                 from .device import DeviceError
                 from .push import Pusher, PushError, rw_device
@@ -3322,13 +3393,16 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     elif slug == "qos":
                         extra_html = _queue_script_box(name, csrf, facts)
                     elif slug == "hubtunnel":
-                        extra_html = _hubtunnel_box(name, current, csrf)
+                        extra_html = _hubtunnel_box(name, current, csrf, devices_db)
                     elif slug == "update":
                         extra_html, extra_actions = _update_box(name, csrf, current)
                     elif slug == "interfaces":
                         extra_html = _interfaces_table(current)
                 except (DeviceError, PushError) as exc:
                     error = str(exc)
+                    # Show hub-side diagnostics even when the device is unreachable
+                    if slug == "hubtunnel" and not _report_html:
+                        _report_html = _hubtunnel_box(name, {}, csrf, devices_db)
                 finally:
                     dev.close()
             page = _render_feature_tab(
@@ -3336,7 +3410,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 fields=fields, preview=preview, submitted=submitted, error=error,
                 msg=msg, recent=recent, facts=facts, unmanaged=unmanaged,
                 confirm_action=confirm_action, cfg=cfg, extra_html=extra_html,
-                extra_actions=extra_actions, report_html=report_html)
+                extra_actions=extra_actions, report_html=_report_html)
             return self._send(200, page, "text/html; charset=utf-8")
 
         def _device_wan_post(self, flat, multi, user):
@@ -3705,6 +3779,34 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 name, user, "hubtunnel",
                 report_html=_wg_repair_report_html(report))
 
+        def _hub_reload_peers_post(self, flat, user):
+            """Rebuild wg-peers.conf from hub.json leases and write it.
+            Writing the file triggers the mikromon-wg-reload.path unit to run
+            wg syncconf on the hub automatically."""
+            if not devices_db:
+                return self._send(400, "device management not enabled")
+            hub_file = _hub_path(devices_db)
+            hub = _hub_load(hub_file)
+            peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
+            leases_meta = hub.get("leases_meta") or {}
+            leases_all = hub.get("leases") or {}
+            leases = {n: {"ip": leases_all.get(n), "pubkey": m.get("pubkey")}
+                      for n, m in leases_meta.items()}
+            ok, err_msg = _write_wg_peers(peers_path, leases)
+            count = sum(1 for v in leases.values()
+                        if v.get("pubkey") and v.get("ip"))
+            name = flat.get("device", "")
+            if ok:
+                msg = quote(f"Hub peers reloaded — {count} device(s) written to "
+                            f"{peers_path}. The wg-reload service will apply them "
+                            f"to WireGuard automatically.")
+            else:
+                msg = quote(f"Could not write {peers_path}: {err_msg}")
+            if name:
+                return self._redirect(
+                    f"/device?name={quote(name)}&tab=hubtunnel&msg=" + msg)
+            return self._redirect("/")
+
         def _serve_logs(self, user):
             if not AuthStore.is_admin(user):
                 return self._send(403, "forbidden")
@@ -3892,6 +3994,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._device_forget_post(flat, user)
             if path == "/device/wg-repair":
                 return self._device_wg_repair_post(flat, user)
+            if path == "/hub/reload-peers":
+                return self._hub_reload_peers_post(flat, user)
             if path == "/device/adopt":
                 return self._device_adopt_post(flat, user)
             if path == "/device/wan":
