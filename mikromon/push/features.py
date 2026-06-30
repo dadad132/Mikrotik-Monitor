@@ -489,8 +489,8 @@ def _apply_failover(ops, flat, pusher, cfg):
     desired_watch = [
         {"comment": f"{_FAILOVER_TAG}watch:primary",
          "host": primary_host, "interval": interval,
-         "down-script": f'/ip route disable [find comment="{_FAILOVER_TAG}primary"]',
-         "up-script":   f'/ip route enable  [find comment="{_FAILOVER_TAG}primary"]'},
+         "down-script": f'/ip route set [find comment="{_FAILOVER_TAG}primary"] distance=10',
+         "up-script":   f'/ip route set [find comment="{_FAILOVER_TAG}primary"] distance=1'},
     ]
     if secondary_gw:
         desired_routes += [
@@ -505,8 +505,8 @@ def _apply_failover(ops, flat, pusher, cfg):
         desired_watch.append(
             {"comment": f"{_FAILOVER_TAG}watch:secondary",
              "host": secondary_host, "interval": interval,
-             "down-script": f'/ip route disable [find comment="{_FAILOVER_TAG}secondary"]',
-             "up-script":   f'/ip route enable  [find comment="{_FAILOVER_TAG}secondary"]'},
+             "down-script": f'/ip route set [find comment="{_FAILOVER_TAG}secondary"] distance=10',
+             "up-script":   f'/ip route set [find comment="{_FAILOVER_TAG}secondary"] distance=2'},
         )
 
     ops.extend(reconcile_list(_ROUTE, "comment", desired_routes, all_routes,
