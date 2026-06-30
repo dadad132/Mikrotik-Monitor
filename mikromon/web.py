@@ -1683,6 +1683,8 @@ def _field_html(desc) -> str:
     label = desc.get("label", "")
     hint = (f'<div class="muted" style="margin-top:3px">{desc["hint"]}</div>'
             if desc.get("hint") else "")
+    if t == "hidden":
+        return f'<input type="hidden" name="{desc["name"]}" value="{esc(desc.get("value",""))}">'
     if t == "toggle":
         ck = " checked" if desc.get("on") else ""
         d = (f'<div class="muted">{esc(desc["desc"])}</div>'
