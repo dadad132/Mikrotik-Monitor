@@ -430,6 +430,22 @@ def _apply_failover(ops, flat, pusher, cfg):
                                   owns=fo_owns, label="failover route"))
         ops.extend(reconcile_list(_NETWATCH, "comment", [], netwatch,
                                   owns=fo_owns, label="netwatch"))
+        # Restore automatic default routes on the WAN clients
+        pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
+        dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
+        links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
+        for link in links:
+            iface = getattr(link, "interface", "") or ""
+            if not iface:
+                continue
+            for c in pppoe_clients:
+                if c.get("name") == iface and c.get("add-default-route", "yes") == "no":
+                    ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route", "yes",
+                                          f"PPPoE {iface}"))
+            for c in dhcp_clients:
+                if c.get("interface") == iface and c.get("add-default-route", "yes") == "no":
+                    ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route", "yes",
+                                          f"DHCP {iface}"))
         return
 
     # Gateways are detected at form-render time and passed via hidden fields
@@ -497,6 +513,29 @@ def _apply_failover(ops, flat, pusher, cfg):
                               owns=fo_owns, label="failover route"))
     ops.extend(reconcile_list(_NETWATCH, "comment", desired_watch, netwatch,
                               owns=fo_owns, label="netwatch"))
+
+    # Stop WAN clients creating their own dynamic default routes — they compete
+    # with our static routes and prevent failover from working.  When the PPPoE
+    # client has add-default-route=yes, it creates a dynamic route at distance=1
+    # that stays active even when Netwatch disables our static primary route,
+    # so the secondary static (distance=2) never wins.
+    # Setting add-default-route=no removes the dynamic route immediately on
+    # active connections and leaves only our managed static routes in control.
+    pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
+    dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
+    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
+    for link in links:
+        iface = getattr(link, "interface", "") or ""
+        if not iface:
+            continue
+        for c in pppoe_clients:
+            if c.get("name") == iface and c.get("add-default-route", "yes") != "no":
+                ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route", "no",
+                                      f"PPPoE {iface}"))
+        for c in dhcp_clients:
+            if c.get("interface") == iface and c.get("add-default-route", "yes") != "no":
+                ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route", "no",
+                                      f"DHCP {iface}"))
 
 
 def routes_plan(pusher, cfg, flat, multi):
