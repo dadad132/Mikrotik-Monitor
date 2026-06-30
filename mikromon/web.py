@@ -811,23 +811,28 @@ def _render_device(store, state, name, user, csrf="",
         router_down = not d["up"]
         health = d["wan_health"]
         if router_down or health == "down":
+            # Router offline or full outage
             dot_c = "#dc2626"; row_bg = "#fef2f2"; row_br = "#fecaca"
-            bdg_bg = "#fee2e2"; bdg_c = "#b91c1c"; slabel = "Offline"
-            active = False; glow = ""
+            bdg_bg = "#fee2e2"; bdg_c = "#b91c1c"
+            slabel = "Offline"; sub = ""; glow = ""
         elif health == "partial" and i == 0:
+            # Primary is failing, traffic on backup
             dot_c = "#f97316"; row_bg = "#fff7ed"; row_br = "#fed7aa"
-            bdg_bg = "#ffedd5"; bdg_c = "#c2410c"; slabel = "Failover"
-            active = False; glow = ""
+            bdg_bg = "#ffedd5"; bdg_c = "#c2410c"
+            slabel = "Failover"; sub = ""; glow = ""
         elif (health == "partial" and i == 1) or (health == "full" and i == 0):
+            # Actively routing traffic
             dot_c = "#16a34a"; row_bg = "#f0fdf4"; row_br = "#bbf7d0"
-            bdg_bg = "#dcfce7"; bdg_c = "#15803d"; slabel = "Online"
-            active = True
-            glow = "box-shadow:0 0 0 4px rgba(22,163,74,0.18);"
+            bdg_bg = "#dcfce7"; bdg_c = "#15803d"
+            slabel = "Online"; sub = ""; glow = "box-shadow:0 0 0 4px rgba(22,163,74,0.18);"
         else:
-            dot_c = "#94a3b8"; row_bg = "#f8fafc"; row_br = "#e2e8f0"
-            bdg_bg = "#f1f5f9"; bdg_c = "#64748b"; slabel = "Standby"
-            active = False; glow = ""
+            # health == "full" and i > 0: backup link is up but not routing
+            dot_c = "#4ade80"; row_bg = "#f0fdf4"; row_br = "#d1fae5"
+            bdg_bg = "#dcfce7"; bdg_c = "#15803d"
+            slabel = "Online"; sub = "Inactive"; glow = ""
         priority = "Primary" if i == 0 else f"Backup {i}"
+        sub_html = (f'<span style="font-size:10px;color:#94a3b8;margin-left:4px">'
+                    f'({sub})</span>') if sub else ""
         wan_rows += (
             f'<div style="display:flex;align-items:center;gap:12px;padding:10px 14px;'
             f'border-radius:8px;background:{row_bg};border:1px solid {row_br}">'
@@ -838,6 +843,7 @@ def _render_device(store, state, name, user, csrf="",
             f'<span style="font-size:11px;color:#94a3b8;margin-right:6px">{priority}</span>'
             f'<span style="font-size:11px;font-weight:600;padding:2px 10px;'
             f'border-radius:10px;background:{bdg_bg};color:{bdg_c}">[{slabel}]</span>'
+            f'{sub_html}'
             f'</div>')
     if wan_rows:
         center_wan = (f'<div class="box"><h2 style="margin-bottom:12px">WAN Status</h2>'
