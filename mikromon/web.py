@@ -1694,6 +1694,31 @@ def _field_html(desc) -> str:
                 f'onclick="pushAddRow(\'{name}\')" style="margin-top:6px">'
                 f'+ Add row</button>{hint}'
                 f'<template id="tmpl-{name}">{row_html({})}</template></div>')
+    if t == "sortable":
+        name = desc["name"]
+        items = desc.get("items", [])
+
+        def sort_row(item):
+            return (
+                f'<tr>'
+                f'<td style="width:1px"><span class="draghandle" draggable="true" '
+                f'title="drag to reorder" style="cursor:grab;padding:0 8px">&#9776;</span></td>'
+                f'<td style="width:1px;white-space:nowrap">'
+                f'<button type="button" class="btn ghost" title="move up (higher priority)" '
+                f'onclick="pushMoveRow(this,-1)">&uarr;</button>'
+                f'<button type="button" class="btn ghost" title="move down" '
+                f'onclick="pushMoveRow(this,1)">&darr;</button></td>'
+                f'<td style="padding:5px 8px">{esc(item["label"])}</td>'
+                f'<td style="display:none">'
+                f'<input type="hidden" name="{esc(name)}" value="{esc(item["id"])}"></td>'
+                f'</tr>')
+
+        body = "".join(sort_row(item) for item in items)
+        empty = (f'<tr><td colspan="4" class="muted" style="padding:8px">'
+                 f'No WAN clients found on this router.</td></tr>') if not items else ""
+        return (f'<div class="f full"><label class="f">{esc(label)}</label>'
+                f'<table class="rowtbl" id="sortable-{esc(name)}">'
+                f'<tbody>{body}{empty}</tbody></table>{hint}</div>')
     return ""
 
 
