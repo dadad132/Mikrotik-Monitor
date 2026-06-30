@@ -2379,9 +2379,12 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
     elif error:
         body = ""
     else:
-        sm = "".join(f'<li>{esc(s)}</li>' for s in (summary_lines or []))
-        state = (f'<div class="box"><h2>Current (managed by {esc(_BRAND)})</h2>'
-                 f'<ul style="margin:0 0 0 18px">{sm}</ul></div>')
+        if summary_lines:
+            sm = "".join(f'<li>{esc(s)}</li>' for s in summary_lines)
+            state = (f'<div class="box"><h2>Current (managed by {esc(_BRAND)})</h2>'
+                     f'<ul style="margin:0 0 0 18px">{sm}</ul></div>')
+        else:
+            state = ""
         if fields is not None:
             ff = "".join(_field_html(d) for d in fields)
             preview_btn = ('<button class="btn" type="submit">Preview changes '

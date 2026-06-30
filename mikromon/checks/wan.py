@@ -122,15 +122,35 @@ class WanCheck(Check):
 
         current = min(active, key=by_distance)
         links = dev.wan.links
+        _FO_PRI = "mikromon:failover:primary"
+        _FO_SEC = "mikromon:failover:secondary"
         if links:
+            cur_comment = str(current.get("comment", ""))
             # Preferred = the highest-priority configured uplink (links[0]).
+            # Try interface/gateway match first, fall back to mikromon comment tag
+            # (needed when the failover route gateway is a PPP remote IP that
+            # doesn't match the uplink's interface name via gateway-status).
             primary_routes = [r for r in defaults if _matches_endpoint(r, links[0])]
+            if not primary_routes:
+                primary_routes = [r for r in defaults
+                                  if r.get("comment", "") == _FO_PRI]
             preferred = (min(primary_routes, key=by_distance)
                          if primary_routes else min(defaults, key=by_distance))
-            on_backup = not _matches_endpoint(current, links[0])
+            # Determine on_backup using comment tag for mikromon-managed routes
+            if cur_comment == _FO_PRI:
+                on_backup = False
+            elif cur_comment.startswith("mikromon:failover:") and cur_comment != _FO_PRI:
+                on_backup = True
+            else:
+                on_backup = not _matches_endpoint(current, links[0])
             # Which configured link is currently carrying traffic?
             cur_idx = next((i for i, ep in enumerate(links)
                             if _matches_endpoint(current, ep)), None)
+            if cur_idx is None:
+                if cur_comment == _FO_PRI:
+                    cur_idx = 0
+                elif cur_comment == _FO_SEC:
+                    cur_idx = 1
             cur_name = (links[cur_idx].label(cur_idx) if cur_idx is not None
                         else (_iface_of(current) or current.get("gateway", "?")))
             prim_name = links[0].label(0)

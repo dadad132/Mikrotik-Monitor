@@ -538,11 +538,20 @@ _RT_TAG = "mikromon:sdwan:rt:"     # the matching marked default route
 
 
 def sdwan_read(pusher, cfg):
-    routes = [r for r in _default_routes(pusher.api)
-              if not str(r.get("comment", "")).startswith("mikromon:sdwan")]
-    policy = [r for r in pusher.api.fetch(_MANGLE)
+    all_routes = _safe_fetch(pusher.api, _ROUTE)
+    routes = [r for r in all_routes
+              if str(r.get("dst-address", "")).startswith("0.0.0.0/0")
+              and not str(r.get("comment", "")).startswith("mikromon:sdwan")]
+    policy = [r for r in _safe_fetch(pusher.api, _MANGLE)
               if str(r.get("comment", "")).startswith(_POL_TAG)]
-    return {"routes": routes, "policy": policy}
+    failover_routes = [r for r in all_routes
+                       if str(r.get("comment", "")).startswith(_FAILOVER_TAG)
+                       and str(r.get("dst-address", "")).startswith("0.0.0.0/0")]
+    netwatch = _safe_fetch(pusher.api, _NETWATCH)
+    failover_watch = [w for w in netwatch
+                      if str(w.get("comment", "")).startswith(_FAILOVER_TAG)]
+    return {"routes": routes, "policy": policy,
+            "failover_routes": failover_routes, "failover_watch": failover_watch}
 
 
 def _policy_rows(current):
@@ -555,12 +564,41 @@ def _policy_rows(current):
 
 
 def sdwan_summary(current, cfg):
-    lines = [f"route via {r.get('gateway', '?')} · distance {r.get('distance', '?')}"
-             + ("" if str(r.get("active", "true")).lower() not in ("false", "no")
-                else " · inactive")
-             for r in current.get("routes", [])]
-    lines.append(f"{len(current.get('policy', []))} LAN→WAN policy rule(s)")
-    return lines or ["No default routes found."]
+    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
+    lines = []
+    fo_routes = {r.get("comment", ""): r for r in current.get("failover_routes", [])}
+    fo_watch  = {w.get("comment", ""): w for w in current.get("failover_watch", [])}
+    for idx, (role, rc, wc) in enumerate((
+            ("primary",   f"{_FAILOVER_TAG}primary",   f"{_FAILOVER_TAG}watch:primary"),
+            ("secondary", f"{_FAILOVER_TAG}secondary",  f"{_FAILOVER_TAG}watch:secondary"))):
+        r = fo_routes.get(rc)
+        if not r:
+            continue
+        link = links[idx] if idx < len(links) else None
+        name = link.label(idx) if link else role.title()
+        gw = r.get("gateway", "?")
+        dist = r.get("distance", "?")
+        disabled = str(r.get("disabled", "false")).lower() in ("true", "yes")
+        active   = str(r.get("active",   "true" )).lower() not in ("false", "no")
+        state = "disabled" if disabled else ("active" if active else "inactive")
+        w = fo_watch.get(wc)
+        watch = f" · watch {w['host']} every {w.get('interval','?')}" if w else ""
+        lines.append(f"{name} via {gw} · distance {dist} · {state}{watch}")
+    # If no managed failover routes, fall back to plain default routes
+    if not lines:
+        for r in current.get("routes", []):
+            gw  = r.get("gateway", "?")
+            dist = r.get("distance", "?")
+            active = str(r.get("active", "true")).lower() not in ("false", "no")
+            matched = next(((i, lk) for i, lk in enumerate(links)
+                            if (lk.gateway and lk.gateway == gw)
+                            or (lk.interface and lk.interface == gw)), None)
+            prefix = f"{matched[1].label(matched[0])} via {gw}" if matched else f"route via {gw}"
+            lines.append(f"{prefix} · distance {dist}" + ("" if active else " · inactive"))
+    pol = len(current.get("policy", []))
+    if pol:
+        lines.append(f"{pol} LAN→WAN policy rule(s)")
+    return lines or ["No WAN routes configured."]
 
 
 def sdwan_form(current, cfg):
@@ -2148,7 +2186,7 @@ def adopt_plan(pusher, cfg, feature, row_id):
 # ===========================================================================
 FEATURES = {
     "routes": {"title": "Routes", "write": True,
-               "read": routes_read, "summary": routes_summary,
+               "read": routes_read,
                "form": routes_form, "plan": routes_plan},
     "wan": {"title": "WAN — failover & load balancing", "write": True,
             "read": sdwan_read, "summary": sdwan_summary, "form": sdwan_form,
