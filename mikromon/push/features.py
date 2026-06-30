@@ -2061,9 +2061,9 @@ FEATURES = {
     "routes": {"title": "Routes", "write": True,
                "read": routes_read, "summary": routes_summary,
                "form": routes_form, "plan": routes_plan},
-    "sdwan": {"title": "WAN — failover & load balancing", "write": True,
-              "read": sdwan_read, "summary": sdwan_summary, "form": sdwan_form,
-              "plan": sdwan_plan},
+    "wan": {"title": "WAN — failover & load balancing", "write": True,
+            "read": sdwan_read, "summary": sdwan_summary, "form": sdwan_form,
+            "plan": sdwan_plan},
     "security": {"title": "Security", "write": True, "read": security_read,
                  "summary": security_summary, "form": security_form,
                  "plan": security_plan, "unmanaged": security_unmanaged},
@@ -2101,7 +2101,7 @@ FEATURES = {
 }
 
 # tab label -> url slug (Overview/Backups handled elsewhere)
-TAB_SLUGS = {"Routes": "routes", "WAN": "sdwan", "Security": "security",
+TAB_SLUGS = {"Routes": "routes", "WAN": "wan", "Security": "security",
              "Restrict access": "harden", "DNS": "nextdns",
              "QoS": "qos", "Port forwarding": "portfwd", "Interfaces": "interfaces",
              "Remote access": "remote", "Tunnel": "tunnel",

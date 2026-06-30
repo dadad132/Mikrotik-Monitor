@@ -578,14 +578,14 @@ _DEVICE_TABS = ["Overview", "Provision", "Routes", "WAN", "Security",
 _MAINT_ITEMS = [("Update", "update"), ("Backups", "backups")]
 # label -> url slug (all tabs are wired to the engine now)
 _LIVE_TABS = {"Overview": "", "Provision": "provision",
-              "Routes": "routes", "WAN": "sdwan",
+              "Routes": "routes", "WAN": "wan",
               "Security": "security", "Restrict access": "harden",
               "DNS": "nextdns", "Queues": "qos", "QoS": "qos", "Port forwarding": "portfwd",
               "Interfaces": "interfaces", "Remote access": "remote",
               "Tunnel": "tunnel", "Scripts": "scripts",
               "Update": "update", "Backups": "backups"}
 # tabs that WRITE to the router (admins only); Overview is read-only
-_ADMIN_TABS = {"provision", "routes", "sdwan", "security", "harden", "nextdns",
+_ADMIN_TABS = {"provision", "routes", "wan", "security", "harden", "nextdns",
                "qos", "portfwd", "remote", "tunnel", "scripts",
                "update", "backups", "interfaces"}
 
@@ -847,7 +847,7 @@ def _render_device(store, state, name, user, csrf="",
         center_wan = (
             f'<div class="box"><h2>WAN Status</h2>'
             f'<p class="muted">No WAN uplinks configured. Go to the '
-            f'<a href="/device/{q}?tab=sdwan">WAN tab</a> and add your ISP lines '
+            f'<a href="/device/{q}?tab=wan">WAN tab</a> and add your ISP lines '
             f'(interface name, e.g. <code>ether1</code> or <code>pppoe-out1</code>) '
             f'to see live status here.</p></div>')
 
@@ -2240,8 +2240,8 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None) -> str:
 _TAB_INTRO = {
     "routes": "See your internet lines (DHCP and PPPoE connections) and their current "
               "status. Drag to reorder — the top line becomes the primary route.",
-    "sdwan": "Set automatic failover or load-balancing across your WAN uplinks, "
-             "and send specific LANs out a chosen internet line.",
+    "wan": "Set automatic failover or load-balancing across your WAN uplinks, "
+           "and send specific LANs out a chosen internet line.",
     "security": "Toggle common firewall protections. Existing rules below can be "
                 "viewed; easymikrotik only manages the ones it creates.",
     "harden": "Stop brute-force attacks: lock API/Winbox/SSH to your trusted IPs, "
@@ -2391,7 +2391,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
     # The SD-WAN tab gets an inline WAN-uplink editor (device metadata, so it
     # works even when the router is unreachable). Hidden during the confirm step.
     wan_editor = (_wan_uplink_editor(name, cfg, csrf, ifaces=wan_ifaces)
-                  if slug == "sdwan" and preview is None else "")
+                  if slug == "wan" and preview is None else "")
     logbox = _recent_log_box(recent or [], device=name)
     intro = (f'<p class="muted" style="margin:-6px 0 14px">{_TAB_INTRO[slug]}</p>'
              if slug in _TAB_INTRO else "")
@@ -3465,7 +3465,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             cfg = build_device(raw, defaults)  # device metadata (no router needed)
             summary_lines = fields = unmanaged = None
             extra_html = extra_actions = ""
-            wan_ifaces = None
+            # Fall back to interface names cached by the monitoring engine so
+            # the WAN uplink dropdown works even when push credentials aren't set.
+            cached_ifaces = [{"name": n} for n in (facts.get("interfaces") or [])]
+            wan_ifaces = cached_ifaces or None
             _report_html = report_html  # local copy; may be overridden below
             if preview is None and not error:
                 from .device import DeviceError
@@ -3481,7 +3484,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     summary_lines = feature["summary"](current, cfg)
                     if "form" in feature:
                         fields = feature["form"](current, cfg)
-                    if slug == "sdwan":
+                    if slug == "wan":
                         try:
                             wan_ifaces = [i for i in api.fetch(("interface",))
                                           if i.get("name")]
@@ -3541,7 +3544,18 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 store.close()
                 return self._send(400, f"Error: {exc}")
             store.close()
-            return self._redirect(f"/device?name={quote(name)}&tab=sdwan&msg=" +
+            # Immediately push wan_links into the state so the Overview WAN
+            # Status bar reflects the change before the next monitoring poll.
+            if state_file:
+                try:
+                    from .state import StateStore as _SS
+                    _ss = _SS(state_file).load()
+                    _ss.facts(name)["wan_links"] = [
+                        lk["name"] for lk in links if lk.get("name")]
+                    _ss.save()
+                except Exception:
+                    pass
+            return self._redirect(f"/device?name={quote(name)}&tab=wan&msg=" +
                                   quote("WAN uplinks saved."))
 
         def _device_adopt_post(self, flat, user):

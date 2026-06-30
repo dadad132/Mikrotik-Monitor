@@ -70,6 +70,10 @@ class Engine:
         ident = snap.first("identity")
         facts = self.state.facts(cfg.name)
         model = rb.get("model") or rb.get("board-name") or res.get("board-name")
+        iface_names = sorted(
+            i.get("name", "") for i in snap.rows("interface")
+            if i.get("name") and not str(i.get("disabled", "false")).lower()
+            in ("true", "yes"))
         wanted = {
             "model": model,
             "version": res.get("version"),
@@ -80,6 +84,7 @@ class Engine:
             "arch": res.get("architecture-name"),
             "host": cfg.host,
             "wan_links": [ep.label(i) for i, ep in enumerate(cfg.wan.links)],
+            "interfaces": [n for n in iface_names if n],
         }
         for key, val in wanted.items():
             if val not in (None, "", []):
