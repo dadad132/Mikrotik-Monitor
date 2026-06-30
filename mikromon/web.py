@@ -856,23 +856,25 @@ def _render_device(store, state, name, user, csrf="",
 
     # ── right: online availability (24 h bar chart) ────────────────────────────
     avail_box = ""
-    up_series = store.series(name, "up", since=time.time() - 86400)
-    if up_series:
-        n = len(up_series)
-        up_n = sum(1 for _, v in up_series if v > 0)
-        avail = (up_n / n * 100) if n else 100.0
+    now_t = time.time()
+    hourly = store.up_hourly(name, now_t - 86400, now_t) if store else []
+    if hourly:
+        # Weighted overall uptime across all polls in the window
+        total_polls = sum(cnt for _, _, cnt in hourly)
+        up_polls = sum(cnt * avg for _, avg, cnt in hourly)
+        avail = (up_polls / total_polls * 100) if total_polls else 100.0
         acol = "#16a34a" if avail >= 99 else "#d97706" if avail >= 90 else "#dc2626"
-        now_t = time.time()
-        buckets: list = [[] for _ in range(24)]
-        for ts, v in up_series:
-            h = int((now_t - ts) / 3600)
-            if 0 <= h < 24:
-                buckets[23 - h].append(v)
+        # Fill 24 hourly buckets: index 0 = 24h ago, index 23 = current hour
+        buckets: list = [None] * 24
+        for h_ago, avg_val, _cnt in hourly:
+            idx = 23 - int(h_ago)
+            if 0 <= idx < 24:
+                buckets[idx] = avg_val
         bars_h = "".join(
             '<div style="flex:1;height:28px;background:'
-            + ("#e2e8f0" if not b
-               else "#16a34a" if (sum(b) / len(b)) >= 0.9
-               else "#dc2626" if (sum(b) / len(b)) < 0.1
+            + ("#e2e8f0" if b is None
+               else "#16a34a" if b >= 0.9
+               else "#dc2626" if b < 0.1
                else "#f97316")
             + ';border-radius:2px;min-width:2px"></div>'
             for b in buckets)

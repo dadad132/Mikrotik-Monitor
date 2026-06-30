@@ -117,6 +117,21 @@ class MetricsStore:
             (device, metric, label, since, limit))
         return cur.fetchall()
 
+    def up_hourly(self, device: str, since: float, now: float) -> list:
+        """Return (hours_ago, avg_value, poll_count) per hour for the 'up' metric.
+
+        Aggregates directly in SQL so the result is always 24 rows or fewer —
+        no row-limit truncation regardless of how many raw samples exist."""
+        cur = self.db.execute(
+            "SELECT CAST((? - ts) / 3600 AS INTEGER) AS h, AVG(value), COUNT(*) "
+            "FROM samples "
+            "WHERE device = ? AND metric = 'up' AND label = '' "
+            "AND ts >= ? AND ts <= ? "
+            "GROUP BY h HAVING h >= 0 AND h < 24 "
+            "ORDER BY h",
+            (now, device, since, now))
+        return cur.fetchall()
+
     def close(self) -> None:
         with self._lock:
             self.db.close()
