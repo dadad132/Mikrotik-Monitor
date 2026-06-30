@@ -2218,9 +2218,7 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None) -> str:
                 f'<td><input name="link_name" placeholder="ISP name (Vodacom)" '
                 f'value="{esc(link.name if link else "")}" style="width:100%"></td>'
                 f'<td>{_iface_field(link.interface if link else "")}</td>'
-                f'<td><input name="link_gw" placeholder="gateway IP (optional)" '
-                f'value="{esc(link.gateway if link else "")}" style="width:100%">'
-                f'</td><td style="white-space:nowrap">'
+                f'<td style="white-space:nowrap">'
                 f'<span class="draghandle" draggable="true" title="drag to '
                 f'reorder priority" style="cursor:grab;padding:0 6px">&#9776;</span>'
                 f'<button type="button" class="btn ghost" title="move up (higher '
@@ -2241,7 +2239,7 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None) -> str:
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="device" value="{esc(name)}">'
             f'<table class="rowtbl" id="rows-wl"><thead><tr><th>Name</th>'
-            f'<th>Interface</th><th>Gateway</th><th>Order</th></tr></thead>'
+            f'<th>Interface</th><th>Order</th></tr></thead>'
             f'<tbody>{body}</tbody></table>'
             f'<button type="button" class="btn ghost" onclick="pushAddRow(\'wl\')" '
             f'style="margin-top:6px">+ Add uplink</button>'
@@ -2680,8 +2678,6 @@ def _wan_link_row(idx, ep=None) -> str:
             f'value="{esc(ep.get("name", ""))}">'
             f'<input name="link_iface" placeholder="interface (ether1, lte1…)" '
             f'value="{esc(ep.get("interface", ""))}">'
-            f'<input name="link_gw" placeholder="gateway IP (optional)" '
-            f'value="{esc(ep.get("gateway", ""))}">'
             f'<button type="button" class="btn ghost wandel" '
             f'onclick="this.parentNode.remove();wanReindex()">&times;</button></div>')
 
@@ -3543,12 +3539,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 store.close()
                 return self._send(404, "no such device")
             links = []
-            for nm, ifc, gw in zip(multi.get("link_name", []),
-                                   multi.get("link_iface", []),
-                                   multi.get("link_gw", [])):
-                nm, ifc, gw = nm.strip(), ifc.strip(), gw.strip()
-                if nm or ifc or gw:
-                    links.append({"name": nm, "interface": ifc, "gateway": gw})
+            for nm, ifc in zip(multi.get("link_name", []),
+                                multi.get("link_iface", [])):
+                nm, ifc = nm.strip(), ifc.strip()
+                if nm or ifc:
+                    links.append({"name": nm, "interface": ifc, "gateway": ""})
             raw["wan"] = {"links": links,
                           "ping_targets": (raw.get("wan") or {}).get("ping_targets", [])}
             try:
@@ -4028,12 +4023,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # in priority order (top row = highest priority).
             names = multi.get("link_name", [])
             ifaces = multi.get("link_iface", [])
-            gws = multi.get("link_gw", [])
             links = []
-            for nm, ifc, gw in zip(names, ifaces, gws):
-                nm, ifc, gw = nm.strip(), ifc.strip(), gw.strip()
-                if nm or ifc or gw:
-                    links.append({"name": nm, "interface": ifc, "gateway": gw})
+            for nm, ifc in zip(names, ifaces):
+                nm, ifc = nm.strip(), ifc.strip()
+                if nm or ifc:
+                    links.append({"name": nm, "interface": ifc, "gateway": ""})
             # API port is required to connect, but you can leave it blank: it
             # defaults to 8729 when API-SSL is ticked, else 8728.
             api_port = (flat.get("api_port") or "").strip()

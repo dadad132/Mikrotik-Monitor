@@ -305,10 +305,6 @@ def routes_form(current, cfg):
                        "label": "Secondary check IP", "value": secondary_check,
                        "placeholder": "8.8.8.8",
                        "hint": "Netwatch pings this IP to confirm the backup line has internet."})
-    fields.append({"type": "text", "name": "fo_interval",
-                   "label": "Netwatch check interval", "value": interval,
-                   "placeholder": "30s",
-                   "hint": "How often Netwatch pings each check IP (default: 30s)."})
     return fields
 
 
