@@ -804,36 +804,52 @@ def _render_device(store, state, name, user, csrf="",
     if not left_col:
         left_col = '<div class="box"><p class="muted">No telemetry yet.</p></div>'
 
-    # ── center: WAN status circles ─────────────────────────────────────────────
+    # ── center: WAN status bar ─────────────────────────────────────────────────
     wl = f.get("wan_links") or []
-    circles_html = ""
+    wan_rows = ""
     for i, wname in enumerate(wl):
-        if not d["up"]:
-            cc = "#dc2626"
-            label = "Offline"
-        elif d["wan_health"] == "partial" and i == 0:
-            cc = "#f97316"
-            label = "Failover"
+        router_down = not d["up"]
+        health = d["wan_health"]
+        if router_down or health == "down":
+            dot_c = "#dc2626"; row_bg = "#fef2f2"; row_br = "#fecaca"
+            bdg_bg = "#fee2e2"; bdg_c = "#b91c1c"; slabel = "Offline"
+            active = False; glow = ""
+        elif health == "partial" and i == 0:
+            dot_c = "#f97316"; row_bg = "#fff7ed"; row_br = "#fed7aa"
+            bdg_bg = "#ffedd5"; bdg_c = "#c2410c"; slabel = "Failover"
+            active = False; glow = ""
+        elif (health == "partial" and i == 1) or (health == "full" and i == 0):
+            dot_c = "#16a34a"; row_bg = "#f0fdf4"; row_br = "#bbf7d0"
+            bdg_bg = "#dcfce7"; bdg_c = "#15803d"; slabel = "Online"
+            active = True
+            glow = "box-shadow:0 0 0 4px rgba(22,163,74,0.18);"
         else:
-            cc = "#16a34a"
-            label = "Online"
-        circles_html += (
-            f'<div style="display:flex;flex-direction:column;align-items:center;gap:8px">'
-            f'<div style="width:52px;height:52px;border-radius:50%;'
-            f'border:3px solid {cc};background:{cc}18;display:flex;'
-            f'align-items:center;justify-content:center;font-size:20px;'
-            f'font-weight:700;color:{cc}">{i + 1}</div>'
-            f'<div style="font-size:12px;color:#334155;font-weight:500;text-align:center;'
-            f'max-width:80px;word-break:break-all">{esc(wname)}</div>'
-            f'<div style="font-size:11px;color:{cc};font-weight:600">{label}</div>'
+            dot_c = "#94a3b8"; row_bg = "#f8fafc"; row_br = "#e2e8f0"
+            bdg_bg = "#f1f5f9"; bdg_c = "#64748b"; slabel = "Standby"
+            active = False; glow = ""
+        priority = "Primary" if i == 0 else f"Backup {i}"
+        wan_rows += (
+            f'<div style="display:flex;align-items:center;gap:12px;padding:10px 14px;'
+            f'border-radius:8px;background:{row_bg};border:1px solid {row_br}">'
+            f'<span style="width:10px;height:10px;border-radius:50%;'
+            f'background:{dot_c};flex-shrink:0;{glow}"></span>'
+            f'<span style="font-weight:600;font-size:13px;color:#1e293b;flex:1">'
+            f'{esc(wname)}</span>'
+            f'<span style="font-size:11px;color:#94a3b8;margin-right:6px">{priority}</span>'
+            f'<span style="font-size:11px;font-weight:600;padding:2px 10px;'
+            f'border-radius:10px;background:{bdg_bg};color:{bdg_c}">[{slabel}]</span>'
             f'</div>')
-    if circles_html:
-        center_wan = (f'<div class="box"><h2 style="margin-bottom:14px">WAN Status</h2>'
-                      f'<div style="display:flex;gap:24px;flex-wrap:wrap">'
-                      f'{circles_html}</div></div>')
+    if wan_rows:
+        center_wan = (f'<div class="box"><h2 style="margin-bottom:12px">WAN Status</h2>'
+                      f'<div style="display:flex;flex-direction:column;gap:6px">'
+                      f'{wan_rows}</div></div>')
     else:
-        center_wan = (f'<div class="box"><h2>WAN Status</h2>'
-                      f'<p class="muted">No WAN uplinks configured.</p></div>')
+        center_wan = (
+            f'<div class="box"><h2>WAN Status</h2>'
+            f'<p class="muted">No WAN uplinks configured. Go to the '
+            f'<a href="/device/{q}?tab=sdwan">WAN tab</a> and add your ISP lines '
+            f'(interface name, e.g. <code>ether1</code> or <code>pppoe-out1</code>) '
+            f'to see live status here.</p></div>')
 
     # ── center: throughput sparklines ──────────────────────────────────────────
     spark_rows = ""
