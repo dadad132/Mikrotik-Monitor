@@ -176,13 +176,28 @@ def _route_status_for(routes, client, ctype):
     return ""
 
 
+def _dist_from_routes(routes, client, ctype):
+    """Find the distance of the matching 0.0.0.0/0 route for this client.
+
+    RouterOS omits default-route-distance from the API response when
+    add-default-route=no, so we fall back to reading the distance from the
+    actual route table (which includes our managed static failover routes)."""
+    gw = str(client.get("gateway", "")) if ctype == "dhcp" else str(client.get("name", ""))
+    if not gw:
+        return ""
+    for r in routes:
+        if str(r.get("gateway", "")) == gw:
+            return str(r.get("distance", ""))
+    return ""
+
+
 def _wan_sortable_items(current):
     routes = current.get("routes", [])
     items = []
     for c in current.get("dhcp", []):
         iface = c.get("interface", "?")
         status = c.get("status", "unknown")
-        dist = c.get("default-route-distance", "?")
+        dist = c.get("default-route-distance", "") or _dist_from_routes(routes, c, "dhcp") or "1"
         rid = c.get(".id", "").lstrip("*")
         if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
             conn_info = f"{status} · no default route"
@@ -198,7 +213,7 @@ def _wan_sortable_items(current):
         ctype = c.get("_type", "ppp").upper()
         name = c.get("name", "?")
         running = str(c.get("running", "false")).lower() in ("true", "yes")
-        dist = c.get("default-route-distance", "?")
+        dist = c.get("default-route-distance", "") or _dist_from_routes(routes, c, c.get("_type", "ppp")) or "1"
         rid = c.get(".id", "").lstrip("*")
         state = "connected" if running else "disconnected"
         if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
