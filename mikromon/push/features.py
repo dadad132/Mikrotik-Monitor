@@ -163,14 +163,21 @@ def routes_form(current, cfg):
         {"type": "sortable", "name": "wan_order",
          "label": "Internet line priority — drag or use ↑/↓ to set primary (top = primary)",
          "items": items,
-         "hint": "Top line becomes distance 1 (primary). Changes are applied to both "
-                 "the client config (persists across reconnects) and the live route "
-                 "(takes effect immediately)."},
+         "hint": "Top line becomes distance 1 (primary). RouterOS does not allow "
+                 "editing distances on dynamic DHCP/PPPoE routes directly — the "
+                 "change is saved on the client config and takes effect the next time "
+                 "that line reconnects or renews its DHCP lease. To apply immediately: "
+                 "disconnect and reconnect the line from RouterOS after applying."},
     ]
 
 
 def _apply_wan_order(ops, order, pusher):
-    """Shared helper: build distance-change ops from a wan_order list."""
+    """Build distance-change ops from a wan_order list.
+
+    RouterOS dynamic routes (DHCP / PPPoE / L2TP) are read-only in /ip/route —
+    attempting to set their distance returns 'no such item'. The only supported
+    path is setting default-route-distance on the client itself, which takes
+    effect on the next connection or DHCP renewal."""
     if not order:
         return
     dhcp_clients = _safe_fetch(pusher.api, _DHCP_CLIENT)
@@ -186,7 +193,6 @@ def _apply_wan_order(ops, order, pusher):
     for c in l2tp_clients:
         rid = c.get(".id", "").lstrip("*")
         client_map[f"l2tp:{rid}"] = (_L2TP_CLIENT, c, f"L2TP {c.get('name','?')}")
-    routes_all = _default_routes(pusher.api)
     for rank, item_id in enumerate(order, start=1):
         want = str(rank)
         if item_id not in client_map:
@@ -194,28 +200,6 @@ def _apply_wan_order(ops, order, pusher):
         cpath, c, clabel = client_map[item_id]
         if _norm(str(c.get("default-route-distance", "1"))) != want:
             ops.append(_set_field(cpath, c, "default-route-distance", want, clabel))
-        # Update the live route for immediate effect.
-        # DHCP routes have gateway = DHCP-assigned IP, not interface name.
-        # PPPoE/L2TP routes have gateway = interface name.
-        if item_id.startswith("dhcp:"):
-            dhcp_gw = c.get("gateway", "")
-            iface = c.get("interface", "")
-            for r in routes_all:
-                r_gw = str(r.get("gateway", ""))
-                if (not str(r.get("comment", "")).startswith("mikromon:sdwan")
-                        and (r_gw == dhcp_gw or (iface and iface in r_gw))
-                        and _norm(str(r.get("distance", ""))) != want):
-                    ops.append(_set_field(_ROUTE, r, "distance", want,
-                                          f"route via {r_gw}"))
-        else:
-            ppp_name = c.get("name", "")
-            for r in routes_all:
-                r_gw = str(r.get("gateway", ""))
-                if (not str(r.get("comment", "")).startswith("mikromon:sdwan")
-                        and ppp_name and ppp_name in r_gw
-                        and _norm(str(r.get("distance", ""))) != want):
-                    ops.append(_set_field(_ROUTE, r, "distance", want,
-                                          f"route via {r_gw}"))
 
 
 def routes_plan(pusher, cfg, flat, multi):
