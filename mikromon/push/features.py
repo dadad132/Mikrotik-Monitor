@@ -392,18 +392,19 @@ def _apply_failover(ops, flat, pusher):
     secondary_check = flat.get("fo_secondary_check", "").strip() or "8.8.8.8"
     interval = flat.get("fo_interval", "").strip() or "30s"
 
-    def _net(ip):
-        return ip if "/" in ip else f"{ip}/32"
-
     desired_routes = [
+        # Primary default route — Netwatch disables/enables this based on
+        # internet reachability. check-gateway=ping gives additional link-layer
+        # protection (e.g. PPPoE drop) without conflicting with Netwatch.
         {"comment": f"{_FAILOVER_TAG}primary",
          "dst-address": "0.0.0.0/0", "gateway": primary_gw,
-         "distance": "1", "check-gateway": "ping",
-         "scope": "30", "target-scope": "10"},
-        {"comment": f"{_FAILOVER_TAG}check:primary",
-         "dst-address": _net(primary_check), "gateway": primary_gw,
-         "distance": "1", "scope": "30", "target-scope": "10"},
+         "distance": "1", "check-gateway": "ping"},
     ]
+    # Netwatch manages the PRIMARY route only.
+    # The secondary route is NEVER touched by Netwatch — doing so causes a
+    # double-failure: when primary goes down, 8.8.8.8 becomes unreachable
+    # via the primary too, so a secondary Netwatch would also disable the
+    # secondary route, leaving the router with no default route at all.
     desired_watch = [
         {"comment": f"{_FAILOVER_TAG}watch:primary",
          "host": primary_check.split("/")[0], "interval": interval,
@@ -411,21 +412,16 @@ def _apply_failover(ops, flat, pusher):
          "up-script": f'/ip route enable [find comment="{_FAILOVER_TAG}primary"]'},
     ]
     if secondary_gw:
-        desired_routes += [
+        # Secondary route stays ALWAYS enabled at distance=2. RouterOS
+        # activates it automatically when primary is disabled. Its own
+        # check-gateway=ping handles detecting if the secondary link itself
+        # goes down — it pings the secondary ISP gateway directly via the
+        # secondary interface, which is independent of primary's state.
+        desired_routes.append(
             {"comment": f"{_FAILOVER_TAG}secondary",
              "dst-address": "0.0.0.0/0", "gateway": secondary_gw,
-             "distance": "2", "check-gateway": "ping",
-             "scope": "30", "target-scope": "10"},
-            {"comment": f"{_FAILOVER_TAG}check:secondary",
-             "dst-address": _net(secondary_check), "gateway": secondary_gw,
-             "distance": "1", "scope": "30", "target-scope": "10"},
-        ]
-        desired_watch.append({
-            "comment": f"{_FAILOVER_TAG}watch:secondary",
-            "host": secondary_check.split("/")[0], "interval": interval,
-            "down-script": f'/ip route disable [find comment="{_FAILOVER_TAG}secondary"]',
-            "up-script": f'/ip route enable [find comment="{_FAILOVER_TAG}secondary"]',
-        })
+             "distance": "2", "check-gateway": "ping"},
+        )
 
     ops.extend(reconcile_list(_ROUTE, "comment", desired_routes, all_routes,
                               owns=fo_owns, label="failover route"))
