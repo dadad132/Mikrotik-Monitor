@@ -273,15 +273,17 @@ def routes_form(current, cfg):
     fo_secondary_gw = (_gateway_for_link(links[1], pppoe_names, dhcp_by_iface)
                        if len(links) > 1 else "")
 
-    def _gw_info(label_name, iface, gw):
-        if gw:
-            return f"{label_name}: {iface} · gateway {gw}"
-        if iface:
-            return f"{label_name}: {iface} · gateway not detected (check router)"
-        return f"{label_name}: not configured in WAN tab"
-
     link0_iface = getattr(links[0], "interface", "") if links else ""
     link1_iface = getattr(links[1], "interface", "") if len(links) > 1 else ""
+
+    # Also pre-fill from existing failover routes so re-opening the form
+    # shows the previously applied gateway even if detection would miss it.
+    for r in current.get("failover_routes", []):
+        c = r.get("comment", "")
+        if c == f"{_FAILOVER_TAG}primary" and r.get("gateway") and not fo_primary_gw:
+            fo_primary_gw = r["gateway"]
+        elif c == f"{_FAILOVER_TAG}secondary" and r.get("gateway") and not fo_secondary_gw:
+            fo_secondary_gw = r["gateway"]
 
     fields = [
         {"type": "sortable", "name": "wan_order",
@@ -294,13 +296,15 @@ def routes_form(current, cfg):
                  "disconnect and reconnect the line from RouterOS after applying."},
         {"type": "heading", "label": "Gateway Failover",
          "hint": "Static routes with check-gateway=ping + Netwatch. Gateways are "
-                 "detected automatically from your WAN interfaces."},
+                 "detected automatically — enter manually if the field is empty."},
         {"type": "toggle", "name": "fo_enabled", "value": "1",
          "on": fo_enabled, "label": "Enable gateway failover"},
-        {"type": "hidden", "name": "fo_primary_gw", "value": fo_primary_gw},
-        {"type": "hidden", "name": "fo_secondary_gw", "value": fo_secondary_gw},
-        {"type": "static", "label": "Primary gateway",
-         "value": _gw_info("Primary", link0_iface, fo_primary_gw)},
+        {"type": "text", "name": "fo_primary_gw",
+         "label": "Primary gateway",
+         "value": fo_primary_gw,
+         "placeholder": "e.g. 192.168.1.1 or pppoe-out1",
+         "hint": f"Auto-detected from interface '{link0_iface}'. "
+                 "For PPPoE use the interface name; for DHCP use the ISP gateway IP."},
         {"type": "text", "name": "fo_primary_check",
          "label": "Primary check IP", "value": primary_check,
          "placeholder": "1.1.1.1",
@@ -308,8 +312,12 @@ def routes_form(current, cfg):
     ]
     if link1_iface or fo_secondary_gw:
         fields += [
-            {"type": "static", "label": "Secondary gateway",
-             "value": _gw_info("Secondary", link1_iface, fo_secondary_gw)},
+            {"type": "text", "name": "fo_secondary_gw",
+             "label": "Secondary gateway",
+             "value": fo_secondary_gw,
+             "placeholder": "e.g. 10.0.0.1 or pppoe-backup",
+             "hint": f"Auto-detected from interface '{link1_iface}'. "
+                     "For PPPoE use the interface name; for DHCP use the ISP gateway IP."},
             {"type": "text", "name": "fo_secondary_check",
              "label": "Secondary check IP", "value": secondary_check,
              "placeholder": "8.8.8.8",
