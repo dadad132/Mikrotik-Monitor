@@ -2396,7 +2396,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                     f'{extra_actions}</div></form></div>')
         else:
             form = ""  # read-only feature (e.g. Interfaces)
-        body = (state + form + extra_html
+        body = (form + state + extra_html
                 + _adopt_box(name, slug, feature, csrf, unmanaged))
 
     # The SD-WAN tab gets an inline WAN-uplink editor (device metadata, so it
