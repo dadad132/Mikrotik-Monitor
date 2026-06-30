@@ -216,31 +216,62 @@ def _wan_sortable_items(current):
     return sorted(items, key=_dist_key)
 
 
+def _wan_clients_sorted(current):
+    """All WAN clients (DHCP + PPPoE + L2TP) that add a default route, sorted by distance."""
+    clients = []
+    for c in current.get("dhcp", []):
+        if str(c.get("add-default-route", "yes")).lower() not in ("no", "false"):
+            clients.append({"_type": "dhcp", **c})
+    for c in current.get("ppp", []):
+        if str(c.get("add-default-route", "yes")).lower() not in ("no", "false"):
+            clients.append(dict(c))
+
+    def _k(c):
+        try:
+            return int(c.get("default-route-distance", "1"))
+        except (ValueError, TypeError):
+            return 1
+
+    return sorted(clients, key=_k)
+
+
+def _wan_gateway_for(client):
+    """Gateway value for a static route to this WAN: IP for DHCP, interface name for PPPoE/L2TP."""
+    if client.get("_type") == "dhcp":
+        return client.get("gateway", "")
+    return client.get("name", "")
+
+
 def routes_form(current, cfg):
     items = _wan_sortable_items(current)
+    wan = _wan_clients_sorted(current)
 
-    # Pre-fill failover fields from existing config
-    primary_gw = secondary_gw = ""
+    # Pre-fill check IPs and interval from existing failover watch config
+    fo_enabled = bool(current.get("failover_routes"))
     primary_check = "1.1.1.1"
     secondary_check = "8.8.8.8"
     interval = "30s"
-    for r in current.get("failover_routes", []):
-        c = r.get("comment", "")
-        if c == f"{_FAILOVER_TAG}primary":
-            primary_gw = r.get("gateway", "")
-        elif c == f"{_FAILOVER_TAG}secondary":
-            secondary_gw = r.get("gateway", "")
-        elif c == f"{_FAILOVER_TAG}check:primary":
-            primary_check = r.get("dst-address", "1.1.1.1/32").replace("/32", "")
-        elif c == f"{_FAILOVER_TAG}check:secondary":
-            secondary_check = r.get("dst-address", "8.8.8.8/32").replace("/32", "")
     for w in current.get("failover_watch", []):
-        iv = w.get("interval", "")
-        if iv:
-            interval = iv
-            break
+        c = w.get("comment", "")
+        if c == f"{_FAILOVER_TAG}watch:primary" and w.get("host"):
+            primary_check = w["host"]
+        elif c == f"{_FAILOVER_TAG}watch:secondary" and w.get("host"):
+            secondary_check = w["host"]
+        if w.get("interval"):
+            interval = w["interval"]
 
-    return [
+    def _wan_info(client):
+        if client.get("_type") == "dhcp":
+            iface = client.get("interface", "?")
+            gw = client.get("gateway", "")
+            status = client.get("status", "unknown")
+            gw_str = gw or "(not yet assigned — DHCP not bound)"
+            return f"DHCP {iface} [{status}] · gateway {gw_str}"
+        name = client.get("name", "?")
+        running = str(client.get("running", "false")).lower() in ("true", "yes")
+        return f"{client.get('_type','ppp').upper()} {name} [{'connected' if running else 'disconnected'}]"
+
+    fields = [
         {"type": "sortable", "name": "wan_order",
          "label": "Internet line priority — drag or use ↑/↓ to set primary (top = primary)",
          "items": items,
@@ -250,31 +281,36 @@ def routes_form(current, cfg):
                  "that line reconnects or renews its DHCP lease. To apply immediately: "
                  "disconnect and reconnect the line from RouterOS after applying."},
         {"type": "heading", "label": "Gateway Failover",
-         "hint": "Creates static default routes with check-gateway=ping and Netwatch "
-                 "entries to automatically disable/re-enable each route when the "
-                 "monitored check IP becomes unreachable. Leave primary gateway blank "
-                 "to remove all failover config."},
-        {"type": "text", "name": "fo_primary_gw",
-         "label": "Primary gateway IP", "value": primary_gw,
-         "placeholder": "e.g. 196.39.82.159",
-         "hint": "ISP gateway for the primary WAN line (leave blank to disable failover)."},
-        {"type": "text", "name": "fo_primary_check",
-         "label": "Primary check IP", "value": primary_check,
-         "placeholder": "1.1.1.1",
-         "hint": "Public IP to ping via the primary gateway to confirm internet is up."},
-        {"type": "text", "name": "fo_secondary_gw",
-         "label": "Secondary gateway IP (optional)", "value": secondary_gw,
-         "placeholder": "e.g. 102.214.189.2",
-         "hint": "ISP gateway for the backup WAN line — leave blank if there is no backup."},
-        {"type": "text", "name": "fo_secondary_check",
-         "label": "Secondary check IP", "value": secondary_check,
-         "placeholder": "8.8.8.8",
-         "hint": "Public IP to ping via the secondary gateway to confirm backup is up."},
-        {"type": "text", "name": "fo_interval",
-         "label": "Netwatch check interval", "value": interval,
-         "placeholder": "30s",
-         "hint": "How often Netwatch pings each check IP (default: 30s)."},
+         "hint": "Static routes with check-gateway=ping + Netwatch. Gateways are taken "
+                 "directly from the WAN clients above and cannot be edited here — only the "
+                 "check IPs (public addresses Netwatch pings to verify the line is up) can be changed."},
+        {"type": "toggle", "name": "fo_enabled", "value": "1",
+         "on": fo_enabled, "label": "Enable gateway failover"},
     ]
+
+    if not wan:
+        fields.append({"type": "static", "label": "WAN clients",
+                        "value": "No WAN clients detected on this router."})
+    else:
+        fields.append({"type": "static", "label": "Primary WAN",
+                        "value": _wan_info(wan[0])})
+        fields.append({"type": "text", "name": "fo_primary_check",
+                        "label": "Primary check IP", "value": primary_check,
+                        "placeholder": "1.1.1.1",
+                        "hint": "Netwatch pings this IP via the primary gateway to confirm internet is up."})
+        if len(wan) > 1:
+            fields.append({"type": "static", "label": "Secondary WAN",
+                            "value": _wan_info(wan[1])})
+            fields.append({"type": "text", "name": "fo_secondary_check",
+                            "label": "Secondary check IP", "value": secondary_check,
+                            "placeholder": "8.8.8.8",
+                            "hint": "Netwatch pings this IP via the secondary gateway to confirm backup is up."})
+
+    fields.append({"type": "text", "name": "fo_interval",
+                   "label": "Netwatch check interval", "value": interval,
+                   "placeholder": "30s",
+                   "hint": "How often Netwatch pings each check IP (default: 30s)."})
+    return fields
 
 
 def _apply_wan_order(ops, order, pusher):
@@ -311,69 +347,90 @@ def _apply_wan_order(ops, order, pusher):
 def _apply_failover(ops, flat, pusher):
     """Reconcile static failover routes and Netwatch entries.
 
-    Creates: one default route per WAN with check-gateway=ping, one host route
-    per check-IP to force pings through the correct gateway, and one Netwatch
-    entry per WAN that disables/enables the matching default route.
+    Gateway IPs are derived live from the WAN clients — they are NOT taken from
+    form fields so the user cannot accidentally set an arbitrary IP. Only the
+    check IPs (public addresses Netwatch pings) and the interval are form-controlled.
+    Netwatch owns the 'disabled' flag at runtime; we omit it from the desired
+    state so reconcile never fights Netwatch by re-enabling a just-downed route."""
+    fo_owns = _prefix_owner(_FAILOVER_TAG)
+    all_routes = _safe_fetch(pusher.api, _ROUTE)
+    netwatch = _safe_fetch(pusher.api, _NETWATCH)
 
-    All managed rows are tagged mikromon:failover:* so human-created routes are
-    never touched.  Netwatch manages the 'disabled' flag at runtime — we
-    intentionally leave that field out of the desired state so reconcile does
-    not fight Netwatch by re-enabling a route it just disabled."""
-    primary_gw = flat.get("fo_primary_gw", "").strip()
-    secondary_gw = flat.get("fo_secondary_gw", "").strip()
+    if not flat.get("fo_enabled"):
+        # Toggle is off — remove everything we manage
+        ops.extend(reconcile_list(_ROUTE, "comment", [], all_routes,
+                                  owns=fo_owns, label="failover route"))
+        ops.extend(reconcile_list(_NETWATCH, "comment", [], netwatch,
+                                  owns=fo_owns, label="netwatch"))
+        return
+
+    # Derive gateway IPs from live WAN clients (same ordering as priority list)
+    dhcp = _safe_fetch(pusher.api, _DHCP_CLIENT)
+    pppoe = _safe_fetch(pusher.api, _PPPOE_CLIENT)
+    l2tp = _safe_fetch(pusher.api, _L2TP_CLIENT)
+    wan = []
+    for c in dhcp:
+        if str(c.get("add-default-route", "yes")).lower() not in ("no", "false"):
+            wan.append({"_type": "dhcp", **c})
+    for c in pppoe:
+        if str(c.get("add-default-route", "yes")).lower() not in ("no", "false"):
+            wan.append({"_type": "pppoe", **c})
+    for c in l2tp:
+        if str(c.get("add-default-route", "yes")).lower() not in ("no", "false"):
+            wan.append({"_type": "l2tp", **c})
+    wan.sort(key=lambda c: int(c.get("default-route-distance", "1"))
+             if str(c.get("default-route-distance", "1")).isdigit() else 1)
+
+    if not wan:
+        return
+    primary_gw = _wan_gateway_for(wan[0])
+    secondary_gw = _wan_gateway_for(wan[1]) if len(wan) > 1 else ""
+    if not primary_gw:
+        return  # DHCP not yet bound — nothing to create
+
     primary_check = flat.get("fo_primary_check", "").strip() or "1.1.1.1"
     secondary_check = flat.get("fo_secondary_check", "").strip() or "8.8.8.8"
     interval = flat.get("fo_interval", "").strip() or "30s"
 
-    # Normalise check IPs: routes need /32, netwatch needs bare IP
     def _net(ip):
         return ip if "/" in ip else f"{ip}/32"
 
-    if primary_gw:
-        desired_routes = [
-            {"comment": f"{_FAILOVER_TAG}primary",
-             "dst-address": "0.0.0.0/0", "gateway": primary_gw,
-             "distance": "1", "check-gateway": "ping",
+    desired_routes = [
+        {"comment": f"{_FAILOVER_TAG}primary",
+         "dst-address": "0.0.0.0/0", "gateway": primary_gw,
+         "distance": "1", "check-gateway": "ping",
+         "scope": "30", "target-scope": "10"},
+        {"comment": f"{_FAILOVER_TAG}check:primary",
+         "dst-address": _net(primary_check), "gateway": primary_gw,
+         "distance": "1", "scope": "30", "target-scope": "10"},
+    ]
+    desired_watch = [
+        {"comment": f"{_FAILOVER_TAG}watch:primary",
+         "host": primary_check.split("/")[0], "interval": interval,
+         "down-script": f'/ip route disable [find comment="{_FAILOVER_TAG}primary"]',
+         "up-script": f'/ip route enable [find comment="{_FAILOVER_TAG}primary"]'},
+    ]
+    if secondary_gw:
+        desired_routes += [
+            {"comment": f"{_FAILOVER_TAG}secondary",
+             "dst-address": "0.0.0.0/0", "gateway": secondary_gw,
+             "distance": "2", "check-gateway": "ping",
              "scope": "30", "target-scope": "10"},
-            {"comment": f"{_FAILOVER_TAG}check:primary",
-             "dst-address": _net(primary_check), "gateway": primary_gw,
+            {"comment": f"{_FAILOVER_TAG}check:secondary",
+             "dst-address": _net(secondary_check), "gateway": secondary_gw,
              "distance": "1", "scope": "30", "target-scope": "10"},
         ]
-        desired_watch = [
-            {"comment": f"{_FAILOVER_TAG}watch:primary",
-             "host": primary_check.split("/")[0], "interval": interval,
-             "down-script": f'/ip route disable [find comment="{_FAILOVER_TAG}primary"]',
-             "up-script": f'/ip route enable [find comment="{_FAILOVER_TAG}primary"]'},
-        ]
-        if secondary_gw:
-            desired_routes += [
-                {"comment": f"{_FAILOVER_TAG}secondary",
-                 "dst-address": "0.0.0.0/0", "gateway": secondary_gw,
-                 "distance": "2", "check-gateway": "ping",
-                 "scope": "30", "target-scope": "10"},
-                {"comment": f"{_FAILOVER_TAG}check:secondary",
-                 "dst-address": _net(secondary_check), "gateway": secondary_gw,
-                 "distance": "1", "scope": "30", "target-scope": "10"},
-            ]
-            desired_watch.append({
-                "comment": f"{_FAILOVER_TAG}watch:secondary",
-                "host": secondary_check.split("/")[0], "interval": interval,
-                "down-script": f'/ip route disable [find comment="{_FAILOVER_TAG}secondary"]',
-                "up-script": f'/ip route enable [find comment="{_FAILOVER_TAG}secondary"]',
-            })
-    else:
-        desired_routes = []
-        desired_watch = []
+        desired_watch.append({
+            "comment": f"{_FAILOVER_TAG}watch:secondary",
+            "host": secondary_check.split("/")[0], "interval": interval,
+            "down-script": f'/ip route disable [find comment="{_FAILOVER_TAG}secondary"]',
+            "up-script": f'/ip route enable [find comment="{_FAILOVER_TAG}secondary"]',
+        })
 
-    fo_owns = _prefix_owner(_FAILOVER_TAG)
-    all_routes = _safe_fetch(pusher.api, _ROUTE)
-    netwatch = _safe_fetch(pusher.api, _NETWATCH)
-    ops.extend(reconcile_list(
-        _ROUTE, "comment", desired_routes, all_routes,
-        owns=fo_owns, label="failover route"))
-    ops.extend(reconcile_list(
-        _NETWATCH, "comment", desired_watch, netwatch,
-        owns=fo_owns, label="netwatch"))
+    ops.extend(reconcile_list(_ROUTE, "comment", desired_routes, all_routes,
+                              owns=fo_owns, label="failover route"))
+    ops.extend(reconcile_list(_NETWATCH, "comment", desired_watch, netwatch,
+                              owns=fo_owns, label="netwatch"))
 
 
 def routes_plan(pusher, cfg, flat, multi):
