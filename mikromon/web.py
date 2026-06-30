@@ -303,11 +303,9 @@ def _throughput_chart(rx_pts, tx_pts, width=284) -> str:
         f'ov.addEventListener("mouseleave",hide);'
         f'}})();</script>')
 
-    # width:100% makes the chart fill its container; viewBox keeps the coordinate
-    # system fixed so all SVG unit math above stays correct.
     return (
         f'<svg id="{cid}" viewBox="0 0 {width} {total_h}" '
-        f'style="width:100%;display:block;overflow:visible">'
+        f'width="{width}" height="{total_h}" style="display:block;overflow:visible">'
         + grid + axis
         + polyline(rx_pts, "#2563eb") + polyline(tx_pts, "#f97316")
         + peak_html
@@ -1709,6 +1707,13 @@ def _field_html(desc) -> str:
                 f'onclick="pushAddRow(\'{name}\')" style="margin-top:6px">'
                 f'+ Add row</button>{hint}'
                 f'<template id="tmpl-{name}">{row_html({})}</template></div>')
+    if t == "heading":
+        sub = (f'<div class="muted" style="margin-top:4px;font-size:12px">'
+               f'{esc(desc["hint"])}</div>') if desc.get("hint") else ""
+        return (f'<div class="f full" style="margin-top:18px;padding-top:14px;'
+                f'border-top:1px solid #e2e8f0">'
+                f'<b style="font-size:13px;color:#334155">{esc(label)}</b>'
+                f'{sub}</div>')
     if t == "sortable":
         name = desc["name"]
         items = desc.get("items", [])
