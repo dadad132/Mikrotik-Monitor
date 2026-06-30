@@ -816,12 +816,17 @@ def _render_device(store, state, name, user, csrf="",
             bdg_bg = "#fee2e2"; bdg_c = "#b91c1c"
             slabel = "Offline"; sub = ""; glow = ""
         elif health == "partial" and i == 0:
-            # Primary is failing, traffic on backup
-            dot_c = "#f97316"; row_bg = "#fff7ed"; row_br = "#fed7aa"
-            bdg_bg = "#ffedd5"; bdg_c = "#c2410c"
-            slabel = "Failover"; sub = ""; glow = ""
-        elif (health == "partial" and i == 1) or (health == "full" and i == 0):
-            # Actively routing traffic
+            # Primary has failed — it is offline, not "in failover"
+            dot_c = "#dc2626"; row_bg = "#fef2f2"; row_br = "#fecaca"
+            bdg_bg = "#fee2e2"; bdg_c = "#b91c1c"
+            slabel = "Offline"; sub = ""; glow = ""
+        elif health == "partial" and i > 0:
+            # This backup is actively routing because primary is down
+            dot_c = "#16a34a"; row_bg = "#f0fdf4"; row_br = "#bbf7d0"
+            bdg_bg = "#dcfce7"; bdg_c = "#15803d"
+            slabel = "Failover"; sub = ""; glow = "box-shadow:0 0 0 4px rgba(22,163,74,0.18);"
+        elif health == "full" and i == 0:
+            # Primary is up and routing
             dot_c = "#16a34a"; row_bg = "#f0fdf4"; row_br = "#bbf7d0"
             bdg_bg = "#dcfce7"; bdg_c = "#15803d"
             slabel = "Online"; sub = ""; glow = "box-shadow:0 0 0 4px rgba(22,163,74,0.18);"

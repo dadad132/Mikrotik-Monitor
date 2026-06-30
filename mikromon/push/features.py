@@ -344,49 +344,63 @@ def _apply_wan_order(ops, order, pusher):
             ops.append(_set_field(cpath, c, "default-route-distance", want, clabel))
 
 
-def _apply_failover(ops, flat, pusher):
+def _gateway_for_link(link, pppoe_names, dhcp_by_iface):
+    """Return the RouterOS gateway string for a WAN uplink endpoint.
+
+    Priority:
+      1. Explicit gateway typed in the WAN uplinks editor (manual override).
+      2. Interface is a PPPoE client → use the interface name itself as the
+         gateway (RouterOS accepts pppoe-out1 etc. as a next-hop).
+      3. Interface has a DHCP client on the router → use the DHCP-assigned
+         gateway IP.  We check ALL DHCP clients here, regardless of their
+         add-default-route setting, because we are managing our own routes."""
+    gw = getattr(link, "gateway", "") or ""
+    if gw:
+        return gw
+    iface = getattr(link, "interface", "") or ""
+    if not iface:
+        return ""
+    if iface in pppoe_names:          # PPPoE: interface name IS the gateway
+        return iface
+    dhcp = dhcp_by_iface.get(iface)   # Ethernet DHCP: use assigned gateway
+    if dhcp:
+        return dhcp.get("gateway", "")
+    return ""
+
+
+def _apply_failover(ops, flat, pusher, cfg):
     """Reconcile static failover routes and Netwatch entries.
 
-    Gateway IPs are derived live from the WAN clients — they are NOT taken from
-    form fields so the user cannot accidentally set an arbitrary IP. Only the
-    check IPs (public addresses Netwatch pings) and the interval are form-controlled.
-    Netwatch owns the 'disabled' flag at runtime; we omit it from the desired
-    state so reconcile never fights Netwatch by re-enabling a just-downed route."""
+    Gateways are derived from cfg.wan.links (the WAN uplinks the user
+    configured) matched against live PPPoE/DHCP data on the router.  Only
+    the check IPs (public addresses Netwatch pings) and interval come from
+    the form."""
     fo_owns = _prefix_owner(_FAILOVER_TAG)
     all_routes = _safe_fetch(pusher.api, _ROUTE)
     netwatch = _safe_fetch(pusher.api, _NETWATCH)
 
     if not flat.get("fo_enabled"):
-        # Toggle is off — remove everything we manage
         ops.extend(reconcile_list(_ROUTE, "comment", [], all_routes,
                                   owns=fo_owns, label="failover route"))
         ops.extend(reconcile_list(_NETWATCH, "comment", [], netwatch,
                                   owns=fo_owns, label="netwatch"))
         return
 
-    # Derive gateway IPs from live WAN clients (same ordering as priority list)
-    dhcp = _safe_fetch(pusher.api, _DHCP_CLIENT)
+    # Build lookup tables from live router data
     pppoe = _safe_fetch(pusher.api, _PPPOE_CLIENT)
-    l2tp = _safe_fetch(pusher.api, _L2TP_CLIENT)
-    wan = []
-    for c in dhcp:
-        if str(c.get("add-default-route", "yes")).lower() not in ("no", "false"):
-            wan.append({"_type": "dhcp", **c})
-    for c in pppoe:
-        if str(c.get("add-default-route", "yes")).lower() not in ("no", "false"):
-            wan.append({"_type": "pppoe", **c})
-    for c in l2tp:
-        if str(c.get("add-default-route", "yes")).lower() not in ("no", "false"):
-            wan.append({"_type": "l2tp", **c})
-    wan.sort(key=lambda c: int(c.get("default-route-distance", "1"))
-             if str(c.get("default-route-distance", "1")).isdigit() else 1)
+    dhcp = _safe_fetch(pusher.api, _DHCP_CLIENT)
+    pppoe_names = {c.get("name", "") for c in pppoe if c.get("name")}
+    dhcp_by_iface = {c.get("interface", ""): c
+                     for c in dhcp if c.get("interface")}
 
-    if not wan:
+    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
+    if not links:
         return
-    primary_gw = _wan_gateway_for(wan[0])
-    secondary_gw = _wan_gateway_for(wan[1]) if len(wan) > 1 else ""
+    primary_gw = _gateway_for_link(links[0], pppoe_names, dhcp_by_iface)
+    secondary_gw = (_gateway_for_link(links[1], pppoe_names, dhcp_by_iface)
+                    if len(links) > 1 else "")
     if not primary_gw:
-        return  # DHCP not yet bound — nothing to create
+        return  # cannot determine primary gateway — skip
 
     primary_check = flat.get("fo_primary_check", "").strip() or "1.1.1.1"
     secondary_check = flat.get("fo_secondary_check", "").strip() or "8.8.8.8"
@@ -435,7 +449,7 @@ def _apply_failover(ops, flat, pusher):
 def routes_plan(pusher, cfg, flat, multi):
     ops = []
     _apply_wan_order(ops, multi.get("wan_order", []), pusher)
-    _apply_failover(ops, flat, pusher)
+    _apply_failover(ops, flat, pusher, cfg)
     return Plan(cfg.name, ops, summary="routes / failover")
 
 
