@@ -279,36 +279,7 @@ def routes_form(current, cfg):
         if w.get("interval"):
             interval = w["interval"]
 
-    # Detect gateways at form-render time using live router data.
-    # PPP: check /ppp/active remote-address then /ip/address network field.
-    # DHCP: use the gateway IP from the DHCP client, ignoring add-default-route.
-    pppoe_names = {c.get("name", "") for c in current.get("ppp", [])
-                   if c.get("_type") == "pppoe" and c.get("name")}
-    dhcp_by_iface = {c.get("interface", ""): c
-                     for c in current.get("dhcp", []) if c.get("interface")}
-    ppp_active_by_name = {s.get("name", ""): s
-                          for s in current.get("ppp_active", []) if s.get("name")}
-    ip_addr_by_iface = {a.get("interface", ""): a
-                        for a in current.get("ip_addrs", []) if a.get("interface")}
     links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
-    fo_primary_gw = (_gateway_for_link(links[0], pppoe_names, dhcp_by_iface,
-                                       ppp_active_by_name, ip_addr_by_iface)
-                     if links else "")
-    fo_secondary_gw = (_gateway_for_link(links[1], pppoe_names, dhcp_by_iface,
-                                         ppp_active_by_name, ip_addr_by_iface)
-                       if len(links) > 1 else "")
-
-    link0_iface = getattr(links[0], "interface", "") if links else ""
-    link1_iface = getattr(links[1], "interface", "") if len(links) > 1 else ""
-
-    # Also pre-fill from existing failover routes so re-opening the form
-    # shows the previously applied gateway even if detection would miss it.
-    for r in current.get("failover_routes", []):
-        c = r.get("comment", "")
-        if c == f"{_FAILOVER_TAG}primary" and r.get("gateway") and not fo_primary_gw:
-            fo_primary_gw = r["gateway"]
-        elif c == f"{_FAILOVER_TAG}secondary" and r.get("gateway") and not fo_secondary_gw:
-            fo_secondary_gw = r["gateway"]
 
     fields = [
         {"type": "sortable", "name": "wan_order",
@@ -320,34 +291,20 @@ def routes_form(current, cfg):
                  "that line reconnects or renews its DHCP lease. To apply immediately: "
                  "disconnect and reconnect the line from RouterOS after applying."},
         {"type": "heading", "label": "Gateway Failover",
-         "hint": "Static routes with check-gateway=ping + Netwatch. Gateways are "
-                 "detected automatically — enter manually if the field is empty."},
+         "hint": "Static routes with check-gateway=ping + Netwatch. "
+                 "Gateways are detected automatically from the configured WAN uplinks."},
         {"type": "toggle", "name": "fo_enabled", "value": "1",
          "on": fo_enabled, "label": "Enable gateway failover"},
-        {"type": "text", "name": "fo_primary_gw",
-         "label": "Primary gateway",
-         "value": fo_primary_gw,
-         "placeholder": "e.g. 192.168.1.1 or pppoe-out1",
-         "hint": f"Auto-detected from interface '{link0_iface}'. "
-                 "For PPPoE use the interface name; for DHCP use the ISP gateway IP."},
         {"type": "text", "name": "fo_primary_check",
          "label": "Primary check IP", "value": primary_check,
          "placeholder": "1.1.1.1",
-         "hint": "Netwatch pings this public IP to confirm the primary line has internet."},
+         "hint": "Netwatch pings this IP to confirm the primary line has internet."},
     ]
-    if link1_iface or fo_secondary_gw:
-        fields += [
-            {"type": "text", "name": "fo_secondary_gw",
-             "label": "Secondary gateway",
-             "value": fo_secondary_gw,
-             "placeholder": "e.g. 10.0.0.1 or pppoe-backup",
-             "hint": f"Auto-detected from interface '{link1_iface}'. "
-                     "For PPPoE use the interface name; for DHCP use the ISP gateway IP."},
-            {"type": "text", "name": "fo_secondary_check",
-             "label": "Secondary check IP", "value": secondary_check,
-             "placeholder": "8.8.8.8",
-             "hint": "Netwatch pings this public IP to confirm the backup line has internet."},
-        ]
+    if len(links) > 1:
+        fields.append({"type": "text", "name": "fo_secondary_check",
+                       "label": "Secondary check IP", "value": secondary_check,
+                       "placeholder": "8.8.8.8",
+                       "hint": "Netwatch pings this IP to confirm the backup line has internet."})
     fields.append({"type": "text", "name": "fo_interval",
                    "label": "Netwatch check interval", "value": interval,
                    "placeholder": "30s",
@@ -463,11 +420,30 @@ def _apply_failover(ops, flat, pusher, cfg):
                                           f"DHCP {iface}"))
         return
 
-    # Gateways are detected at form-render time and passed via hidden fields
-    primary_gw = flat.get("fo_primary_gw", "").strip()
-    secondary_gw = flat.get("fo_secondary_gw", "").strip()
+    # Detect gateways live from the router at apply time
+    pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
+    dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
+    pppoe_names = {c.get("name", "") for c in pppoe_clients if c.get("name")}
+    dhcp_by_iface = {c.get("interface", ""): c for c in dhcp_clients if c.get("interface")}
+    ppp_active_by_name = {s.get("name", ""): s
+                          for s in _safe_fetch(pusher.api, _PPP_ACTIVE) if s.get("name")}
+    ip_addr_by_iface = {a.get("interface", ""): a
+                        for a in _safe_fetch(pusher.api, _IP_ADDRESS) if a.get("interface")}
+    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
+    primary_gw = (_gateway_for_link(links[0], pppoe_names, dhcp_by_iface,
+                                    ppp_active_by_name, ip_addr_by_iface) if links else "")
+    secondary_gw = (_gateway_for_link(links[1], pppoe_names, dhcp_by_iface,
+                                      ppp_active_by_name, ip_addr_by_iface)
+                    if len(links) > 1 else "")
+    # Fall back to gateways already on the router from a previous apply
+    for r in all_routes:
+        c = r.get("comment", "")
+        if c == f"{_FAILOVER_TAG}primary" and r.get("gateway") and not primary_gw:
+            primary_gw = r["gateway"]
+        elif c == f"{_FAILOVER_TAG}secondary" and r.get("gateway") and not secondary_gw:
+            secondary_gw = r["gateway"]
     if not primary_gw:
-        return  # primary gateway not detected — cannot build routes
+        return  # primary gateway not detectable — cannot build routes
 
     primary_check = flat.get("fo_primary_check", "").strip() or "1.1.1.1"
     secondary_check = flat.get("fo_secondary_check", "").strip() or "8.8.8.8"
@@ -536,9 +512,6 @@ def _apply_failover(ops, flat, pusher, cfg):
     # so the secondary static (distance=2) never wins.
     # Setting add-default-route=no removes the dynamic route immediately on
     # active connections and leaves only our managed static routes in control.
-    pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
-    dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
-    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
     for link in links:
         iface = getattr(link, "interface", "") or ""
         if not iface:
