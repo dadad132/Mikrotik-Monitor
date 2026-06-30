@@ -239,16 +239,30 @@ def sdwan_plan(pusher, cfg, flat, multi):
             cpath, c, clabel = client_map[item_id]
             if _norm(str(c.get("default-route-distance", "1"))) != want:
                 ops.append(_set_field(cpath, c, "default-route-distance", want, clabel))
-            # Also update the live route for immediate effect
-            gw_match = (c.get("interface", "") if item_id.startswith("dhcp:")
-                        else c.get("name", ""))
-            if gw_match:
+            # Also update the live route for immediate effect.
+            # DHCP routes: gateway is the DHCP-assigned IP (e.g. 172.17.232.254),
+            # NOT the interface name. Use the `gateway` field from the bound DHCP
+            # client to find the matching route, falling back to the interface name.
+            # PPPoE/L2TP routes: gateway IS the interface name (e.g. "Axxess").
+            if item_id.startswith("dhcp:"):
+                dhcp_gw = c.get("gateway", "")   # IP the DHCP server assigned as GW
+                iface = c.get("interface", "")
                 for r in routes_all:
+                    r_gw = str(r.get("gateway", ""))
                     if (not str(r.get("comment", "")).startswith("mikromon:sdwan")
-                            and gw_match in str(r.get("gateway", ""))
+                            and (r_gw == dhcp_gw or (iface and iface in r_gw))
                             and _norm(str(r.get("distance", ""))) != want):
                         ops.append(_set_field(_ROUTE, r, "distance", want,
-                                              f"route via {gw_match}"))
+                                              f"route via {r_gw}"))
+            else:
+                ppp_name = c.get("name", "")
+                for r in routes_all:
+                    r_gw = str(r.get("gateway", ""))
+                    if (not str(r.get("comment", "")).startswith("mikromon:sdwan")
+                            and ppp_name and ppp_name in r_gw
+                            and _norm(str(r.get("distance", ""))) != want):
+                        ops.append(_set_field(_ROUTE, r, "distance", want,
+                                              f"route via {r_gw}"))
 
     # 2. Auto mode: set static-link route distances by priority
     if mode != "manual":
