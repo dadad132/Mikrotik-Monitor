@@ -2177,15 +2177,34 @@ def _norm_html(v) -> str:
     return "true" if v in (True, "true") else str(v)
 
 
-def _wan_uplink_editor(name, cfg, csrf) -> str:
-    """Editable WAN uplink list (saved to the device record, not pushed)."""
+def _wan_uplink_editor(name, cfg, csrf, ifaces=None) -> str:
+    """Editable WAN uplink list (saved to the device record, not pushed).
+
+    When ifaces is a list of interface dicts (fetched live from the router),
+    the interface column renders as a <select> dropdown instead of a text input."""
+    def _iface_field(selected=""):
+        if ifaces is None:
+            return (f'<input name="link_iface" placeholder="ether1 / lte1" '
+                    f'value="{esc(selected)}" style="width:100%">')
+        opts = '<option value="">— select interface —</option>'
+        names = [i.get("name", "") for i in ifaces]
+        if selected and selected not in names:
+            opts += f'<option value="{esc(selected)}" selected>{esc(selected)}</option>'
+        for iface in sorted(ifaces, key=lambda i: i.get("name", "")):
+            iname = iface.get("name", "")
+            if not iname:
+                continue
+            itype = iface.get("type", "")
+            sel = " selected" if iname == selected else ""
+            lbl = iname + (f"  ({itype})" if itype and itype != "ether" else "")
+            opts += f'<option value="{esc(iname)}"{sel}>{esc(lbl)}</option>'
+        return f'<select name="link_iface" style="width:100%">{opts}</select>'
+
     def row(link):
         return (f'<tr>'
                 f'<td><input name="link_name" placeholder="ISP name (Vodacom)" '
                 f'value="{esc(link.name if link else "")}" style="width:100%"></td>'
-                f'<td><input name="link_iface" placeholder="ether1 / lte1" '
-                f'value="{esc(link.interface if link else "")}" style="width:100%">'
-                f'</td>'
+                f'<td>{_iface_field(link.interface if link else "")}</td>'
                 f'<td><input name="link_gw" placeholder="gateway IP (optional)" '
                 f'value="{esc(link.gateway if link else "")}" style="width:100%">'
                 f'</td><td style="white-space:nowrap">'
@@ -2308,7 +2327,8 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                         fields=None, preview=None, submitted=None, error="",
                         msg="", recent=None, facts=None, unmanaged=None,
                         confirm_action="/device/push", cfg=None,
-                        extra_html="", extra_actions="", report_html="") -> str:
+                        extra_html="", extra_actions="", report_html="",
+                        wan_ifaces=None) -> str:
     tabbar = _device_tabbar(name, slug, AuthStore.is_admin(user or {}), csrf)
     q = quote(name)
     banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
@@ -2370,7 +2390,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
 
     # The SD-WAN tab gets an inline WAN-uplink editor (device metadata, so it
     # works even when the router is unreachable). Hidden during the confirm step.
-    wan_editor = (_wan_uplink_editor(name, cfg, csrf)
+    wan_editor = (_wan_uplink_editor(name, cfg, csrf, ifaces=wan_ifaces)
                   if slug == "sdwan" and preview is None else "")
     logbox = _recent_log_box(recent or [], device=name)
     intro = (f'<p class="muted" style="margin:-6px 0 14px">{_TAB_INTRO[slug]}</p>'
@@ -3445,6 +3465,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             cfg = build_device(raw, defaults)  # device metadata (no router needed)
             summary_lines = fields = unmanaged = None
             extra_html = extra_actions = ""
+            wan_ifaces = None
             _report_html = report_html  # local copy; may be overridden below
             if preview is None and not error:
                 from .device import DeviceError
@@ -3460,6 +3481,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     summary_lines = feature["summary"](current, cfg)
                     if "form" in feature:
                         fields = feature["form"](current, cfg)
+                    if slug == "sdwan":
+                        try:
+                            wan_ifaces = [i for i in api.fetch(("interface",))
+                                          if i.get("name")]
+                        except Exception:
+                            wan_ifaces = None
                     if "unmanaged" in feature:
                         unmanaged = feature["unmanaged"](pusher, cfg)
                     if slug == "scripts":
@@ -3484,7 +3511,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 fields=fields, preview=preview, submitted=submitted, error=error,
                 msg=msg, recent=recent, facts=facts, unmanaged=unmanaged,
                 confirm_action=confirm_action, cfg=cfg, extra_html=extra_html,
-                extra_actions=extra_actions, report_html=_report_html)
+                extra_actions=extra_actions, report_html=_report_html,
+                wan_ifaces=wan_ifaces)
             return self._send(200, page, "text/html; charset=utf-8")
 
         def _device_wan_post(self, flat, multi, user):
