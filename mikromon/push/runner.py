@@ -53,7 +53,7 @@ class Pusher:
         out.sort(key=lambda x: x.get("time", ""), reverse=True)
         return out
 
-    def plan_backup(self, name: str | None = None) -> Plan:
+    def plan_backup(self, name: str | None = None, keep: int = 10) -> Plan:
         name = name or ("mikromon-" +
                         datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
         # dont-encrypt=yes so the restore (load) works without a password prompt
@@ -62,7 +62,30 @@ class Pusher:
         op = Operation("run", ("system", "backup"),
                        {"_cmd": "save", "name": name, "dont-encrypt": "yes"},
                        desc=f"create backup '{name}.backup' on the router")
-        return Plan(self.cfg.name, [op], summary="backup")
+        # Prune old server-created backups in the same plan so the router never
+        # accumulates more than `keep` mikromon backups.  We delete `keep-1`
+        # from the current list because one new backup is about to be added.
+        return Plan(self.cfg.name, [op] + self._prune_backup_ops(keep - 1),
+                    summary="backup")
+
+    def _prune_backup_ops(self, keep: int) -> list:
+        """Return remove ops for mikromon-created backups beyond the newest `keep`."""
+        try:
+            all_files = self.api.fetch(("file",))
+        except Exception:
+            return []
+        managed = sorted(
+            [r for r in all_files
+             if str(r.get("name", "")).startswith("mikromon-")
+             and str(r.get("name", "")).endswith(".backup")],
+            key=lambda r: r.get("creation-time", ""),
+            reverse=True,  # newest first
+        )
+        return [
+            Operation("remove", ("file",), {".id": r[".id"]},
+                      desc=f"prune old backup '{r['name']}'")
+            for r in managed[keep:] if r.get(".id")
+        ]
 
     def plan_restore(self, name: str) -> Plan:
         """Restore a .backup file. RouterOS REBOOTS to apply, so this is a
