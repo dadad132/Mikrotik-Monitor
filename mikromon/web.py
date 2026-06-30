@@ -3493,7 +3493,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     api.connect()
                     pusher = Pusher(cfg, api)
                     current = feature["read"](pusher, cfg)
-                    summary_lines = feature["summary"](current, cfg)
+                    summary_lines = (feature["summary"](current, cfg)
+                                     if "summary" in feature else None)
                     if "form" in feature:
                         fields = feature["form"](current, cfg)
                     if slug == "wan":
