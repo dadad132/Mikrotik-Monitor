@@ -393,30 +393,33 @@ def _apply_failover(ops, flat, pusher):
     interval = flat.get("fo_interval", "").strip() or "30s"
 
     desired_routes = [
-        # Primary default route — Netwatch disables/enables this based on
-        # internet reachability. check-gateway=ping gives additional link-layer
-        # protection (e.g. PPPoE drop) without conflicting with Netwatch.
+        # Primary default route — distance=1 normally; Netwatch bumps it to
+        # 200 on failure so secondary (distance=2) wins without the primary
+        # ever disappearing from the routing table.
         {"comment": f"{_FAILOVER_TAG}primary",
          "dst-address": "0.0.0.0/0", "gateway": primary_gw,
          "distance": "1", "check-gateway": "ping"},
     ]
-    # Netwatch manages the PRIMARY route only.
-    # The secondary route is NEVER touched by Netwatch — doing so causes a
-    # double-failure: when primary goes down, 8.8.8.8 becomes unreachable
-    # via the primary too, so a secondary Netwatch would also disable the
-    # secondary route, leaving the router with no default route at all.
+    # Netwatch adjusts the PRIMARY route distance only.
+    # Setting distance=200 on failure means secondary (distance=2) takes
+    # over automatically. Restoring distance=1 on recovery hands traffic
+    # back to primary. The secondary route is never touched by Netwatch —
+    # it always stays at distance=2 and check-gateway=ping handles
+    # detecting if the secondary link itself goes down.
     desired_watch = [
         {"comment": f"{_FAILOVER_TAG}watch:primary",
          "host": primary_check.split("/")[0], "interval": interval,
-         "down-script": f'/ip route disable [find comment="{_FAILOVER_TAG}primary"]',
-         "up-script": f'/ip route enable [find comment="{_FAILOVER_TAG}primary"]'},
+         "down-script": (f'/ip route set [find comment="{_FAILOVER_TAG}primary"]'
+                         f' distance=200'),
+         "up-script": (f'/ip route set [find comment="{_FAILOVER_TAG}primary"]'
+                       f' distance=1')},
     ]
     if secondary_gw:
-        # Secondary route stays ALWAYS enabled at distance=2. RouterOS
-        # activates it automatically when primary is disabled. Its own
+        # Secondary route stays permanently at distance=2. When primary's
+        # distance is bumped to 200, RouterOS prefers this automatically.
         # check-gateway=ping handles detecting if the secondary link itself
-        # goes down — it pings the secondary ISP gateway directly via the
-        # secondary interface, which is independent of primary's state.
+        # goes down — it pings the secondary ISP gateway directly via that
+        # interface, independent of the primary's state.
         desired_routes.append(
             {"comment": f"{_FAILOVER_TAG}secondary",
              "dst-address": "0.0.0.0/0", "gateway": secondary_gw,
