@@ -413,38 +413,55 @@ def _apply_failover(ops, flat, pusher, cfg):
     secondary_check = flat.get("fo_secondary_check", "").strip() or "8.8.8.8"
     interval = flat.get("fo_interval", "").strip() or "30s"
 
+    def _net(ip):
+        return ip if "/" in ip else f"{ip}/32"
+
+    primary_host = primary_check.split("/")[0]
+    secondary_host = secondary_check.split("/")[0]
+
+    # Matches the standard MikroTik recursive-check failover pattern.
+    #
+    # The check routes (1.1.1.1/32, 8.8.8.8/32) are the critical piece:
+    # they force each Netwatch ping through its OWN ISP gateway, so the
+    # secondary Netwatch continues to reach 8.8.8.8 via the secondary
+    # interface even when the primary default route is disabled — making
+    # both Netwatch entries safe to run simultaneously.
+    #
+    # scope=30 / target-scope=10 on all routes matches the pattern; the
+    # default routes resolve their gateway via ARP (directly-connected,
+    # scope=0 ≤ target-scope=10). The check routes are not used for
+    # recursive next-hop resolution — they exist solely to give Netwatch
+    # a dedicated, interface-specific path to its check IP.
     desired_routes = [
-        # Primary default route — distance=1 normally; Netwatch bumps it to
-        # 200 on failure so secondary (distance=2) wins without the primary
-        # ever disappearing from the routing table.
         {"comment": f"{_FAILOVER_TAG}primary",
          "dst-address": "0.0.0.0/0", "gateway": primary_gw,
-         "distance": "1", "check-gateway": "ping"},
+         "distance": "1", "check-gateway": "ping",
+         "scope": "30", "target-scope": "10"},
+        {"comment": f"{_FAILOVER_TAG}check:primary",
+         "dst-address": _net(primary_host), "gateway": primary_gw,
+         "distance": "1", "scope": "30", "target-scope": "10"},
     ]
-    # Netwatch adjusts the PRIMARY route distance only.
-    # Setting distance=200 on failure means secondary (distance=2) takes
-    # over automatically. Restoring distance=1 on recovery hands traffic
-    # back to primary. The secondary route is never touched by Netwatch —
-    # it always stays at distance=2 and check-gateway=ping handles
-    # detecting if the secondary link itself goes down.
     desired_watch = [
         {"comment": f"{_FAILOVER_TAG}watch:primary",
-         "host": primary_check.split("/")[0], "interval": interval,
-         "down-script": (f'/ip route set [find comment="{_FAILOVER_TAG}primary"]'
-                         f' distance=200'),
-         "up-script": (f'/ip route set [find comment="{_FAILOVER_TAG}primary"]'
-                       f' distance=1')},
+         "host": primary_host, "interval": interval,
+         "down-script": f'/ip route disable [find comment="{_FAILOVER_TAG}primary"]',
+         "up-script":   f'/ip route enable  [find comment="{_FAILOVER_TAG}primary"]'},
     ]
     if secondary_gw:
-        # Secondary route stays permanently at distance=2. When primary's
-        # distance is bumped to 200, RouterOS prefers this automatically.
-        # check-gateway=ping handles detecting if the secondary link itself
-        # goes down — it pings the secondary ISP gateway directly via that
-        # interface, independent of the primary's state.
-        desired_routes.append(
+        desired_routes += [
             {"comment": f"{_FAILOVER_TAG}secondary",
              "dst-address": "0.0.0.0/0", "gateway": secondary_gw,
-             "distance": "2", "check-gateway": "ping"},
+             "distance": "2", "check-gateway": "ping",
+             "scope": "30", "target-scope": "10"},
+            {"comment": f"{_FAILOVER_TAG}check:secondary",
+             "dst-address": _net(secondary_host), "gateway": secondary_gw,
+             "distance": "1", "scope": "30", "target-scope": "10"},
+        ]
+        desired_watch.append(
+            {"comment": f"{_FAILOVER_TAG}watch:secondary",
+             "host": secondary_host, "interval": interval,
+             "down-script": f'/ip route disable [find comment="{_FAILOVER_TAG}secondary"]',
+             "up-script":   f'/ip route enable  [find comment="{_FAILOVER_TAG}secondary"]'},
         )
 
     ops.extend(reconcile_list(_ROUTE, "comment", desired_routes, all_routes,
