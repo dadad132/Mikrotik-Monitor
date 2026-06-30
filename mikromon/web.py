@@ -269,20 +269,31 @@ def _throughput_chart(rx_pts, tx_pts, width=284) -> str:
         f'elDT.setAttribute("opacity","0");'
         f'tip.setAttribute("opacity","0");}}'
         f'ov.addEventListener("mousemove",function(e){{'
-        f'var r=ov.getBoundingClientRect(),mx=e.clientX-r.left;'
+        # Use r.width (actual rendered px) to convert mouse→SVG units, so the
+        # chart works correctly whether the SVG is scaled by CSS or not.
+        f'var r=ov.getBoundingClientRect();'
+        f'if(!r.width)return;'
+        f'var mx=(e.clientX-r.left)/r.width*W;'  # SVG units
         f'var ts=ST+mx/W*3600;'
         f'var p0=near(RX,ts),p1=near(TX,ts);'
-        f'xh.setAttribute("x1",mx);xh.setAttribute("x2",mx);'
+        # Snap crosshair to nearest data point so the line, dots, time and
+        # values all move together — avoids the "stuck" look between samples.
+        f'var snapTs=ts;'
+        f'if(p0&&p1){{snapTs=Math.abs(p0[0]-ts)<=Math.abs(p1[0]-ts)?p0[0]:p1[0];}}'
+        f'else if(p0){{snapTs=p0[0];}}'
+        f'else if(p1){{snapTs=p1[0];}}'
+        f'var sx=xp(snapTs);'
+        f'xh.setAttribute("x1",sx);xh.setAttribute("x2",sx);'
         f'if(p0){{elDR.setAttribute("cx",xp(p0[0]));elDR.setAttribute("cy",yp(p0[1]));elDR.setAttribute("opacity","1");}}'
         f'if(p1){{elDT.setAttribute("cx",xp(p1[0]));elDT.setAttribute("cy",yp(p1[1]));elDT.setAttribute("opacity","1");}}'
-        f'var dd=new Date(ts*1000),'
+        f'var dd=new Date(snapTs*1000),'
         f'hh=dd.getHours().toString().padStart(2,"0"),'
         f'mn=dd.getMinutes().toString().padStart(2,"0");'
         f'elTT.textContent=hh+":"+mn;'
         f'elDL.textContent="↓ "+(p0?hbps(p0[1]):"—");'
         f'elUL.textContent="↑ "+(p1?hbps(p1[1]):"—");'
-        f'var tx2=mx+8,ty2=PT;'
-        f'if(tx2+120>W)tx2=mx-122;'
+        f'var tx2=sx+8,ty2=PT;'
+        f'if(tx2+120>W)tx2=sx-122;'
         f'bg.setAttribute("x",tx2);bg.setAttribute("y",ty2);'
         f'elTT.setAttribute("x",tx2+8);elTT.setAttribute("y",ty2+13);'
         f'elDL.setAttribute("x",tx2+8);elDL.setAttribute("y",ty2+28);'
@@ -292,9 +303,11 @@ def _throughput_chart(rx_pts, tx_pts, width=284) -> str:
         f'ov.addEventListener("mouseleave",hide);'
         f'}})();</script>')
 
+    # width:100% makes the chart fill its container; viewBox keeps the coordinate
+    # system fixed so all SVG unit math above stays correct.
     return (
         f'<svg id="{cid}" viewBox="0 0 {width} {total_h}" '
-        f'width="{width}" height="{total_h}" style="display:block;overflow:visible">'
+        f'style="width:100%;display:block;overflow:visible">'
         + grid + axis
         + polyline(rx_pts, "#2563eb") + polyline(tx_pts, "#f97316")
         + peak_html
