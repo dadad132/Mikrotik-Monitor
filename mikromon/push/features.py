@@ -57,7 +57,7 @@ def _set_field(path, row, field, value, label):
 
 
 # ===========================================================================
-# SD-WAN — failover / load balancing by adjusting default-route distances
+# Routes — live internet lines: DHCP/PPP client status + primary-line switcher
 # ===========================================================================
 _ROUTE = ("ip", "route")
 _DHCP_CLIENT = ("ip", "dhcp-client")
@@ -84,32 +84,17 @@ def _safe_fetch(api, path):
         return []
 
 
-_MANGLE = ("ip", "firewall", "mangle")
-_POL_TAG = "mikromon:sdwan:pol:"   # mangle mark-routing rule
-_RT_TAG = "mikromon:sdwan:rt:"     # the matching marked default route
-
-
-def sdwan_read(pusher, cfg):
-    routes = _default_routes(pusher.api)
-    policy = [r for r in pusher.api.fetch(_MANGLE)
-              if str(r.get("comment", "")).startswith(_POL_TAG)]
+def routes_read(pusher, cfg):
     dhcp = _safe_fetch(pusher.api, _DHCP_CLIENT)
     pppoe = _safe_fetch(pusher.api, _PPPOE_CLIENT)
     l2tp = _safe_fetch(pusher.api, _L2TP_CLIENT)
     ppp = [{"_type": "pppoe", **c} for c in pppoe] + [{"_type": "l2tp", **c} for c in l2tp]
-    return {"routes": routes, "policy": policy, "dhcp": dhcp, "ppp": ppp}
+    routes = [r for r in _default_routes(pusher.api)
+              if not str(r.get("comment", "")).startswith("mikromon:sdwan")]
+    return {"routes": routes, "dhcp": dhcp, "ppp": ppp}
 
 
-def _policy_rows(current):
-    rows = []
-    for m in current.get("policy", []):
-        enc = m.get("comment", "")[len(_POL_TAG):]
-        subnet, _, via = enc.partition("|")
-        rows.append({"subnet": m.get("src-address", subnet), "via": via})
-    return rows
-
-
-def sdwan_summary(current, cfg):
+def routes_summary(current, cfg):
     lines = []
     for c in current.get("dhcp", []):
         iface = c.get("interface", "?")
@@ -130,21 +115,15 @@ def sdwan_summary(current, cfg):
             state = "connected" if running else "disconnected"
             lines.append(f"{ctype} {name} · {state} · distance {dist}")
     for r in current.get("routes", []):
-        if str(r.get("comment", "")).startswith("mikromon:sdwan"):
-            continue
         gw = r.get("gateway", "?")
         dist = r.get("distance", "?")
         active = str(r.get("active", "true")).lower() not in ("false", "no")
         lines.append(f"route via {gw} · distance {dist}"
                      + ("" if active else " · inactive"))
-    if not lines:
-        lines = ["No WAN clients or default routes found."]
-    lines.append(f"{len(current.get('policy', []))} LAN→WAN policy rule(s)")
-    return lines
+    return lines or ["No internet lines found on this router."]
 
 
 def _wan_sortable_items(current):
-    """Build sortable item list for DHCP/PPP clients, pre-sorted by current distance."""
     items = []
     for c in current.get("dhcp", []):
         iface = c.get("interface", "?")
@@ -168,35 +147,131 @@ def _wan_sortable_items(current):
             "label": f"{ctype} {name} [{state}] · distance {dist}",
             "_dist": dist,
         })
-    # Sort by current distance so the list reflects current priority
+
     def _dist_key(item):
         try:
             return int(item["_dist"])
         except (ValueError, TypeError):
             return 9999
+
     return sorted(items, key=_dist_key)
 
 
-def sdwan_form(current, cfg):
+def routes_form(current, cfg):
     items = _wan_sortable_items(current)
-    links = ", ".join(e.label(i) for i, e in enumerate(cfg.wan.links)) or "(none)"
-    fields = [
+    return [
         {"type": "sortable", "name": "wan_order",
-         "label": "WAN priority — drag or use ↑/↓ to set primary line (top = primary)",
+         "label": "Internet line priority — drag or use ↑/↓ to set primary (top = primary)",
          "items": items,
-         "hint": "Top item becomes distance 1 (primary). Applied to both the DHCP/PPP "
-                 "client config (persists across reconnects) and the live route."},
+         "hint": "Top line becomes distance 1 (primary). Changes are applied to both "
+                 "the client config (persists across reconnects) and the live route "
+                 "(takes effect immediately)."},
+    ]
+
+
+def _apply_wan_order(ops, order, pusher):
+    """Shared helper: build distance-change ops from a wan_order list."""
+    if not order:
+        return
+    dhcp_clients = _safe_fetch(pusher.api, _DHCP_CLIENT)
+    pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
+    l2tp_clients = _safe_fetch(pusher.api, _L2TP_CLIENT)
+    client_map = {}
+    for c in dhcp_clients:
+        rid = c.get(".id", "").lstrip("*")
+        client_map[f"dhcp:{rid}"] = (_DHCP_CLIENT, c, f"DHCP {c.get('interface','?')}")
+    for c in pppoe_clients:
+        rid = c.get(".id", "").lstrip("*")
+        client_map[f"pppoe:{rid}"] = (_PPPOE_CLIENT, c, f"PPPOE {c.get('name','?')}")
+    for c in l2tp_clients:
+        rid = c.get(".id", "").lstrip("*")
+        client_map[f"l2tp:{rid}"] = (_L2TP_CLIENT, c, f"L2TP {c.get('name','?')}")
+    routes_all = _default_routes(pusher.api)
+    for rank, item_id in enumerate(order, start=1):
+        want = str(rank)
+        if item_id not in client_map:
+            continue
+        cpath, c, clabel = client_map[item_id]
+        if _norm(str(c.get("default-route-distance", "1"))) != want:
+            ops.append(_set_field(cpath, c, "default-route-distance", want, clabel))
+        # Update the live route for immediate effect.
+        # DHCP routes have gateway = DHCP-assigned IP, not interface name.
+        # PPPoE/L2TP routes have gateway = interface name.
+        if item_id.startswith("dhcp:"):
+            dhcp_gw = c.get("gateway", "")
+            iface = c.get("interface", "")
+            for r in routes_all:
+                r_gw = str(r.get("gateway", ""))
+                if (not str(r.get("comment", "")).startswith("mikromon:sdwan")
+                        and (r_gw == dhcp_gw or (iface and iface in r_gw))
+                        and _norm(str(r.get("distance", ""))) != want):
+                    ops.append(_set_field(_ROUTE, r, "distance", want,
+                                          f"route via {r_gw}"))
+        else:
+            ppp_name = c.get("name", "")
+            for r in routes_all:
+                r_gw = str(r.get("gateway", ""))
+                if (not str(r.get("comment", "")).startswith("mikromon:sdwan")
+                        and ppp_name and ppp_name in r_gw
+                        and _norm(str(r.get("distance", ""))) != want):
+                    ops.append(_set_field(_ROUTE, r, "distance", want,
+                                          f"route via {r_gw}"))
+
+
+def routes_plan(pusher, cfg, flat, multi):
+    ops = []
+    _apply_wan_order(ops, multi.get("wan_order", []), pusher)
+    return Plan(cfg.name, ops, summary="routes priority")
+
+
+# ===========================================================================
+# SD-WAN — failover / load-balance policy + per-subnet policy routing
+# ===========================================================================
+_MANGLE = ("ip", "firewall", "mangle")
+_POL_TAG = "mikromon:sdwan:pol:"   # mangle mark-routing rule
+_RT_TAG = "mikromon:sdwan:rt:"     # the matching marked default route
+
+
+def sdwan_read(pusher, cfg):
+    routes = [r for r in _default_routes(pusher.api)
+              if not str(r.get("comment", "")).startswith("mikromon:sdwan")]
+    policy = [r for r in pusher.api.fetch(_MANGLE)
+              if str(r.get("comment", "")).startswith(_POL_TAG)]
+    return {"routes": routes, "policy": policy}
+
+
+def _policy_rows(current):
+    rows = []
+    for m in current.get("policy", []):
+        enc = m.get("comment", "")[len(_POL_TAG):]
+        subnet, _, via = enc.partition("|")
+        rows.append({"subnet": m.get("src-address", subnet), "via": via})
+    return rows
+
+
+def sdwan_summary(current, cfg):
+    lines = [f"route via {r.get('gateway', '?')} · distance {r.get('distance', '?')}"
+             + ("" if str(r.get("active", "true")).lower() not in ("false", "no")
+                else " · inactive")
+             for r in current.get("routes", [])]
+    lines.append(f"{len(current.get('policy', []))} LAN→WAN policy rule(s)")
+    return lines or ["No default routes found."]
+
+
+def sdwan_form(current, cfg):
+    links = ", ".join(e.label(i) for i, e in enumerate(cfg.wan.links)) or "(none)"
+    return [
         {"type": "select", "name": "mode",
-         "label": "Auto-set distances for configured static WAN uplinks",
+         "label": "Auto-set distances for configured WAN uplinks",
          "options": [
-             ("manual", "Manual — only apply ordering above"),
+             ("manual", "Manual — no automatic distance changes"),
              ("failover", "Failover — strict priority (1, 2, 3 … in link order)"),
              ("loadbalance", "Load balance — all equal (distance 1)"),
          ],
          "value": "manual",
          "hint": "Failover/load-balance auto-assigns distances to the static WAN "
-                 "uplinks below. Manual leaves them untouched."},
-        {"type": "static", "label": "Configured WAN uplinks (for auto modes)",
+                 "uplinks below. Use the Routes tab to change which line is primary."},
+        {"type": "static", "label": "Configured WAN uplinks (priority order)",
          "value": links,
          "hint": "Edit them on the Devices page → WAN uplinks section."},
         {"type": "rows", "name": "pol",
@@ -207,64 +282,11 @@ def sdwan_form(current, cfg):
          "hint": "Each row marks that source and routes it via the chosen WAN "
                  "(mangle mark + marked default route). Leave empty for none."},
     ]
-    return fields
 
 
 def sdwan_plan(pusher, cfg, flat, multi):
     mode = flat.get("mode", "manual")
     ops = []
-
-    # 1. WAN priority order from drag-and-drop: assign distance = rank (1 = primary)
-    order = multi.get("wan_order", [])
-    if order:
-        dhcp_clients = _safe_fetch(pusher.api, _DHCP_CLIENT)
-        pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
-        l2tp_clients = _safe_fetch(pusher.api, _L2TP_CLIENT)
-        # Build lookup: "dhcp:3" → (path, row, label)
-        client_map = {}
-        for c in dhcp_clients:
-            rid = c.get(".id", "").lstrip("*")
-            client_map[f"dhcp:{rid}"] = (_DHCP_CLIENT, c, f"DHCP {c.get('interface','?')}")
-        for c in pppoe_clients:
-            rid = c.get(".id", "").lstrip("*")
-            client_map[f"pppoe:{rid}"] = (_PPPOE_CLIENT, c, f"PPPOE {c.get('name','?')}")
-        for c in l2tp_clients:
-            rid = c.get(".id", "").lstrip("*")
-            client_map[f"l2tp:{rid}"] = (_L2TP_CLIENT, c, f"L2TP {c.get('name','?')}")
-        routes_all = _default_routes(pusher.api)
-        for rank, item_id in enumerate(order, start=1):
-            want = str(rank)
-            if item_id not in client_map:
-                continue
-            cpath, c, clabel = client_map[item_id]
-            if _norm(str(c.get("default-route-distance", "1"))) != want:
-                ops.append(_set_field(cpath, c, "default-route-distance", want, clabel))
-            # Also update the live route for immediate effect.
-            # DHCP routes: gateway is the DHCP-assigned IP (e.g. 172.17.232.254),
-            # NOT the interface name. Use the `gateway` field from the bound DHCP
-            # client to find the matching route, falling back to the interface name.
-            # PPPoE/L2TP routes: gateway IS the interface name (e.g. "Axxess").
-            if item_id.startswith("dhcp:"):
-                dhcp_gw = c.get("gateway", "")   # IP the DHCP server assigned as GW
-                iface = c.get("interface", "")
-                for r in routes_all:
-                    r_gw = str(r.get("gateway", ""))
-                    if (not str(r.get("comment", "")).startswith("mikromon:sdwan")
-                            and (r_gw == dhcp_gw or (iface and iface in r_gw))
-                            and _norm(str(r.get("distance", ""))) != want):
-                        ops.append(_set_field(_ROUTE, r, "distance", want,
-                                              f"route via {r_gw}"))
-            else:
-                ppp_name = c.get("name", "")
-                for r in routes_all:
-                    r_gw = str(r.get("gateway", ""))
-                    if (not str(r.get("comment", "")).startswith("mikromon:sdwan")
-                            and ppp_name and ppp_name in r_gw
-                            and _norm(str(r.get("distance", ""))) != want):
-                        ops.append(_set_field(_ROUTE, r, "distance", want,
-                                              f"route via {r_gw}"))
-
-    # 2. Auto mode: set static-link route distances by priority
     if mode != "manual":
         routes = [r for r in _default_routes(pusher.api)
                   if not str(r.get("comment", "")).startswith("mikromon:sdwan")]
@@ -274,8 +296,6 @@ def sdwan_plan(pusher, cfg, flat, multi):
                 if _route_matches(r, link) and _norm(r.get("distance", "")) != want:
                     ops.append(_set_field(_ROUTE, r, "distance", want,
                                           f"route via {link.label(i)}"))
-
-    # 3. Per-subnet policy: mangle mark + marked default route per row
     mangle_desired, route_desired = [], []
     for r in _rows(multi, "pol", ("subnet", "via")):
         subnet, via = r["subnet"], r["via"]
@@ -1822,6 +1842,9 @@ def adopt_plan(pusher, cfg, feature, row_id):
 # Registry — keyed by URL slug; order follows the device tab bar.
 # ===========================================================================
 FEATURES = {
+    "routes": {"title": "Routes", "write": True,
+               "read": routes_read, "summary": routes_summary,
+               "form": routes_form, "plan": routes_plan},
     "sdwan": {"title": "WAN — failover & load balancing", "write": True,
               "read": sdwan_read, "summary": sdwan_summary, "form": sdwan_form,
               "plan": sdwan_plan},
@@ -1862,7 +1885,7 @@ FEATURES = {
 }
 
 # tab label -> url slug (Overview/Backups handled elsewhere)
-TAB_SLUGS = {"WAN": "sdwan", "Security": "security",
+TAB_SLUGS = {"Routes": "routes", "WAN": "sdwan", "Security": "security",
              "Restrict access": "harden", "DNS": "nextdns",
              "QoS": "qos", "Port forwarding": "portfwd", "Interfaces": "interfaces",
              "Remote access": "remote", "Tunnel": "tunnel",

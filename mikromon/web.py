@@ -2185,8 +2185,10 @@ def _wan_uplink_editor(name, cfg, csrf) -> str:
 
 
 _TAB_INTRO = {
-    "sdwan": "Add your internet links, set failover or load-balancing priority, "
-             "and choose which LANs go out which WAN.",
+    "routes": "See your internet lines (DHCP and PPPoE connections) and their current "
+              "status. Drag to reorder — the top line becomes the primary route.",
+    "sdwan": "Set automatic failover or load-balancing across your WAN uplinks, "
+             "and send specific LANs out a chosen internet line.",
     "security": "Toggle common firewall protections. Existing rules below can be "
                 "viewed; easymikrotik only manages the ones it creates.",
     "harden": "Stop brute-force attacks: lock API/Winbox/SSH to your trusted IPs, "
