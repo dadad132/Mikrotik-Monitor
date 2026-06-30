@@ -64,6 +64,8 @@ _DHCP_CLIENT = ("ip", "dhcp-client")
 _PPPOE_CLIENT = ("interface", "pppoe-client")
 _L2TP_CLIENT = ("interface", "l2tp-client")
 _NETWATCH = ("tool", "netwatch")
+_PPP_ACTIVE = ("ppp", "active")
+_IP_ADDRESS = ("ip", "address")
 _FAILOVER_TAG = "mikromon:failover:"
 
 
@@ -91,6 +93,8 @@ def routes_read(pusher, cfg):
     pppoe = _safe_fetch(pusher.api, _PPPOE_CLIENT)
     l2tp = _safe_fetch(pusher.api, _L2TP_CLIENT)
     ppp = [{"_type": "pppoe", **c} for c in pppoe] + [{"_type": "l2tp", **c} for c in l2tp]
+    ppp_active = _safe_fetch(pusher.api, _PPP_ACTIVE)
+    ip_addrs = _safe_fetch(pusher.api, _IP_ADDRESS)
     all_routes = _safe_fetch(pusher.api, _ROUTE)
     routes = [r for r in all_routes
               if str(r.get("dst-address", "")).startswith("0.0.0.0/0")
@@ -101,6 +105,7 @@ def routes_read(pusher, cfg):
     failover_watch = [w for w in netwatch
                       if str(w.get("comment", "")).startswith(_FAILOVER_TAG)]
     return {"routes": routes, "dhcp": dhcp, "ppp": ppp,
+            "ppp_active": ppp_active, "ip_addrs": ip_addrs,
             "failover_routes": failover_routes, "failover_watch": failover_watch}
 
 
@@ -260,17 +265,22 @@ def routes_form(current, cfg):
             interval = w["interval"]
 
     # Detect gateways at form-render time using live router data.
-    # Results are stored in hidden fields and passed to _apply_failover via
-    # flat — no re-detection needed at apply time, which avoids failures when
-    # add-default-route=no or the DHCP client hasn't bound yet on apply.
+    # PPP: check /ppp/active remote-address then /ip/address network field.
+    # DHCP: use the gateway IP from the DHCP client, ignoring add-default-route.
     pppoe_names = {c.get("name", "") for c in current.get("ppp", [])
                    if c.get("_type") == "pppoe" and c.get("name")}
     dhcp_by_iface = {c.get("interface", ""): c
                      for c in current.get("dhcp", []) if c.get("interface")}
+    ppp_active_by_name = {s.get("name", ""): s
+                          for s in current.get("ppp_active", []) if s.get("name")}
+    ip_addr_by_iface = {a.get("interface", ""): a
+                        for a in current.get("ip_addrs", []) if a.get("interface")}
     links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
-    fo_primary_gw = (_gateway_for_link(links[0], pppoe_names, dhcp_by_iface)
+    fo_primary_gw = (_gateway_for_link(links[0], pppoe_names, dhcp_by_iface,
+                                       ppp_active_by_name, ip_addr_by_iface)
                      if links else "")
-    fo_secondary_gw = (_gateway_for_link(links[1], pppoe_names, dhcp_by_iface)
+    fo_secondary_gw = (_gateway_for_link(links[1], pppoe_names, dhcp_by_iface,
+                                         ppp_active_by_name, ip_addr_by_iface)
                        if len(links) > 1 else "")
 
     link0_iface = getattr(links[0], "interface", "") if links else ""
@@ -361,25 +371,44 @@ def _apply_wan_order(ops, order, pusher):
             ops.append(_set_field(cpath, c, "default-route-distance", want, clabel))
 
 
-def _gateway_for_link(link, pppoe_names, dhcp_by_iface):
-    """Return the RouterOS gateway string for a WAN uplink endpoint.
+def _gateway_for_link(link, pppoe_names, dhcp_by_iface,
+                      ppp_active_by_name=None, ip_addr_by_iface=None):
+    """Return the RouterOS gateway IP (or interface name) for a WAN uplink.
 
     Priority:
-      1. Explicit gateway typed in the WAN uplinks editor (manual override).
-      2. Interface is a PPPoE client → use the interface name itself as the
-         gateway (RouterOS accepts pppoe-out1 etc. as a next-hop).
-      3. Interface has a DHCP client on the router → use the DHCP-assigned
-         gateway IP.  We check ALL DHCP clients here, regardless of their
-         add-default-route setting, because we are managing our own routes."""
+      1. Explicit gateway set in the WAN uplinks editor (manual override).
+      2. PPP/PPPoE interface → look up the remote address of the active session:
+         a. /ppp/active  remote-address field
+         b. /ip/address  network field (PPP point-to-point creates a /32 where
+            'network' is the remote/ISP end — that IS the gateway IP)
+         If neither returns an IP, fall back to the interface name so RouterOS
+         can still route via the PPPoE interface directly.
+      3. DHCP client on the interface → use the DHCP-assigned gateway IP."""
     gw = getattr(link, "gateway", "") or ""
     if gw:
         return gw
     iface = getattr(link, "interface", "") or ""
     if not iface:
         return ""
-    if iface in pppoe_names:          # PPPoE: interface name IS the gateway
+
+    if iface in pppoe_names:
+        # Try /ppp/active first — some RouterOS versions expose remote-address
+        if ppp_active_by_name:
+            sess = ppp_active_by_name.get(iface, {})
+            remote = sess.get("remote-address", "")
+            if remote:
+                return remote
+        # Try /ip/address — PPP assigns a /32 local with 'network' = remote end
+        if ip_addr_by_iface:
+            addr = ip_addr_by_iface.get(iface, {})
+            network = addr.get("network", "")
+            if network and network not in ("0.0.0.0", ""):
+                return network
+        # Last resort: use the interface name (RouterOS accepts it as a gateway)
         return iface
-    dhcp = dhcp_by_iface.get(iface)   # Ethernet DHCP: use assigned gateway
+
+    # Not PPP — check DHCP client for this interface
+    dhcp = dhcp_by_iface.get(iface)
     if dhcp:
         return dhcp.get("gateway", "")
     return ""
