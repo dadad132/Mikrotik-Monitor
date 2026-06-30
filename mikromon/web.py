@@ -561,20 +561,20 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
 
 
 # Flat tabs on the device bar.
-_DEVICE_TABS = ["Overview", "Provision", "WAN", "Security",
+_DEVICE_TABS = ["Overview", "Provision", "Routes", "WAN", "Security",
                 "DNS", "Queues", "Port forwarding",
                 "Tunnel", "Scripts"]
 _MAINT_ITEMS = [("Update", "update"), ("Backups", "backups")]
 # label -> url slug (all tabs are wired to the engine now)
 _LIVE_TABS = {"Overview": "", "Provision": "provision",
-              "WAN": "sdwan",
+              "Routes": "routes", "WAN": "sdwan",
               "Security": "security", "Restrict access": "harden",
               "DNS": "nextdns", "Queues": "qos", "QoS": "qos", "Port forwarding": "portfwd",
               "Interfaces": "interfaces", "Remote access": "remote",
               "Tunnel": "tunnel", "Scripts": "scripts",
               "Update": "update", "Backups": "backups"}
 # tabs that WRITE to the router (admins only); Overview is read-only
-_ADMIN_TABS = {"provision", "sdwan", "security", "harden", "nextdns",
+_ADMIN_TABS = {"provision", "routes", "sdwan", "security", "harden", "nextdns",
                "qos", "portfwd", "remote", "tunnel", "scripts",
                "update", "backups", "interfaces"}
 
