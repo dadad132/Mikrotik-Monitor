@@ -1,11 +1,14 @@
-"""Auth, account, and team-admin page renders for the web dashboard.
+"""Auth, account, team-admin, and billing page renders for the web dashboard.
 
 Extracted from web.py to keep that file manageable. Imports shared constants
 and helpers from web_shared; web.py imports the render functions from here.
 """
 from __future__ import annotations
 
+import time
+
 from .auth import AuthStore
+from .billing import PLANS, GRACE_DAYS
 from .web_shared import _BRAND, _PAGE_CSS, esc, _header, _page, _who
 
 
@@ -172,3 +175,126 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user) -> str:
         f'<button class="btn" type="submit">Add member</button></div>'
         f'</form></div></div>')
     return _page("Team", _header(user, "/admin") + inner + _ADMIN_JS)
+
+
+def _grace_banner_html(days_left: float) -> str:
+    days = max(1, int(days_left) + 1)
+    plural = "day" if days == 1 else "days"
+    return (f'<div style="background:#fef3c7;border-bottom:2px solid #d97706;'
+            f'padding:10px 20px;text-align:center;font-size:13px;color:#92400e">'
+            f'<b>Subscription lapsed.</b> You have {days} {plural} before your '
+            f'account is locked. '
+            f'<a href="/billing" style="color:#92400e;font-weight:700">Upgrade now</a>'
+            f'</div>')
+
+
+def _render_billing(user, bill: dict | None, prices: dict, csrf: str,
+                    msg: str = "", error: str = "") -> str:
+    """Billing page for owners: shows current status and plan upgrade options."""
+    status = (bill or {}).get("status", "none")
+    plan_name = (bill or {}).get("plan") or ""
+    device_limit = int((bill or {}).get("device_limit", 0))
+    period_end = (bill or {}).get("current_period_end")
+    trial_end = (bill or {}).get("trial_end")
+    grace_end = (bill or {}).get("grace_period_end")
+    stripe_customer = (bill or {}).get("stripe_customer_id") or ""
+
+    # --- status summary box ---
+    if status in ("active", "trialing"):
+        status_label = "Active"
+        status_color = "#16a34a"
+        renews = (f" · renews {time.strftime('%d %b %Y', time.localtime(period_end))}"
+                  if period_end else "")
+        limit_label = f"{device_limit} device{'s' if device_limit != 1 else ''}" if device_limit else "unlimited devices"
+        status_html = (f'<p style="margin:0"><span style="color:{status_color};'
+                       f'font-weight:700">{status_label}</span>'
+                       f' &middot; {esc(plan_name or "Subscribed")}'
+                       f' &middot; {limit_label}{renews}</p>')
+    elif status == "trial":
+        te_fmt = (time.strftime("%d %b %Y", time.localtime(trial_end))
+                  if trial_end else "soon")
+        status_html = (f'<p style="margin:0"><span style="color:#2563eb;font-weight:700">'
+                       f'Free Trial</span> &middot; {_TRIAL_DEVICES} device &middot; '
+                       f'expires {te_fmt}</p>')
+    elif status in ("grace", "past_due", "unpaid", "incomplete"):
+        ge_fmt = (time.strftime("%d %b %Y", time.localtime(grace_end))
+                  if grace_end else "soon")
+        status_html = (f'<p style="margin:0"><span style="color:#d97706;font-weight:700">'
+                       f'Grace Period</span> &middot; subscribe before {ge_fmt} to '
+                       f'avoid account lockout</p>')
+    elif status in ("canceled", "locked"):
+        status_html = (f'<p style="margin:0"><span style="color:#dc2626;font-weight:700">'
+                       f'Suspended</span> &middot; choose a plan below to reactivate</p>')
+    else:
+        status_html = (f'<p style="margin:0"><span style="color:#64748b;font-weight:700">'
+                       f'No active subscription</span> &middot; '
+                       f'30-day free trial (1 device) on signup</p>')
+
+    note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
+           (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
+
+    # Manage billing button (only when Stripe customer exists + prices configured)
+    manage_btn = ""
+    if stripe_customer and prices:
+        manage_btn = (f'<form method="POST" action="/billing/portal" style="display:inline">'
+                      f'<input type="hidden" name="csrf" value="{csrf}">'
+                      f'<button class="btn ghost" type="submit">'
+                      f'Manage billing (invoices, card)</button></form>')
+
+    status_box = (f'<div class="box">'
+                  f'<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">'
+                  f'{status_html}{manage_btn}</div>'
+                  f'</div>')
+
+    # --- plan table ---
+    if prices:
+        plan_rows = ""
+        for p in PLANS:
+            price_id = prices.get(p["name"])
+            if status in ("active", "trialing") and plan_name == p["name"]:
+                btn = '<span class="badge ok">Current plan</span>'
+            elif price_id:
+                btn = (f'<form method="POST" action="/billing/checkout">'
+                       f'<input type="hidden" name="csrf" value="{csrf}">'
+                       f'<input type="hidden" name="plan" value="{esc(p["name"])}">'
+                       f'<button class="btn" type="submit" style="padding:6px 14px">'
+                       f'Subscribe</button></form>')
+            else:
+                btn = '<span class="muted">not configured</span>'
+            plan_rows += (f'<tr>'
+                          f'<td><b>{esc(p["label"])}</b></td>'
+                          f'<td>{p["devices"]}</td>'
+                          f'<td><b>${p["price_usd"]}</b>/mo</td>'
+                          f'<td>${round(p["price_usd"] / p["devices"], 2):.2f}/device</td>'
+                          f'<td>{btn}</td>'
+                          f'</tr>')
+        plans_html = (f'<div class="box"><h2>Choose a plan</h2>'
+                      f'<table><thead><tr>'
+                      f'<th>Plan</th><th>Devices</th><th>Monthly</th>'
+                      f'<th>Per device</th><th></th>'
+                      f'</tr></thead><tbody>{plan_rows}</tbody></table></div>')
+    else:
+        plans_html = (f'<div class="box"><p class="muted">Stripe prices are not yet '
+                      f'configured. Add a <code>billing.prices</code> map to your '
+                      f'config to enable subscriptions.</p></div>')
+
+    inner = (f'<div class="wrap"><h1>Billing</h1>{note}'
+             f'{status_box}{plans_html}</div>')
+    return _page("Billing", _header(user, "/billing") + inner)
+
+
+def _render_locked(user) -> str:
+    """Full-page lockout shown when an org's grace period has expired."""
+    inner = (f'<div class="wrap" style="max-width:560px;margin-top:10vh;text-align:center">'
+             f'<div class="box">'
+             f'<h1 style="color:#dc2626;margin-bottom:8px">Account Suspended</h1>'
+             f'<p>Your subscription has lapsed and the {GRACE_DAYS}-day grace period '
+             f'has expired. All access has been suspended.</p>'
+             f'<p><a class="btn" href="/billing">Reactivate your account</a></p>'
+             f'<p class="muted" style="margin-top:18px">'
+             f'<a href="/logout">Log out</a></p>'
+             f'</div></div>')
+    return _page("Account Suspended", _header(user, "") + inner)
+
+
+_TRIAL_DEVICES = 1

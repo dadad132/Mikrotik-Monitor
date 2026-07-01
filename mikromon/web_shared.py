@@ -211,6 +211,8 @@ def _nav(user, active) -> str:
     if user.get("role") == "owner":
         items += [("/devices", "Devices"), ("/logs", "Activity"),
                   ("/admin", "Users")]
+        if user.get("_show_billing"):
+            items.append(("/billing", "Billing"))
     items += [("/account", "Account")]
     links = "".join(
         f'<a href="{href}" class="{"on" if href == active else ""}">{label}</a>'

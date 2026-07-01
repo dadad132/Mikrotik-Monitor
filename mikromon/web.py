@@ -40,6 +40,7 @@ from .web_shared import (
 from .web_auth import (
     _render_login, _render_signup, _render_account,
     _render_admin, _device_chips, _ADMIN_JS,
+    _render_billing, _render_locked, _grace_banner_html,
 )
 
 _CLIENT_SOURCES = ["dhcp", "wireless", "arp", "hotspot"]
@@ -2766,9 +2767,17 @@ class SessionManager:
 def make_handler(metrics_db, state_file, auth: AuthStore | None,
                  sessions: SessionManager, secure_cookies=False,
                  metrics_token=None, devices_db=None, defaults=None,
-                 push_log_db=None, access_cfg=None):
+                 push_log_db=None, access_cfg=None, billing_cfg=None):
     defaults = defaults or {}
     access_cfg = access_cfg or {}
+    billing_cfg = billing_cfg or {}
+    billing = None
+    if billing_cfg.get("db"):
+        from .billing import BillingStore
+        billing = BillingStore(billing_cfg["db"])
+    _stripe_secret = billing_cfg.get("stripe_secret", "")
+    _webhook_secret = billing_cfg.get("webhook_secret", "")
+    _stripe_prices = billing_cfg.get("prices") or {}
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "mikromon"
@@ -2778,6 +2787,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
         # ---- low-level helpers ----
         def _send(self, code, body, ctype="text/plain; charset=utf-8", headers=None):
+            # Inject grace-period banner into HTML responses when set.
+            if (isinstance(body, str) and "text/html" in ctype
+                    and getattr(self, "_grace_banner", "")):
+                body = body.replace("<body>", "<body>" + self._grace_banner, 1)
             data = body.encode("utf-8") if isinstance(body, str) else body
             self.send_response(code)
             self.send_header("Content-Type", ctype)
@@ -2887,6 +2900,21 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._send(401, '{"error":"unauthorized"}',
                                       "application/json")
                 return self._redirect("/login")
+
+            # Billing guard: inject grace banner or redirect locked orgs.
+            if billing:
+                user = dict(user)
+                user["_show_billing"] = True
+                org_id = user.get("org_id")
+                if billing.is_locked(org_id):
+                    if path != "/billing":
+                        return self._redirect("/billing")
+                elif billing.in_grace_period(org_id):
+                    self._grace_banner = _grace_banner_html(
+                        billing.days_left_in_grace(org_id))
+
+            if path == "/billing":
+                return self._serve_billing(url, user)
             if path == "/account":
                 q = parse_qs(url.query)
                 return self._send(200, _render_account(
@@ -3019,6 +3047,19 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 store.close()
             return self._send(200, _render_admin(
                 auth, known, self._session()["csrf"], user),
+                "text/html; charset=utf-8")
+
+        def _serve_billing(self, url, user):
+            if not AuthStore.is_admin(user):
+                return self._send(403, "forbidden")
+            q = parse_qs(url.query)
+            bill = billing.get(user["org_id"]) if billing else None
+            if billing and billing.is_locked(user["org_id"]):
+                return self._send(200, _render_locked(user),
+                                  "text/html; charset=utf-8")
+            return self._send(200, _render_billing(
+                user, bill, _stripe_prices, self._session()["csrf"],
+                msg=q.get("ok", [""])[0], error=q.get("error", [""])[0]),
                 "text/html; charset=utf-8")
 
         # ---- device management (admin only) ----
@@ -4086,9 +4127,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
         # ---- POST ----
         def do_POST(self):
+            path = urlparse(self.path).path
+            # Stripe webhook: signature-verified, no auth session required.
+            if path == "/stripe/webhook":
+                return self._post_stripe_webhook()
             if auth is None:
                 return self._send(404, "not found")
-            path = urlparse(self.path).path
             if path == "/signup":
                 return self._post_signup()
             if path == "/login":
@@ -4106,6 +4150,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             flat, multi = self._form()
             if flat.get("csrf") != self._session()["csrf"]:
                 return self._send(400, "bad csrf token")
+            # Billing routes (owner only, no device ownership check needed).
+            if path == "/billing/checkout":
+                return self._post_billing_checkout(flat, user)
+            if path == "/billing/portal":
+                return self._post_billing_portal(flat, user)
             # Org isolation: an owner may only touch devices their company owns.
             if not self._owns_target(flat, user):
                 return self._send(403, "forbidden")
@@ -4202,12 +4251,103 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._redirect("/signup?error=" + quote(
                     "A valid mobile number is required (at least 7 digits)."))
             try:
-                auth.signup(email, flat.get("password", ""),
-                            flat.get("company", ""), phone=phone)
+                org_id = auth.signup(email, flat.get("password", ""),
+                                     flat.get("company", ""), phone=phone)
+                if billing:
+                    billing.start_trial(org_id)
             except Exception as exc:  # noqa: BLE001 — show the reason on the form
                 return self._redirect("/signup?error=" + quote(str(exc)))
             token = sessions.create(email)
             return self._redirect("/", self._cookie_header(token))
+
+        def _post_stripe_webhook(self):
+            if not _webhook_secret:
+                return self._send(400, "webhook not configured")
+            length = int(self.headers.get("Content-Length", 0))
+            payload = self.rfile.read(length)
+            sig = self.headers.get("Stripe-Signature", "")
+            from .billing import verify_webhook
+            try:
+                event = verify_webhook(payload, sig, _webhook_secret)
+            except ValueError as exc:
+                log.warning("Stripe webhook rejected: %s", exc)
+                return self._send(400, str(exc))
+            if billing:
+                try:
+                    billing.apply_event(event)
+                except Exception:  # noqa: BLE001
+                    log.exception("billing.apply_event failed for %s",
+                                  event.get("type"))
+            return self._send(200, "ok")
+
+        def _post_billing_checkout(self, flat, user):
+            if not billing or not _stripe_secret:
+                return self._redirect("/billing?error=" + quote(
+                    "Stripe is not configured on this server."))
+            plan_name = flat.get("plan", "").strip()
+            price_id = _stripe_prices.get(plan_name)
+            if not price_id:
+                return self._redirect("/billing?error=" + quote(
+                    f"Plan '{plan_name}' is not configured."))
+            org_id = user["org_id"]
+            bill = billing.get(org_id)
+            customer_id = (bill or {}).get("stripe_customer_id") or ""
+            if not customer_id:
+                # Create a new Stripe customer for this org owner.
+                owner_email = user.get("email") or user.get("username") or ""
+                org_name = auth.org_name(org_id) if auth else ""
+                from .billing import create_customer
+                try:
+                    customer_id = create_customer(_stripe_secret, owner_email, org_name)
+                    billing.link_customer(org_id, customer_id)
+                except Exception as exc:  # noqa: BLE001
+                    log.error("create_customer failed: %s", exc)
+                    return self._redirect("/billing?error=" + quote(
+                        "Could not create Stripe customer. Try again or contact support."))
+            host = self.headers.get("Host", "localhost")
+            scheme = "https" if secure_cookies else "http"
+            base = f"{scheme}://{host}"
+            from .billing import create_checkout_session
+            try:
+                checkout_url = create_checkout_session(
+                    _stripe_secret,
+                    price_id=price_id,
+                    customer_id=customer_id,
+                    org_id=org_id,
+                    success_url=f"{base}/billing?ok=Subscription+activated",
+                    cancel_url=f"{base}/billing",
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.error("create_checkout_session failed: %s", exc)
+                return self._redirect("/billing?error=" + quote(
+                    "Could not create Stripe checkout session. Try again."))
+            return self._redirect(checkout_url)
+
+        def _post_billing_portal(self, flat, user):
+            if not billing or not _stripe_secret:
+                return self._redirect("/billing?error=" + quote(
+                    "Stripe is not configured on this server."))
+            org_id = user["org_id"]
+            bill = billing.get(org_id)
+            customer_id = (bill or {}).get("stripe_customer_id") or ""
+            if not customer_id:
+                return self._redirect("/billing?error=" + quote(
+                    "No billing account found. Subscribe first."))
+            host = self.headers.get("Host", "localhost")
+            scheme = "https" if secure_cookies else "http"
+            return_url = f"{scheme}://{host}/billing"
+            from .billing import create_portal_session
+            try:
+                portal_url = create_portal_session(
+                    _stripe_secret,
+                    customer_id=customer_id,
+                    return_url=return_url,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.error("create_portal_session failed: %s", exc)
+                return self._redirect("/billing?error=" + quote(
+                    "Could not open billing portal. Try again."))
+            return self._redirect(portal_url)
 
         def _post_login(self):
             flat, _ = self._form()
@@ -4279,7 +4419,7 @@ def _register_hub_peer(device_name: str, api, flat: dict, devices_db: str) -> No
 
 def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,
           secure_cookies=False, metrics_token=None, devices_db=None,
-          defaults=None, push_log_db=None, access_cfg=None):
+          defaults=None, push_log_db=None, access_cfg=None, billing_cfg=None):
     if metrics_db and not os.path.exists(metrics_db):
         log.warning("metrics DB %s not found yet — start the monitor first",
                     metrics_db)
@@ -4291,10 +4431,12 @@ def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,
     httpd = ThreadingHTTPServer(
         (host, port), make_handler(metrics_db, state_file, auth, sessions,
                                    secure_cookies, metrics_token, devices_db,
-                                   defaults, push_log_db, access_cfg))
+                                   defaults, push_log_db, access_cfg,
+                                   billing_cfg))
     scheme = "auth ON" if auth else "auth OFF (open)"
-    log.info("Dashboard at http://%s:%d  [%s]  Prometheus: /metrics",
-             host, port, scheme)
+    billing_note = "  billing ON" if (billing_cfg or {}).get("db") else ""
+    log.info("Dashboard at http://%s:%d  [%s]%s  Prometheus: /metrics",
+             host, port, scheme, billing_note)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

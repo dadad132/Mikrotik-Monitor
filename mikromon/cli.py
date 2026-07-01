@@ -121,7 +121,8 @@ def main(argv=None) -> int:
                   secure_cookies=config.web_secure_cookies,
                   metrics_token=config.metrics_token,
                   devices_db=config.devices_db, defaults=config.defaults,
-                  push_log_db=config.push_log_db, access_cfg=config.access)
+                  push_log_db=config.push_log_db, access_cfg=config.access,
+                  billing_cfg=config.billing)
         return 0
 
     if args.command == "list-checks":
