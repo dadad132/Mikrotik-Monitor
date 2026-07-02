@@ -104,6 +104,8 @@ class AuthStore:
         self.db.commit()
         # Additive column migrations — safe to run every startup.
         self._add_col_if_missing("users", "phone", "TEXT")
+        self._add_col_if_missing("users", "is_superadmin",
+                                 "INTEGER NOT NULL DEFAULT 0")
         self._add_col_if_missing("orgs", "plan", "TEXT NOT NULL DEFAULT 'free'")
         self._add_col_if_missing("orgs", "contact", "TEXT")
         self._add_col_if_missing("orgs", "phone", "TEXT")
@@ -275,7 +277,7 @@ class AuthStore:
             return None
         cur = self.db.execute(
             "SELECT id, username, email, pw_hash, salt, iterations, role, "
-            "org_id, devices, created FROM users "
+            "org_id, devices, created, is_superadmin FROM users "
             "WHERE lower(email) = ? OR lower(username) = ? LIMIT 1",
             (ident, ident))
         row = cur.fetchone()
@@ -285,7 +287,8 @@ class AuthStore:
                 "pw_hash": row[3], "salt": row[4], "iterations": row[5],
                 "role": row[6], "org_id": row[7],
                 "devices": _load_devices(row[8]), "created": row[9],
-                "login": row[2] or row[1]}     # email preferred, else username
+                "login": row[2] or row[1],
+                "is_superadmin": bool(row[10])}
 
     def list_users(self, org_id: int | None = None) -> list:
         cols = ("id", "username", "email", "role", "org_id", "devices", "created")
@@ -380,6 +383,17 @@ class AuthStore:
         org = self.org(org_id) if org_id is not None else None
         return org["name"] if org else ""
 
+    def _has_superadmin(self) -> bool:
+        return bool(self.db.execute(
+            "SELECT 1 FROM users WHERE is_superadmin = 1 LIMIT 1"
+        ).fetchone())
+
+    def _grant_superadmin(self, user_id: int) -> None:
+        with self._lock:
+            self.db.execute(
+                "UPDATE users SET is_superadmin = 1 WHERE id = ?", (user_id,))
+            self.db.commit()
+
     def verify(self, identifier: str, password: str) -> dict | None:
         user = self.get_user(identifier)
         if not user:
@@ -387,8 +401,26 @@ class AuthStore:
             hash_password(password)
             return None
         if _verify(password, user["salt"], user["pw_hash"], user["iterations"]):
+            # First person ever to log in becomes the platform superadmin.
+            if not user["is_superadmin"] and not self._has_superadmin():
+                self._grant_superadmin(user["id"])
+                user["is_superadmin"] = True
             return user
         return None
+
+    def list_orgs_summary(self) -> list:
+        """All orgs with their owner email — for the superadmin panel."""
+        rows = self.db.execute(
+            "SELECT o.id, o.name, o.created, "
+            "  (SELECT u.email FROM users u "
+            "   WHERE u.org_id = o.id AND u.role = 'owner' "
+            "   ORDER BY u.created LIMIT 1) as owner_email, "
+            "  (SELECT COUNT(*) FROM users u WHERE u.org_id = o.id) as user_count "
+            "FROM orgs o ORDER BY o.created"
+        ).fetchall()
+        return [{"id": r[0], "name": r[1], "created": r[2],
+                 "owner_email": r[3] or "", "user_count": r[4]}
+                for r in rows]
 
     # ----- authorization ----------------------------------------------------
     @staticmethod

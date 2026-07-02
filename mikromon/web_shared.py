@@ -214,6 +214,8 @@ def _nav(user, active) -> str:
         if user.get("_show_billing"):
             items.append(("/billing", "Billing"))
     items += [("/account", "Account")]
+    if user.get("is_superadmin"):
+        items.append(("/superadmin", "Platform"))
     links = "".join(
         f'<a href="{href}" class="{"on" if href == active else ""}">{label}</a>'
         for href, label in items)

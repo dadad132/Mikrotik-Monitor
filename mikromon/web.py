@@ -41,6 +41,7 @@ from .web_auth import (
     _render_login, _render_signup, _render_account,
     _render_admin, _device_chips, _ADMIN_JS,
     _render_billing, _render_locked, _grace_banner_html,
+    _render_superadmin,
 )
 
 _CLIENT_SOURCES = ["dhcp", "wireless", "arp", "hotspot"]
@@ -2918,6 +2919,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
             if path == "/billing":
                 return self._serve_billing(url, user)
+            if path == "/superadmin":
+                return self._serve_superadmin(url, user)
             if path == "/account":
                 q = parse_qs(url.query)
                 return self._send(200, _render_account(
@@ -3074,6 +3077,36 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._send(200, _render_billing(
                 user, bill, pf_enabled, self._session()["csrf"],
                 msg=q.get("ok", [""])[0], error=q.get("error", [""])[0]),
+                "text/html; charset=utf-8")
+
+        def _serve_superadmin(self, url, user):
+            if not user.get("is_superadmin"):
+                return self._send(403, "forbidden")
+            q = parse_qs(url.query)
+            orgs = auth.list_orgs_summary() if auth else []
+            rows = []
+            for org in orgs:
+                oid = org["id"]
+                bill = billing.get(oid) if billing else None
+                # Resolve billing_status so the render sees "grace"/"trial"/etc
+                if billing and bill:
+                    status = billing.billing_status(oid)
+                    bill = dict(bill)
+                    bill["status"] = status
+                dev_count = 0
+                if devices_db:
+                    try:
+                        from .devices_store import DevicesStore as _DS
+                        _ds = _DS(devices_db)
+                        dev_count = _ds.count_for_org(oid)
+                        _ds.close()
+                    except Exception:
+                        pass
+                rows.append({**org, "bill": bill, "device_count": dev_count})
+            return self._send(200, _render_superadmin(
+                user, rows,
+                msg=q.get("ok", [""])[0],
+                error=q.get("error", [""])[0]),
                 "text/html; charset=utf-8")
 
         # ---- device management (admin only) ----

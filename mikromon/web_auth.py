@@ -343,3 +343,98 @@ def _render_locked(user) -> str:
 
 
 _TRIAL_DEVICES = FREE_DEVICES
+
+_STATUS_COLOR = {
+    "active":   ("#16a34a", "Active"),
+    "trialing": ("#16a34a", "Active"),
+    "trial":    ("#2563eb", "Trial"),
+    "grace":    ("#d97706", "Grace"),
+    "canceled": ("#dc2626", "Lapsed"),
+    "locked":   ("#dc2626", "Locked"),
+    "inactive": ("#64748b", "Free"),
+    "none":     ("#64748b", "Free"),
+}
+
+
+def _render_superadmin(user, rows: list, msg: str = "", error: str = "") -> str:
+    """Platform superadmin panel — shows all orgs, billing status, and device counts."""
+    note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
+           (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
+
+    _status_counts: dict[str, int] = {}
+    tbody = ""
+    for r in rows:
+        bill = r.get("bill") or {}
+        status = bill.get("status") or "none"
+        color, label = _STATUS_COLOR.get(status, ("#64748b", status.title()))
+        _status_counts[label] = _status_counts.get(label, 0) + 1
+
+        plan = bill.get("plan") or ""
+        device_limit = bill.get("device_limit") or FREE_DEVICES
+        device_count = r.get("device_count", 0)
+        trial_end = bill.get("trial_end")
+        grace_end = bill.get("grace_period_end")
+
+        trial_str = (time.strftime("%d %b %Y", time.localtime(trial_end))
+                     if trial_end and status == "trial" else "")
+        grace_str = (time.strftime("%d %b %Y", time.localtime(grace_end))
+                     if grace_end and status == "grace" else "")
+        created_str = (time.strftime("%d %b %Y", time.localtime(r["created"]))
+                       if r.get("created") else "")
+
+        tbody += (
+            f'<tr>'
+            f'<td><b>{esc(r["name"])}</b>'
+            f'<br><span class="muted" style="font-size:11px">'
+            f'{esc(r.get("owner_email",""))} &middot; '
+            f'{r.get("user_count",0)} user(s)</span></td>'
+            f'<td><span style="color:{color};font-weight:700">{label}</span>'
+            f'{f"<br><span class=\'muted\' style=\'font-size:11px\'>trial ends {trial_str}</span>" if trial_str else ""}'
+            f'{f"<br><span class=\'muted\' style=\'font-size:11px;color:#d97706\'>grace ends {grace_str}</span>" if grace_str else ""}'
+            f'</td>'
+            f'<td>{esc(plan) if plan else "<span class=\'muted\'>—</span>"}</td>'
+            f'<td>{device_count} / {device_limit if device_limit else "∞"}</td>'
+            f'<td>{created_str}</td>'
+            f'</tr>'
+        )
+
+    # Summary tiles
+    total = len(rows)
+    active_n = _status_counts.get("Active", 0)
+    trial_n = _status_counts.get("Trial", 0)
+    grace_n = _status_counts.get("Grace", 0)
+    locked_n = _status_counts.get("Locked", 0)
+    free_n = _status_counts.get("Free", 0)
+
+    tiles = (
+        f'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));'
+        f'gap:12px;margin-bottom:20px">'
+        f'{_sa_tile(total, "Total orgs", "#2563eb")}'
+        f'{_sa_tile(active_n, "Active", "#16a34a")}'
+        f'{_sa_tile(trial_n, "On trial", "#2563eb")}'
+        f'{_sa_tile(free_n, "Free plan", "#64748b")}'
+        f'{_sa_tile(grace_n, "Grace period", "#d97706")}'
+        f'{_sa_tile(locked_n, "Locked", "#dc2626")}'
+        f'</div>'
+    )
+
+    table = (
+        f'<div class="box" style="overflow-x:auto">'
+        f'<table style="min-width:700px"><thead><tr>'
+        f'<th>Company</th><th>Status</th><th>Plan</th>'
+        f'<th>Devices</th><th>Joined</th>'
+        f'</tr></thead><tbody>{tbody or "<tr><td colspan=5 class=muted>No organisations yet.</td></tr>"}'
+        f'</tbody></table></div>'
+    )
+
+    inner = (f'<div class="wrap"><h1>Platform admin</h1>{note}{tiles}{table}</div>')
+    return _page("Platform Admin", _header(user, "/superadmin") + inner)
+
+
+def _sa_tile(value, label: str, color: str) -> str:
+    return (f'<div style="background:#fff;border-radius:10px;padding:12px 16px;'
+            f'box-shadow:0 1px 3px rgba(0,0,0,.1);border-top:3px solid {color}">'
+            f'<div style="font-size:26px;font-weight:700;color:{color}">{value}</div>'
+            f'<div style="font-size:11px;color:#64748b;text-transform:uppercase;'
+            f'letter-spacing:.04em;margin-top:4px">{label}</div>'
+            f'</div>')
