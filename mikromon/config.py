@@ -220,8 +220,7 @@ def load_config(path: str) -> AppConfig:
             min_severity=Severity.parse(smtp_raw.get("min_severity", "INFO"),
                                         Severity.INFO),
         )
-        if not smtp.to_addrs:
-            raise ConfigError("smtp.to_addrs must list at least one recipient.")
+        # to_addrs may be empty in multi-tenant mode — each org has its own list.
 
     devices_db = raw.get("devices_db") or None
     devices = []
