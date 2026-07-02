@@ -1,34 +1,24 @@
-"""Stripe billing — per-company subscriptions, device limits, and grace periods.
+"""PayFast billing — per-company subscriptions with device limits.
 
 Design:
-  * Each company (org) gets a billing record: Stripe customer, subscription
-    status, plan, device_limit (0 = unlimited), and grace period tracking.
-  * New orgs automatically receive a 30-day free trial (1 device limit).
-  * Owners upgrade via Stripe Checkout; manage card/plan/invoices via the
-    Stripe-hosted Customer Portal — no card data stored here.
+  * Orgs without a billing record are on the FREE plan (FREE_DEVICES cap).
+  * New orgs get a 30-day free trial (FREE_DEVICES limit).
+  * Owners subscribe via PayFast's hosted payment page; the subscription token
+    arrives via ITN and is stored for recurring billing tracking.
   * Missed payment → 7-day grace period banner → full org lockout.
-  * Stripe POSTs subscription changes to /stripe/webhook; we verify the
-    signature (stdlib HMAC) and update status/device_limit/grace fields.
+  * PayFast POSTs ITN to /billing/itn; we verify the MD5 signature.
 
-Enabling billing (config.yaml):
+Config (config.yaml):
   billing:
     db: ./billing.db
-    stripe_secret: sk_live_...
-    webhook_secret: whsec_...
-    prices:                   # Stripe Price IDs, one per plan name below
-      starter:  price_...
-      small:    price_...
-      medium:   price_...
-      business: price_...
-      pro:      price_...
-      ent250:   price_...
-      ent500:   price_...
-      ent1000:  price_...
+    payfast_merchant_id: "10000100"
+    payfast_merchant_key: "46f0cd694581a"
+    payfast_passphrase: "jt7NOE43FZPn"   # strongly recommended
+    sandbox: false
 """
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import sqlite3
 import threading
@@ -36,29 +26,35 @@ import time
 import urllib.parse
 import urllib.request
 
-_STRIPE_API = "https://api.stripe.com/v1"
-
 GRACE_DAYS = 7
 _GRACE_SECS = GRACE_DAYS * 86400
 _TRIAL_DAYS = 30
-_TRIAL_DEVICES = 1
+FREE_DEVICES = 5     # cap for free plan and trial
+_TRIAL_DEVICES = FREE_DEVICES
+
+_PF_LIVE_URL = "https://www.payfast.co.za/eng/process"
+_PF_SANDBOX_URL = "https://sandbox.payfast.co.za/eng/process"
+_PF_VALIDATE_LIVE = "https://www.payfast.co.za/eng/query/validate"
+_PF_VALIDATE_SANDBOX = "https://sandbox.payfast.co.za/eng/query/validate"
 
 PLANS = [
-    {"name": "starter",  "label": "Starter",        "devices": 5,    "price_usd": 25},
-    {"name": "small",    "label": "Small",           "devices": 15,   "price_usd": 69},
-    {"name": "medium",   "label": "Medium",          "devices": 30,   "price_usd": 135},
-    {"name": "business", "label": "Business",        "devices": 50,   "price_usd": 210},
-    {"name": "pro",      "label": "Professional",    "devices": 100,  "price_usd": 400},
-    {"name": "ent250",   "label": "Enterprise 250",  "devices": 250,  "price_usd": 925},
-    {"name": "ent500",   "label": "Enterprise 500",  "devices": 500,  "price_usd": 1750},
-    {"name": "ent1000",  "label": "Enterprise 1000", "devices": 1000, "price_usd": 3000},
+    {"name": "starter",  "label": "Starter",        "devices": 5,    "price_zar": 460.00},
+    {"name": "small",    "label": "Small",           "devices": 15,   "price_zar": 1270.00},
+    {"name": "medium",   "label": "Medium",          "devices": 30,   "price_zar": 2490.00},
+    {"name": "business", "label": "Business",        "devices": 50,   "price_zar": 3870.00},
+    {"name": "pro",      "label": "Professional",    "devices": 100,  "price_zar": 7360.00},
+    {"name": "ent250",   "label": "Enterprise 250",  "devices": 250,  "price_zar": 17030.00},
+    {"name": "ent500",   "label": "Enterprise 500",  "devices": 500,  "price_zar": 32210.00},
+    {"name": "ent1000",  "label": "Enterprise 1000", "devices": 1000, "price_zar": 55230.00},
 ]
+
+_PLAN_MAP = {p["name"]: p for p in PLANS}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS billing (
     org_id             INTEGER PRIMARY KEY,
-    stripe_customer_id TEXT,
-    subscription_id    TEXT,
+    pf_token           TEXT,              -- PayFast subscription token
+    payment_id         TEXT,              -- our m_payment_id sent to PayFast
     status             TEXT NOT NULL DEFAULT 'inactive',
     plan               TEXT,
     device_limit       INTEGER NOT NULL DEFAULT 0,
@@ -70,39 +66,126 @@ CREATE TABLE IF NOT EXISTS billing (
 """
 
 
-# ===== pure helpers ==========================================================
+# ===== pure helpers ===========================================================
+
 def can_add_device(device_limit: int, current_count: int) -> bool:
+    """device_limit 0 = unlimited."""
     return not device_limit or current_count < device_limit
 
 
-def limit_from_subscription(sub: dict) -> int:
-    meta = sub.get("metadata") or {}
-    if str(meta.get("device_limit", "")).strip().isdigit():
-        return int(meta["device_limit"])
-    items = (sub.get("items") or {}).get("data") or []
-    if items and str(items[0].get("quantity", "")).strip().isdigit():
-        return int(items[0]["quantity"])
-    return 0
+def payment_url(sandbox: bool = False) -> str:
+    return _PF_SANDBOX_URL if sandbox else _PF_LIVE_URL
 
 
-def verify_webhook(payload: bytes, sig_header: str, secret: str,
-                   tolerance: int = 300) -> dict:
-    parts = dict(p.split("=", 1) for p in sig_header.split(",") if "=" in p)
-    ts = parts.get("t")
-    if not ts or not ts.isdigit():
-        raise ValueError("missing/invalid timestamp")
-    if abs(time.time() - int(ts)) > tolerance:
-        raise ValueError("timestamp outside tolerance")
-    signed = ts.encode() + b"." + payload
-    expected = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
-    sent = [v for k, v in (p.split("=", 1) for p in sig_header.split(",")
-                           if "=" in p) if k == "v1"]
-    if not any(hmac.compare_digest(expected, s) for s in sent):
-        raise ValueError("signature mismatch")
-    return json.loads(payload.decode("utf-8"))
+def _pf_signature(params: dict, passphrase: str = "") -> str:
+    """MD5 signature over sorted, URL-encoded params (PayFast spec)."""
+    parts = [f"{k}={urllib.parse.quote_plus(str(v)).replace('%20', '+')}"
+             for k, v in sorted(params.items()) if str(v) != ""]
+    data = "&".join(parts)
+    if passphrase:
+        data += f"&passphrase={urllib.parse.quote_plus(passphrase).replace('%20', '+')}"
+    return hashlib.md5(data.encode("utf-8")).hexdigest()
 
 
-# ===== persistence ===========================================================
+def build_payment_data(*, merchant_id: str, merchant_key: str,
+                       passphrase: str = "", sandbox: bool = False,
+                       org_id: int, plan_name: str,
+                       buyer_email: str = "", buyer_name: str = "",
+                       notify_url: str, return_url: str,
+                       cancel_url: str) -> dict:
+    """Build the signed form-data dict to POST to the PayFast payment page.
+
+    Returns a dict of field_name → value ready to be serialised as a hidden
+    HTML form or a URL-encoded POST body.
+    """
+    plan = _PLAN_MAP.get(plan_name)
+    if plan is None:
+        raise ValueError(f"Unknown plan: {plan_name!r}")
+
+    payment_id = f"{org_id}:{int(time.time())}"
+    amount = f"{plan['price_zar']:.2f}"
+    item_name = f"EasyMikrotik {plan['label']} Plan"
+
+    params: dict = {
+        "merchant_id": merchant_id,
+        "merchant_key": merchant_key,
+        "return_url": return_url,
+        "cancel_url": cancel_url,
+        "notify_url": notify_url,
+        "m_payment_id": payment_id,
+        "amount": amount,
+        "item_name": item_name,
+        "item_description": f"{plan['devices']} devices · monthly subscription",
+        "subscription_type": "1",
+        "billing_date": time.strftime("%Y-%m-%d"),
+        "recurring_amount": amount,
+        "frequency": "3",    # 3 = monthly
+        "cycles": "0",       # 0 = recurring until cancelled
+    }
+    if buyer_email:
+        parts = buyer_name.strip().split(" ", 1)
+        params["name_first"] = parts[0]
+        params["name_last"] = parts[1] if len(parts) > 1 else ""
+        params["email_address"] = buyer_email
+
+    # merchant_key is NOT included in the signature data
+    sig_params = {k: v for k, v in params.items() if k != "merchant_key"}
+    params["signature"] = _pf_signature(sig_params, passphrase)
+    # Store plan and org in custom fields so ITN can route back to the right org
+    params["custom_int1"] = str(org_id)
+    params["custom_str1"] = plan_name
+    return params
+
+
+def verify_itn(post_data: dict, passphrase: str = "",
+               sandbox: bool = False) -> bool:
+    """Verify a PayFast ITN POST.
+
+    Checks the MD5 signature and (optionally) the PayFast validate endpoint.
+    Returns True if the notification is authentic.
+    """
+    received_sig = post_data.get("signature", "")
+    params = {k: v for k, v in post_data.items() if k != "signature"}
+    expected = _pf_signature(params, passphrase)
+    if not received_sig or received_sig != expected:
+        return False
+    # Secondary: ask PayFast's validate endpoint
+    try:
+        validate_url = _PF_VALIDATE_SANDBOX if sandbox else _PF_VALIDATE_LIVE
+        body = urllib.parse.urlencode(post_data).encode()
+        req = urllib.request.Request(validate_url, data=body, headers={
+            "Content-Type": "application/x-www-form-urlencoded"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.read().decode().strip().upper() == "VALID"
+    except Exception:
+        # If PayFast's validate endpoint is unreachable, trust the signature alone
+        return True
+
+
+def cancel_subscription(token: str, *, merchant_id: str, merchant_key: str,
+                        passphrase: str = "", sandbox: bool = False) -> bool:
+    """Cancel a PayFast subscription via the API. Returns True on success."""
+    endpoint = ("https://sandbox.payfast.co.za" if sandbox
+                else "https://www.payfast.co.za")
+    url = f"{endpoint}/eng/recurring/cancel/{token}"
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S+02:00")
+    headers_dict = {
+        "merchant-id": merchant_id,
+        "timestamp": ts,
+        "version": "v1",
+    }
+    sig = _pf_signature({**headers_dict}, passphrase)
+    headers_dict["signature"] = sig
+    try:
+        req = urllib.request.Request(url, method="PUT", headers=headers_dict)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+# ===== persistence ============================================================
+
 class BillingStore:
     def __init__(self, path: str):
         self.path = path
@@ -112,6 +195,8 @@ class BillingStore:
         self.db.commit()
         self._add_col_if_missing("billing", "grace_period_end", "REAL")
         self._add_col_if_missing("billing", "trial_end", "REAL")
+        self._add_col_if_missing("billing", "pf_token", "TEXT")
+        self._add_col_if_missing("billing", "payment_id", "TEXT")
 
     def _add_col_if_missing(self, table: str, col: str, col_def: str) -> None:
         try:
@@ -125,43 +210,52 @@ class BillingStore:
 
     def get(self, org_id: int) -> dict | None:
         row = self.db.execute(
-            "SELECT org_id, stripe_customer_id, subscription_id, status, plan, "
+            "SELECT org_id, pf_token, payment_id, status, plan, "
             "device_limit, current_period_end, grace_period_end, trial_end "
             "FROM billing WHERE org_id = ?",
             (int(org_id),)).fetchone()
         if not row:
             return None
-        keys = ("org_id", "stripe_customer_id", "subscription_id", "status",
-                "plan", "device_limit", "current_period_end", "grace_period_end",
+        keys = ("org_id", "pf_token", "payment_id", "status", "plan",
+                "device_limit", "current_period_end", "grace_period_end",
                 "trial_end")
         return dict(zip(keys, row))
 
     def device_limit(self, org_id: int) -> int:
+        """Returns the device cap for this org. 0 = unlimited."""
         row = self.get(org_id)
-        return int(row["device_limit"]) if row else 0
+        if not row:
+            return FREE_DEVICES  # no billing record → free plan cap
+        status = row.get("status", "inactive")
+        if status in ("active", "trialing"):
+            return int(row.get("device_limit") or 0)
+        if status == "trial":
+            te = row.get("trial_end")
+            if te and time.time() <= te:
+                return int(row.get("device_limit") or FREE_DEVICES)
+        # lapsed / grace / locked — still enforce the cap from last sub, or free
+        return int(row.get("device_limit") or FREE_DEVICES)
 
     def can_add(self, org_id: int, current_count: int) -> bool:
         return can_add_device(self.device_limit(org_id), current_count)
 
     def is_locked(self, org_id: int) -> bool:
-        """True when billing has lapsed AND the grace period has expired."""
         row = self.get(org_id)
         if not row:
-            return False  # no billing record = unrestricted (self-hosted)
+            return False
         status = row.get("status", "inactive")
         if status in ("active", "trialing"):
             return False
         if status == "trial":
             te = row.get("trial_end")
             if te and time.time() <= te:
-                return False  # still inside the 30-day trial
+                return False
         gpe = row.get("grace_period_end")
         if gpe is None:
             return False
         return time.time() > gpe
 
     def in_grace_period(self, org_id: int) -> bool:
-        """True when billing has lapsed but the 7-day grace window is still open."""
         row = self.get(org_id)
         if not row:
             return False
@@ -171,7 +265,7 @@ class BillingStore:
         if status == "trial":
             te = row.get("trial_end")
             if te and time.time() <= te:
-                return False  # still inside active trial, not yet grace
+                return False
         gpe = row.get("grace_period_end")
         if gpe is None:
             return False
@@ -185,7 +279,7 @@ class BillingStore:
         return max(0.0, (gpe - time.time()) / 86400)
 
     def billing_status(self, org_id: int) -> str:
-        """Returns one of: 'none', 'trial', 'active', 'grace', 'locked'."""
+        """Returns: 'none' | 'trial' | 'active' | 'grace' | 'locked'."""
         row = self.get(org_id)
         if not row:
             return "none"
@@ -203,11 +297,45 @@ class BillingStore:
         return "locked"
 
     def start_trial(self, org_id: int) -> None:
-        """Called at new org creation — starts the 30-day free trial."""
         trial_end = time.time() + _TRIAL_DAYS * 86400
         grace_end = trial_end + _GRACE_SECS
         self._upsert(org_id, status="trial", device_limit=_TRIAL_DEVICES,
                      trial_end=trial_end, grace_period_end=grace_end)
+
+    def apply_itn(self, itn: dict) -> None:
+        """Update billing state from a verified PayFast ITN notification."""
+        payment_status = itn.get("payment_status", "").upper()
+        token = itn.get("token", "")
+        plan_name = itn.get("custom_str1", "")
+        try:
+            org_id = int(itn.get("custom_int1", 0))
+        except (ValueError, TypeError):
+            return
+        if not org_id:
+            return
+
+        plan = _PLAN_MAP.get(plan_name)
+        device_limit = plan["devices"] if plan else FREE_DEVICES
+
+        if payment_status == "COMPLETE":
+            self._upsert(org_id, pf_token=token or None,
+                         payment_id=itn.get("m_payment_id"),
+                         status="active", plan=plan_name,
+                         device_limit=device_limit,
+                         grace_period_end=None)
+        elif payment_status in ("FAILED", "CANCELLED"):
+            existing = self.get(org_id)
+            existing_gpe = (existing or {}).get("grace_period_end")
+            grace_end = (existing_gpe if existing_gpe and time.time() <= existing_gpe
+                         else time.time() + _GRACE_SECS)
+            self._upsert(org_id, status="canceled",
+                         grace_period_end=grace_end)
+
+    def org_for_token(self, token: str) -> int | None:
+        row = self.db.execute(
+            "SELECT org_id FROM billing WHERE pf_token = ?",
+            (token,)).fetchone()
+        return row[0] if row else None
 
     def _upsert(self, org_id: int, **cols) -> None:
         cols["updated"] = time.time()
@@ -221,91 +349,6 @@ class BillingStore:
                 (int(org_id), *cols.values()))
             self.db.commit()
 
-    def link_customer(self, org_id: int, customer_id: str) -> None:
-        self._upsert(org_id, stripe_customer_id=customer_id)
-
-    def org_for_customer(self, customer_id: str) -> int | None:
-        row = self.db.execute(
-            "SELECT org_id FROM billing WHERE stripe_customer_id = ?",
-            (customer_id,)).fetchone()
-        return row[0] if row else None
-
-    def apply_event(self, event: dict) -> None:
-        """Update local state from a verified Stripe webhook event."""
-        etype = event.get("type", "")
-        obj = (event.get("data") or {}).get("object") or {}
-        if etype == "checkout.session.completed":
-            org_id = obj.get("client_reference_id")
-            customer = obj.get("customer")
-            if org_id and customer:
-                self.link_customer(int(org_id), customer)
-            return
-        if etype.startswith("customer.subscription."):
-            org_id = self.org_for_customer(obj.get("customer", ""))
-            if org_id is None:
-                return
-            status = "canceled" if etype.endswith("deleted") \
-                else obj.get("status", "inactive")
-            limit = 0 if status not in ("active", "trialing") \
-                else limit_from_subscription(obj)
-            plan = None
-            items = (obj.get("items") or {}).get("data") or []
-            if items:
-                plan = ((items[0].get("price") or {}).get("nickname")
-                        or (items[0].get("price") or {}).get("id"))
-            existing = self.get(org_id)
-            if status in ("active", "trialing"):
-                grace_end = None  # payment received — clear grace period
-            elif status in ("past_due", "unpaid", "canceled", "incomplete",
-                            "incomplete_expired"):
-                existing_gpe = (existing or {}).get("grace_period_end")
-                if existing_gpe and time.time() <= existing_gpe:
-                    grace_end = existing_gpe  # preserve running grace window
-                else:
-                    grace_end = time.time() + _GRACE_SECS
-            else:
-                grace_end = (existing or {}).get("grace_period_end")
-            self._upsert(org_id, subscription_id=obj.get("id"), status=status,
-                         plan=plan, device_limit=limit,
-                         current_period_end=obj.get("current_period_end"),
-                         grace_period_end=grace_end)
-
     def close(self) -> None:
         with self._lock:
             self.db.close()
-
-
-# ===== Stripe REST calls =====================================================
-def _post(path: str, data: dict, secret: str) -> dict:
-    body = urllib.parse.urlencode(data, doseq=True).encode()
-    req = urllib.request.Request(f"{_STRIPE_API}/{path}", data=body, headers={
-        "Authorization": f"Bearer {secret}",
-        "Content-Type": "application/x-www-form-urlencoded"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return json.loads(r.read().decode("utf-8"))
-
-
-def create_customer(secret: str, email: str, company: str) -> str:
-    return _post("customers", {"email": email, "name": company}, secret)["id"]
-
-
-def create_checkout_session(secret: str, *, price_id: str, customer_id: str,
-                            org_id: int, success_url: str, cancel_url: str,
-                            quantity: int = 1) -> str:
-    sess = _post("checkout/sessions", {
-        "mode": "subscription",
-        "customer": customer_id,
-        "client_reference_id": str(org_id),
-        "line_items[0][price]": price_id,
-        "line_items[0][quantity]": quantity,
-        "success_url": success_url,
-        "cancel_url": cancel_url,
-    }, secret)
-    return sess["url"]
-
-
-def create_portal_session(secret: str, *, customer_id: str,
-                          return_url: str) -> str:
-    return _post("billing_portal/sessions",
-                 {"customer": customer_id, "return_url": return_url},
-                 secret)["url"]

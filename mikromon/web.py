@@ -2777,9 +2777,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
     if billing_cfg.get("db"):
         from .billing import BillingStore
         billing = BillingStore(billing_cfg["db"])
-    _stripe_secret = billing_cfg.get("stripe_secret", "")
-    _webhook_secret = billing_cfg.get("webhook_secret", "")
-    _stripe_prices = billing_cfg.get("prices") or {}
+    _pf_merchant_id = billing_cfg.get("payfast_merchant_id", "")
+    _pf_merchant_key = billing_cfg.get("payfast_merchant_key", "")
+    _pf_passphrase = billing_cfg.get("payfast_passphrase", "")
+    _pf_sandbox = bool(billing_cfg.get("sandbox", False))
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "mikromon"
@@ -3069,8 +3070,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if billing and billing.is_locked(user["org_id"]):
                 return self._send(200, _render_locked(user),
                                   "text/html; charset=utf-8")
+            pf_enabled = bool(_pf_merchant_id and _pf_merchant_key)
             return self._send(200, _render_billing(
-                user, bill, _stripe_prices, self._session()["csrf"],
+                user, bill, pf_enabled, self._session()["csrf"],
                 msg=q.get("ok", [""])[0], error=q.get("error", [""])[0]),
                 "text/html; charset=utf-8")
 
@@ -4140,9 +4142,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
         # ---- POST ----
         def do_POST(self):
             path = urlparse(self.path).path
-            # Stripe webhook: signature-verified, no auth session required.
-            if path == "/stripe/webhook":
-                return self._post_stripe_webhook()
+            # PayFast ITN: server-to-server, no auth session required.
+            if path == "/billing/itn":
+                return self._post_billing_itn()
             if auth is None:
                 return self._send(404, "not found")
             if path == "/signup":
@@ -4163,10 +4165,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if flat.get("csrf") != self._session()["csrf"]:
                 return self._send(400, "bad csrf token")
             # Billing routes (owner only, no device ownership check needed).
-            if path == "/billing/checkout":
-                return self._post_billing_checkout(flat, user)
-            if path == "/billing/portal":
-                return self._post_billing_portal(flat, user)
+            if path == "/billing/subscribe":
+                return self._post_billing_subscribe(flat, user)
+            if path == "/billing/cancel-sub":
+                return self._post_billing_cancel(flat, user)
             # Org isolation: an owner may only touch devices their company owns.
             if not self._owns_target(flat, user):
                 return self._send(403, "forbidden")
@@ -4281,94 +4283,105 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             token = sessions.create(email)
             return self._redirect("/", self._cookie_header(token))
 
-        def _post_stripe_webhook(self):
-            if not _webhook_secret:
-                return self._send(400, "webhook not configured")
+        def _post_billing_itn(self):
+            """PayFast Instant Transaction Notification handler.
+
+            PayFast POSTs form-encoded payment data to this URL directly from
+            their servers (server-to-server). No browser session is involved.
+            We verify the MD5 signature and then update billing state.
+            """
+            if not billing:
+                return self._send(200, "ok")
             length = int(self.headers.get("Content-Length", 0))
-            payload = self.rfile.read(length)
-            sig = self.headers.get("Stripe-Signature", "")
-            from .billing import verify_webhook
+            raw = self.rfile.read(length).decode("utf-8", errors="replace")
+            from urllib.parse import parse_qs as _pqs
+            itn: dict = {k: v[0] for k, v in _pqs(raw).items() if v}
+            from .billing import verify_itn
+            if not verify_itn(itn, passphrase=_pf_passphrase,
+                              sandbox=_pf_sandbox):
+                log.warning("PayFast ITN signature mismatch — rejected")
+                return self._send(400, "invalid signature")
             try:
-                event = verify_webhook(payload, sig, _webhook_secret)
-            except ValueError as exc:
-                log.warning("Stripe webhook rejected: %s", exc)
-                return self._send(400, str(exc))
-            if billing:
-                try:
-                    billing.apply_event(event)
-                except Exception:  # noqa: BLE001
-                    log.exception("billing.apply_event failed for %s",
-                                  event.get("type"))
+                billing.apply_itn(itn)
+                log.info("PayFast ITN applied: status=%s plan=%s org=%s",
+                         itn.get("payment_status"), itn.get("custom_str1"),
+                         itn.get("custom_int1"))
+            except Exception:  # noqa: BLE001
+                log.exception("billing.apply_itn failed")
             return self._send(200, "ok")
 
-        def _post_billing_checkout(self, flat, user):
-            if not billing or not _stripe_secret:
+        def _post_billing_subscribe(self, flat, user):
+            """Redirect the owner to the PayFast payment page for their chosen plan."""
+            if not billing or not _pf_merchant_id:
                 return self._redirect("/billing?error=" + quote(
-                    "Stripe is not configured on this server."))
+                    "PayFast billing is not configured on this server."))
             plan_name = flat.get("plan", "").strip()
-            price_id = _stripe_prices.get(plan_name)
-            if not price_id:
-                return self._redirect("/billing?error=" + quote(
-                    f"Plan '{plan_name}' is not configured."))
-            org_id = user["org_id"]
-            bill = billing.get(org_id)
-            customer_id = (bill or {}).get("stripe_customer_id") or ""
-            if not customer_id:
-                # Create a new Stripe customer for this org owner.
-                owner_email = user.get("email") or user.get("username") or ""
-                org_name = auth.org_name(org_id) if auth else ""
-                from .billing import create_customer
-                try:
-                    customer_id = create_customer(_stripe_secret, owner_email, org_name)
-                    billing.link_customer(org_id, customer_id)
-                except Exception as exc:  # noqa: BLE001
-                    log.error("create_customer failed: %s", exc)
-                    return self._redirect("/billing?error=" + quote(
-                        "Could not create Stripe customer. Try again or contact support."))
             host = self.headers.get("Host", "localhost")
             scheme = "https" if secure_cookies else "http"
             base = f"{scheme}://{host}"
-            from .billing import create_checkout_session
+            owner_email = user.get("email") or user.get("username") or ""
+            org_name = auth.org_name(user["org_id"]) if auth else ""
+            from .billing import build_payment_data, payment_url, PLANS
             try:
-                checkout_url = create_checkout_session(
-                    _stripe_secret,
-                    price_id=price_id,
-                    customer_id=customer_id,
-                    org_id=org_id,
-                    success_url=f"{base}/billing?ok=Subscription+activated",
-                    cancel_url=f"{base}/billing",
+                data = build_payment_data(
+                    merchant_id=_pf_merchant_id,
+                    merchant_key=_pf_merchant_key,
+                    passphrase=_pf_passphrase,
+                    sandbox=_pf_sandbox,
+                    org_id=user["org_id"],
+                    plan_name=plan_name,
+                    buyer_email=owner_email,
+                    buyer_name=org_name,
+                    notify_url=f"{base}/billing/itn",
+                    return_url=f"{base}/billing?ok=Subscription+activated",
+                    cancel_url=f"{base}/billing?error=Payment+cancelled",
                 )
-            except Exception as exc:  # noqa: BLE001
-                log.error("create_checkout_session failed: %s", exc)
-                return self._redirect("/billing?error=" + quote(
-                    "Could not create Stripe checkout session. Try again."))
-            return self._redirect(checkout_url)
+            except ValueError as exc:
+                return self._redirect("/billing?error=" + quote(str(exc)))
+            pf_url = payment_url(_pf_sandbox)
+            # Render an auto-submitting form — PayFast requires a POST.
+            fields = "".join(
+                f'<input type="hidden" name="{k}" value="{v}">'
+                for k, v in data.items()
+            )
+            html = (f'<!doctype html><html><body>'
+                    f'<p style="font-family:sans-serif;margin:40px auto;'
+                    f'text-align:center">Redirecting to PayFast…</p>'
+                    f'<form id="pf" method="POST" action="{pf_url}">{fields}</form>'
+                    f'<script>document.getElementById("pf").submit();</script>'
+                    f'</body></html>')
+            return self._send(200, html, "text/html; charset=utf-8")
 
-        def _post_billing_portal(self, flat, user):
-            if not billing or not _stripe_secret:
+        def _post_billing_cancel(self, flat, user):
+            """Cancel the org's active PayFast subscription."""
+            if not billing or not _pf_merchant_id:
                 return self._redirect("/billing?error=" + quote(
-                    "Stripe is not configured on this server."))
-            org_id = user["org_id"]
-            bill = billing.get(org_id)
-            customer_id = (bill or {}).get("stripe_customer_id") or ""
-            if not customer_id:
+                    "Billing is not configured."))
+            bill = billing.get(user["org_id"])
+            token = (bill or {}).get("pf_token") or ""
+            if not token:
                 return self._redirect("/billing?error=" + quote(
-                    "No billing account found. Subscribe first."))
-            host = self.headers.get("Host", "localhost")
-            scheme = "https" if secure_cookies else "http"
-            return_url = f"{scheme}://{host}/billing"
-            from .billing import create_portal_session
-            try:
-                portal_url = create_portal_session(
-                    _stripe_secret,
-                    customer_id=customer_id,
-                    return_url=return_url,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.error("create_portal_session failed: %s", exc)
-                return self._redirect("/billing?error=" + quote(
-                    "Could not open billing portal. Try again."))
-            return self._redirect(portal_url)
+                    "No active subscription found."))
+            from .billing import cancel_subscription
+            ok = cancel_subscription(
+                token,
+                merchant_id=_pf_merchant_id,
+                merchant_key=_pf_merchant_key,
+                passphrase=_pf_passphrase,
+                sandbox=_pf_sandbox,
+            )
+            if ok:
+                billing.apply_itn({
+                    "payment_status": "CANCELLED",
+                    "custom_int1": str(user["org_id"]),
+                    "custom_str1": (bill or {}).get("plan") or "",
+                    "token": token,
+                    "m_payment_id": (bill or {}).get("payment_id") or "",
+                })
+                return self._redirect("/billing?ok=" + quote(
+                    "Subscription cancelled. Access continues until the grace period ends."))
+            return self._redirect("/billing?error=" + quote(
+                "Could not cancel via PayFast. Please contact support."))
 
         def _post_login(self):
             flat, _ = self._form()

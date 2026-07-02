@@ -46,15 +46,16 @@ web:
 auth_db: ./auth.db
 
 # ----------------------------------------------------------------------------
-# Billing (Stripe) — DISABLED / not wired in yet. Leave commented until the
-# rest of the site is finished; uncommenting nothing here keeps the dashboard
-# free with no device limits. See mikromon/billing.py for the enable steps.
+# Billing (PayFast) — leave commented for unlimited free access.
+# Set ITN notify URL in your PayFast dashboard to:
+#   https://yourdomain.com/billing/itn
 # ----------------------------------------------------------------------------
 # billing:
 #   db: ./billing.db
-#   stripe_secret: "sk_live_..."     # Stripe secret key
-#   stripe_price: "price_..."        # the recurring Price to subscribe to
-#   webhook_secret: "whsec_..."      # /stripe/webhook signing secret
+#   payfast_merchant_id: "10000100"        # PayFast → Integration → Merchant Details
+#   payfast_merchant_key: "46f0cd694581a"  # PayFast → Integration → Merchant Details
+#   payfast_passphrase: "your-passphrase"  # PayFast → Integration → Settings
+#   sandbox: false                          # true for sandbox.payfast.co.za testing
 
 # Manage devices from the dashboard (admins use the /devices page to add, edit,
 # delete, and test routers) instead of editing this file. When set, the devices

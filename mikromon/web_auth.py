@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 
 from .auth import AuthStore
-from .billing import PLANS, GRACE_DAYS
+from .billing import PLANS, GRACE_DAYS, FREE_DEVICES
 from .web_shared import _BRAND, _PAGE_CSS, esc, _header, _page, _who
 
 
@@ -233,95 +233,95 @@ def _grace_banner_html(days_left: float) -> str:
             f'</div>')
 
 
-def _render_billing(user, bill: dict | None, prices: dict, csrf: str,
+def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                     msg: str = "", error: str = "") -> str:
-    """Billing page for owners: shows current status and plan upgrade options."""
+    """Billing page: current subscription status + PayFast plan subscribe buttons."""
     status = (bill or {}).get("status", "none")
     plan_name = (bill or {}).get("plan") or ""
-    device_limit = int((bill or {}).get("device_limit", 0))
-    period_end = (bill or {}).get("current_period_end")
+    device_limit = int((bill or {}).get("device_limit") or FREE_DEVICES)
     trial_end = (bill or {}).get("trial_end")
     grace_end = (bill or {}).get("grace_period_end")
-    stripe_customer = (bill or {}).get("stripe_customer_id") or ""
+    pf_token = (bill or {}).get("pf_token") or ""
 
     # --- status summary box ---
     if status in ("active", "trialing"):
-        status_label = "Active"
-        status_color = "#16a34a"
-        renews = (f" · renews {time.strftime('%d %b %Y', time.localtime(period_end))}"
-                  if period_end else "")
-        limit_label = f"{device_limit} device{'s' if device_limit != 1 else ''}" if device_limit else "unlimited devices"
-        status_html = (f'<p style="margin:0"><span style="color:{status_color};'
-                       f'font-weight:700">{status_label}</span>'
-                       f' &middot; {esc(plan_name or "Subscribed")}'
-                       f' &middot; {limit_label}{renews}</p>')
+        limit_label = (f"{device_limit} device{'s' if device_limit != 1 else ''}"
+                       if device_limit else "unlimited devices")
+        status_html = (f'<p style="margin:0"><span style="color:#16a34a;font-weight:700">'
+                       f'Active</span> &middot; {esc(plan_name or "Subscribed")}'
+                       f' &middot; {limit_label}</p>')
     elif status == "trial":
         te_fmt = (time.strftime("%d %b %Y", time.localtime(trial_end))
                   if trial_end else "soon")
         status_html = (f'<p style="margin:0"><span style="color:#2563eb;font-weight:700">'
-                       f'Free Trial</span> &middot; {_TRIAL_DEVICES} device &middot; '
+                       f'Free Trial</span> &middot; {FREE_DEVICES} devices &middot; '
                        f'expires {te_fmt}</p>')
-    elif status in ("grace", "past_due", "unpaid", "incomplete"):
+    elif status in ("grace",):
         ge_fmt = (time.strftime("%d %b %Y", time.localtime(grace_end))
                   if grace_end else "soon")
         status_html = (f'<p style="margin:0"><span style="color:#d97706;font-weight:700">'
                        f'Grace Period</span> &middot; subscribe before {ge_fmt} to '
-                       f'avoid account lockout</p>')
-    elif status in ("canceled", "locked"):
+                       f'avoid lockout</p>')
+    elif status in ("canceled", "locked", "inactive"):
         status_html = (f'<p style="margin:0"><span style="color:#dc2626;font-weight:700">'
                        f'Suspended</span> &middot; choose a plan below to reactivate</p>')
     else:
         status_html = (f'<p style="margin:0"><span style="color:#64748b;font-weight:700">'
-                       f'No active subscription</span> &middot; '
-                       f'30-day free trial (1 device) on signup</p>')
+                       f'Free plan</span> &middot; {FREE_DEVICES} devices &middot; '
+                       f'subscribe to add more</p>')
 
     note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
            (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
 
-    # Manage billing button (only when Stripe customer exists + prices configured)
-    manage_btn = ""
-    if stripe_customer and prices:
-        manage_btn = (f'<form method="POST" action="/billing/portal" style="display:inline">'
+    # Cancel button shown only when there's an active PayFast subscription token
+    cancel_btn = ""
+    if pf_token and status in ("active", "trialing"):
+        cancel_btn = (f'<form method="POST" action="/billing/cancel-sub" '
+                      f'style="display:inline" '
+                      f'onsubmit="return confirm(\'Cancel your subscription? You will keep access until the end of the grace period.\');">'
                       f'<input type="hidden" name="csrf" value="{csrf}">'
-                      f'<button class="btn ghost" type="submit">'
-                      f'Manage billing (invoices, card)</button></form>')
+                      f'<button class="btn ghost" type="submit" '
+                      f'style="color:#dc2626;border-color:#dc2626">Cancel subscription</button>'
+                      f'</form>')
 
     status_box = (f'<div class="box">'
-                  f'<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">'
-                  f'{status_html}{manage_btn}</div>'
+                  f'<div style="display:flex;align-items:center;'
+                  f'justify-content:space-between;flex-wrap:wrap;gap:10px">'
+                  f'{status_html}{cancel_btn}</div>'
                   f'</div>')
 
     # --- plan table ---
-    if prices:
+    if pf_enabled:
         plan_rows = ""
         for p in PLANS:
-            price_id = prices.get(p["name"])
-            if status in ("active", "trialing") and plan_name == p["name"]:
+            is_current = (status in ("active", "trialing") and plan_name == p["name"])
+            per_dev = p["price_zar"] / p["devices"]
+            if is_current:
                 btn = '<span class="badge ok">Current plan</span>'
-            elif price_id:
-                btn = (f'<form method="POST" action="/billing/checkout">'
+            else:
+                btn = (f'<form method="POST" action="/billing/subscribe">'
                        f'<input type="hidden" name="csrf" value="{csrf}">'
                        f'<input type="hidden" name="plan" value="{esc(p["name"])}">'
                        f'<button class="btn" type="submit" style="padding:6px 14px">'
                        f'Subscribe</button></form>')
-            else:
-                btn = '<span class="muted">not configured</span>'
             plan_rows += (f'<tr>'
                           f'<td><b>{esc(p["label"])}</b></td>'
                           f'<td>{p["devices"]}</td>'
-                          f'<td><b>${p["price_usd"]}</b>/mo</td>'
-                          f'<td>${round(p["price_usd"] / p["devices"], 2):.2f}/device</td>'
+                          f'<td><b>R{p["price_zar"]:,.2f}</b>/mo</td>'
+                          f'<td>R{per_dev:,.2f}/device</td>'
                           f'<td>{btn}</td>'
                           f'</tr>')
         plans_html = (f'<div class="box"><h2>Choose a plan</h2>'
+                      f'<p class="muted" style="margin-top:0">All prices in ZAR, '
+                      f'billed monthly via PayFast. Cancel anytime.</p>'
                       f'<table><thead><tr>'
                       f'<th>Plan</th><th>Devices</th><th>Monthly</th>'
                       f'<th>Per device</th><th></th>'
                       f'</tr></thead><tbody>{plan_rows}</tbody></table></div>')
     else:
-        plans_html = (f'<div class="box"><p class="muted">Stripe prices are not yet '
-                      f'configured. Add a <code>billing.prices</code> map to your '
-                      f'config to enable subscriptions.</p></div>')
+        plans_html = (f'<div class="box"><p class="muted">PayFast billing is not '
+                      f'yet configured on this server. Add a <code>billing:</code> '
+                      f'section to config.yaml to enable subscriptions.</p></div>')
 
     inner = (f'<div class="wrap"><h1>Billing</h1>{note}'
              f'{status_box}{plans_html}</div>')
@@ -342,4 +342,4 @@ def _render_locked(user) -> str:
     return _page("Account Suspended", _header(user, "") + inner)
 
 
-_TRIAL_DEVICES = 1
+_TRIAL_DEVICES = FREE_DEVICES
