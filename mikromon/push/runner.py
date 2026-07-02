@@ -69,7 +69,11 @@ class Pusher:
                     summary="backup")
 
     def _prune_backup_ops(self, keep: int) -> list:
-        """Return remove ops for mikromon-created backups beyond the newest `keep`."""
+        """Return remove ops for system-created backups beyond the newest `keep`.
+
+        Only targets files whose name matches the mikromon-YYYYMMDD-HHMMSS.backup
+        pattern created by plan_backup().  Backups the user created manually on
+        the router (different name prefix) are never touched."""
         try:
             all_files = self.api.fetch(("file",))
         except Exception:
@@ -78,7 +82,7 @@ class Pusher:
             [r for r in all_files
              if str(r.get("name", "")).startswith("mikromon-")
              and str(r.get("name", "")).endswith(".backup")],
-            key=lambda r: r.get("creation-time", ""),
+            key=lambda r: str(r.get("name", "")),  # YYYYMMDD-HHMMSS sorts correctly
             reverse=True,  # newest first
         )
         return [
