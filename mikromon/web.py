@@ -4519,7 +4519,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 org_name = auth.org_name(user["org_id"]) if auth else ""
                 send_test_email(smtp_cfg, recipients, org_name, prefix)
             except Exception as exc:  # noqa: BLE001
-                return _json_resp(False, error=f"SMTP error: {exc}")
+                return _json_resp(False,
+                                  error=f"SMTP error ({type(exc).__name__}): {exc}")
             return _json_resp(True,
                               msg=f"Test email sent to: {', '.join(recipients)}")
 
@@ -4555,13 +4556,25 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Expires</td>'
                     f'<td>{esc(creds["exp_time"])} on router clock '
                     f'({esc(str(creds["duration_mins"]))} min)</td></tr>'
-                    f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Router</td>'
-                    f'<td>{esc(host)}:{esc(str(api_port))}</td></tr>'
+                    f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Winbox</td>'
+                    f'<td><code>{esc(host)}:8291</code>'
+                    f'<span style="color:#64748b;font-size:12px;margin-left:8px">'
+                    f'(desktop Winbox app)</span></td></tr>'
+                    f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">WebFig</td>'
+                    f'<td><code>http://{esc(host)}</code>'
+                    f'<span style="color:#64748b;font-size:12px;margin-left:8px">'
+                    f'(browser)</span></td></tr>'
                     f'</table>'
-                    f'<p class="muted" style="margin:14px 0 0">These credentials are '
-                    f'automatically deleted from the router when they expire. '
-                    f'Connect via the router\'s WireGuard tunnel address shown above.'
-                    f'</p></div>')
+                    f'<div style="margin:14px 0 0;padding:10px 12px;background:#fef9c3;'
+                    f'border-left:3px solid #ca8a04;border-radius:4px;font-size:13px">'
+                    f'<b>&#9888; You must be connected to WireGuard</b> to reach '
+                    f'<code>{esc(host)}</code>. '
+                    f'These are tunnel-only addresses — they are unreachable from the '
+                    f'public internet without an active WireGuard VPN session to this hub.'
+                    f'</div>'
+                    f'<p class="muted" style="margin:10px 0 0;font-size:13px">Credentials '
+                    f'are automatically deleted from the router when they expire.</p>'
+                    f'</div>')
             form = (
                 f'<div class="box"><h2>Create temporary login</h2>'
                 f'<p class="muted" style="margin-top:0">Generates a random username '
@@ -4615,7 +4628,19 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             allowed_ip = ""  # WireGuard tunnel is the security boundary
             import secrets as _sec
             username = "tmp" + _sec.token_hex(4)
-            password = _sec.token_urlsafe(12)
+            # Build a 16-char password with guaranteed uppercase, lowercase,
+            # digit, and symbol so it meets complexity requirements.
+            import string as _str
+            _pool = _str.ascii_letters + _str.digits + "!@#$%&*-"
+            _pwd = [
+                _sec.choice(_str.ascii_uppercase),
+                _sec.choice(_str.ascii_lowercase),
+                _sec.choice(_str.digits),
+                _sec.choice("!@#$%&*-"),
+                *[_sec.choice(_pool) for _ in range(12)],
+            ]
+            _sec.SystemRandom().shuffle(_pwd)
+            password = "".join(_pwd)
             from .config import build_device
             from .device import DeviceError
             from .push import Pusher, PushError, rw_device
