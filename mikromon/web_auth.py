@@ -123,7 +123,8 @@ def _device_chips(known_devices, selected, all_on) -> str:
             f'{chips}</div></div>')
 
 
-def _render_admin(auth: AuthStore, known_devices, csrf: str, user) -> str:
+def _render_admin(auth: AuthStore, known_devices, csrf: str, user,
+                  org: dict | None = None, msg: str = "", error: str = "") -> str:
     rows = []
     for u in auth.list_users(user["org_id"]):
         is_all = u["devices"] == "*"
@@ -155,8 +156,36 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user) -> str:
               <button class="btn red" type="submit">Delete</button>
             </form>'''}
           </td></tr>""")
+    note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
+           (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
+    o = org or {}
+    company_form = (
+        f'<div class="box"><h2>Company details</h2>'
+        f'<form method="POST" action="/admin/company">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<div class="fields">'
+        f'<label class="f full">Company name <span style="color:#dc2626">*</span>'
+        f'<input name="org_name" value="{esc(o.get("name", ""))}" '
+        f'style="width:100%" required></label>'
+        f'<label class="f">Primary contact'
+        f'<input name="org_contact" value="{esc(o.get("contact", ""))}" '
+        f'placeholder="Contact person name" style="width:100%"></label>'
+        f'<label class="f">Company phone'
+        f'<input name="org_phone" value="{esc(o.get("phone", ""))}" '
+        f'placeholder="+27 11 555 0000" style="width:100%"></label>'
+        f'<label class="f">VAT / Tax number'
+        f'<input name="org_vat" value="{esc(o.get("vat_number", ""))}" '
+        f'placeholder="VAT number" style="width:100%"></label>'
+        f'<label class="f full">Physical address'
+        f'<input name="org_address" value="{esc(o.get("address", ""))}" '
+        f'placeholder="Street, City, Province, Postal code" style="width:100%"></label>'
+        f'</div>'
+        f'<div style="margin-top:16px">'
+        f'<button class="btn" type="submit">Save company details</button>'
+        f'</div></form></div>')
     inner = (
         f'<div class="wrap"><h1>Team &mdash; {esc(user.get("org_name", ""))}</h1>'
+        f'{note}'
         f'<div class="box"><table>'
         f'<tr><th>Email</th><th>Role</th><th>Allowed devices</th><th></th></tr>'
         f'{"".join(rows)}</table></div>'
@@ -173,7 +202,9 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user) -> str:
         f'{_device_chips(known_devices, set(), False)}'
         f'<div style="margin-top:14px">'
         f'<button class="btn" type="submit">Add member</button></div>'
-        f'</form></div></div>')
+        f'</form></div>'
+        f'{company_form}'
+        f'</div>')
     return _page("Team", _header(user, "/admin") + inner + _ADMIN_JS)
 
 

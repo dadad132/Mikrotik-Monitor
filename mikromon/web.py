@@ -576,7 +576,8 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
 _DEVICE_TABS = ["Overview", "Provision", "Routes", "WAN", "Security",
                 "DNS", "Queues", "Port forwarding",
                 "Tunnel", "Scripts"]
-_MAINT_ITEMS = [("Update", "update"), ("Backups", "backups")]
+_MAINT_ITEMS = [("Update", "update"), ("Backups", "backups"),
+                ("Temp Access", "tempaccess")]
 # label -> url slug (all tabs are wired to the engine now)
 _LIVE_TABS = {"Overview": "", "Provision": "provision",
               "Routes": "routes", "WAN": "wan",
@@ -584,11 +585,12 @@ _LIVE_TABS = {"Overview": "", "Provision": "provision",
               "DNS": "nextdns", "Queues": "qos", "QoS": "qos", "Port forwarding": "portfwd",
               "Interfaces": "interfaces", "Remote access": "remote",
               "Tunnel": "tunnel", "Scripts": "scripts",
-              "Update": "update", "Backups": "backups"}
+              "Update": "update", "Backups": "backups",
+              "Temp Access": "tempaccess"}
 # tabs that WRITE to the router (admins only); Overview is read-only
 _ADMIN_TABS = {"provision", "routes", "wan", "security", "harden", "nextdns",
                "qos", "portfwd", "remote", "tunnel", "scripts",
-               "update", "backups", "interfaces"}
+               "update", "backups", "tempaccess", "interfaces"}
 
 
 def _device_tabbar(name, active, is_admin=True, csrf="") -> str:
@@ -2971,6 +2973,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                             return self._send(403, "forbidden")
                         return self._device_backups_page(
                             dev, user, msg=q.get("msg", [""])[0])
+                    if tab == "tempaccess":
+                        if user is not None and not AuthStore.is_admin(user):
+                            return self._send(403, "forbidden")
+                        return self._device_tempaccess_page(
+                            dev, user, creds=None,
+                            msg=q.get("msg", [""])[0],
+                            error=q.get("error", [""])[0])
                     if tab == "provision":
                         if user is not None and not AuthStore.is_admin(user):
                             return self._send(403, "forbidden")
@@ -3045,8 +3054,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 store = self._store()
                 known = _known_devices(store, _load_state(state_file))
                 store.close()
+            q = parse_qs(urlparse(self.path).query)
+            org = auth.org(user["org_id"]) if auth else {}
             return self._send(200, _render_admin(
-                auth, known, self._session()["csrf"], user),
+                auth, known, self._session()["csrf"], user, org=org,
+                msg=q.get("ok", [""])[0], error=q.get("error", [""])[0]),
                 "text/html; charset=utf-8")
 
         def _serve_billing(self, url, user):
@@ -4162,6 +4174,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._devices_post(path, flat, multi, user)
             if path == "/device/backup":
                 return self._device_backup_post(flat, user)
+            if path == "/device/tempaccess":
+                return self._post_tempaccess(flat, user)
             if path == "/device/provision":
                 return self._device_provision_post(flat, user)
             if path == "/device/push":
@@ -4182,6 +4196,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._device_access_post(flat, user)
             if path == "/device/confirm":
                 return self._device_confirm_post(flat, user)
+            if path == "/admin/company":
+                return self._post_company(flat, user)
             try:
                 if path == "/admin/add":
                     auth.add_member(user["org_id"], flat.get("email", ""),
@@ -4384,6 +4400,153 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             except Exception as exc:  # noqa: BLE001
                 return self._redirect("/account?error=" + quote(str(exc)))
             return self._redirect("/account?ok=" + quote("Saved."))
+
+        # ---- Temp Access tab ----
+        def _device_tempaccess_page(self, name, user, creds=None,
+                                    msg="", error=""):
+            raw = self._device_raw(name)
+            if raw is None:
+                return self._send(400, "Device not managed in the dashboard.")
+            facts = (_load_state(state_file).get("devices", {})
+                     .get(name, {}).get("facts", {}))
+            sess = self._session()
+            csrf = sess["csrf"] if sess else ""
+            tabbar = _device_tabbar(name, "tempaccess", True, csrf)
+            host = facts.get("host") or raw.get("host", "")
+            api_port = raw.get("api_port", 8728)
+            note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
+                   (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
+            creds_html = ""
+            if creds:
+                creds_html = (
+                    f'<div class="box" style="border-left:4px solid #d97706">'
+                    f'<h2 style="margin-top:0">&#9888; Copy these now — shown once</h2>'
+                    f'<table style="font-size:14px;width:auto;border:0">'
+                    f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Username</td>'
+                    f'<td><code style="font-size:15px;font-weight:700">'
+                    f'{esc(creds["username"])}</code></td></tr>'
+                    f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Password</td>'
+                    f'<td><code style="font-size:15px;font-weight:700">'
+                    f'{esc(creds["password"])}</code></td></tr>'
+                    f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Group</td>'
+                    f'<td>{esc(creds["group"])}</td></tr>'
+                    f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Expires</td>'
+                    f'<td>{esc(creds["exp_time"])} on router clock '
+                    f'({esc(str(creds["duration_mins"]))} min)</td></tr>'
+                    f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Router</td>'
+                    f'<td>{esc(host)}:{esc(str(api_port))}</td></tr>'
+                    f'</table>'
+                    f'<p class="muted" style="margin:14px 0 0">These credentials are '
+                    f'automatically deleted from the router when they expire. '
+                    f'{("Restricted to your IP: " + esc(creds["allowed_ip"])) if creds.get("allowed_ip") else "No IP restriction."}'
+                    f'</p></div>')
+            form = (
+                f'<div class="box"><h2>Create temporary login</h2>'
+                f'<p class="muted" style="margin-top:0">Generates a random username '
+                f'and password on the router that expires automatically. '
+                f'The credentials are deleted from the router when the timer runs out.</p>'
+                f'<form method="POST" action="/device/tempaccess">'
+                f'<input type="hidden" name="csrf" value="{csrf}">'
+                f'<input type="hidden" name="device" value="{esc(name)}">'
+                f'<div class="fields">'
+                f'<label class="f">Duration'
+                f'<select name="duration_mins" style="width:100%">'
+                f'<option value="15">15 minutes</option>'
+                f'<option value="30" selected>30 minutes</option>'
+                f'<option value="60">1 hour</option>'
+                f'</select></label>'
+                f'<label class="f">Access level'
+                f'<select name="group" style="width:100%">'
+                f'<option value="read" selected>Read-only (monitor, cannot change settings)</option>'
+                f'<option value="write">Write (can change most settings)</option>'
+                f'<option value="full">Full (complete router access)</option>'
+                f'</select></label>'
+                f'<label class="f">IP restriction'
+                f'<select name="restrict_ip" style="width:100%">'
+                f'<option value="browser">My current IP ({esc(self.client_address[0])})</option>'
+                f'<option value="none">No restriction (any IP)</option>'
+                f'</select></label>'
+                f'</div>'
+                f'<div style="margin-top:16px">'
+                f'<button class="btn" type="submit">Create credentials</button>'
+                f'</div></form></div>')
+            inner = (f'<div class="wrap"><h1>Temp Access — {esc(name)}</h1>'
+                     f'{tabbar}{note}{creds_html}{form}</div>')
+            return self._send(200,
+                              _page(f"Temp Access — {name}",
+                                    _header(user, "") + inner),
+                              "text/html; charset=utf-8")
+
+        def _post_tempaccess(self, flat, user):
+            if not AuthStore.is_admin(user or {}):
+                return self._send(403, "forbidden")
+            name = flat.get("device", "")
+            raw = self._device_raw(name)
+            if raw is None:
+                return self._send(400, "Device not managed in the dashboard.")
+            duration_mins = int(flat.get("duration_mins", "30") or "30")
+            duration_mins = max(5, min(120, duration_mins))
+            group = flat.get("group", "read").strip()
+            if group not in ("read", "write", "full"):
+                group = "read"
+            restrict = flat.get("restrict_ip", "browser")
+            allowed_ip = (self.client_address[0]
+                          if restrict == "browser" else "")
+            import secrets as _sec
+            username = "tmp" + _sec.token_hex(4)
+            password = _sec.token_urlsafe(12)
+            from .config import build_device
+            from .device import DeviceError
+            from .push import Pusher, PushError, rw_device
+            from .push.api import PushApi
+            cfg = build_device(raw, defaults)
+            dev = rw_device(cfg)
+            api = PushApi(dev)
+            try:
+                api.connect()
+                pusher = Pusher(cfg, api, dry_run=False,
+                                audit=self._auditlog(),
+                                user=user.get("login", ""))
+                plan = pusher.plan_tempuser(
+                    username=username, password=password,
+                    group=group, allowed_ip=allowed_ip,
+                    duration_mins=duration_mins)
+                pusher.apply(plan, feature="tempaccess")
+                # Read back router time for the expiry display
+                from .push.runner import _router_datetime
+                import datetime as _dt
+                rdt = _router_datetime(api) or _dt.datetime.now()
+                exp = (rdt + _dt.timedelta(minutes=duration_mins)).strftime("%H:%M:%S")
+            except (DeviceError, PushError) as exc:
+                dev.close()
+                q = quote(name)
+                return self._redirect(
+                    f"/device?name={q}&tab=tempaccess&error=" + quote(str(exc)))
+            finally:
+                dev.close()
+            creds = {"username": username, "password": password,
+                     "group": group, "allowed_ip": allowed_ip,
+                     "duration_mins": duration_mins, "exp_time": exp}
+            return self._device_tempaccess_page(name, user, creds=creds)
+
+        # ---- Company details (admin/owner only) ----
+        def _post_company(self, flat, user):
+            new_name = flat.get("org_name", "").strip()
+            if not new_name:
+                return self._redirect("/admin?error=" + quote(
+                    "Company name cannot be empty."))
+            try:
+                auth.set_org_name(user["org_id"], new_name)
+                auth.set_org_details(
+                    user["org_id"],
+                    contact=flat.get("org_contact", ""),
+                    phone=flat.get("org_phone", ""),
+                    address=flat.get("org_address", ""),
+                    vat_number=flat.get("org_vat", ""),
+                )
+            except Exception as exc:  # noqa: BLE001
+                return self._redirect("/admin?error=" + quote(str(exc)))
+            return self._redirect("/admin?ok=" + quote("Company details saved."))
 
     return Handler
 

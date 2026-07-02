@@ -105,6 +105,10 @@ class AuthStore:
         # Additive column migrations — safe to run every startup.
         self._add_col_if_missing("users", "phone", "TEXT")
         self._add_col_if_missing("orgs", "plan", "TEXT NOT NULL DEFAULT 'free'")
+        self._add_col_if_missing("orgs", "contact", "TEXT")
+        self._add_col_if_missing("orgs", "phone", "TEXT")
+        self._add_col_if_missing("orgs", "address", "TEXT")
+        self._add_col_if_missing("orgs", "vat_number", "TEXT")
 
     def _add_col_if_missing(self, table: str, col: str, col_def: str) -> None:
         try:
@@ -305,17 +309,42 @@ class AuthStore:
     def org(self, org_id: int) -> dict | None:
         try:
             row = self.db.execute(
-                "SELECT id, name, plan, created FROM orgs WHERE id = ?",
+                "SELECT id, name, plan, created, contact, phone, address, vat_number "
+                "FROM orgs WHERE id = ?",
                 (int(org_id),)).fetchone()
-            return ({"id": row[0], "name": row[1], "plan": row[2], "created": row[3]}
-                    if row else None)
+            if not row:
+                return None
+            return {"id": row[0], "name": row[1], "plan": row[2], "created": row[3],
+                    "contact": row[4] or "", "phone": row[5] or "",
+                    "address": row[6] or "", "vat_number": row[7] or ""}
         except Exception:
-            # plan column not migrated yet — fall back to old query
             row = self.db.execute(
                 "SELECT id, name, created FROM orgs WHERE id = ?",
                 (int(org_id),)).fetchone()
-            return ({"id": row[0], "name": row[1], "plan": "free", "created": row[2]}
+            return ({"id": row[0], "name": row[1], "plan": "free", "created": row[2],
+                     "contact": "", "phone": "", "address": "", "vat_number": ""}
                     if row else None)
+
+    def set_org_name(self, org_id: int, name: str) -> None:
+        name = name.strip()
+        if not name:
+            raise AuthError("Company name cannot be empty.")
+        with self._lock:
+            self.db.execute("UPDATE orgs SET name = ? WHERE id = ?",
+                            (name, int(org_id)))
+            self.db.commit()
+
+    def set_org_details(self, org_id: int, *, contact: str = "",
+                        phone: str = "", address: str = "",
+                        vat_number: str = "") -> None:
+        with self._lock:
+            self.db.execute(
+                "UPDATE orgs SET contact=?, phone=?, address=?, vat_number=? "
+                "WHERE id = ?",
+                (contact.strip() or None, phone.strip() or None,
+                 address.strip() or None, vat_number.strip() or None,
+                 int(org_id)))
+            self.db.commit()
 
     def set_phone(self, identifier: str, phone: str) -> None:
         self._update(self._require(identifier)["id"], phone=_norm_phone(phone) or None)

@@ -19,6 +19,29 @@ log = logging.getLogger(__name__)
 # Name of the on-router scheduler that performs the commit-confirm auto-revert.
 _REVERT_SCHED = "mikromon-autorevert"
 
+_ROS_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun",
+               "jul", "aug", "sep", "oct", "nov", "dec"]
+
+
+def _router_datetime(api) -> datetime.datetime | None:
+    """Fetch the router's current date+time via the API clock resource."""
+    try:
+        rows = api.fetch(("system", "clock"))
+        if not rows:
+            return None
+        c = rows[0]
+        ds = str(c.get("date", ""))  # e.g. "jul/02/2026"
+        ts = str(c.get("time", ""))  # e.g. "14:35:22"
+        dp = ds.split("/")
+        tp = ts.split(":")
+        if len(dp) != 3 or len(tp) != 3:
+            return None
+        mon = _ROS_MONTHS.index(dp[0].lower()) + 1
+        return datetime.datetime(int(dp[2]), mon, int(dp[1]),
+                                 int(tp[0]), int(tp[1]), int(tp[2]))
+    except Exception:
+        return None
+
 
 def rw_device(cfg):
     """Build a Device that authenticates with the read-write push credentials
@@ -90,6 +113,46 @@ class Pusher:
                       desc=f"prune old backup '{r['name']}'")
             for r in managed[keep:] if r.get(".id")
         ]
+
+    def plan_tempuser(self, *, username: str, password: str,
+                      group: str = "read", allowed_ip: str = "",
+                      duration_mins: int = 30) -> Plan:
+        """Create a temporary local router user that auto-deletes after duration_mins.
+
+        A RouterOS scheduler entry is created alongside the user; when it fires
+        it removes the user and then removes itself. The user's source-IP can be
+        restricted to `allowed_ip` (CIDR or bare IP); leave empty for no restriction.
+        """
+        sched_name = f"mm-tmpd-{username}"
+        now = _router_datetime(self.api) or datetime.datetime.now()
+        expiry = now + datetime.timedelta(minutes=duration_mins)
+        exp_date = f"{_ROS_MONTHS[expiry.month - 1]}/{expiry.day:02d}/{expiry.year}"
+        exp_time = expiry.strftime("%H:%M:%S")
+        on_event = (f'/user remove [find name="{username}"]\r\n'
+                    f'/system scheduler remove [find name="{sched_name}"]')
+        user_params: dict = {"name": username, "password": password,
+                             "group": group, "comment": "mikromon:tempuser"}
+        if allowed_ip:
+            user_params["address"] = (allowed_ip if "/" in allowed_ip
+                                      else f"{allowed_ip}/32")
+        add_user = Operation(
+            "add", ("user",), user_params,
+            desc=f"create temp user '{username}' (expires in {duration_mins} min)",
+            inverse=Operation("remove", ("user",), {},
+                              desc=f"remove temp user '{username}'"))
+        add_sched = Operation(
+            "add", ("system", "scheduler"), {
+                "name": sched_name,
+                "start-date": exp_date, "start-time": exp_time,
+                "interval": "00:00:00",
+                "on-event": on_event,
+                "policy": "read,write,policy",
+                "comment": "mikromon:tempuser",
+            },
+            desc=f"auto-delete temp user at {exp_date} {exp_time}",
+            inverse=Operation("remove", ("system", "scheduler"), {},
+                              desc=f"cancel auto-delete for '{username}'"))
+        return Plan(self.cfg.name, [add_user, add_sched], summary="temp user")
 
     def plan_restore(self, name: str) -> Plan:
         """Restore a .backup file. RouterOS REBOOTS to apply, so this is a
