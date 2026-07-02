@@ -34,6 +34,11 @@ DATASETS = {
     "wifi_reg": ("interface", "wifi", "registration-table"),  # wifiwave2 (v7)
     "arp": ("ip", "arp"),
     "hotspot_active": ("ip", "hotspot", "active"),
+    # Bridge MAC table — most reliable "currently sending traffic" signal.
+    # Entries are learned per-frame and aged out (default 5 min) when traffic
+    # stops, so this reflects real-time layer-2 activity regardless of DHCP or
+    # ARP state.
+    "bridge_host": ("interface", "bridge", "host"),
     # per-client usage sources
     "queue_simple": ("queue", "simple"),
     "kid_control": ("ip", "kid-control", "device"),

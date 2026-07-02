@@ -124,7 +124,7 @@ class DeviceConfig:
     monitor_interfaces: list = field(default_factory=list)
     # which sources to count for device-count anomaly: dhcp|wireless|arp|hotspot
     client_count_sources: list = field(
-        default_factory=lambda: ["wireless", "arp"])
+        default_factory=lambda: ["bridge", "wireless"])
     # interfaces to track for WAN throughput ([] = auto: the WAN uplinks)
     traffic_interfaces: list = field(default_factory=list)
     checks: dict = field(default_factory=lambda: dict(DEFAULT_CHECKS))
