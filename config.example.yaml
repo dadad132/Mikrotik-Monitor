@@ -91,19 +91,21 @@ confirmations: 2
 # Email / SMTP — where alerts are delivered.
 # ----------------------------------------------------------------------------
 smtp:
-  host: smtp.gmail.com
+  # cPanel / shared hosting (e.g. domains.co.za):
+  host: mail.yourdomain.com
   port: 587
-  username: alerts@yourcompany.com
-  password: "your-app-password"      # for Gmail/O365 use an App Password
+  username: noreply@yourdomain.com
+  password: "your-email-password"
   use_tls: true                       # STARTTLS on port 587 (recommended)
-  use_ssl: false                      # implicit SSL on port 465 (set port: 465)
-  from_addr: alerts@yourcompany.com
-  to_addrs:
-    - itadmin@yourcompany.com
-    # - oncall@yourcompany.com
-  subject_prefix: "[MikroMon]"
+  use_ssl: false                      # set true and port: 465 for implicit SSL
+  from_addr: noreply@yourdomain.com
+  # to_addrs is used only when per-org alert_emails are not configured.
+  # In multi-tenant mode each company manages its own recipient list via the
+  # Admin → Company details page. Leave this list empty or add a fallback.
+  to_addrs: []
+  subject_prefix: "[EasyMikrotik]"
   # Only email alerts at or above this severity: INFO / WARNING / CRITICAL
-  min_severity: INFO
+  min_severity: WARNING
 
 # ----------------------------------------------------------------------------
 # Default thresholds (apply to all devices unless overridden).
