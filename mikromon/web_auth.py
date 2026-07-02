@@ -105,6 +105,10 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
     company_box = ""
     if AuthStore.is_owner(user) and org is not None:
         o = org
+        sched = o.get("report_schedule") or "none"
+        def _sched_opt(val, label):
+            sel = ' selected' if sched == val else ''
+            return f'<option value="{val}"{sel}>{label}</option>'
         company_box = (
             f'<div class="box"><h2 style="margin-top:0">Company details</h2>'
             f'<form method="POST" action="/account">'
@@ -126,16 +130,40 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
             f'<label class="f full">Physical address'
             f'<input name="org_address" value="{esc(o.get("address", ""))}" '
             f'placeholder="Street, City, Province, Postal code" style="width:100%"></label>'
+            f'</div>'
+            f'<h3 style="margin:20px 0 8px">Alert notifications</h3>'
+            f'<div class="fields">'
             f'<label class="f full">WAN alert recipients'
             f'<span style="color:#64748b;font-size:12px;font-weight:normal;margin-left:6px">'
             f'Comma-separated — notified when any WAN uplink changes state</span>'
-            f'<input name="alert_emails" type="text" '
+            f'<div style="display:flex;gap:8px;align-items:center">'
+            f'<input name="alert_emails" type="text" id="alert_emails_input" '
             f'value="{esc(", ".join(o.get("alert_emails") or []))}" '
-            f'placeholder="it@company.com, manager@company.com" style="width:100%"></label>'
+            f'placeholder="it@company.com, manager@company.com" '
+            f'style="flex:1;min-width:0"></div></label>'
+            f'<label class="f full">Status report emails'
+            f'<span style="color:#64748b;font-size:12px;font-weight:normal;margin-left:6px">'
+            f'Send a device status summary to alert recipients</span>'
+            f'<select name="report_schedule" style="width:auto">'
+            + _sched_opt("none", "Disabled")
+            + _sched_opt("weekly", "Weekly (every 7 days)")
+            + _sched_opt("biweekly", "Bi-weekly (every 14 days)")
+            + _sched_opt("monthly", "Monthly (every 30 days)")
+            + f'</select></label>'
             f'</div>'
-            f'<div style="margin-top:16px">'
+            f'<div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">'
             f'<button class="btn" type="submit">Save company details</button>'
-            f'</div></form></div>')
+            f'</div></form>'
+            f'<form method="POST" action="/account/send-test-email" '
+            f'style="margin-top:8px">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            f'<button class="btn" type="submit" '
+            f'style="background:#0f766e;border-color:#0f766e" '
+            f'onclick="this.textContent=\'Sending…\';this.disabled=true">'
+            f'&#9993; Send test email</button>'
+            f'<span style="color:#64748b;font-size:12px;margin-left:8px">'
+            f'Sends a test notification to the alert recipients above</span>'
+            f'</form></div>')
     inner = (
         f'<div class="wrap"><h1>My account</h1>'
         f'<p class="muted" style="margin-top:-8px">'

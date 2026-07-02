@@ -149,7 +149,16 @@ class Engine:
             batch.extend(self._poll_device(device))
         self.dispatch(batch)
         self.state.save()
+        self._check_scheduled_reports()
         return batch
+
+    def _check_scheduled_reports(self) -> None:
+        for n in self.notifiers:
+            if hasattr(n, "check_scheduled"):
+                try:
+                    n.check_scheduled(self.state, self.devices_store)
+                except Exception:  # noqa: BLE001
+                    log.exception("check_scheduled failed for %s", n.name)
 
     # ----- per-device -------------------------------------------------------
     def _poll_device(self, device) -> list:

@@ -2775,7 +2775,8 @@ class SessionManager:
 def make_handler(metrics_db, state_file, auth: AuthStore | None,
                  sessions: SessionManager, secure_cookies=False,
                  metrics_token=None, devices_db=None, defaults=None,
-                 push_log_db=None, access_cfg=None, billing_cfg=None):
+                 push_log_db=None, access_cfg=None, billing_cfg=None,
+                 smtp_cfg=None):
     defaults = defaults or {}
     access_cfg = access_cfg or {}
     billing_cfg = billing_cfg or {}
@@ -4195,6 +4196,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # /account: any logged-in user edits their own email/password.
             if path == "/account":
                 return self._post_account()
+            if path == "/account/send-test-email":
+                return self._post_test_email()
             # Everything below requires an owner + a valid CSRF token.
             user = self._user()
             if not AuthStore.is_admin(user or {}):
@@ -4460,6 +4463,36 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._redirect("/account?error=" + quote(str(exc)))
             return self._redirect("/account?ok=" + quote("Saved."))
 
+        def _post_test_email(self):
+            user = self._user()
+            if not user:
+                return self._redirect("/login")
+            flat, _ = self._form()
+            if flat.get("csrf") != self._session()["csrf"]:
+                return self._send(400, "bad csrf token")
+            if not AuthStore.is_owner(user):
+                return self._send(403, "forbidden")
+            if not smtp_cfg:
+                return self._redirect(
+                    "/account?error=" + quote("SMTP is not configured on this server."))
+            recipients = auth.get_alert_emails(user["org_id"]) if auth else []
+            if not recipients:
+                return self._redirect(
+                    "/account?error=" + quote(
+                        "No alert email addresses are set for your company. "
+                        "Add at least one address in the Company details section."))
+            try:
+                from .notify.org_email import send_test_email
+                prefix = smtp_cfg.subject_prefix if smtp_cfg else "[EasyMikrotik]"
+                org_name = auth.org_name(user["org_id"]) if auth else ""
+                send_test_email(smtp_cfg, recipients, org_name, prefix)
+            except Exception as exc:  # noqa: BLE001
+                return self._redirect(
+                    "/account?error=" + quote(f"Failed to send test email: {exc}"))
+            return self._redirect(
+                "/account?ok=" + quote(
+                    f"Test email sent to: {', '.join(recipients)}"))
+
         # ---- Temp Access tab ----
         def _device_tempaccess_page(self, name, user, creds=None,
                                     msg="", error=""):
@@ -4607,6 +4640,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 alert_list = [e.strip().lower() for e in alert_raw.split(",")
                               if e.strip()]
                 auth.set_alert_emails(user["org_id"], alert_list)
+                sched = flat.get("report_schedule", "none")
+                if sched in ("none", "weekly", "biweekly", "monthly"):
+                    auth.set_report_schedule(user["org_id"], sched)
             except Exception as exc:  # noqa: BLE001
                 return self._redirect("/account?error=" + quote(str(exc)))
             return self._redirect("/account?ok=" + quote("Company details saved."))
@@ -4645,7 +4681,8 @@ def _register_hub_peer(device_name: str, api, flat: dict, devices_db: str) -> No
 
 def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,
           secure_cookies=False, metrics_token=None, devices_db=None,
-          defaults=None, push_log_db=None, access_cfg=None, billing_cfg=None):
+          defaults=None, push_log_db=None, access_cfg=None, billing_cfg=None,
+          smtp_cfg=None):
     if metrics_db and not os.path.exists(metrics_db):
         log.warning("metrics DB %s not found yet — start the monitor first",
                     metrics_db)
@@ -4658,7 +4695,7 @@ def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,
         (host, port), make_handler(metrics_db, state_file, auth, sessions,
                                    secure_cookies, metrics_token, devices_db,
                                    defaults, push_log_db, access_cfg,
-                                   billing_cfg))
+                                   billing_cfg, smtp_cfg))
     scheme = "auth ON" if auth else "auth OFF (open)"
     billing_note = "  billing ON" if (billing_cfg or {}).get("db") else ""
     log.info("Dashboard at http://%s:%d  [%s]%s  Prometheus: /metrics",

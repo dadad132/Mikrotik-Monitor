@@ -61,6 +61,15 @@ CREATE TABLE IF NOT EXISTS users (
 """
 
 
+def _next_report_due(schedule: str, from_ts: float | None = None) -> float | None:
+    """Return the unix timestamp when the next scheduled report should fire."""
+    intervals = {"weekly": 7 * 86400, "biweekly": 14 * 86400, "monthly": 30 * 86400}
+    secs = intervals.get(schedule)
+    if secs is None:
+        return None
+    return (from_ts or time.time()) + secs
+
+
 def hash_password(password: str, salt: bytes | None = None,
                   iterations: int = _ITERATIONS):
     salt = salt or secrets.token_bytes(16)
@@ -112,6 +121,9 @@ class AuthStore:
         self._add_col_if_missing("orgs", "address", "TEXT")
         self._add_col_if_missing("orgs", "vat_number", "TEXT")
         self._add_col_if_missing("orgs", "alert_emails", "TEXT NOT NULL DEFAULT '[]'")
+        self._add_col_if_missing("orgs", "report_schedule",
+                                 "TEXT NOT NULL DEFAULT 'none'")
+        self._add_col_if_missing("orgs", "report_next_due", "REAL")
 
     def _add_col_if_missing(self, table: str, col: str, col_def: str) -> None:
         try:
@@ -314,7 +326,7 @@ class AuthStore:
         try:
             row = self.db.execute(
                 "SELECT id, name, plan, created, contact, phone, address, "
-                "vat_number, alert_emails "
+                "vat_number, alert_emails, report_schedule "
                 "FROM orgs WHERE id = ?",
                 (int(org_id),)).fetchone()
             if not row:
@@ -326,14 +338,15 @@ class AuthStore:
             return {"id": row[0], "name": row[1], "plan": row[2], "created": row[3],
                     "contact": row[4] or "", "phone": row[5] or "",
                     "address": row[6] or "", "vat_number": row[7] or "",
-                    "alert_emails": alert_emails}
+                    "alert_emails": alert_emails,
+                    "report_schedule": row[9] or "none"}
         except Exception:
             row = self.db.execute(
                 "SELECT id, name, created FROM orgs WHERE id = ?",
                 (int(org_id),)).fetchone()
             return ({"id": row[0], "name": row[1], "plan": "free", "created": row[2],
                      "contact": "", "phone": "", "address": "", "vat_number": "",
-                     "alert_emails": []}
+                     "alert_emails": [], "report_schedule": "none"}
                     if row else None)
 
     def set_org_name(self, org_id: int, name: str) -> None:
@@ -374,6 +387,49 @@ class AuthStore:
             self.db.execute(
                 "UPDATE orgs SET alert_emails = ? WHERE id = ?",
                 (json.dumps(clean), int(org_id)))
+            self.db.commit()
+
+    def get_report_schedule(self, org_id: int) -> str:
+        row = self.db.execute(
+            "SELECT report_schedule FROM orgs WHERE id = ?",
+            (int(org_id),)).fetchone()
+        return (row[0] if row else None) or "none"
+
+    def set_report_schedule(self, org_id: int, schedule: str) -> None:
+        valid = {"none", "weekly", "biweekly", "monthly"}
+        if schedule not in valid:
+            raise ValueError(f"schedule must be one of {sorted(valid)}")
+        due = _next_report_due(schedule)
+        with self._lock:
+            self.db.execute(
+                "UPDATE orgs SET report_schedule=?, report_next_due=? WHERE id=?",
+                (schedule, due, int(org_id)))
+            self.db.commit()
+
+    def orgs_with_report_due(self, now: float) -> list:
+        """Return orgs whose scheduled report is overdue."""
+        rows = self.db.execute(
+            "SELECT id, name, report_schedule, alert_emails, report_next_due "
+            "FROM orgs WHERE report_schedule != 'none' "
+            "AND report_next_due IS NOT NULL AND report_next_due <= ?",
+            (now,)).fetchall()
+        result = []
+        for r in rows:
+            try:
+                emails = [e for e in json.loads(r[3] or "[]") if e]
+            except (json.JSONDecodeError, TypeError):
+                emails = []
+            result.append({
+                "org_id": r[0], "name": r[1], "schedule": r[2],
+                "alert_emails": emails,
+            })
+        return result
+
+    def set_report_next_due(self, org_id: int, ts: float | None) -> None:
+        with self._lock:
+            self.db.execute(
+                "UPDATE orgs SET report_next_due=? WHERE id=?",
+                (ts, int(org_id)))
             self.db.commit()
 
     def set_phone(self, identifier: str, phone: str) -> None:

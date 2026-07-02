@@ -122,7 +122,7 @@ def main(argv=None) -> int:
                   metrics_token=config.metrics_token,
                   devices_db=config.devices_db, defaults=config.defaults,
                   push_log_db=config.push_log_db, access_cfg=config.access,
-                  billing_cfg=config.billing)
+                  billing_cfg=config.billing, smtp_cfg=config.smtp)
         return 0
 
     if args.command == "list-checks":
