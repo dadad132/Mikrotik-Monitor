@@ -413,6 +413,7 @@ def _render_superadmin(user, rows: list, msg: str = "", error: str = "") -> str:
         plan = bill.get("plan") or ""
         device_limit = bill.get("device_limit") or FREE_DEVICES
         device_count = r.get("device_count", 0)
+        active_count = r.get("active_count", device_count)
         trial_end = bill.get("trial_end")
         grace_end = bill.get("grace_period_end")
 
@@ -434,7 +435,9 @@ def _render_superadmin(user, rows: list, msg: str = "", error: str = "") -> str:
             f'{f"<br><span class=\'muted\' style=\'font-size:11px;color:#d97706\'>grace ends {grace_str}</span>" if grace_str else ""}'
             f'</td>'
             f'<td>{esc(plan) if plan else "<span class=\'muted\'>—</span>"}</td>'
-            f'<td>{device_count} / {device_limit if device_limit else "∞"}</td>'
+            f'<td>{active_count}'
+            f'{"" if active_count == device_count else f" <span class=\"muted\" style=\"font-size:11px\">({device_count} total)</span>"}'
+            f' / {device_limit if device_limit else "∞"}</td>'
             f'<td>{created_str}</td>'
             f'</tr>'
         )

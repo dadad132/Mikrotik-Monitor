@@ -24,10 +24,10 @@ DEFAULT_THRESHOLDS = {
     "flap_window_s": 600,
     "flap_threshold": 4,
     # --- learned-baseline tuning (shared by the anomaly checks) ---
-    "baseline_alpha": 0.1,      # EWMA learning rate (lower = steadier)
-    "baseline_warmup": 24,      # samples a time-bucket needs before it can alert
+    "baseline_alpha": 0.05,     # EWMA learning rate (lower = steadier / longer memory)
+    "baseline_warmup": 168,     # ~7 days of data before a bucket starts alerting
     "baseline_z": 3.0,          # std-devs above normal to count as abnormal
-    "baseline_buckets": "hour",  # hour | hourweek | global
+    "baseline_buckets": "hourweek",  # hour | hourweek | global
     # device-count anomaly
     "client_min_count": 5,      # ignore networks smaller than this
     "client_count_ratio": 1.5,  # must be >=1.5x the typical count to alert

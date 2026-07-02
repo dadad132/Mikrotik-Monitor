@@ -2458,7 +2458,8 @@ def _render_upgrade_wall(user, current_count: int = 0) -> str:
 
 
 def _render_devices(store, csrf, user, edit_name=None, msg="",
-                    all_devs=None, org_count: int = 0, org_plan: str = "free") -> str:
+                    all_devs=None, org_count: int = 0, org_total: int = 0,
+                    org_plan: str = "free") -> str:
     if store is None:
         return _page("Devices", _header(user, "/devices") + '<div class="wrap">'
                      '<h1>Devices</h1><div class="box">Device management is not '
@@ -2677,8 +2678,15 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
     # TODO: re-enable after testing
     # if org_plan == "free": ...
 
+    # Show active vs total count when there are waiting (never-connected) devices.
+    count_note = ""
+    if org_total > org_count:
+        count_note = (f'<p class="muted" style="margin:0 0 12px">'
+                      f'{org_count} active / {org_total} total '
+                      f'({org_total - org_count} waiting for first connection)</p>')
+
     inner = (f'<div class="wrap" style="max-width:1200px"><h1>Devices</h1>'
-             f'{msg_html}{plan_banner}{inv_table}</div>'
+             f'{msg_html}{plan_banner}{count_note}{inv_table}</div>'
              f'{add_modal}{edit_modal}{auto_open}')
     return _page("Devices", _header(user, "/devices") + inner + _WAN_JS + inv_js)
 
@@ -3098,15 +3106,21 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     bill = dict(bill)
                     bill["status"] = status
                 dev_count = 0
+                active_count = 0
                 if devices_db:
                     try:
                         from .devices_store import DevicesStore as _DS
                         _ds = _DS(devices_db)
-                        dev_count = _ds.count_for_org(oid)
+                        org_names = set(_ds.names_for_org(oid))
+                        dev_count = len(org_names)
                         _ds.close()
+                        known_set = set(_known_devices(self._store(),
+                                                       _load_state(state_file)))
+                        active_count = sum(1 for n in org_names if n in known_set)
                     except Exception:
                         pass
-                rows.append({**org, "bill": bill, "device_count": dev_count})
+                rows.append({**org, "bill": bill, "device_count": dev_count,
+                             "active_count": active_count})
             return self._send(200, _render_superadmin(
                 user, rows,
                 msg=q.get("ok", [""])[0],
@@ -3127,12 +3141,18 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 org_scope = (sorted(store.names_for_org(user["org_id"]))
                              if store else None)
                 all_devs = _all_devices(main_store, state, org_scope)
-                org_count = store.count_for_org(user["org_id"]) if store else 0
+                # Active = devices that have been polled at least once (have metrics).
+                known_all = set(_known_devices(main_store, state))
+                active_count = (sum(1 for n in (org_scope or []) if n in known_all)
+                                if org_scope is not None else len(known_all))
+                org_count = len(org_scope) if org_scope is not None else active_count
                 org_plan = (auth.org(user["org_id"]) or {}).get("plan", "free") if auth else "free"
                 page = _render_devices(store, self._session()["csrf"], user,
                                        edit_name=edit,
                                        all_devs=all_devs,
-                                       org_count=org_count, org_plan=org_plan)
+                                       org_count=active_count,
+                                       org_total=org_count,
+                                       org_plan=org_plan)
             finally:
                 if store:
                     store.close()
@@ -4061,11 +4081,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     orig = flat.get("original_name") or None
                     # TODO: re-enable after testing
                     # if not orig and auth:
-                    #     org_count = store.count_for_org(user["org_id"])
+                    #     state = _load_state(state_file)
+                    #     org_scope = sorted(store.names_for_org(user["org_id"]))
+                    #     active_count = sum(1 for n in org_scope
+                    #                       if n in set(_known_devices(self._store(), state)))
                     #     org_plan = (auth.org(user["org_id"]) or {}).get("plan", "free")
-                    #     if org_plan == "free" and org_count >= _FREE_PLAN_DEVICE_LIMIT:
+                    #     if org_plan == "free" and active_count >= _FREE_PLAN_DEVICE_LIMIT:
                     #         return self._send(200,
-                    #             _render_upgrade_wall(user, org_count),
+                    #             _render_upgrade_wall(user, active_count),
                     #             "text/html; charset=utf-8")
                     # Script-first add: no public IP entered -> provision over
                     # the tunnel. Pre-assign a stable tunnel IP now so the record
@@ -4530,7 +4553,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     f'</table>'
                     f'<p class="muted" style="margin:14px 0 0">These credentials are '
                     f'automatically deleted from the router when they expire. '
-                    f'{("Restricted to your IP: " + esc(creds["allowed_ip"])) if creds.get("allowed_ip") else "No IP restriction."}'
+                    f'Connect via the router\'s WireGuard tunnel address shown above.'
                     f'</p></div>')
             form = (
                 f'<div class="box"><h2>Create temporary login</h2>'
@@ -4553,11 +4576,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 f'<option value="write">Write (can change most settings)</option>'
                 f'<option value="full">Full (complete router access)</option>'
                 f'</select></label>'
-                f'<label class="f">IP restriction'
-                f'<select name="restrict_ip" style="width:100%">'
-                f'<option value="browser">My current IP ({esc(self.client_address[0])})</option>'
-                f'<option value="none">No restriction (any IP)</option>'
-                f'</select></label>'
+                f'<p class="muted" style="margin:0;font-size:13px;padding:10px 12px;'
+                f'background:#f1f5f9;border-radius:6px;border-left:3px solid #38bdf8">'
+                f'<b>Network security:</b> Access is via the WireGuard tunnel '
+                f'(address <code>10.10.0.x</code>). Only devices enrolled as WireGuard '
+                f'peers can reach the router &mdash; so no additional IP restriction is '
+                f'needed.</p>'
                 f'</div>'
                 f'<div style="margin-top:16px">'
                 f'<button class="btn" type="submit">Create credentials</button>'
@@ -4581,9 +4605,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             group = flat.get("group", "read").strip()
             if group not in ("read", "write", "full"):
                 group = "read"
-            restrict = flat.get("restrict_ip", "browser")
-            allowed_ip = (self.client_address[0]
-                          if restrict == "browser" else "")
+            allowed_ip = ""  # WireGuard tunnel is the security boundary
             import secrets as _sec
             username = "tmp" + _sec.token_hex(4)
             password = _sec.token_urlsafe(12)
