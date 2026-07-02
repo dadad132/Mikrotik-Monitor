@@ -4271,6 +4271,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                      flat.get("company", ""), phone=phone)
                 if billing:
                     billing.start_trial(org_id)
+                alert_raw = flat.get("alert_emails", "")
+                alert_list = [e.strip().lower() for e in alert_raw.split(",")
+                              if e.strip()]
+                if alert_list:
+                    auth.set_alert_emails(org_id, alert_list)
             except Exception as exc:  # noqa: BLE001 — show the reason on the form
                 return self._redirect("/signup?error=" + quote(str(exc)))
             token = sessions.create(email)
@@ -4544,6 +4549,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     address=flat.get("org_address", ""),
                     vat_number=flat.get("org_vat", ""),
                 )
+                alert_raw = flat.get("alert_emails", "")
+                alert_list = [e.strip().lower() for e in alert_raw.split(",")
+                              if e.strip()]
+                auth.set_alert_emails(user["org_id"], alert_list)
             except Exception as exc:  # noqa: BLE001
                 return self._redirect("/admin?error=" + quote(str(exc)))
             return self._redirect("/admin?ok=" + quote("Company details saved."))

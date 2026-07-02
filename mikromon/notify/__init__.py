@@ -9,6 +9,7 @@ from __future__ import annotations
 from .base import Notifier  # noqa: F401  (re-export)
 from .email_smtp import EmailNotifier
 from .file_outbox import OutboxNotifier
+from .org_email import OrgEmailNotifier  # noqa: F401  (re-export)
 
 
 def build_notifiers(config):
@@ -18,4 +19,10 @@ def build_notifiers(config):
     if getattr(config, "outbox_dir", None):
         prefix = config.smtp.subject_prefix if config.smtp else "[MikroMon]"
         notifiers.append(OutboxNotifier(config.outbox_dir, subject_prefix=prefix))
+    # Multi-tenant mode: route WAN alerts to per-org recipients.
+    if (config.smtp
+            and getattr(config, "auth_db", None)
+            and getattr(config, "devices_db", None)):
+        notifiers.append(OrgEmailNotifier(
+            config.smtp, config.auth_db, config.devices_db))
     return notifiers

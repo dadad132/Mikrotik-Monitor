@@ -109,6 +109,7 @@ class AuthStore:
         self._add_col_if_missing("orgs", "phone", "TEXT")
         self._add_col_if_missing("orgs", "address", "TEXT")
         self._add_col_if_missing("orgs", "vat_number", "TEXT")
+        self._add_col_if_missing("orgs", "alert_emails", "TEXT NOT NULL DEFAULT '[]'")
 
     def _add_col_if_missing(self, table: str, col: str, col_def: str) -> None:
         try:
@@ -309,20 +310,27 @@ class AuthStore:
     def org(self, org_id: int) -> dict | None:
         try:
             row = self.db.execute(
-                "SELECT id, name, plan, created, contact, phone, address, vat_number "
+                "SELECT id, name, plan, created, contact, phone, address, "
+                "vat_number, alert_emails "
                 "FROM orgs WHERE id = ?",
                 (int(org_id),)).fetchone()
             if not row:
                 return None
+            try:
+                alert_emails = json.loads(row[8] or "[]")
+            except (json.JSONDecodeError, TypeError):
+                alert_emails = []
             return {"id": row[0], "name": row[1], "plan": row[2], "created": row[3],
                     "contact": row[4] or "", "phone": row[5] or "",
-                    "address": row[6] or "", "vat_number": row[7] or ""}
+                    "address": row[6] or "", "vat_number": row[7] or "",
+                    "alert_emails": alert_emails}
         except Exception:
             row = self.db.execute(
                 "SELECT id, name, created FROM orgs WHERE id = ?",
                 (int(org_id),)).fetchone()
             return ({"id": row[0], "name": row[1], "plan": "free", "created": row[2],
-                     "contact": "", "phone": "", "address": "", "vat_number": ""}
+                     "contact": "", "phone": "", "address": "", "vat_number": "",
+                     "alert_emails": []}
                     if row else None)
 
     def set_org_name(self, org_id: int, name: str) -> None:
@@ -344,6 +352,25 @@ class AuthStore:
                 (contact.strip() or None, phone.strip() or None,
                  address.strip() or None, vat_number.strip() or None,
                  int(org_id)))
+            self.db.commit()
+
+    def get_alert_emails(self, org_id: int) -> list:
+        row = self.db.execute(
+            "SELECT alert_emails FROM orgs WHERE id = ?",
+            (int(org_id),)).fetchone()
+        if not row:
+            return []
+        try:
+            return [e for e in json.loads(row[0] or "[]") if e]
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    def set_alert_emails(self, org_id: int, emails: list) -> None:
+        clean = [e.strip().lower() for e in emails if e.strip()]
+        with self._lock:
+            self.db.execute(
+                "UPDATE orgs SET alert_emails = ? WHERE id = ?",
+                (json.dumps(clean), int(org_id)))
             self.db.commit()
 
     def set_phone(self, identifier: str, phone: str) -> None:
