@@ -24,6 +24,10 @@ log = logging.getLogger(__name__)
 _NOTIFY_KEYS = {"wan_failover", "internet_down", "reachability"}
 
 
+def _should_notify(alert) -> bool:
+    return alert.key in _NOTIFY_KEYS or alert.key.startswith("wan_link:")
+
+
 class OrgEmailNotifier(Notifier):
     """Delivers WAN alerts to each org's alert recipients list."""
     name = "org_email"
@@ -34,7 +38,7 @@ class OrgEmailNotifier(Notifier):
         self._devices_db = devices_db_path
 
     def send(self, alerts) -> None:
-        targets = [a for a in alerts if a.key in _NOTIFY_KEYS]
+        targets = [a for a in alerts if _should_notify(a)]
         if not targets:
             return
 

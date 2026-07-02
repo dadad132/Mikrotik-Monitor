@@ -103,7 +103,7 @@ def _known_devices(store, state) -> list:
     return sorted(set(store.devices()) | set(state.get("devices", {}).keys()))
 
 
-def _visible_device_names(store, state, ds) -> set:
+def _visible_device_names(store, state, ds, org_id=None) -> set:
     """Which devices the dashboard / inventory / device pages may show.
 
     Web-managed mode (`devices_db` set, so `ds` is given): the devices DB is the
@@ -112,9 +112,14 @@ def _visible_device_names(store, state, ds) -> set:
     saved state linger (those get swept by the delete itself and by the engine's
     next poll). This is why a removed device no longer haunts the dashboard.
 
+    When `org_id` is given in web-managed mode only that company's devices are
+    returned — enforcing per-org isolation at the source.
+
     YAML mode (no `devices_db`, `ds` is None): fall back to anything that has
     metrics or saved state, since there is no managed inventory to defer to."""
     if ds is not None:
+        if org_id is not None:
+            return set(ds.names_for_org(org_id))
         return set(ds.names())
     return set(_known_devices(store, state))
 
@@ -2923,9 +2928,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._serve_superadmin(url, user)
             if path == "/account":
                 q = parse_qs(url.query)
+                org_data = auth.org(user["org_id"]) if auth else None
                 return self._send(200, _render_account(
                     user, self._session()["csrf"],
-                    msg=q.get("ok", [""])[0], error=q.get("error", [""])[0]),
+                    msg=q.get("ok", [""])[0], error=q.get("error", [""])[0],
+                    org=org_data),
                     "text/html; charset=utf-8")
             if path == "/admin":
                 return self._serve_admin(user)
@@ -2936,18 +2943,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
             store = self._store()
             ds = self._devstore()
-            # In web-managed mode show only devices still in the DB (hide
-            # orphans left in metrics/state); fall back to known in YAML mode.
-            known = _visible_device_names(store, _load_state(state_file), ds)
-            # Scope to the user's company: only devices their org owns.
-            org_names = (set(ds.names_for_org(user["org_id"]))
-                         if ds is not None else None)
+            # Web-managed: return only this org's devices. YAML mode: all known.
+            known = _visible_device_names(store, _load_state(state_file), ds,
+                                          user["org_id"])
             if ds:
                 ds.close()
             store.close()
-            scope = sorted(known & org_names) if org_names is not None \
-                else sorted(known)
-            allowed = AuthStore.allowed_devices(user, scope)
+            allowed = AuthStore.allowed_devices(user, sorted(known))
             return self._serve_data(path, url, user=user, allowed=allowed)
 
         def _serve_data(self, path, url, user, allowed):
@@ -2964,7 +2966,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     q = parse_qs(url.query)
                     dev = q.get("name", [""])[0]
                     ds = self._devstore()
-                    known = _visible_device_names(store, state, ds)
+                    known = _visible_device_names(
+                        store, state, ds,
+                        user["org_id"] if user else None)
                     if ds:
                         ds.close()
                     if dev not in known:
@@ -3059,9 +3063,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 known = _known_devices(store, _load_state(state_file))
                 store.close()
             q = parse_qs(urlparse(self.path).query)
-            org = auth.org(user["org_id"]) if auth else {}
             return self._send(200, _render_admin(
-                auth, known, self._session()["csrf"], user, org=org,
+                auth, known, self._session()["csrf"], user,
                 msg=q.get("ok", [""])[0], error=q.get("error", [""])[0]),
                 "text/html; charset=utf-8")
 
@@ -3118,9 +3121,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             main_store = self._store()
             try:
                 state = _load_state(state_file)
-                org_names = (set(store.names_for_org(user["org_id"])) if store else None)
-                scope = sorted(org_names) if org_names is not None else []
-                all_devs = _all_devices(main_store, state, scope if scope else None)
+                # None means "no devstore" (YAML mode) → show all.
+                # A list (even empty) means "only this org's devices".
+                org_scope = (sorted(store.names_for_org(user["org_id"]))
+                             if store else None)
+                all_devs = _all_devices(main_store, state, org_scope)
                 org_count = store.count_for_org(user["org_id"]) if store else 0
                 org_plan = (auth.org(user["org_id"]) or {}).get("plan", "free") if auth else "free"
                 page = _render_devices(store, self._session()["csrf"], user,
@@ -4434,6 +4439,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             flat, _ = self._form()
             if flat.get("csrf") != self._session()["csrf"]:
                 return self._send(400, "bad csrf token")
+            action = flat.get("action", "personal")
+            if action == "company":
+                if not AuthStore.is_owner(user):
+                    return self._send(403, "forbidden")
+                return self._post_company(flat, user)
+            # personal details
             new_email = flat.get("email", "").strip().lower()
             new_pw = flat.get("password", "")
             ident = user["login"]
@@ -4442,9 +4453,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     auth.set_password(ident, new_pw)
                 if new_email and new_email != (user.get("email") or ""):
                     auth.set_email(ident, new_email)
-                    # The session is keyed by login id. If they signed in with
-                    # the email they just changed, repoint it so they stay
-                    # logged in (signing in with a username keeps working as-is).
                     sess = self._session()
                     if sess and sess.get("login") == user.get("email"):
                         sess["login"] = new_email
@@ -4584,7 +4592,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
         def _post_company(self, flat, user):
             new_name = flat.get("org_name", "").strip()
             if not new_name:
-                return self._redirect("/admin?error=" + quote(
+                return self._redirect("/account?error=" + quote(
                     "Company name cannot be empty."))
             try:
                 auth.set_org_name(user["org_id"], new_name)
@@ -4600,8 +4608,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                               if e.strip()]
                 auth.set_alert_emails(user["org_id"], alert_list)
             except Exception as exc:  # noqa: BLE001
-                return self._redirect("/admin?error=" + quote(str(exc)))
-            return self._redirect("/admin?ok=" + quote("Company details saved."))
+                return self._redirect("/account?error=" + quote(str(exc)))
+            return self._redirect("/account?ok=" + quote("Company details saved."))
 
     return Handler
 

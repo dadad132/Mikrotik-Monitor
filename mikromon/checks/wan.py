@@ -74,6 +74,29 @@ class WanCheck(Check):
         defaults = [r for r in snap.rows("route") if _is_default(r)]
         want_failover = dev.check_enabled("wan_failover")
         want_down = dev.check_enabled("internet_down")
+        links = dev.wan.links
+
+        # ---- per-uplink status (one alert per configured link) ------------
+        # Fires whenever an individual link's gateway becomes unreachable or
+        # recovers, regardless of whether overall internet access is up.
+        if want_failover and links:
+            for idx, ep in enumerate(links):
+                link_name = ep.label(idx)
+                ep_routes = [r for r in defaults if _matches_endpoint(r, ep)]
+                if ep_routes:
+                    link_up = any(_is_active(r) for r in ep_routes)
+                    gw_status = str(ep_routes[0].get("gateway-status", "unknown"))
+                else:
+                    link_up = False
+                    gw_status = "no route found"
+                ctx.transition(
+                    f"wan_link:{idx}", healthy=link_up,
+                    severity=Severity.WARNING,
+                    title=f"WAN uplink \"{link_name}\" is DOWN",
+                    cause=(f"Gateway status: {gw_status}." if not link_up else ""),
+                    recovery_title=f"WAN uplink \"{link_name}\" is back UP",
+                    recovery_detail=f"Gateway: {gw_status}.",
+                )
 
         if not defaults:
             # Nothing routes to the internet at all.
@@ -121,7 +144,6 @@ class WanCheck(Check):
             return
 
         current = min(active, key=by_distance)
-        links = dev.wan.links
         _FO_PRI = "mikromon:failover:primary"
         _FO_SEC = "mikromon:failover:secondary"
         if links:
