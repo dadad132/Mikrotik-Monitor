@@ -1,122 +1,147 @@
 """Landing page for easymikrotik.
 
-DORMANT — complete but not wired to any route. Nothing in the running app
-serves this until you explicitly hook it in (same pattern as billing.py).
+Accessible at /landing for preview. Wire it to / for unauthenticated visitors
+by adding this before the auth gate in web.py do_GET:
 
-To enable for unauthenticated visitors, add these two blocks inside the
-request handler in web.py, BEFORE the auth-gate section
-(around the `if not auth:` check, roughly line 2400):
-
-    # ---- landing page for unauthenticated visitors ----
     if path in ("/", "/home") and not self._session():
         from .web_landing import render_landing
         return self._send(200, render_landing(), "text/html; charset=utf-8")
-
-    # ---- dev/staging preview (remove before production) ----
-    if path == "/landing":
-        from .web_landing import render_landing
-        return self._send(200, render_landing(), "text/html; charset=utf-8")
-    # ---------------------------------------------------
 """
 from __future__ import annotations
 
 from .web_shared import _BRAND, esc
 
-_TITLE = f"{_BRAND} — MikroTik Monitoring Made Easy"
+_TITLE = f"{_BRAND} — MikroTik Monitoring & Remote Management"
 
 # ---------------------------------------------------------------------------
 # Content
 # ---------------------------------------------------------------------------
 
 _FEATURES = [
-    ("&#9670;", "Real-time Dashboard",
-     "CPU, RAM, temperature, interface state, and WAN health across every router "
-     "at a glance. Problems are colour-coded so you see what needs attention first."),
-    ("&#8635;", "Safe Config Push",
-     "Push RouterOS configuration changes through the API. A 5-minute auto-revert "
-     "safety net rolls the change back if it breaks the tunnel — you can't lock "
-     "yourself out of a router again."),
-    ("&#8644;", "WAN Failover Alerts",
-     "Name your ISP uplinks (Vodacom, MTN, LTE) and get alerted the moment a "
-     "router switches to a backup link, so you act before users even notice."),
+    ("&#9670;", "Real-time NOC Dashboard",
+     "Device grid with live CPU, RAM, temperature, throughput charts, and WAN "
+     "health indicators. Problems colour-coded — see what's wrong before users "
+     "start calling."),
+    ("&#8644;", "Gateway Failover Management",
+     "Configure primary/secondary WAN uplinks with automatic gateway detection. "
+     "Netwatch distance-based switching means failover without reboots — and an "
+     "alert the moment traffic moves to the backup link."),
+    ("&#8635;", "Safe Config Push & Auto-Revert",
+     "Push RouterOS changes through the API. If the change breaks connectivity "
+     "the router auto-reverts to the previous backup within 5 minutes — you "
+     "cannot lock yourself out of a remote router again."),
+    ("&#128190;", "Automated Router Backups",
+     "One-click encrypted backup saved directly to the router's flash. The "
+     "system keeps the last 10 server-created backups and prunes older ones "
+     "automatically — manual backups you create on the router are never touched."),
     ("&#9671;", "Secure Remote Access",
-     "Open WebFig or Winbox for any router through a time-limited, encrypted proxy "
-     "— even behind double NAT. No port forwarding, no exposed API ports on the router."),
-    ("&#10022;", "Works Behind Any NAT",
-     "Routers dial home over WireGuard. No public IP needed on the router side — "
-     "ideal for CGNAT connections, home offices, and remote branch sites."),
-    ("&#10022;", "Multi-tenant Teams",
-     "Create a company account, invite your team, and control exactly which routers "
-     "each member can see and manage. Perfect for MSPs and multi-site businesses."),
+     "Open WebFig or Winbox through the encrypted hub tunnel — time-limited and "
+     "audited. No port forwarding, no exposed API port on the internet, works "
+     "even behind double NAT."),
+    ("&#9737;", "WireGuard Dial-Home Tunnel",
+     "Routers connect outbound to your server. No public IP required on the "
+     "router side — ideal for CGNAT, home offices, LTE uplinks, and any site "
+     "you can't port-forward."),
+    ("&#10022;", "Multi-tenant Company Accounts",
+     "One company account for your whole team. The owner controls which devices "
+     "each member can see and manage. Add unlimited staff — your team grows "
+     "without extra per-seat charges."),
+    ("&#128179;", "Transparent Per-Device Billing",
+     "30-day free trial with 1 device. Then pay only for what you use — from "
+     "$25/mo for 5 devices up to $3 000/mo for 1 000 devices. Cancel anytime; "
+     "7-day grace period on missed payments."),
 ]
 
 _STEPS = [
-    ("1", "Install on your server",
-     "One command on any Ubuntu 22+ VPS. The installer sets up the monitoring "
-     "service, the WireGuard hub, nginx, and the web dashboard automatically."),
-    ("2", "Add your routers",
-     "Enter the router's IP or leave it blank to provision over the tunnel. The "
-     "Provision tab generates a ready-to-paste RouterOS script — no manual key "
-     "exchange, no copying public keys."),
+    ("1", "Create your account",
+     "Sign up with your company email. You get a 30-day free trial with 1 device "
+     "immediately — no credit card needed."),
+    ("2", "Add your first router",
+     "Enter the router IP or provision it over the WireGuard tunnel. The Provision "
+     "tab generates a ready-to-paste RouterOS script — no manual key exchange."),
     ("3", "Monitor and manage",
-     "The dashboard refreshes every 60 seconds. You get email alerts when something "
-     "breaks, and one-click WebFig / Winbox access when you need to fix it."),
+     "The dashboard refreshes every 60 seconds. Set up WAN failover, schedule "
+     "backups, push config changes, and open WebFig/Winbox from anywhere."),
 ]
 
+# Real billing tiers shown on the landing page.
 _PLANS = [
     {
-        "name":    "Self-hosted",
-        "amount":  "Free",
-        "period":  "forever, open source",
+        "name":    "Free Trial",
+        "devices": "1 device",
+        "amount":  "$0",
+        "period":  "30 days, no card needed",
         "items":   [
-            "Unlimited routers",
             "All monitoring features",
+            "WAN failover management",
+            "Config push & auto-revert",
+            "Automated backups",
+            "Remote WebFig / Winbox access",
             "WireGuard dial-home tunnel",
-            "Safe config push + auto-revert",
-            "On-demand WebFig / Winbox",
-            "Email alerts",
-            "Multi-tenant team accounts",
         ],
         "cta_href":  "/signup",
-        "cta_label": "Get started free",
+        "cta_label": "Start free trial",
         "highlight": False,
         "soon":      False,
     },
     {
-        "name":    "Cloud",
-        "amount":  "Coming soon",
-        "period":  "hosted &amp; managed",
+        "name":    "Starter",
+        "devices": "5 devices",
+        "amount":  "$25",
+        "period":  "per month",
         "items":   [
-            "Hosted on our infrastructure",
-            "Automatic updates",
-            "Managed backups",
-            "Priority email support",
-            "Grafana / Prometheus export",
-            "SSO / SAML login",
-            "Custom domain",
+            "Everything in Free Trial",
+            "Unlimited team members",
+            "Email alerts",
+            "7-day grace on missed payment",
+            "$5.00 / device / month",
         ],
-        "cta_href":  "#",
-        "cta_label": "Notify me",
-        "highlight": True,
-        "soon":      True,
+        "cta_href":  "/signup",
+        "cta_label": "Start free trial",
+        "highlight": False,
+        "soon":      False,
     },
     {
-        "name":    "Enterprise",
-        "amount":  "Contact us",
-        "period":  "dedicated &amp; on-premise",
+        "name":    "Business",
+        "devices": "50 devices",
+        "amount":  "$210",
+        "period":  "per month",
         "items":   [
-            "Dedicated instance",
-            "Custom SLA",
-            "On-premise option",
-            "White-label branding",
-            "Professional services",
-            "Team training",
+            "Everything in Starter",
+            "$4.20 / device / month",
+            "Priority support",
         ],
-        "cta_href":  "#",
-        "cta_label": "Get in touch",
-        "highlight": False,
-        "soon":      True,
+        "cta_href":  "/signup",
+        "cta_label": "Start free trial",
+        "highlight": True,
+        "soon":      False,
     },
+    {
+        "name":    "Professional",
+        "devices": "100 devices",
+        "amount":  "$400",
+        "period":  "per month",
+        "items":   [
+            "Everything in Business",
+            "$4.00 / device / month",
+            "Ideal for MSPs",
+        ],
+        "cta_href":  "/signup",
+        "cta_label": "Start free trial",
+        "highlight": False,
+        "soon":      False,
+    },
+]
+
+_ALL_TIERS = [
+    ("Starter",        5,    25),
+    ("Small",         15,    69),
+    ("Medium",        30,   135),
+    ("Business",      50,   210),
+    ("Professional", 100,   400),
+    ("Ent 250",      250,   925),
+    ("Ent 500",      500,  1750),
+    ("Ent 1000",    1000,  3000),
 ]
 
 # ---------------------------------------------------------------------------
@@ -149,12 +174,10 @@ a{color:#2563eb;text-decoration:none}
 .btn-nav-primary{background:#2563eb;color:#fff;padding:8px 16px;border-radius:7px;
   font-size:14px;font-weight:600;transition:.12s}
 .btn-nav-primary:hover{background:#1d4ed8;color:#fff}
-/* hamburger */
 .hamburger{display:none;background:0;border:0;cursor:pointer;
   padding:6px;flex-direction:column;gap:5px;margin-left:auto}
 .hamburger span{display:block;width:22px;height:2px;background:#e2e8f0;
   border-radius:2px;transition:.2s}
-/* mobile nav open state */
 .lnav-links.open{display:flex}
 
 /* ── hero ────────────────────────────────────────── */
@@ -222,16 +245,18 @@ section{padding:76px 24px}
 .step h3{font-size:15px;font-weight:700;color:#0f172a;margin-top:4px}
 .step p{font-size:13px;color:#475569;line-height:1.65}
 
-/* ── pricing ─────────────────────────────────────── */
+/* ── pricing cards ───────────────────────────────── */
 .price-grid{display:grid;
-  grid-template-columns:repeat(auto-fit,minmax(268px,1fr));
-  gap:20px;align-items:start}
+  grid-template-columns:repeat(auto-fit,minmax(228px,1fr));
+  gap:20px;align-items:start;margin-bottom:36px}
 .price-card{border:1px solid #e2e8f0;border-radius:14px;
   padding:28px 24px;display:flex;flex-direction:column;background:#fff}
 .price-card.highlight{background:#0f172a;border-color:#0f172a}
 .price-plan{font-size:11px;font-weight:700;text-transform:uppercase;
-  letter-spacing:.07em;color:#2563eb;margin-bottom:8px}
+  letter-spacing:.07em;color:#2563eb;margin-bottom:4px}
 .price-card.highlight .price-plan{color:#38bdf8}
+.price-devices{font-size:13px;color:#64748b;margin-bottom:6px}
+.price-card.highlight .price-devices{color:#94a3b8}
 .price-amount{font-size:36px;font-weight:800;line-height:1;
   color:#0f172a;margin-bottom:3px}
 .price-card.highlight .price-amount{color:#fff}
@@ -249,12 +274,20 @@ section{padding:76px 24px}
   font-size:14px;font-weight:600;transition:.12s}
 .price-cta.solid{background:#2563eb;color:#fff;border:2px solid #2563eb}
 .price-cta.solid:hover{background:#1d4ed8;border-color:#1d4ed8;color:#fff}
-.price-cta.outline{border:2px solid #e2e8f0;color:#64748b;background:#fff}
-.price-cta.outline:hover{border-color:#94a3b8;background:#f8fafc;color:#334155}
-.badge-soon{background:#fef3c7;color:#92400e;font-size:10px;font-weight:700;
-  padding:2px 7px;border-radius:999px;text-transform:uppercase;
-  letter-spacing:.04em;vertical-align:middle;margin-left:6px}
-.price-card.highlight .badge-soon{background:rgba(254,243,199,.15);color:#fcd34d}
+.price-cta.ghost{background:#fff;color:#0f172a;border:2px solid #e2e8f0}
+.price-cta.ghost:hover{border-color:#94a3b8;background:#f8fafc}
+
+/* ── all-tiers table ─────────────────────────────── */
+.tier-table{width:100%;border-collapse:collapse;font-size:13px;
+  background:#fff;border-radius:12px;overflow:hidden;
+  border:1px solid #e2e8f0;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.tier-table th{background:#f8fafc;font-size:11px;text-transform:uppercase;
+  letter-spacing:.05em;color:#64748b;padding:10px 16px;
+  border-bottom:1px solid #e2e8f0;text-align:left}
+.tier-table td{padding:10px 16px;border-bottom:1px solid #f1f5f9;color:#334155}
+.tier-table tr:last-child td{border-bottom:0}
+.tier-table .usd{font-weight:700;color:#0f172a}
+.tier-table .per{color:#64748b}
 
 /* ── CTA banner ──────────────────────────────────── */
 .cta-wrap{background:linear-gradient(135deg,#1e3a5f,#2563eb);
@@ -332,17 +365,33 @@ def _step_card(num: str, title: str, body: str) -> str:
 
 def _price_card(plan: dict) -> str:
     hl = plan["highlight"]
-    soon_badge = '<span class="badge-soon">soon</span>' if plan["soon"] else ""
     items = "".join(f'<li>{esc(i)}</li>' for i in plan["items"])
-    cta_cls = "solid" if not plan["soon"] else "outline"
+    cta_cls = "ghost" if hl else "solid"
     return (f'<div class="price-card{"  highlight" if hl else ""}">'
             f'<div class="price-plan">{esc(plan["name"])}</div>'
-            f'<div class="price-amount">{plan["amount"]}{soon_badge}</div>'
+            f'<div class="price-devices">{esc(plan["devices"])}</div>'
+            f'<div class="price-amount">{plan["amount"]}</div>'
             f'<div class="price-period">{plan["period"]}</div>'
             f'<ul class="price-items">{items}</ul>'
             f'<a href="{esc(plan["cta_href"])}" class="price-cta {cta_cls}">'
             f'{esc(plan["cta_label"])}</a>'
             f'</div>')
+
+
+def _tier_rows() -> str:
+    rows = ""
+    for name, devices, price in _ALL_TIERS:
+        per = round(price / devices, 2)
+        rows += (f'<tr>'
+                 f'<td><b>{esc(name)}</b></td>'
+                 f'<td>{devices}</td>'
+                 f'<td class="usd">${price:,}</td>'
+                 f'<td class="per">${per:.2f} / device</td>'
+                 f'<td><a class="btn-nav-primary" href="/signup" '
+                 f'style="display:inline-block;padding:5px 14px;font-size:13px">'
+                 f'Start trial</a></td>'
+                 f'</tr>')
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +402,7 @@ def render_landing() -> str:
     feat_cards = "\n".join(_feat_card(i, t, b) for i, t, b in _FEATURES)
     step_cards = "\n".join(_step_card(n, t, b) for n, t, b in _STEPS)
     price_cards = "\n".join(_price_card(p) for p in _PLANS)
+    tier_rows = _tier_rows()
     brand = esc(_BRAND)
 
     return f"""<!doctype html>
@@ -360,7 +410,7 @@ def render_landing() -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Monitor and manage every MikroTik router from one dashboard. Real-time alerts, safe config push, and remote access — even behind NAT.">
+  <meta name="description" content="Monitor and manage every MikroTik router from one dashboard. Real-time alerts, WAN failover, safe config push, automated backups, and remote WebFig access — even behind NAT.">
   <title>{esc(_TITLE)}</title>
   <style>{_CSS}</style>
 </head>
@@ -378,7 +428,7 @@ def render_landing() -> str:
   </div>
   <div class="lnav-right">
     <a class="btn-nav-ghost" href="/login">Sign in</a>
-    <a class="btn-nav-primary" href="/signup">Get started</a>
+    <a class="btn-nav-primary" href="/signup">Start free trial</a>
   </div>
   <button class="hamburger" aria-label="Open menu"
     onclick="document.getElementById('lnav-links').classList.toggle('open')">
@@ -389,15 +439,14 @@ def render_landing() -> str:
 <!-- ── HERO ────────────────────────────────────── -->
 <section class="hero">
   <div class="hero-inner">
-    <div class="hero-badge">&#10022; Built for MikroTik admins</div>
-    <h1>Monitor every router.<br><em>Fix problems before users notice.</em></h1>
+    <div class="hero-badge">&#10022; Built for MikroTik admins &amp; MSPs</div>
+    <h1>All your MikroTik routers.<br><em>One dashboard. Zero surprises.</em></h1>
     <p class="hero-sub">
-      A single dashboard for all your MikroTik routers — real-time health,
-      instant alerts, safe remote config, and on-demand WebFig access.
-      Works behind NAT and CGNAT.
+      Real-time health, WAN failover management, safe remote config push,
+      automated backups, and on-demand WebFig access — even behind NAT and CGNAT.
     </p>
     <div class="hero-ctas">
-      <a class="btn-hero-primary" href="/signup">Create free account</a>
+      <a class="btn-hero-primary" href="/signup">Start 30-day free trial</a>
       <a class="btn-hero-outline" href="#how-it-works">See how it works</a>
     </div>
   </div>
@@ -405,21 +454,21 @@ def render_landing() -> str:
 
 <!-- ── PROOF BAR ────────────────────────────────── -->
 <div class="proof">
-  <div class="proof-item"><b>&#10003;</b>&nbsp;Self-hosted — your data, your server</div>
-  <div class="proof-item"><b>&#10003;</b>&nbsp;No public IP needed on routers</div>
+  <div class="proof-item"><b>&#10003;</b>&nbsp;30-day free trial — no card needed</div>
+  <div class="proof-item"><b>&#10003;</b>&nbsp;No public IP required on routers</div>
   <div class="proof-item"><b>&#10003;</b>&nbsp;Works behind NAT &amp; CGNAT</div>
+  <div class="proof-item"><b>&#10003;</b>&nbsp;Unlimited team members per account</div>
   <div class="proof-item"><b>&#10003;</b>&nbsp;RouterOS 7.1+ compatible</div>
-  <div class="proof-item"><b>&#10003;</b>&nbsp;Open source</div>
 </div>
 
 <!-- ── FEATURES ─────────────────────────────────── -->
 <section id="features">
   <div class="s-inner">
     <p class="s-label">Features</p>
-    <h2 class="s-title">Everything you need to stay on top of your network</h2>
+    <h2 class="s-title">Everything you need to run a professional MikroTik operation</h2>
     <p class="s-sub">
-      From a 1-router home lab to a 50-site MSP deployment — {brand} scales
-      with you without adding complexity.
+      From a 1-router home lab to a 1 000-device MSP deployment — {brand} gives
+      you the visibility and control to fix problems before users notice.
     </p>
     <div class="feat-grid">
       {feat_cards}
@@ -431,10 +480,10 @@ def render_landing() -> str:
 <section id="how-it-works" class="steps-bg">
   <div class="s-inner">
     <p class="s-label">How it works</p>
-    <h2 class="s-title">Up and running in under 10 minutes</h2>
+    <h2 class="s-title">Up and monitoring in minutes</h2>
     <p class="s-sub">
-      No Docker, no Kubernetes, no certificates to manage. One command
-      on a standard Ubuntu VPS is all you need to start.
+      No Docker, no Kubernetes, no certificates to manage. Create an account,
+      add a router, and you're live.
     </p>
     <div class="steps-grid">
       {step_cards}
@@ -446,14 +495,28 @@ def render_landing() -> str:
 <section id="pricing">
   <div class="s-inner">
     <p class="s-label">Pricing</p>
-    <h2 class="s-title">Simple, honest pricing</h2>
+    <h2 class="s-title">Pay only for what you monitor</h2>
     <p class="s-sub">
-      Start free and self-hosted. Managed cloud and enterprise tiers are
-      coming — join the waitlist to be first in line.
+      Start with a 30-day free trial — no credit card. Upgrade to a paid plan
+      when you're ready. 7-day grace period on missed payments; cancel anytime.
     </p>
     <div class="price-grid">
       {price_cards}
     </div>
+
+    <!-- Full tier table -->
+    <h3 style="font-size:16px;font-weight:700;margin-bottom:14px;color:#0f172a">
+      All plans include every feature — you only pay for more devices.
+    </h3>
+    <table class="tier-table">
+      <thead><tr>
+        <th>Plan</th><th>Devices</th><th>Monthly</th><th>Per device</th><th></th>
+      </tr></thead>
+      <tbody>{tier_rows}</tbody>
+    </table>
+    <p style="font-size:12px;color:#94a3b8;margin-top:12px">
+      Need more than 1 000 devices? <a href="/signup">Contact us</a> for a custom quote.
+    </p>
   </div>
 </section>
 
@@ -461,10 +524,10 @@ def render_landing() -> str:
 <div class="cta-wrap">
   <h2>Ready to take control of your network?</h2>
   <p>
-    Create your free account and have your first router connected in
-    under 10 minutes. No credit card required.
+    Start your 30-day free trial today. Add your first router in minutes —
+    no credit card, no commitment.
   </p>
-  <a class="btn-hero-primary" href="/signup">Create free account</a>
+  <a class="btn-hero-primary" href="/signup">Start free trial</a>
 </div>
 
 <!-- ── FOOTER ───────────────────────────────────── -->
@@ -475,7 +538,7 @@ def render_landing() -> str:
         <a class="foot-logo" href="/">
           <span class="dot">&#9670;</span>{brand}
         </a>
-        <p class="foot-tag">MikroTik monitoring made easy for IT teams and MSPs.</p>
+        <p class="foot-tag">MikroTik monitoring &amp; remote management for IT teams and MSPs.</p>
       </div>
       <div class="foot-col">
         <h4>Product</h4>
@@ -486,7 +549,7 @@ def render_landing() -> str:
       <div class="foot-col">
         <h4>Account</h4>
         <a href="/login">Sign in</a>
-        <a href="/signup">Create account</a>
+        <a href="/signup">Start free trial</a>
       </div>
     </div>
     <div class="foot-bottom">
