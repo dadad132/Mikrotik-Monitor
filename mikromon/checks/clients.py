@@ -4,6 +4,21 @@ Counts the number of *distinct* devices (by MAC) currently on the network,
 combining the sources you choose (DHCP bound leases, wireless/wifi
 registrations, ARP, hotspot). A learned per-time baseline decides what's
 "normal", so a quiet Sunday and a busy Tuesday afternoon are judged separately.
+
+Source guidance:
+  wireless  — clients currently associated with the router's WiFi.  Most
+              accurate for wireless networks; entries disappear the instant a
+              client disconnects.
+  arp       — dynamic+complete ARP entries.  The router learns these from any
+              client that recently exchanged packets with the gateway; they
+              expire in seconds when the device goes offline.  Best choice for
+              wired clients.
+  dhcp      — DHCP bound leases cross-referenced with dynamic ARP.  A lease
+              stays "bound" for the full lease time after a device disconnects,
+              so we only count leases whose MAC also appears in the dynamic ARP
+              table.  Falls back to ARP alone when no local DHCP server is
+              running (ARP still reflects who is actually on the wire).
+  hotspot   — active hotspot sessions.
 """
 from __future__ import annotations
 
@@ -11,6 +26,22 @@ from ..alert import Severity
 from ..baseline import Baseline, is_high, sigma_str
 from ..util import as_bool
 from .base import Check
+
+
+def _arp_dynamic_macs(snap) -> set[str]:
+    """MACs from dynamic+complete ARP entries only.
+
+    Dynamic entries are learned from traffic and expire within seconds when a
+    device goes offline.  Static (manually-added) entries never expire and
+    must be excluded or they inflate the count with offline devices.
+    """
+    return {
+        str(r.get("mac-address", "")).upper()
+        for r in snap.rows("arp")
+        if r.get("mac-address")
+        and as_bool(r.get("complete", True))
+        and as_bool(r.get("dynamic", True))
+    }
 
 
 class ClientCountCheck(Check):
@@ -24,10 +55,7 @@ class ClientCountCheck(Check):
         ds = set()
         if "dhcp" in srcs:
             ds.add("dhcp_lease")
-            # Always fetch ARP alongside DHCP so we can cross-reference —
-            # a bound lease only proves the IP was assigned, not that the
-            # device is still on the network.  ARP entries expire in seconds
-            # when a device goes offline, so ARP-complete = truly reachable.
+            # Always fetch ARP alongside DHCP for cross-referencing.
             ds.add("arp")
         if "wireless" in srcs:
             ds.update({"wireless_reg", "wifi_reg"})
@@ -43,34 +71,40 @@ class ClientCountCheck(Check):
         breakdown = {}
 
         if "dhcp" in srcs:
-            # Build the complete-ARP set once so DHCP leases can be validated
-            # against it.  A device in ARP-complete has recently sent packets to
-            # the router and is therefore actually online right now.
-            arp_complete = {
-                str(r.get("mac-address", "")).upper()
-                for r in snap.rows("arp")
-                if r.get("mac-address") and as_bool(r.get("complete", True))
-            }
-            use_arp = bool(arp_complete)  # fall back to lease-only if ARP empty
+            # Dynamic ARP = devices that have recently exchanged packets with
+            # the router.  These entries expire in seconds after a device goes
+            # offline, making them the best "currently reachable" signal.
+            arp_dynamic = _arp_dynamic_macs(snap)
 
-            n = 0
+            # Non-stale DHCP leases.  "bound" can persist for the full lease
+            # duration after a device disconnects, so we use it as a candidate
+            # list only, not as the truth.
+            dhcp_bound: set[str] = set()
             for lease in snap.rows("dhcp_lease"):
-                # Skip explicitly inactive dynamic leases.
                 status = str(lease.get("status", "")).lower()
                 if status in ("waiting", "expired", "offered"):
                     continue
                 mac = str(lease.get("mac-address", "")).upper()
-                if not mac:
-                    continue
-                # When ARP data is available, require the device to be present
-                # in the ARP table — this filters out devices that disconnected
-                # mid-lease (their lease stays "bound" until expiry, but their
-                # ARP entry disappears within seconds).
-                if use_arp and mac not in arp_complete:
-                    continue
-                macs.add(mac)
-                n += 1
-            breakdown["dhcp"] = n
+                if mac:
+                    dhcp_bound.add(mac)
+
+            if dhcp_bound and arp_dynamic:
+                # Intersection: device must have both a valid lease AND a live
+                # ARP entry.  This drops stale-bound devices that disconnected
+                # mid-lease.
+                counted = dhcp_bound & arp_dynamic
+            elif dhcp_bound:
+                # ARP data unavailable (fetch error / empty table) — fall back
+                # to lease-based counting.
+                counted = dhcp_bound
+            else:
+                # No local DHCP server (relay, upstream DHCP, or static IPs).
+                # Count dynamic ARP entries directly — they still reflect who
+                # is on the wire even without a local DHCP server.
+                counted = arp_dynamic
+
+            macs |= counted
+            breakdown["dhcp"] = len(counted)
 
         if "wireless" in srcs:
             wmacs = {str(r.get("mac-address", "")).upper()
@@ -78,12 +112,14 @@ class ClientCountCheck(Check):
                      if r.get("mac-address")}
             macs |= wmacs
             breakdown["wifi"] = len(wmacs)
+
         if "arp" in srcs:
-            amacs = {str(r.get("mac-address", "")).upper()
-                     for r in snap.rows("arp")
-                     if r.get("mac-address") and as_bool(r.get("complete", True))}
+            # Explicit ARP source: dynamic+complete only — same reasoning as
+            # above; static entries do not reflect current connectivity.
+            amacs = _arp_dynamic_macs(snap)
             macs |= amacs
             breakdown["arp"] = len(amacs)
+
         if "hotspot" in srcs:
             hmacs = {str(r.get("mac-address", "")).upper()
                      for r in snap.rows("hotspot_active") if r.get("mac-address")}

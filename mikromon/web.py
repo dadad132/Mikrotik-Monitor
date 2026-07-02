@@ -2522,7 +2522,7 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
         trows = ('<tr><td colspan="8" class="muted" style="padding:16px">No devices '
                  'yet — click <b>Add device</b> to get started.</td></tr>')
 
-    sources_sel = set(pre.get("client_count_sources") or ["dhcp", "wireless"])
+    sources_sel = set(pre.get("client_count_sources") or ["wireless", "arp"])
     src_boxes = "".join(
         f'<label><input type="checkbox" name="sources" value="{s}"'
         f'{" checked" if s in sources_sel else ""}> {s}</label>'
@@ -2606,7 +2606,7 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
     # Separate fields without pre-filled values for Add modal
     pre_add = {}
     wan_add = {}
-    sources_add = set(["dhcp", "wireless"])
+    sources_add = set(["wireless", "arp"])
     src_add = "".join(
         f'<label><input type="checkbox" name="sources" value="{s}"'
         f'{" checked" if s in sources_add else ""}> {s}</label>'
@@ -4171,7 +4171,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 "lan_subnets": csv(flat.get("lan_subnets")),
                 "wan": {"links": links},
                 "monitor_interfaces": csv(flat.get("monitor_interfaces")),
-                "client_count_sources": multi.get("sources") or ["dhcp", "wireless"],
+                "client_count_sources": multi.get("sources") or ["wireless", "arp"],
                 "checks": {k: (k in checks_sel) for k in DEFAULT_CHECKS},
             }
 
