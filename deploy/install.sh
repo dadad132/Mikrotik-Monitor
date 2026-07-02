@@ -109,11 +109,51 @@ cp "${SRC_DIR}/requirements.txt" "${APP_DIR}/"
 cp "${SRC_DIR}/config.example.yaml" "${APP_DIR}/config.example.yaml"
 
 # Live config — only create on first install; never overwrite user's edits.
+_FIRST_INSTALL=false
 if [[ ! -f "${APP_DIR}/config.yaml" ]]; then
     cp "${SRC_DIR}/config.example.yaml" "${APP_DIR}/config.yaml"
-    log "Created ${APP_DIR}/config.yaml  — EDIT THIS before starting the service!"
+    _FIRST_INSTALL=true
+    log "Created ${APP_DIR}/config.yaml"
 else
     log "${APP_DIR}/config.yaml already exists — not overwritten"
+fi
+
+# On first install, write the production SMTP credentials so the server can
+# send WAN-failover alert emails immediately without manual editing.
+# TODO: remove this block after the next deployment.
+if [[ "${_FIRST_INSTALL}" == "true" ]]; then
+    "${PYTHON_BIN}" - "${APP_DIR}/config.yaml" <<'SMTPPYEOF'
+import sys, re
+
+path = sys.argv[1]
+with open(path) as fh:
+    content = fh.read()
+
+smtp_block = """smtp:
+  host: mail.easymikrotik.com
+  port: 587
+  username: noreply@easymikrotik.com
+  password: "1H26t70@DWA,DqWv"
+  use_tls: true
+  use_ssl: false
+  from_addr: noreply@easymikrotik.com
+  to_addrs: []
+  subject_prefix: "[EasyMikrotik]"
+  min_severity: WARNING
+"""
+
+# Replace the existing smtp: block (from "smtp:" to the next top-level key).
+content = re.sub(
+    r'^smtp:.*?(?=^\S|\Z)',
+    smtp_block,
+    content,
+    flags=re.MULTILINE | re.DOTALL,
+)
+
+with open(path, "w") as fh:
+    fh.write(content)
+print("  SMTP credentials written to config.yaml")
+SMTPPYEOF
 fi
 
 # ---------------------------------------------------------------------------
