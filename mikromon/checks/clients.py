@@ -24,6 +24,11 @@ class ClientCountCheck(Check):
         ds = set()
         if "dhcp" in srcs:
             ds.add("dhcp_lease")
+            # Always fetch ARP alongside DHCP so we can cross-reference —
+            # a bound lease only proves the IP was assigned, not that the
+            # device is still on the network.  ARP entries expire in seconds
+            # when a device goes offline, so ARP-complete = truly reachable.
+            ds.add("arp")
         if "wireless" in srcs:
             ds.update({"wireless_reg", "wifi_reg"})
         if "arp" in srcs:
@@ -38,20 +43,35 @@ class ClientCountCheck(Check):
         breakdown = {}
 
         if "dhcp" in srcs:
+            # Build the complete-ARP set once so DHCP leases can be validated
+            # against it.  A device in ARP-complete has recently sent packets to
+            # the router and is therefore actually online right now.
+            arp_complete = {
+                str(r.get("mac-address", "")).upper()
+                for r in snap.rows("arp")
+                if r.get("mac-address") and as_bool(r.get("complete", True))
+            }
+            use_arp = bool(arp_complete)  # fall back to lease-only if ARP empty
+
             n = 0
             for lease in snap.rows("dhcp_lease"):
-                # Exclude dynamic leases that are no longer active.
-                # "waiting"/"expired" leases retain active-address after expiry
-                # so we can't use that field.  Static leases have no status
-                # field and should always be counted.
+                # Skip explicitly inactive dynamic leases.
                 status = str(lease.get("status", "")).lower()
                 if status in ("waiting", "expired", "offered"):
                     continue
                 mac = str(lease.get("mac-address", "")).upper()
-                if mac:
-                    macs.add(mac)
-                    n += 1
+                if not mac:
+                    continue
+                # When ARP data is available, require the device to be present
+                # in the ARP table — this filters out devices that disconnected
+                # mid-lease (their lease stays "bound" until expiry, but their
+                # ARP entry disappears within seconds).
+                if use_arp and mac not in arp_complete:
+                    continue
+                macs.add(mac)
+                n += 1
             breakdown["dhcp"] = n
+
         if "wireless" in srcs:
             wmacs = {str(r.get("mac-address", "")).upper()
                      for r in (snap.rows("wireless_reg") + snap.rows("wifi_reg"))
