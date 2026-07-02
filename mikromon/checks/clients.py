@@ -40,10 +40,12 @@ class ClientCountCheck(Check):
         if "dhcp" in srcs:
             n = 0
             for lease in snap.rows("dhcp_lease"):
-                # Only count leases where the client is actively bound.
-                # "waiting" leases retain active-address after expiry — don't
-                # use that field or waiting devices would appear connected.
-                if str(lease.get("status", "")) != "bound":
+                # Exclude dynamic leases that are no longer active.
+                # "waiting"/"expired" leases retain active-address after expiry
+                # so we can't use that field.  Static leases have no status
+                # field and should always be counted.
+                status = str(lease.get("status", "")).lower()
+                if status in ("waiting", "expired", "offered"):
                     continue
                 mac = str(lease.get("mac-address", "")).upper()
                 if mac:
