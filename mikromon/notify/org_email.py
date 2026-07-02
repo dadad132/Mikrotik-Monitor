@@ -31,42 +31,17 @@ def _should_notify(alert) -> bool:
 
 
 def _smtp_send(smtp_cfg, msg: EmailMessage) -> None:
-    """Send a pre-built EmailMessage via the configured SMTP relay.
-
-    Tries the configured port/mode first, then falls back to port 465 (SSL)
-    if that fails, so a single transient error or wrong-port config doesn't
-    silently drop the message.
-    """
+    """Send a pre-built EmailMessage via the configured SMTP relay."""
     ctx = ssl.create_default_context()
-
-    def _try_ssl(port):
-        with smtplib.SMTP_SSL(smtp_cfg.host, port, timeout=45, context=ctx) as srv:
+    if smtp_cfg.use_ssl:
+        with smtplib.SMTP_SSL(smtp_cfg.host, smtp_cfg.port,
+                              timeout=45, context=ctx) as srv:
             _login_and_send(srv, smtp_cfg, msg)
-
-    def _try_starttls(port):
-        with smtplib.SMTP(smtp_cfg.host, port, timeout=45) as srv:
+    else:
+        with smtplib.SMTP(smtp_cfg.host, smtp_cfg.port, timeout=45) as srv:
             if smtp_cfg.use_tls:
                 srv.starttls(context=ctx)
             _login_and_send(srv, smtp_cfg, msg)
-
-    if smtp_cfg.use_ssl:
-        # Configured for SSL — try configured port, then 587 STARTTLS fallback.
-        try:
-            _try_ssl(smtp_cfg.port)
-            return
-        except (OSError, smtplib.SMTPException, socket.error) as primary_exc:
-            log.warning("SMTP SSL on port %s failed (%s: %s), trying 587 STARTTLS",
-                        smtp_cfg.port, type(primary_exc).__name__, primary_exc)
-        _try_starttls(587)
-    else:
-        # Configured for STARTTLS — try configured port, then 465 SSL fallback.
-        try:
-            _try_starttls(smtp_cfg.port)
-            return
-        except (OSError, smtplib.SMTPException, socket.error) as primary_exc:
-            log.warning("SMTP STARTTLS on port %s failed (%s: %s), trying 465 SSL",
-                        smtp_cfg.port, type(primary_exc).__name__, primary_exc)
-        _try_ssl(465)
 
 
 def _login_and_send(srv, smtp_cfg, msg: EmailMessage) -> None:
