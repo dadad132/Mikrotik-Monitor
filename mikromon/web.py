@@ -2469,7 +2469,10 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
 
     # Build inventory-style rows with live state merged in
     devs_by_name = {d["device"]: d for d in (all_devs or [])}
-    all_names = sorted(set(store.names()) | set(devs_by_name.keys()),
+    _org_id = (user or {}).get("org_id")
+    _db_names = (set(store.names_for_org(_org_id)) if _org_id is not None
+                 else set(store.names()))
+    all_names = sorted(_db_names | set(devs_by_name.keys()),
                        key=lambda x: x.lower())
     trows = ""
     for n in all_names:
