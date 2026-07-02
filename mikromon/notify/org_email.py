@@ -35,10 +35,10 @@ def _smtp_send(smtp_cfg, msg: EmailMessage) -> None:
     if smtp_cfg.use_ssl:
         ctx = ssl.create_default_context()
         with smtplib.SMTP_SSL(smtp_cfg.host, smtp_cfg.port,
-                              timeout=20, context=ctx) as srv:
+                              timeout=45, context=ctx) as srv:
             _login_and_send(srv, smtp_cfg, msg)
     else:
-        with smtplib.SMTP(smtp_cfg.host, smtp_cfg.port, timeout=20) as srv:
+        with smtplib.SMTP(smtp_cfg.host, smtp_cfg.port, timeout=45) as srv:
             if smtp_cfg.use_tls:
                 srv.starttls(context=ssl.create_default_context())
             _login_and_send(srv, smtp_cfg, msg)
