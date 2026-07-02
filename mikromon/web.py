@@ -4487,34 +4487,41 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._redirect("/account?ok=" + quote("Saved."))
 
         def _post_test_email(self):
+            import json as _json
+
+            def _json_resp(ok, **kw):
+                return self._send(200, _json.dumps({"ok": ok, **kw}),
+                                  "application/json")
+
             user = self._user()
             if not user:
-                return self._redirect("/login")
+                return _json_resp(False, error="Not logged in.")
             flat, _ = self._form()
-            if flat.get("csrf") != self._session()["csrf"]:
-                return self._send(400, "bad csrf token")
+            sess = self._session()
+            if not sess or flat.get("csrf") != sess["csrf"]:
+                return _json_resp(False, error="Bad CSRF token — please reload the page.")
             if not AuthStore.is_owner(user):
-                return self._send(403, "forbidden")
+                return _json_resp(False, error="Only the account owner can send test emails.")
             if not smtp_cfg:
-                return self._redirect(
-                    "/account?error=" + quote("SMTP is not configured on this server."))
+                return _json_resp(False,
+                                  error="SMTP is not configured on this server. "
+                                        "Ask your administrator to add smtp: settings "
+                                        "to the config file.")
             recipients = auth.get_alert_emails(user["org_id"]) if auth else []
             if not recipients:
-                return self._redirect(
-                    "/account?error=" + quote(
-                        "No alert email addresses are set for your company. "
-                        "Add at least one address in the Company details section."))
+                return _json_resp(False,
+                                  error="No alert email addresses are set for your company. "
+                                        "Add at least one address in the WAN alert recipients "
+                                        "field above and save first.")
             try:
                 from .notify.org_email import send_test_email
                 prefix = smtp_cfg.subject_prefix if smtp_cfg else "[EasyMikrotik]"
                 org_name = auth.org_name(user["org_id"]) if auth else ""
                 send_test_email(smtp_cfg, recipients, org_name, prefix)
             except Exception as exc:  # noqa: BLE001
-                return self._redirect(
-                    "/account?error=" + quote(f"Failed to send test email: {exc}"))
-            return self._redirect(
-                "/account?ok=" + quote(
-                    f"Test email sent to: {', '.join(recipients)}"))
+                return _json_resp(False, error=f"SMTP error: {exc}")
+            return _json_resp(True,
+                              msg=f"Test email sent to: {', '.join(recipients)}")
 
         # ---- Temp Access tab ----
         def _device_tempaccess_page(self, name, user, creds=None,

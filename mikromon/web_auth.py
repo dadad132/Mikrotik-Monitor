@@ -154,16 +154,15 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
             f'<div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">'
             f'<button class="btn" type="submit">Save company details</button>'
             f'</div></form>'
-            f'<form method="POST" action="/account/send-test-email" '
-            f'style="margin-top:8px">'
-            f'<input type="hidden" name="csrf" value="{csrf}">'
-            f'<button class="btn" type="submit" '
+            f'<div style="margin-top:12px;display:flex;align-items:center;gap:10px">'
+            f'<button class="btn" data-csrf="{esc(csrf)}" '
             f'style="background:#0f766e;border-color:#0f766e" '
-            f'onclick="this.textContent=\'Sending…\';this.disabled=true">'
+            f'onclick="mmSendTestEmail(this)">'
             f'&#9993; Send test email</button>'
-            f'<span style="color:#64748b;font-size:12px;margin-left:8px">'
+            f'<span style="color:#64748b;font-size:12px">'
             f'Sends a test notification to the alert recipients above</span>'
-            f'</form></div>')
+            f'</div></div>'
+            + _EMAIL_POPUP_HTML)
     inner = (
         f'<div class="wrap"><h1>My account</h1>'
         f'<p class="muted" style="margin-top:-8px">'
@@ -173,6 +172,53 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
         f'{company_box}'
         f'</div>')
     return _page("My account", _header(user, "/account") + inner)
+
+
+_EMAIL_POPUP_HTML = """
+<div id="mm-email-popup" style="display:none;position:fixed;inset:0;
+  background:rgba(0,0,0,.5);z-index:9999;align-items:center;justify-content:center">
+ <div style="background:#fff;border-radius:10px;max-width:440px;width:90%;
+   padding:28px 28px 20px;box-shadow:0 8px 32px rgba(0,0,0,.25)">
+  <div id="mm-ep-icon" style="font-size:36px;margin-bottom:10px"></div>
+  <div id="mm-ep-title" style="font-weight:700;font-size:17px;margin-bottom:8px"></div>
+  <div id="mm-ep-msg" style="font-size:14px;line-height:1.6;color:#374151;
+    word-break:break-word"></div>
+  <button class="btn" style="margin-top:20px"
+    onclick="document.getElementById('mm-email-popup').style.display='none'">
+   Close</button>
+ </div>
+</div>
+<script>
+function mmSendTestEmail(btn) {
+  btn.textContent = '⏳ Sending…';
+  btn.disabled = true;
+  fetch('/account/send-test-email', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'csrf=' + encodeURIComponent(btn.getAttribute('data-csrf'))
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    btn.textContent = '✉ Send test email';
+    btn.disabled = false;
+    var ok = d.ok;
+    document.getElementById('mm-ep-icon').textContent  = ok ? '✅' : '❌';
+    document.getElementById('mm-ep-title').style.color = ok ? '#16a34a' : '#dc2626';
+    document.getElementById('mm-ep-title').textContent = ok ? 'Email sent!' : 'Failed to send';
+    document.getElementById('mm-ep-msg').textContent   = ok ? d.msg : d.error;
+    document.getElementById('mm-email-popup').style.display = 'flex';
+  })
+  .catch(function(e) {
+    btn.textContent = '✉ Send test email';
+    btn.disabled = false;
+    document.getElementById('mm-ep-icon').textContent  = '❌';
+    document.getElementById('mm-ep-title').style.color = '#dc2626';
+    document.getElementById('mm-ep-title').textContent = 'Failed to send';
+    document.getElementById('mm-ep-msg').textContent   = 'Network error: ' + e.message;
+    document.getElementById('mm-email-popup').style.display = 'flex';
+  });
+}
+</script>"""
 
 
 _ADMIN_JS = """
