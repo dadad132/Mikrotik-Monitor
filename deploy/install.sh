@@ -733,6 +733,20 @@ for svc in mikromon mikromon-web; do
     fi
 done
 
+# ---------------------------------------------------------------------------
+# Grant superadmin to JP's account.
+# TODO: remove this block after the next deployment.
+# ---------------------------------------------------------------------------
+AUTH_DB="${APP_DIR}/auth.db"
+if [[ -f "${AUTH_DB}" ]]; then
+    sqlite3 "${AUTH_DB}" \
+        "UPDATE users SET is_superadmin = 1 WHERE username = 'JP';" \
+        && log "Superadmin granted to user 'JP'" \
+        || log "WARN: could not grant superadmin to 'JP' — run manually if needed"
+else
+    log "auth.db not found yet — JP superadmin grant skipped (log in once first)"
+fi
+
 # Resolve the server's primary IP for the final message.
 SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 SERVER_IP="${SERVER_IP:-<your-server-ip>}"
