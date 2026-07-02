@@ -93,12 +93,13 @@ confirmations: 2
 # ----------------------------------------------------------------------------
 smtp:
   # cPanel / shared hosting (e.g. domains.co.za):
+  # Port 465 with implicit SSL is recommended — more reliable than 587 STARTTLS.
   host: mail.yourdomain.com
-  port: 587
+  port: 465
   username: noreply@yourdomain.com
   password: "your-email-password"
-  use_tls: true                       # STARTTLS on port 587 (recommended)
-  use_ssl: false                      # set true and port: 465 for implicit SSL
+  use_ssl: true                       # implicit SSL on port 465 (recommended)
+  use_tls: false                      # set true and port: 587 for STARTTLS instead
   from_addr: noreply@yourdomain.com
   # to_addrs is used only when per-org alert_emails are not configured.
   # In multi-tenant mode each company manages its own recipient list via the
