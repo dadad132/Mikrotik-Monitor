@@ -10,8 +10,11 @@ _COLORS = {Severity.INFO: "#2563eb", Severity.WARNING: "#d97706",
 
 
 def esc(text) -> str:
+    # Also escape quotes: esc() is used inside HTML attribute values
+    # (value="...") throughout the dashboard, so a bare " would break out
+    # of the attribute.
     return (str(text).replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;"))
+            .replace(">", "&gt;").replace('"', "&quot;"))
 
 
 def ts(alert) -> str:

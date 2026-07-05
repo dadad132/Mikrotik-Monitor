@@ -20,11 +20,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import threading
 import time
 import urllib.parse
 import urllib.request
+
+log = logging.getLogger(__name__)
 
 GRACE_DAYS = 7
 _GRACE_SECS = GRACE_DAYS * 86400
@@ -157,9 +160,14 @@ def verify_itn(post_data: dict, passphrase: str = "",
             "Content-Type": "application/x-www-form-urlencoded"})
         with urllib.request.urlopen(req, timeout=10) as r:
             return r.read().decode().strip().upper() == "VALID"
-    except Exception:
-        # If PayFast's validate endpoint is unreachable, trust the signature alone
-        return True
+    except Exception as exc:
+        # Validate endpoint unreachable. With a passphrase set the signature
+        # is a shared-secret check and can stand alone; without one the MD5
+        # is computable by anyone, so fail closed.
+        log.warning("PayFast validate endpoint unreachable (%s); %s", exc,
+                    "trusting signed ITN" if passphrase
+                    else "rejecting ITN (no passphrase configured)")
+        return bool(passphrase)
 
 
 def cancel_subscription(token: str, *, merchant_id: str, merchant_key: str,
@@ -290,11 +298,13 @@ class BillingStore:
             te = row.get("trial_end")
             if te and time.time() <= te:
                 return "trial"
-        if self.is_locked(org_id):
-            return "locked"
         if self.in_grace_period(org_id):
             return "grace"
-        return "locked"
+        if self.is_locked(org_id):
+            return "locked"
+        # No grace deadline set (e.g. a lapsed row that never had one):
+        # is_locked() is False for this state, so stay consistent with it.
+        return "none"
 
     def start_trial(self, org_id: int) -> None:
         trial_end = time.time() + _TRIAL_DAYS * 86400

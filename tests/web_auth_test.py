@@ -163,7 +163,7 @@ try:
     op0 = opener()
     st, body = req(op0, "/signup",
                    {"company": "Startup", "email": "founder@startup.test",
-                    "password": "startup1"}, B0)
+                    "password": "startup1", "phone": "0821234567"}, B0)
     check("signing up creates the company + logs in",
           st == 200 and "easymikrotik" in body)
     st, body = req(op0, "/signup", base=B0)
@@ -228,7 +228,7 @@ try:
     st, _ = req(zoe, "/api/series?device=R1&metric=cpu")
     check("zoe blocked from Acme's R1 series (403)", st == 403)
     st, _ = req(zoe, "/device?name=R1")
-    check("zoe blocked from Acme's R1 device page (403)", st == 403)
+    check("zoe blocked from Acme's R1 device page (404)", st == 404)
 
     print("Account self-service (edit email/password):")
     _, acct = req(bob, "/account")

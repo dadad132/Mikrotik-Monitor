@@ -91,7 +91,11 @@ class AuthStore:
     def __init__(self, path: str):
         self.path = path
         self._lock = threading.Lock()
+        self._login_fails: dict = {}
         self.db = sqlite3.connect(path, check_same_thread=False)
+        # WAL avoids "database is locked" when the engine thread reads while
+        # the web thread writes.
+        self.db.execute("PRAGMA journal_mode=WAL")
         self._ensure_schema()
 
     # ----- schema / migration ----------------------------------------------
@@ -444,24 +448,64 @@ class AuthStore:
             "SELECT 1 FROM users WHERE is_superadmin = 1 LIMIT 1"
         ).fetchone())
 
-    def _grant_superadmin(self, user_id: int) -> None:
+    def _grant_first_superadmin(self, user_id: int) -> bool:
+        """Atomically promote user_id if and only if no superadmin exists yet.
+        The guarded UPDATE makes two simultaneous first logins race-safe."""
         with self._lock:
-            self.db.execute(
-                "UPDATE users SET is_superadmin = 1 WHERE id = ?", (user_id,))
+            cur = self.db.execute(
+                "UPDATE users SET is_superadmin = 1 WHERE id = ? AND NOT "
+                "EXISTS (SELECT 1 FROM users WHERE is_superadmin = 1)",
+                (user_id,))
             self.db.commit()
+            return cur.rowcount > 0
+
+    # Brute-force throttle: after this many consecutive failures for one
+    # login identifier, further attempts are rejected for the lockout window.
+    _MAX_FAILURES = 8
+    _LOCKOUT_S = 300
+
+    def _login_locked(self, ident: str) -> bool:
+        with self._lock:
+            rec = self._login_fails.get(ident)
+            if not rec:
+                return False
+            if rec["until"] and rec["until"] > time.time():
+                return True
+            if rec["until"]:  # lockout expired — start fresh
+                self._login_fails.pop(ident, None)
+            return False
+
+    def _note_login_result(self, ident: str, ok: bool) -> None:
+        with self._lock:
+            if ok:
+                self._login_fails.pop(ident, None)
+                return
+            rec = self._login_fails.setdefault(ident, {"n": 0, "until": 0.0})
+            rec["n"] += 1
+            if rec["n"] >= self._MAX_FAILURES:
+                rec["until"] = time.time() + self._LOCKOUT_S
+                rec["n"] = 0
 
     def verify(self, identifier: str, password: str) -> dict | None:
+        ident = (identifier or "").strip().lower()
+        if self._login_locked(ident):
+            # Burn comparable time so a lockout is not a timing oracle.
+            hash_password(password)
+            return None
         user = self.get_user(identifier)
         if not user:
             # Spend ~equal time to reduce account enumeration via timing.
             hash_password(password)
+            self._note_login_result(ident, False)
             return None
         if _verify(password, user["salt"], user["pw_hash"], user["iterations"]):
+            self._note_login_result(ident, True)
             # First person ever to log in becomes the platform superadmin.
-            if not user["is_superadmin"] and not self._has_superadmin():
-                self._grant_superadmin(user["id"])
+            if (not user["is_superadmin"] and not self._has_superadmin()
+                    and self._grant_first_superadmin(user["id"])):
                 user["is_superadmin"] = True
             return user
+        self._note_login_result(ident, False)
         return None
 
     def list_orgs_summary(self) -> list:

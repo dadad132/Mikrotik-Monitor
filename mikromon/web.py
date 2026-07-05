@@ -687,7 +687,7 @@ def _render_inventory(store, state, user, allowed) -> str:
 
 
 def _render_device(store, state, name, user, csrf="",
-                   last_change=None, others_down=0) -> str:
+                   last_change=None, others_down=0, access_html="") -> str:
     d = _device_view(store, state, name)
     f = d["facts"]
     sev = _severity(d)
@@ -974,7 +974,7 @@ def _render_device(store, state, name, user, csrf="",
         f'<div style="display:flex;flex-direction:column;gap:16px">'
         f'{center_wan}{center_throughput}</div>'
         f'<div style="display:flex;flex-direction:column;gap:16px">'
-        f'{avail_box}{probs_box}{diag_html or ""}{iface_card}</div>'
+        f'{avail_box}{access_html}{probs_box}{diag_html or ""}{iface_card}</div>'
         f'</div>'
         f'<p style="margin-top:16px"><a href="/">&larr; dashboard</a></p>'
         f'</div>')
@@ -2746,13 +2746,18 @@ def _render_test_result(name, ok, detail, user) -> str:
     return _page("Test", _header(user, "/devices") + inner)
 
 
+def _prom_label(v) -> str:
+    return str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
 def _render_prometheus(store, allowed=None) -> str:
     lines = []
     for device, metric, label, value, _ts in store.all_latest():
         if allowed is not None and device not in allowed:
             continue
         name = "mikromon_" + _PROM_SAFE.sub("_", metric)
-        labels = f'device="{device}"' + (f',name="{label}"' if label else "")
+        labels = (f'device="{_prom_label(device)}"'
+                  + (f',name="{_prom_label(label)}"' if label else ""))
         lines.append(f"{name}{{{labels}}} {value}")
     return "\n".join(lines) + "\n"
 
@@ -3021,9 +3026,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     others_down = sum(
                         1 for dd in _all_devices(store, state, allowed)
                         if dd.get("device") != dev and not dd.get("up", True))
+                    access_html = (self._access_box_html(dev, csrf)
+                                  if AuthStore.is_admin(user or {}) else "")
                     return self._send(200, _render_device(store, state, dev, user,
                                       csrf, last_change=last_change,
-                                      others_down=others_down),
+                                      others_down=others_down,
+                                      access_html=access_html),
                                       "text/html; charset=utf-8")
                 if path == "/api/devices":
                     return self._send(200, json.dumps(
@@ -3100,30 +3108,45 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             q = parse_qs(url.query)
             orgs = auth.list_orgs_summary() if auth else []
             rows = []
-            for org in orgs:
-                oid = org["id"]
-                bill = billing.get(oid) if billing else None
-                # Resolve billing_status so the render sees "grace"/"trial"/etc
-                if billing and bill:
-                    status = billing.billing_status(oid)
-                    bill = dict(bill)
-                    bill["status"] = status
-                dev_count = 0
-                active_count = 0
-                if devices_db:
+            known_set: set = set()
+            _ds = None
+            if devices_db:
+                try:
+                    ms = self._store()
                     try:
-                        from .devices_store import DevicesStore as _DS
-                        _ds = _DS(devices_db)
-                        org_names = set(_ds.names_for_org(oid))
-                        dev_count = len(org_names)
-                        _ds.close()
-                        known_set = set(_known_devices(self._store(),
+                        known_set = set(_known_devices(ms,
                                                        _load_state(state_file)))
-                        active_count = sum(1 for n in org_names if n in known_set)
-                    except Exception:
-                        pass
-                rows.append({**org, "bill": bill, "device_count": dev_count,
-                             "active_count": active_count})
+                    finally:
+                        if ms:
+                            ms.close()
+                    from .devices_store import DevicesStore as _DS
+                    _ds = _DS(devices_db)
+                except Exception:
+                    log.exception("superadmin: could not load device inventory")
+            try:
+                for org in orgs:
+                    oid = org["id"]
+                    bill = billing.get(oid) if billing else None
+                    # Resolve billing_status so the render sees "grace"/"trial"/etc
+                    if billing and bill:
+                        status = billing.billing_status(oid)
+                        bill = dict(bill)
+                        bill["status"] = status
+                    dev_count = 0
+                    active_count = 0
+                    if _ds is not None:
+                        try:
+                            org_names = set(_ds.names_for_org(oid))
+                            dev_count = len(org_names)
+                            active_count = sum(1 for n in org_names
+                                               if n in known_set)
+                        except Exception:
+                            pass
+                    rows.append({**org, "bill": bill, "device_count": dev_count,
+                                 "active_count": active_count})
+            finally:
+                if _ds is not None:
+                    _ds.close()
             return self._send(200, _render_superadmin(
                 user, rows,
                 msg=q.get("ok", [""])[0],
@@ -4059,6 +4082,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             rows = audit.recent(limit=200) if audit else []
             if audit:
                 audit.close()
+            # Scope to this company's devices — the push log itself has no org
+            # column, so filter by device ownership (superadmin sees all).
+            if rows and devices_db and not user.get("is_superadmin"):
+                ds = self._devstore()
+                try:
+                    org_names = (set(ds.names_for_org(user.get("org_id")))
+                                 if ds else set())
+                finally:
+                    if ds:
+                        ds.close()
+                rows = [r for r in rows if r.get("device") in org_names]
             return self._send(200, _render_logs(user, rows),
                               "text/html; charset=utf-8")
 
@@ -4229,7 +4263,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if not AuthStore.is_admin(user or {}):
                 return self._send(403, "forbidden")
             flat, multi = self._form()
-            if flat.get("csrf") != self._session()["csrf"]:
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
                 return self._send(400, "bad csrf token")
             # Billing routes (owner only, no device ownership check needed).
             if path == "/billing/subscribe":
@@ -4408,7 +4443,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             pf_url = payment_url(_pf_sandbox)
             # Render an auto-submitting form — PayFast requires a POST.
             fields = "".join(
-                f'<input type="hidden" name="{k}" value="{v}">'
+                f'<input type="hidden" name="{esc(str(k))}" '
+                f'value="{esc(str(v))}">'
                 for k, v in data.items()
             )
             html = (f'<!doctype html><html><body>'
@@ -4544,6 +4580,47 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                    (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
             creds_html = ""
             if creds:
+                if creds.get("webfig_url") or creds.get("winbox_addr"):
+                    # Public hub-proxy addresses — no VPN needed by the user.
+                    wb = creds.get("winbox_addr", "")
+                    wf = creds.get("webfig_url", "")
+                    winbox_row = (
+                        f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Winbox</td>'
+                        f'<td><code style="font-weight:700">{esc(wb)}</code>'
+                        f'<span style="color:#64748b;font-size:12px;margin-left:8px">'
+                        f'(enter in the desktop Winbox app — "Connect To")</span>'
+                        f'</td></tr>') if wb else ""
+                    webfig_row = (
+                        f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">WebFig</td>'
+                        f'<td><a href="{esc(wf)}" target="_blank" rel="noopener">'
+                        f'{esc(wf)}</a>'
+                        f'<span style="color:#64748b;font-size:12px;margin-left:8px">'
+                        f'(browser)</span></td></tr>') if wf else ""
+                    how_note = (
+                        f'<div style="margin:14px 0 0;padding:10px 12px;background:#dcfce7;'
+                        f'border-left:3px solid #16a34a;border-radius:4px;font-size:13px">'
+                        f'<b>No VPN needed.</b> These addresses are proxied through the '
+                        f'hub and work from anywhere on the internet. The connection '
+                        f'closes automatically when the timer runs out.</div>')
+                else:
+                    winbox_row = (
+                        f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Winbox</td>'
+                        f'<td><code>{esc(host)}:8291</code>'
+                        f'<span style="color:#64748b;font-size:12px;margin-left:8px">'
+                        f'(desktop Winbox app)</span></td></tr>')
+                    webfig_row = (
+                        f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">WebFig</td>'
+                        f'<td><code>http://{esc(host)}</code>'
+                        f'<span style="color:#64748b;font-size:12px;margin-left:8px">'
+                        f'(browser)</span></td></tr>')
+                    how_note = (
+                        f'<div style="margin:14px 0 0;padding:10px 12px;background:#fef9c3;'
+                        f'border-left:3px solid #ca8a04;border-radius:4px;font-size:13px">'
+                        f'<b>&#9888; You must be connected to WireGuard</b> to reach '
+                        f'<code>{esc(host)}</code>. '
+                        f'These are tunnel-only addresses — they are unreachable from the '
+                        f'public internet without an active WireGuard VPN session to this hub.'
+                        f'</div>')
                 creds_html = (
                     f'<div class="box" style="border-left:4px solid #d97706">'
                     f'<h2 style="margin-top:0">&#9888; Copy these now — shown once</h2>'
@@ -4559,25 +4636,28 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Expires</td>'
                     f'<td>{esc(creds["exp_time"])} on router clock '
                     f'({esc(str(creds["duration_mins"]))} min)</td></tr>'
-                    f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Winbox</td>'
-                    f'<td><code>{esc(host)}:8291</code>'
-                    f'<span style="color:#64748b;font-size:12px;margin-left:8px">'
-                    f'(desktop Winbox app)</span></td></tr>'
-                    f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">WebFig</td>'
-                    f'<td><code>http://{esc(host)}</code>'
-                    f'<span style="color:#64748b;font-size:12px;margin-left:8px">'
-                    f'(browser)</span></td></tr>'
+                    f'{winbox_row}{webfig_row}'
                     f'</table>'
-                    f'<div style="margin:14px 0 0;padding:10px 12px;background:#fef9c3;'
-                    f'border-left:3px solid #ca8a04;border-radius:4px;font-size:13px">'
-                    f'<b>&#9888; You must be connected to WireGuard</b> to reach '
-                    f'<code>{esc(host)}</code>. '
-                    f'These are tunnel-only addresses — they are unreachable from the '
-                    f'public internet without an active WireGuard VPN session to this hub.'
-                    f'</div>'
+                    f'{how_note}'
                     f'<p class="muted" style="margin:10px 0 0;font-size:13px">Credentials '
                     f'are automatically deleted from the router when they expire.</p>'
                     f'</div>')
+            if access_cfg.get("hub_host") and _device_tunnel_ip(name, devices_db):
+                sec_note = (
+                    f'<p class="muted" style="margin:0;font-size:13px;padding:10px 12px;'
+                    f'background:#f1f5f9;border-radius:6px;border-left:3px solid #38bdf8">'
+                    f'<b>No VPN needed:</b> along with the login, you will get public '
+                    f'Winbox and WebFig addresses proxied through '
+                    f'<code>{esc(access_cfg.get("hub_host", ""))}</code>. They close '
+                    f'automatically when the login expires.</p>')
+            else:
+                sec_note = (
+                    f'<p class="muted" style="margin:0;font-size:13px;padding:10px 12px;'
+                    f'background:#f1f5f9;border-radius:6px;border-left:3px solid #38bdf8">'
+                    f'<b>Network security:</b> Access is via the WireGuard tunnel '
+                    f'(address <code>10.10.0.x</code>). Only devices enrolled as WireGuard '
+                    f'peers can reach the router &mdash; so no additional IP restriction is '
+                    f'needed.</p>')
             form = (
                 f'<div class="box"><h2>Create temporary login</h2>'
                 f'<p class="muted" style="margin-top:0">Generates a random username '
@@ -4599,12 +4679,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 f'<option value="write">Write (can change most settings)</option>'
                 f'<option value="full">Full (complete router access)</option>'
                 f'</select></label>'
-                f'<p class="muted" style="margin:0;font-size:13px;padding:10px 12px;'
-                f'background:#f1f5f9;border-radius:6px;border-left:3px solid #38bdf8">'
-                f'<b>Network security:</b> Access is via the WireGuard tunnel '
-                f'(address <code>10.10.0.x</code>). Only devices enrolled as WireGuard '
-                f'peers can reach the router &mdash; so no additional IP restriction is '
-                f'needed.</p>'
+                f'{sec_note}'
                 f'</div>'
                 f'<div style="margin-top:16px">'
                 f'<button class="btn" type="submit">Create credentials</button>'
@@ -4676,6 +4751,26 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             creds = {"username": username, "password": password,
                      "group": group, "allowed_ip": allowed_ip,
                      "duration_mins": duration_mins, "exp_time": exp}
+            # If the on-demand hub proxy is configured, open public Winbox +
+            # WebFig ports for the same duration so the user never needs a VPN.
+            astore = self._access_store()
+            if astore is not None:
+                tunnel_ip = _device_tunnel_ip(name, devices_db)
+                if tunnel_ip:
+                    hub = access_cfg.get("hub_host", "")
+                    ttl = duration_mins * 60
+                    try:
+                        wb = astore.open(name, "winbox", tunnel_ip, ttl=ttl)
+                        creds["winbox_addr"] = f"{hub}:{wb['port']}"
+                    except (ValueError, RuntimeError) as exc:
+                        log.warning("%s: could not open winbox grant: %s",
+                                    name, exc)
+                    try:
+                        wf = astore.open(name, "webfig", tunnel_ip, ttl=ttl)
+                        creds["webfig_url"] = f"https://{hub}:{wf['port']}"
+                    except (ValueError, RuntimeError) as exc:
+                        log.warning("%s: could not open webfig grant: %s",
+                                    name, exc)
             return self._device_tempaccess_page(name, user, creds=creds)
 
         # ---- Company details (admin/owner only) ----

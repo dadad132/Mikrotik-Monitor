@@ -13,11 +13,14 @@ gitignored. Encryption-at-rest is a planned enhancement.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
 
 from .config import ConfigError, DEFAULT_CHECKS, build_device, device_to_dict
+
+log = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
@@ -34,6 +37,9 @@ class DevicesStore:
         self.path = path
         self._lock = threading.Lock()
         self.db = sqlite3.connect(path, check_same_thread=False)
+        # WAL lets the engine thread read while the web thread writes without
+        # "database is locked" errors.
+        self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(_SCHEMA)
         # Add org_id to pre-multi-tenant DBs (all existing devices -> org 1).
         cols = [r[1] for r in self.db.execute("PRAGMA table_info(devices)")]
@@ -149,10 +155,12 @@ class DevicesStore:
     def list_configs(self, defaults: dict) -> list:
         """All devices as DeviceConfig objects (skips any that fail to build)."""
         out = []
-        for r in self.db.execute("SELECT config FROM devices ORDER BY name"):
+        for r in self.db.execute("SELECT name, config FROM devices ORDER BY name"):
             try:
-                out.append(build_device(json.loads(r[0]), defaults))
-            except (ConfigError, json.JSONDecodeError):
+                out.append(build_device(json.loads(r[1]), defaults))
+            except (ConfigError, json.JSONDecodeError) as exc:
+                log.warning("device %r has an invalid stored config and is "
+                            "NOT being monitored: %s", r[0], exc)
                 continue
         return out
 

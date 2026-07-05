@@ -90,23 +90,22 @@ class MetricsStore:
         return [r[0] for r in cur.fetchall()]
 
     def latest(self, device: str) -> dict:
-        """Most-recent value per (metric, label) for a device."""
+        """Most-recent value per (metric, label) for a device.
+
+        SQLite's bare-column-with-MAX() rule guarantees `value` comes from
+        the row holding MAX(ts)."""
         cur = self.db.execute(
-            "SELECT metric, label, value, ts FROM samples "
-            "WHERE device = ? ORDER BY ts", (device,))
-        out = {}
-        for metric, label, value, ts in cur.fetchall():
-            out[(metric, label)] = {"value": value, "ts": ts}
-        return out
+            "SELECT metric, label, value, MAX(ts) FROM samples "
+            "WHERE device = ? GROUP BY metric, label", (device,))
+        return {(metric, label): {"value": value, "ts": ts}
+                for metric, label, value, ts in cur.fetchall()}
 
     def all_latest(self) -> list:
         """(device, metric, label, value, ts) latest per series — for Prometheus."""
-        cur = self.db.execute("SELECT device, metric, label, value, ts FROM samples "
-                              "ORDER BY ts")
-        seen = {}
-        for device, metric, label, value, ts in cur.fetchall():
-            seen[(device, metric, label)] = (device, metric, label, value, ts)
-        return list(seen.values())
+        cur = self.db.execute(
+            "SELECT device, metric, label, value, MAX(ts) FROM samples "
+            "GROUP BY device, metric, label")
+        return cur.fetchall()
 
     def series(self, device: str, metric: str, label: str = "",
                since: float | None = None, limit: int = 500) -> list:

@@ -64,7 +64,9 @@ class AccessStore:
 
     def _save(self, data: dict) -> None:
         tmp = f"{self.path}.tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
+        # 0600 — the grants file maps devices to tunnel IPs and open ports.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=2)
         os.replace(tmp, self.path)
 
@@ -130,7 +132,10 @@ class AccessStore:
     @staticmethod
     def _alloc_port(data: dict, kind: str) -> int:
         lo, hi = KINDS[kind]["ports"]
-        taken = {g["port"] for g in data["grants"].values()}
+        # Only this kind's grants occupy this range — counting all kinds
+        # would declare exhaustion while half the range is still free.
+        taken = {g["port"] for g in data["grants"].values()
+                 if lo <= g.get("port", 0) <= hi}
         if len(taken) >= (hi - lo + 1):
             raise RuntimeError("no free access ports left")
         while True:
