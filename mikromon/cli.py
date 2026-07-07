@@ -297,9 +297,13 @@ def _cmd_backup_server(args, config) -> int:
               file=sys.stderr)
         return 2
     out_path = args.out or backup_filename()
-    build_archive_to_file(paths, out_path)
+    skipped = build_archive_to_file(paths, out_path)
     print(f"Wrote {out_path} ({os.path.getsize(out_path):,} bytes) "
           f"containing: {', '.join(included)}")
+    if skipped:
+        print("NOTE: skipped unreadable file(s), not included in the "
+              "archive: " + ", ".join(f"{n} ({e})" for n, e in skipped),
+              file=sys.stderr)
     if "config.yaml" not in included:
         print("NOTE: config.yaml wasn't found at the path passed via -c — "
               "double-check it's included.", file=sys.stderr)

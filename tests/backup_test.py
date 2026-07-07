@@ -64,6 +64,27 @@ with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
     got = tar.extractfile("config.yaml").read().decode()
     check("plain file content round-trips", got == "poll_interval: 60\n")
 
+print("build_archive_to_file — an unreadable file is skipped, not fatal:")
+readable_path = os.path.join(tmp, "readable.json")
+with open(readable_path, "w") as fh:
+    fh.write('{"grants": {}}')
+unreadable_path = os.path.join(tmp, "unreadable.json")
+with open(unreadable_path, "w") as fh:
+    fh.write('{"grants": {}}')
+os.chmod(unreadable_path, 0o000)
+try:
+    out_path = os.path.join(tmp, "partial.tar.gz")
+    skipped = backup.build_archive_to_file(
+        {"readable.json": readable_path, "unreadable.json": unreadable_path},
+        out_path)
+    check("the unreadable file is reported as skipped",
+          len(skipped) == 1 and skipped[0][0] == "unreadable.json")
+    with tarfile.open(out_path, mode="r:gz") as tar:
+        check("the rest of the archive is still built successfully",
+              tar.getnames() == ["readable.json"])
+finally:
+    os.chmod(unreadable_path, 0o644)  # so cleanup can remove tmp/ afterward
+
 print("build_archive — live WAL-mode SQLite DB is snapshotted consistently:")
 db_path = os.path.join(tmp, "live.db")
 conn = sqlite3.connect(db_path)

@@ -3220,15 +3220,18 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             from .backup import backup_filename, build_archive_to_file
             out_path = os.path.join(backups_dir, backup_filename())
             try:
-                build_archive_to_file(self._backup_paths(), out_path)
+                skipped = build_archive_to_file(self._backup_paths(), out_path)
             except Exception as exc:
                 log.exception("superadmin: backup creation failed")
                 if os.path.exists(out_path):
                     os.unlink(out_path)
                 return self._redirect("/superadmin?error="
                                       + quote(f"Backup failed: {exc}"))
-            return self._redirect("/superadmin?ok="
-                                  + quote(f"Backup created: {os.path.basename(out_path)}"))
+            msg = f"Backup created: {os.path.basename(out_path)}"
+            if skipped:
+                log.warning("superadmin: backup skipped unreadable file(s): %s", skipped)
+                msg += " (skipped, unreadable: " + ", ".join(n for n, _ in skipped) + ")"
+            return self._redirect("/superadmin?ok=" + quote(msg))
 
         def _post_superadmin_backup_delete(self, user):
             if not user or not user.get("is_superadmin"):

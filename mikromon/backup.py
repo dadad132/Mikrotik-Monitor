@@ -97,11 +97,18 @@ def _add_sqlite_snapshot(tar: tarfile.TarFile, arcname: str, path: str,
             os.unlink(tmp_path)
 
 
-def build_archive_to_file(paths: dict, out_path: str) -> None:
+def build_archive_to_file(paths: dict, out_path: str) -> list:
     """Tar+gzip every existing file in `paths` (archive name -> source path)
     straight to `out_path` on disk. Missing files (e.g. a DB feature that
     was never enabled) are silently skipped rather than failing the whole
     backup.
+
+    Returns a list of (arcname, error) for files that EXIST but couldn't be
+    read (e.g. access-grants.json, whose ownership legitimately flips
+    between the web service and the root-run access-reload timer that prunes
+    it every minute — whichever wrote it last is the only one that can read
+    its 0600 permissions). One unreadable, low-value file must not fail the
+    whole backup — the caller can surface these as a warning.
 
     Writes to disk rather than building the archive in memory: metrics.db
     can grow large, and holding a full in-memory copy (on top of the SQLite
@@ -113,14 +120,19 @@ def build_archive_to_file(paths: dict, out_path: str) -> None:
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     now = time.time()
     tmp_dir = os.path.dirname(out_path) or "."
+    skipped = []
     with tarfile.open(out_path, mode="w:gz") as tar:
         for arcname, path in paths.items():
             if not path or not os.path.isfile(path):
                 continue
-            if path.endswith(".db"):
-                _add_sqlite_snapshot(tar, arcname, path, now, tmp_dir)
-            else:
-                tar.add(path, arcname=arcname)
+            try:
+                if path.endswith(".db"):
+                    _add_sqlite_snapshot(tar, arcname, path, now, tmp_dir)
+                else:
+                    tar.add(path, arcname=arcname)
+            except Exception as exc:  # noqa: BLE001 — one bad file must not sink the backup
+                skipped.append((arcname, str(exc)))
+    return skipped
 
 
 def build_archive(paths: dict, tmp_dir: str = ".") -> bytes:
