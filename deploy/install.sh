@@ -302,6 +302,34 @@ if [[ -f "${CONFIG_FILE}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# TEMPORARY — one-off cleanup for this migration. Remove this block on the
+# next push; new migrations don't need it (restore now strips hub_ip
+# automatically). hub.json restored from the old server's backup has the
+# OLD server's IP cached in hub_ip forever (unlike hub_pubkey/listen_port/
+# subnet, which install.sh already refreshes every run) — this clears just
+# that one field so the Provision page re-detects this server's real
+# address. Everything else in hub.json (hub_pubkey, leases, subnet) is left
+# untouched. Best-effort: does nothing if hub.json doesn't exist yet or has
+# no cached hub_ip, so it never fails the install.
+# ---------------------------------------------------------------------------
+HUB_JSON="${APP_DIR}/hub.json"
+if [[ -f "${HUB_JSON}" ]]; then
+  sudo -u "${SERVICE_USER}" "${APP_DIR}/.venv/bin/python" -c "
+import json
+path = '${HUB_JSON}'
+with open(path) as f:
+    data = json.load(f)
+if data.pop('hub_ip', None) is not None:
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+    print('Cleared stale hub_ip from hub.json — will re-detect')
+else:
+    print('hub.json has no cached hub_ip — nothing to clear')
+" && log "hub.json hub_ip check complete" \
+    || log "WARN: could not check/clear hub_ip in hub.json"
+fi
+
+# ---------------------------------------------------------------------------
 # 8. Firewall — open the dashboard port  (ufw is idempotent)
 # ---------------------------------------------------------------------------
 step "Opening firewall port ${WEB_PORT}/tcp"
