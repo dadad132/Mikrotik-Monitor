@@ -4075,14 +4075,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(400, "unknown access kind")
             q = quote(name)
             if action == "close":
-                store.close(name, kind)
+                try:
+                    store.close(name, kind)
+                except OSError as exc:
+                    return self._send(400, f"Could not update the grants file: {exc}")
                 return self._redirect(f"/device?name={q}")
             tunnel_ip = _device_tunnel_ip(name, devices_db)
             if not tunnel_ip:
                 return self._send(400, "this device has no hub tunnel yet")
             try:
                 store.open(name, kind, tunnel_ip, ttl=self._access_ttl())
-            except (ValueError, RuntimeError) as exc:
+            except (ValueError, RuntimeError, OSError) as exc:
                 return self._send(400, f"Error: {exc}")
             return self._redirect(f"/device?name={q}")
 

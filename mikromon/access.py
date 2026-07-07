@@ -54,10 +54,16 @@ class AccessStore:
 
     # ----- persistence ------------------------------------------------------
     def _load(self) -> dict:
+        """Missing, invalid, or unreadable -> treat as no grants rather than
+        raising. This file's ownership legitimately flips between the web
+        service and the root-run access-reload timer that prunes it every
+        minute, so a transient permission mismatch is expected, not
+        exceptional — and every device page renders this on every view, so
+        it must never be able to take the whole page down."""
         try:
             with open(self.path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
-        except (FileNotFoundError, ValueError):
+        except (OSError, ValueError):
             data = {}
         data.setdefault("grants", {})
         return data

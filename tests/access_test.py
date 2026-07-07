@@ -94,6 +94,24 @@ check("apply pruned the expired grant (its port is not served)",
       "10.10.0.9" not in http_txt and "10.10.0.9" not in stream_txt
       and all("R9" not in g["device"] for g in store.active(now=T0 + 6100)))
 
+print("An unreadable grants file is tolerated, not fatal:")
+# The grants file's ownership legitimately flips between the web service and
+# the root-run access-reload timer that prunes it every minute — a device
+# page renders this on every view, so a permission mismatch here must never
+# crash it (reported in production: it did, with no graceful fallback).
+unreadable = os.path.join(tmp, "unreadable-access.json")
+with open(unreadable, "w") as fh:
+    fh.write('{"grants": {}}')
+os.chmod(unreadable, 0o000)
+try:
+    ustore = access.AccessStore(unreadable)
+    check("grant_for() on an unreadable file returns None, doesn't raise",
+          ustore.grant_for("R1", "webfig") is None)
+    check("active() on an unreadable file returns [], doesn't raise",
+          ustore.active() == [])
+finally:
+    os.chmod(unreadable, 0o644)  # so cleanup can remove tmp/ afterward
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")
