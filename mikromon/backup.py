@@ -213,5 +213,17 @@ def _restore_from_tar(tar: tarfile.TarFile, paths: dict) -> list:
         with open(tmp, "wb") as fh:
             fh.write(member.read())
         os.replace(tmp, dest)
+        if dest.endswith(".db"):
+            # Drop any pre-existing WAL/SHM sidecar files for the OLD version
+            # of this database. SQLite validates a -wal file against the main
+            # file before trusting it, so a mismatched one is normally just
+            # ignored — but a stale sidecar left with different ownership
+            # (e.g. from a process that touched the old file as a different
+            # user) can still block the service from opening its replacement
+            # cleanly. A freshly-restored DB doesn't need them anyway.
+            for suffix in ("-wal", "-shm"):
+                sidecar = dest + suffix
+                if os.path.exists(sidecar):
+                    os.unlink(sidecar)
         written.append(dest)
     return written

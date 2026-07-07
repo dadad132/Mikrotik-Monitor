@@ -145,6 +145,20 @@ restored.close()
 check("restored db has the same rows as the live source it was backed up from",
       rows == ["before-backup", "also-before-backup"])
 
+print("restore_archive — stale WAL/SHM sidecars from the OLD file are removed:")
+stale_wal = new_auth_db + "-wal"
+stale_shm = new_auth_db + "-shm"
+with open(stale_wal, "w") as fh:
+    fh.write("stale wal data from before the restore")
+with open(stale_shm, "w") as fh:
+    fh.write("stale shm data from before the restore")
+backup.restore_archive(archive, new_paths)
+check("stale -wal sidecar is removed on restore", not os.path.exists(stale_wal))
+check("stale -shm sidecar is removed on restore", not os.path.exists(stale_shm))
+check("the restored db itself still opens and reads correctly",
+      [r[0] for r in sqlite3.connect(new_auth_db).execute(
+          "SELECT v FROM t ORDER BY id")] == ["before-backup", "also-before-backup"])
+
 print("restore_archive — a member missing from the archive is left alone:")
 untouched_path = os.path.join(new_dir, "metrics.db")
 with open(untouched_path, "w") as fh:

@@ -249,7 +249,11 @@ fi
 # exist yet or auth: isn't configured, so it never fails the install.
 # ---------------------------------------------------------------------------
 if [[ -f "${CONFIG_FILE}" ]]; then
-  "${APP_DIR}/.venv/bin/python" -m mikromon set-superadmin \
+  # Must run as the mikromon user, not root (this whole script runs under
+  # sudo) — writing auth.db as root here leaves root-owned bits behind
+  # (WAL/SHM sidecar files in particular) that the actual mikromon-web
+  # service, running unprivileged, can then fail to read/write correctly.
+  sudo -u "${SERVICE_USER}" "${APP_DIR}/.venv/bin/python" -m mikromon set-superadmin \
       --user barnard.juanpierre@gmail.com -c "${CONFIG_FILE}" \
       && log "Granted superadmin to barnard.juanpierre@gmail.com" \
       || log "Skipped superadmin grant (account may not exist yet — sign up first, then re-run)"
