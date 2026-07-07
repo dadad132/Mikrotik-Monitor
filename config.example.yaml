@@ -63,6 +63,11 @@ auth_db: ./auth.db
 # truth and the monitor picks up changes on its next poll (no restart needed).
 devices_db: ./devices.db
 
+# Config-push audit trail -> SQLite file. Powers the "Activity" tab (who
+# pushed what, when, and whether it succeeded) and the pre-change safety
+# backups' history. Leave commented to disable logging entirely.
+push_log_db: ./push_log.db
+
 # On-demand WebFig / Winbox access through the hub. When set, each device page
 # gets "Open WebFig" / "Open Winbox" buttons that expose a time-limited public
 # port on the hub, proxied to the router over the WireGuard tunnel, then auto-
