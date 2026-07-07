@@ -9,6 +9,7 @@ import time
 
 from .auth import AuthStore
 from .billing import PLANS, GRACE_DAYS, FREE_DEVICES
+from .util import human_bytes
 from .web_shared import _BRAND, _PAGE_CSS, esc, _header, _page, _who
 
 
@@ -443,7 +444,8 @@ _STATUS_COLOR = {
 }
 
 
-def _render_superadmin(user, rows: list, msg: str = "", error: str = "") -> str:
+def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
+                       msg: str = "", error: str = "") -> str:
     """Platform superadmin panel — shows all orgs, billing status, and device counts."""
     note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
            (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
@@ -517,19 +519,69 @@ def _render_superadmin(user, rows: list, msg: str = "", error: str = "") -> str:
         f'</tbody></table></div>'
     )
 
+    def _post(action, label, cls="btn ghost", extra="", confirm=""):
+        oc = f' onclick="return confirm(\'{confirm}\')"' if confirm else ""
+        return (f'<form method="POST" action="{action}" style="display:inline">'
+                f'<input type="hidden" name="csrf" value="{esc(csrf)}">{extra}'
+                f'<button class="{cls}" type="submit"{oc}>{label}</button></form>')
+
+    backup_rows = ""
+    for b in backups:
+        when = time.strftime("%d %b %Y %H:%M", time.localtime(b["mtime"]))
+        name_q = esc(b["name"])
+        backup_rows += (
+            f'<tr><td><code>{name_q}</code></td>'
+            f'<td>{esc(human_bytes(b["size"]))}</td>'
+            f'<td class="muted">{when}</td>'
+            f'<td style="white-space:nowrap">'
+            f'<a class="btn ghost" href="/superadmin/backup/download?name={name_q}">'
+            f'Download</a> '
+            + _post("/superadmin/backup/restore", "Restore",
+                    extra=f'<input type="hidden" name="name" value="{name_q}">',
+                    confirm=f"Restore {b['name']}? This OVERWRITES every "
+                            f"company's current data on this server with what "
+                            f"was in this backup. You must restart the service "
+                            f"afterward for it to take effect. Continue?")
+            + " "
+            + _post("/superadmin/backup/delete", "Delete",
+                    extra=f'<input type="hidden" name="name" value="{name_q}">',
+                    confirm=f"Delete backup {b['name']}? This cannot be undone.")
+            + '</td></tr>')
+
+    _no_backups = '<tr><td colspan=4 class="muted">No backups yet — create one below.</td></tr>'
+    backup_table = (
+        f'<table style="min-width:600px"><thead><tr>'
+        f'<th>Backup</th><th>Size</th><th>Created</th><th></th>'
+        f'</tr></thead><tbody>{backup_rows or _no_backups}</tbody></table>'
+    )
+
     backup_box = (
         f'<div class="box"><h2>Server backup</h2>'
-        f'<p class="muted">Download every configured mikromon data file '
-        f'(config, all companies\' accounts/devices/billing/metrics, the '
-        f'tunnel-IP registry) as one archive — for moving this install to a '
-        f'new server.</p>'
+        f'<p class="muted">Bundles config, every company\'s accounts/devices/'
+        f'billing/metrics, and the tunnel-IP registry into one archive — for '
+        f'moving this install to a new server.</p>'
         f'<p class="muted" style="border-left:3px solid #d97706;padding-left:8px">'
         f'⚠ This does <b>not</b> include the hub\'s WireGuard identity '
         f'(<code>/etc/wireguard/</code> on this server) — copy that '
         f'separately (as root) so already-provisioned routers keep dialing '
         f'home without changes. Full restore steps: '
         f'<code>deploy/SERVER-MIGRATION.md</code>.</p>'
-        f'<a class="btn" href="/superadmin/backup">Download full backup</a>'
+        f'<div style="overflow-x:auto">{backup_table}</div>'
+        f'<div style="margin-top:12px">'
+        + _post("/superadmin/backup/create", "Create new backup", cls="btn")
+        + '</div>'
+        f'<h3 style="margin:20px 0 8px">Restore from a file</h3>'
+        f'<p class="muted" style="margin-top:0">Upload a backup archive '
+        f'downloaded from this or another mikromon server.</p>'
+        f'<form method="POST" action="/superadmin/backup/restore-upload" '
+        f'enctype="multipart/form-data" '
+        f'onsubmit="return confirm(\'Restore from this file? This OVERWRITES '
+        f'every company\\\'s current data on this server. You must restart '
+        f'the service afterward for it to take effect. Continue?\')">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<input type="file" name="archive" accept=".gz,.tar.gz" required> '
+        f'<button class="btn ghost" type="submit">Restore uploaded file</button>'
+        f'</form>'
         f'</div>'
     )
 

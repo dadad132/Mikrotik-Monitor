@@ -5,8 +5,39 @@ Imported by web.py and web_auth.py so neither needs to duplicate these.
 from __future__ import annotations
 
 import html
+import re
 
 esc = html.escape
+
+_MULTIPART_BOUNDARY_RE = re.compile(r'boundary="?([^";]+)"?')
+_MULTIPART_NAME_RE = re.compile(r'name="([^"]*)"')
+
+
+def parse_multipart_form(content_type: str, body: bytes) -> dict:
+    """Minimal multipart/form-data parser: returns {field_name: bytes}.
+
+    Only what's needed for a small admin form (a CSRF token + one uploaded
+    file) — not a general MIME parser. Returns {} if `content_type` isn't
+    multipart/form-data or has no boundary."""
+    m = _MULTIPART_BOUNDARY_RE.search(content_type or "")
+    if not m:
+        return {}
+    boundary = ("--" + m.group(1)).encode()
+    fields: dict = {}
+    for part in body.split(boundary)[1:-1]:
+        part = part.strip(b"\r\n")
+        if not part:
+            continue
+        header_blob, sep, content = part.partition(b"\r\n\r\n")
+        if not sep:
+            continue
+        name_m = _MULTIPART_NAME_RE.search(header_blob.decode("latin-1"))
+        if not name_m:
+            continue
+        if content.endswith(b"\r\n"):
+            content = content[:-2]
+        fields[name_m.group(1)] = content
+    return fields
 
 _BRAND = "easymikrotik"
 

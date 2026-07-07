@@ -30,6 +30,7 @@ from mikromon.auth import AuthStore
 from mikromon.config import DEFAULT_THRESHOLDS
 from mikromon.devices_store import DevicesStore
 from mikromon.metrics import MetricsStore
+from mikromon.web_shared import parse_multipart_form
 
 FAILS = []
 BASE = "http://127.0.0.1:8098"
@@ -40,6 +41,24 @@ def check(name, ok):
     print(f"  [{'ok  ' if ok else 'FAIL'}] {name}")
     if not ok:
         FAILS.append(name)
+
+
+print("parse_multipart_form (offline, no server needed):")
+_boundary = "----testboundary123"
+_body = (
+    f"--{_boundary}\r\n"
+    f'Content-Disposition: form-data; name="csrf"\r\n\r\n'
+    f"tok-xyz\r\n"
+    f"--{_boundary}\r\n"
+    f'Content-Disposition: form-data; name="archive"; filename="b.tar.gz"\r\n'
+    f"Content-Type: application/gzip\r\n\r\n"
+).encode("latin-1") + b"\x1f\x8bBINARY\x00\x01\r\n" + f"--{_boundary}--\r\n".encode("latin-1")
+_fields = parse_multipart_form(f"multipart/form-data; boundary={_boundary}", _body)
+check("text field parsed", _fields.get("csrf") == b"tok-xyz")
+check("binary file field parsed byte-exact",
+      _fields.get("archive") == b"\x1f\x8bBINARY\x00\x01")
+check("non-multipart content-type yields no fields",
+      parse_multipart_form("application/x-www-form-urlencoded", b"a=1") == {})
 
 
 def opener(redirect=True):
@@ -195,23 +214,82 @@ try:
     req(op_helper, "/login",
         {"email": "helper@startup.test", "password": "helper123"}, B0)
 
-    r = op_founder.open(urllib.request.Request(B0 + "/superadmin/backup"))
+    _, sa_body = req(op_founder, "/superadmin", base=B0)
+    sa_csrf = csrf_of(sa_body)
+    check("no backups listed yet", "No backups yet" in sa_body)
+
+    print("  create:")
+    st, _ = req(op_founder, "/superadmin/backup/create", {"csrf": sa_csrf}, B0)
+    check("create redirects back to /superadmin", st == 200)  # opener follows redirects
+    st, sa_body = req(op_founder, "/superadmin", base=B0)
+    m = re.search(r"(mikromon-backup-[\d-]+\.tar\.gz)", sa_body)
+    check("the created backup is now listed", m is not None)
+    backup_name = m.group(1) if m else ""
+
+    print("  download:")
+    r = op_founder.open(urllib.request.Request(
+        B0 + f"/superadmin/backup/download?name={backup_name}"))
     ctype = r.headers.get("Content-Type", "")
     payload = r.read()
-    check("superadmin backup download has a gzip content-type",
-          ctype.startswith("application/gzip"))
-    check("superadmin backup payload is a real gzip stream",
-          payload[:2] == b"\x1f\x8b")
+    check("download has a gzip content-type", ctype.startswith("application/gzip"))
+    check("payload is a real gzip stream", payload[:2] == b"\x1f\x8b")
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tar:
-        check("superadmin backup contains this server's config + auth db",
+        check("archive contains this server's config + auth db",
               "config.yaml" in tar.getnames() and "auth.db" in tar.getnames())
+
+    print("  path-traversal protection:")
+    for bad_name in ("../../etc/passwd", "/etc/passwd", "sub/dir.tar.gz"):
+        try:
+            op_founder.open(urllib.request.Request(
+                B0 + f"/superadmin/backup/download?name={urllib.parse.quote(bad_name)}"))
+            check(f"crafted name rejected ({bad_name})", False)
+        except urllib.error.HTTPError as e:
+            check(f"crafted name rejected ({bad_name})", e.code == 400)
+
+    print("  restore from the on-server backup:")
+    st, restore_body = req(op_founder, "/superadmin/backup/restore",
+                           {"csrf": sa_csrf, "name": backup_name}, B0)
+    check("restore succeeds and tells the admin to restart the service",
+          st == 200 and "restart the service" in restore_body.lower())
+
+    print("  restore from an uploaded file:")
+    boundary = "----uploadtestboundary"
+    up_body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="csrf"\r\n\r\n'
+        f"{sa_csrf}\r\n"
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="archive"; filename="{backup_name}"\r\n'
+        f"Content-Type: application/gzip\r\n\r\n"
+    ).encode("latin-1") + payload + f"\r\n--{boundary}--\r\n".encode("latin-1")
+    up_req = urllib.request.Request(
+        B0 + "/superadmin/backup/restore-upload", data=up_body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    up_resp = op_founder.open(up_req)
+    up_text = up_resp.read().decode()
+    check("restore-from-upload succeeds and tells the admin to restart",
+          up_resp.status == 200 and "restart the service" in up_text.lower())
+
+    print("  non-superadmin (helper, a member) is blocked from every action:")
+    for path, data in (
+        ("/superadmin/backup/create", {"csrf": "x"}),
+        ("/superadmin/backup/delete", {"csrf": "x", "name": backup_name}),
+        ("/superadmin/backup/restore", {"csrf": "x", "name": backup_name}),
+    ):
+        st, _ = req(op_helper, path, data, B0)
+        check(f"member blocked from {path} (403)", st == 403)
     try:
-        op_helper.open(urllib.request.Request(B0 + "/superadmin/backup"))
-        check("non-superadmin member blocked from the backup download (403)",
-              False)
+        op_helper.open(urllib.request.Request(
+            B0 + f"/superadmin/backup/download?name={backup_name}"))
+        check("member blocked from download (403)", False)
     except urllib.error.HTTPError as e:
-        check("non-superadmin member blocked from the backup download (403)",
-              e.code == 403)
+        check("member blocked from download (403)", e.code == 403)
+
+    print("  delete:")
+    st, _ = req(op_founder, "/superadmin/backup/delete",
+               {"csrf": sa_csrf, "name": backup_name}, B0)
+    _, sa_body = req(op_founder, "/superadmin", base=B0)
+    check("deleted backup no longer listed", backup_name not in sa_body)
 finally:
     srv0.shutdown()
     srv0.server_close()

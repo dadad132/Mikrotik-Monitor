@@ -13,6 +13,7 @@ import sqlite3
 import sys
 import tarfile
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -43,7 +44,8 @@ check("hub.json is derived alongside devices.db",
       paths["hub.json"] == os.path.join(tmp, "sub", "hub.json"))
 
 print("build_archive — missing files are skipped, not fatal:")
-data = backup.build_archive({"config.yaml": os.path.join(tmp, "nope.yaml")})
+data = backup.build_archive({"config.yaml": os.path.join(tmp, "nope.yaml")},
+                            tmp_dir=tmp)
 with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
     check("archive is empty when nothing exists", tar.getnames() == [])
 
@@ -54,7 +56,8 @@ with open(cfg_path, "w") as fh:
 state_path = os.path.join(tmp, "state.json")
 with open(state_path, "w") as fh:
     fh.write('{"devices": {}}')
-data = backup.build_archive({"config.yaml": cfg_path, "state.json": state_path})
+data = backup.build_archive({"config.yaml": cfg_path, "state.json": state_path},
+                            tmp_dir=tmp)
 with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
     names = tar.getnames()
     check("both plain files present", set(names) == {"config.yaml", "state.json"})
@@ -74,7 +77,7 @@ conn2 = sqlite3.connect(db_path)
 conn2.execute("INSERT INTO t (v) VALUES ('also-before-backup')")
 conn2.commit()
 
-data = backup.build_archive({"live.db": db_path})
+data = backup.build_archive({"live.db": db_path}, tmp_dir=tmp)
 with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
     check("db appears in the archive", tar.getnames() == ["live.db"])
     member = tar.extractfile("live.db").read()
@@ -103,7 +106,7 @@ old_cfg = os.path.join(old_dir, "config.yaml")
 with open(old_cfg, "w") as fh:
     fh.write("poll_interval: 60\n")
 old_paths = backup.backup_paths(config_path=old_cfg, auth_db=db_path)
-archive = backup.build_archive(old_paths)
+archive = backup.build_archive(old_paths, tmp_dir=tmp)
 
 # The "new server" has its own config at a different path — restoring must
 # write to THIS install's configured destinations, not the old server's paths.
@@ -130,6 +133,56 @@ written2 = backup.restore_archive(
 check("only members actually present in the archive are written",
       "metrics.db" not in [os.path.basename(w) for w in written2]
       and open(untouched_path).read() == "pre-existing, not in the backup")
+
+print("backups_dir_for:")
+check("anchored next to config.yaml",
+      backup.backups_dir_for(config_path="/opt/mikromon/config.yaml")
+      == os.path.join("/opt/mikromon", "backups-server"))
+check("falls back to devices.db's directory when there's no config_path",
+      backup.backups_dir_for(devices_db="/opt/mikromon/devices.db")
+      == os.path.join("/opt/mikromon", "backups-server"))
+
+print("is_safe_backup_name — rejects anything that could escape the dir:")
+check("a normal generated name is accepted",
+      backup.is_safe_backup_name("mikromon-backup-20260101-000000.tar.gz"))
+check("path traversal is rejected", not backup.is_safe_backup_name("../../etc/passwd"))
+check("an absolute path is rejected", not backup.is_safe_backup_name("/etc/passwd.tar.gz"))
+check("a nested path is rejected", not backup.is_safe_backup_name("sub/dir.tar.gz"))
+check("wrong extension is rejected", not backup.is_safe_backup_name("backup.zip"))
+check("empty name is rejected", not backup.is_safe_backup_name(""))
+
+print("list_backups + build_archive_to_file (the persisted, listable flow):")
+backups_dir = os.path.join(tmp, "backups-server")
+check("no directory yet -> empty list", backup.list_backups(backups_dir) == [])
+# Explicit distinct names — backup_filename() only has second resolution,
+# too coarse to reliably distinguish two backups made back-to-back in a test.
+name1, name2 = "mikromon-backup-A.tar.gz", "mikromon-backup-B.tar.gz"
+backup.build_archive_to_file(old_paths, os.path.join(backups_dir, name1))
+os.utime(os.path.join(backups_dir, name1), (time.time() - 5, time.time() - 5))
+backup.build_archive_to_file(old_paths, os.path.join(backups_dir, name2))
+listed = backup.list_backups(backups_dir)
+check("both created backups are listed",
+      {b["name"] for b in listed} == {name1, name2})
+check("listed newest first", listed[0]["name"] == name2)
+check("sizes are non-zero (the config.yaml + db actually got written)",
+      all(b["size"] > 0 for b in listed))
+with open(os.path.join(backups_dir, "not-a-backup.txt"), "w") as fh:
+    fh.write("ignore me")
+check("a stray file in the backups dir is ignored by list_backups",
+      len(backup.list_backups(backups_dir)) == 2)
+
+print("restore_archive_from_path — restores directly from an on-disk archive:")
+new_dir2 = os.path.join(tmp, "new2")
+os.makedirs(new_dir2)
+new_paths2 = backup.backup_paths(
+    config_path=os.path.join(new_dir2, "config.yaml"),
+    auth_db=os.path.join(new_dir2, "auth.db"))
+written3 = backup.restore_archive_from_path(
+    os.path.join(backups_dir, name1), new_paths2)
+check("restore_archive_from_path writes both configured files",
+      set(written3) == set(new_paths2.values()))
+check("restored config content matches",
+      open(new_paths2["config.yaml"]).read() == "poll_interval: 60\n")
 
 print()
 if FAILS:

@@ -25,7 +25,6 @@ import os
 import re
 import secrets
 import shutil
-import tempfile
 import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,7 +36,7 @@ from .metrics import MetricsStore
 from .util import human_bps
 from .web_shared import (
     esc, _BRAND, _REVERT_MINUTES, _PAGE_CSS,
-    _nav, _who, _header, _page,
+    _nav, _who, _header, _page, parse_multipart_form,
 )
 from .web_auth import (
     _render_login, _render_signup, _render_account,
@@ -2799,6 +2798,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
     defaults = defaults or {}
     access_cfg = access_cfg or {}
     billing_cfg = billing_cfg or {}
+    from .backup import backups_dir_for
+    backups_dir = backups_dir_for(config_path=config_path, devices_db=devices_db)
     billing = None
     if billing_cfg.get("db"):
         from .billing import BillingStore
@@ -2962,8 +2963,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._serve_billing(url, user)
             if path == "/superadmin":
                 return self._serve_superadmin(url, user)
-            if path == "/superadmin/backup":
-                return self._serve_superadmin_backup(user)
+            if path == "/superadmin/backup/download":
+                name = parse_qs(url.query).get("name", [""])[0]
+                return self._serve_superadmin_backup_download(user, name)
             if path == "/account":
                 q = parse_qs(url.query)
                 org_data = auth.org(user["org_id"]) if auth else None
@@ -3168,38 +3170,139 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             finally:
                 if _ds is not None:
                     _ds.close()
+            from .backup import list_backups
+            backups = list_backups(backups_dir)
             return self._send(200, _render_superadmin(
-                user, rows,
+                user, rows, backups, self._session()["csrf"],
                 msg=q.get("ok", [""])[0],
                 error=q.get("error", [""])[0]),
                 "text/html; charset=utf-8")
 
-        def _serve_superadmin_backup(self, user):
-            """Superadmin-only: download every configured mikromon data file
-            (config, auth/devices/billing/metrics/push-log DBs, tunnel-IP
-            registry, alert state) as one archive, for moving the whole
-            install to a new server. See mikromon/backup.py for exactly
-            what is (and isn't) included."""
-            if not user.get("is_superadmin"):
-                return self._send(403, "forbidden")
-            from .backup import backup_filename, backup_paths, build_archive_to_file
-            paths = backup_paths(
+        def _backup_paths(self):
+            from .backup import backup_paths
+            return backup_paths(
                 config_path=config_path, auth_db=auth.path if auth else None,
                 devices_db=devices_db, metrics_db=metrics_db,
                 push_log_db=push_log_db,
                 billing_db=billing_cfg.get("db"),
                 state_file=state_file,
                 access_grants_file=access_cfg.get("grants_file"))
-            fname = backup_filename()
-            fd, tmp_path = tempfile.mkstemp(suffix=".tar.gz")
-            os.close(fd)
+
+        def _serve_superadmin_backup_download(self, user, name):
+            """Superadmin-only: download a previously-created backup archive
+            by name. Only a bare, already-listed filename is accepted (see
+            backup.is_safe_backup_name) so a crafted name can never read a
+            file outside the backups directory."""
+            if not user or not user.get("is_superadmin"):
+                return self._send(403, "forbidden")
+            from .backup import is_safe_backup_name
+            if not is_safe_backup_name(name):
+                return self._send(400, "invalid backup name")
+            path = os.path.join(backups_dir, name)
+            if not os.path.isfile(path):
+                return self._send(404, "no such backup")
+            return self._send_file(200, path, "application/gzip",
+                                   headers={"Content-Disposition":
+                                            f'attachment; filename="{name}"'})
+
+        def _post_superadmin_backup_create(self, user):
+            """Superadmin-only: build a new backup archive (config, every
+            configured DB, the tunnel-IP registry, alert state) into the
+            persistent backups directory, so it can be listed and downloaded
+            afterward. See mikromon/backup.py for exactly what is (and
+            isn't) included."""
+            if not user or not user.get("is_superadmin"):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            from .backup import backup_filename, build_archive_to_file
+            out_path = os.path.join(backups_dir, backup_filename())
             try:
-                build_archive_to_file(paths, tmp_path)
-                return self._send_file(200, tmp_path, "application/gzip",
-                                       headers={"Content-Disposition":
-                                                f'attachment; filename="{fname}"'})
-            finally:
-                os.unlink(tmp_path)
+                build_archive_to_file(self._backup_paths(), out_path)
+            except Exception as exc:
+                log.exception("superadmin: backup creation failed")
+                if os.path.exists(out_path):
+                    os.unlink(out_path)
+                return self._redirect("/superadmin?error="
+                                      + quote(f"Backup failed: {exc}"))
+            return self._redirect("/superadmin?ok="
+                                  + quote(f"Backup created: {os.path.basename(out_path)}"))
+
+        def _post_superadmin_backup_delete(self, user):
+            if not user or not user.get("is_superadmin"):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            from .backup import is_safe_backup_name
+            name = flat.get("name", "")
+            if is_safe_backup_name(name):
+                path = os.path.join(backups_dir, name)
+                if os.path.isfile(path):
+                    os.unlink(path)
+            return self._redirect("/superadmin")
+
+        def _post_superadmin_backup_restore(self, user):
+            """Superadmin-only: restore an already-created, on-server backup
+            by name. This overwrites this install's config/auth/devices/
+            billing/metrics/push-log files — a full replace, not a merge.
+            The currently-running process keeps some of these open (auth.db
+            in particular), so the restore only fully takes effect after a
+            service restart — the success message says so."""
+            if not user or not user.get("is_superadmin"):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            from .backup import is_safe_backup_name, restore_archive_from_path
+            name = flat.get("name", "")
+            if not is_safe_backup_name(name):
+                return self._redirect("/superadmin?error=" + quote("Invalid backup name."))
+            path = os.path.join(backups_dir, name)
+            if not os.path.isfile(path):
+                return self._redirect("/superadmin?error=" + quote("No such backup."))
+            try:
+                written = restore_archive_from_path(path, self._backup_paths())
+            except Exception as exc:
+                log.exception("superadmin: restore failed")
+                return self._redirect("/superadmin?error="
+                                      + quote(f"Restore failed: {exc}"))
+            return self._redirect("/superadmin?ok=" + quote(
+                f"Restored {len(written)} file(s) from {name}. Restart the "
+                f"service now (sudo systemctl restart mikromon mikromon-web) "
+                f"for this to fully take effect."))
+
+        def _post_superadmin_backup_restore_upload(self, user):
+            """Superadmin-only: restore from an uploaded backup archive
+            (multipart/form-data — the generic urlencoded _form() can't
+            carry binary file content, so this parses the body itself)."""
+            if not user or not user.get("is_superadmin"):
+                return self._send(403, "forbidden")
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            body = self.rfile.read(length) if length else b""
+            fields = parse_multipart_form(self.headers.get("Content-Type", ""), body)
+            sess = self._session()
+            csrf = fields.get("csrf", b"").decode("utf-8", "replace")
+            if sess is None or csrf != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            data = fields.get("archive")
+            if not data:
+                return self._redirect("/superadmin?error=" + quote("No file uploaded."))
+            from .backup import restore_archive
+            try:
+                written = restore_archive(data, self._backup_paths())
+            except Exception as exc:
+                log.exception("superadmin: restore-from-upload failed")
+                return self._redirect("/superadmin?error="
+                                      + quote(f"Restore failed: {exc}"))
+            return self._redirect("/superadmin?ok=" + quote(
+                f"Restored {len(written)} file(s) from the uploaded archive. "
+                f"Restart the service now (sudo systemctl restart mikromon "
+                f"mikromon-web) for this to fully take effect."))
 
         # ---- device management (admin only) ----
         def _serve_devices(self, url, user):
@@ -4315,8 +4418,22 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_account()
             if path == "/account/send-test-email":
                 return self._post_test_email()
-            # Everything below requires an owner + a valid CSRF token.
             user = self._user()
+            # Superadmin server-backup actions: dispatched before the
+            # generic is_admin (org-owner) gate below, since a platform
+            # superadmin need not be an owner of their own company.
+            # /restore-upload in particular must run before _form() below,
+            # which reads+decodes the body as UTF-8 and would corrupt a
+            # multipart file upload's binary content.
+            if path == "/superadmin/backup/create":
+                return self._post_superadmin_backup_create(user)
+            if path == "/superadmin/backup/delete":
+                return self._post_superadmin_backup_delete(user)
+            if path == "/superadmin/backup/restore":
+                return self._post_superadmin_backup_restore(user)
+            if path == "/superadmin/backup/restore-upload":
+                return self._post_superadmin_backup_restore_upload(user)
+            # Everything below requires an owner + a valid CSRF token.
             if not AuthStore.is_admin(user or {}):
                 return self._send(403, "forbidden")
             flat, multi = self._form()
