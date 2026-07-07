@@ -400,6 +400,19 @@ set +e
     ip link delete wg0 2>/dev/null || true
   fi
 
+  # Migrating from another server: preserve the OLD hub's identity instead of
+  # generating a new one, so already-provisioned routers don't need to be
+  # touched at all (they already trust this exact public key). Env-var
+  # driven so the private key never sits in this script or in git — set it
+  # once for this run only, e.g.:
+  #   WG_PRIVATE_KEY='...' sudo -E bash deploy/install.sh
+  if [[ -n "${WG_PRIVATE_KEY:-}" && ! -f /etc/wireguard/wg0.key ]]; then
+    umask 077
+    echo "${WG_PRIVATE_KEY}" > /etc/wireguard/wg0.key
+    wg pubkey < /etc/wireguard/wg0.key > /etc/wireguard/wg0.pub
+    echo "Seeded wg0.key from WG_PRIVATE_KEY (preserving the old hub's identity)."
+  fi
+
   if [ ! -f /etc/wireguard/wg0.key ]; then
     umask 077
     wg genkey | tee /etc/wireguard/wg0.key | wg pubkey > /etc/wireguard/wg0.pub
