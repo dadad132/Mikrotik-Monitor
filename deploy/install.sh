@@ -151,6 +151,42 @@ chmod 640 "${APP_DIR}/config.yaml"
 chmod 755 "${APP_DIR}"
 
 # ---------------------------------------------------------------------------
+# Quarantine a corrupted auth.db, if there is one. Both the dashboard and any
+# CLI command open this file at startup — if it's corrupted (e.g. from an
+# earlier bug that wrote to it as a different OS user than the running
+# service), EVERYTHING that touches it crashes, including the service itself.
+# Detect that here, before anything else tries to open it, and move it aside
+# so a fresh, empty, valid one gets created automatically. Restore a backup
+# afterward (Platform -> Server backup -> Restore) to get real data back.
+# ---------------------------------------------------------------------------
+AUTH_DB_CHECK="${APP_DIR}/auth.db"
+if [[ -f "${AUTH_DB_CHECK}" ]]; then
+  step "Checking auth.db integrity"
+  if ! "${APP_DIR}/.venv/bin/python" - "${AUTH_DB_CHECK}" <<'PY'
+import sqlite3, sys
+path = sys.argv[1]
+try:
+    conn = sqlite3.connect(path)
+    ok = conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    conn.close()
+except Exception:
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+  then
+    BAD="${AUTH_DB_CHECK}.corrupted-$(date +%Y%m%d-%H%M%S).bak"
+    mv "${AUTH_DB_CHECK}" "${BAD}"
+    rm -f "${AUTH_DB_CHECK}-wal" "${AUTH_DB_CHECK}-shm"
+    chown "${SERVICE_USER}:${SERVICE_USER}" "$(dirname "${AUTH_DB_CHECK}")" 2>/dev/null || true
+    log "auth.db was corrupted — moved to $(basename "${BAD}"), a fresh one will"
+    log "be created automatically. Restore a backup afterward to get your"
+    log "accounts/companies back (Platform -> Server backup -> Restore)."
+  else
+    log "auth.db integrity OK"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 7. Web dashboard network binding
 # ---------------------------------------------------------------------------
 step "Configuring web dashboard (host 0.0.0.0, port ${WEB_PORT})"
