@@ -24,6 +24,7 @@ the backups directory always lives there.
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import sqlite3
@@ -210,8 +211,24 @@ def _restore_from_tar(tar: tarfile.TarFile, paths: dict) -> list:
         member = tar.extractfile(arcname)
         os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
         tmp = f"{dest}.restoring"
+        content = member.read()
+        if arcname == "hub.json":
+            # hub_ip is the OLD server's address, cached at provisioning
+            # time. Unlike hub_pubkey/listen_port/subnet (which install.sh
+            # refreshes on every run), hub_ip is only ever set once — so a
+            # restored hub.json would otherwise pin every future
+            # provisioning screen to the old server's IP forever, with no
+            # UI control to fix it (the field is server-set, not editable).
+            # Strip it so the next Provision page view auto-detects this
+            # server's real address instead.
+            try:
+                hub_data = json.loads(content)
+                if hub_data.pop("hub_ip", None) is not None:
+                    content = json.dumps(hub_data, indent=2).encode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                pass  # not valid JSON — restore it as-is, nothing to strip
         with open(tmp, "wb") as fh:
-            fh.write(member.read())
+            fh.write(content)
         os.replace(tmp, dest)
         if dest.endswith(".db"):
             # Drop any pre-existing WAL/SHM sidecar files for the OLD version

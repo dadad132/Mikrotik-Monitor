@@ -8,6 +8,7 @@ Run:  ./.venv/Scripts/python.exe tests/backup_test.py
 from __future__ import annotations
 
 import io
+import json
 import os
 import sqlite3
 import sys
@@ -218,6 +219,35 @@ check("restore_archive_from_path writes both configured files",
       set(written3) == set(new_paths2.values()))
 check("restored config content matches",
       open(new_paths2["config.yaml"]).read() == "poll_interval: 60\n")
+
+print("restore — hub.json's hub_ip is stripped so the new server re-detects:")
+# Unlike hub_pubkey/listen_port/subnet (refreshed by install.sh on every run),
+# hub_ip is only ever set once, so a restored hub.json would otherwise pin
+# every future provisioning screen to the OLD server's address forever, with
+# no UI to fix it (the field is server-set, not user-editable).
+old_dir3 = os.path.join(tmp, "old3")
+new_dir3 = os.path.join(tmp, "new3")
+os.makedirs(old_dir3)
+os.makedirs(new_dir3)
+old_devices_db = os.path.join(old_dir3, "devices.db")
+with open(old_devices_db, "w") as fh:
+    fh.write("fake devices db")
+old_hub_json = os.path.join(old_dir3, "hub.json")
+with open(old_hub_json, "w") as fh:
+    json.dump({"hub_ip": "203.0.113.10", "hub_pubkey": "OLDKEY=",
+              "leases": {"R1": "10.10.5.5"}}, fh)
+old_paths3 = backup.backup_paths(devices_db=old_devices_db)
+archive3 = backup.build_archive(old_paths3, tmp_dir=tmp)
+
+new_devices_db = os.path.join(new_dir3, "devices.db")
+new_paths3 = backup.backup_paths(devices_db=new_devices_db)
+backup.restore_archive(archive3, new_paths3)
+restored_hub = json.load(open(os.path.join(new_dir3, "hub.json")))
+check("hub_ip is stripped from the restored hub.json",
+      "hub_ip" not in restored_hub)
+check("everything else in hub.json (pubkey, leases) is preserved",
+      restored_hub.get("hub_pubkey") == "OLDKEY="
+      and restored_hub.get("leases") == {"R1": "10.10.5.5"})
 
 print()
 if FAILS:
