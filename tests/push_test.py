@@ -357,8 +357,9 @@ check("removed security toggles produce no firewall rules",
               for o in plan.ops))
 form_vals = {f["value"] for f in F.security_form(
     {"rules": [], "ssh_disabled": False, "syn_cookies": False}, devcfg)}
-check("security form exposes only the 4 requested toggles",
-      form_vals == {"syn_cookies", "ddos_detect", "ssh_blacklist", "disable_ssh"})
+check("security form exposes the 5 supported toggles",
+      form_vals == {"disable_telnet_ftp", "syn_cookies", "ddos_detect",
+                    "ssh_blacklist", "disable_ssh"})
 # a leftover rule from a removed toggle is reconciled AWAY on the next apply
 off_api = FakeApi({("ip", "firewall", "filter"): [
     {".id": "*1", "chain": "input", "action": "drop",
@@ -854,8 +855,10 @@ check("provision_apply hardens (disables telnet)",
           and o.params.get("disabled") == "yes" for o in ex))
 check("provision_apply creates the WG interface, address and hub peer",
       any(o.action == "add" and o.path == WG for o in ex)
+      # /16 (not /24): so any device on the hub's 10.10.x.x range is reachable
+      # regardless of the third octet _alloc_tunnel_ip randomised for it.
       and any(o.action == "add" and o.path == IPA
-              and o.params.get("address") == "10.10.0.2/24" for o in ex)
+              and o.params.get("address") == "10.10.0.2/16" for o in ex)
       and any(o.action == "add" and o.path == WGP
               and o.params.get("public-key") == "HUBKEY==" for o in ex))
 check("provision_apply returns a result dict (router pubkey key present)",
@@ -893,7 +896,8 @@ F.provision_apply(la_api, "B", "mikromon", "pw1234567890", harden=False,
                   subnet="10.10.0.0/24", tunnel_ip="10.10.0.2")
 bound = {o.params.get(".id") for o in la_api.executed
          if o.path == ("ip", "service")
-         and o.params.get("address") == "10.10.0.0/24"}
+         # /16 to match the peer's allowed-address widening (see above).
+         and o.params.get("address") == "10.10.0.0/16"}
 check("lock_api binds api + api-ssl to the tunnel subnet", bound == {"*s1", "*s2"})
 # single-user provisioning: ONE full-access user (does both polling + push)
 tu_api = FakeApi({("user",): [], ("ip", "service"): [],

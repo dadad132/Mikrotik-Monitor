@@ -201,6 +201,48 @@ else:
 PYEOF
 
 # ---------------------------------------------------------------------------
+# SMTP email relay — optional, env-var driven so credentials never live in
+# this script or in git. Set SMTP_HOST/SMTP_USER/SMTP_PASS (and optionally
+# SMTP_PORT/SMTP_FROM/SMTP_USE_TLS/SMTP_USE_SSL) before running the installer,
+# e.g.:
+#   SMTP_HOST=mail-eu.smtp2go.com SMTP_PORT=2525 \
+#   SMTP_USER=noreply@yourdomain.com SMTP_PASS='...' \
+#   sudo -E bash deploy/install.sh
+# Safe to re-run — only touches the smtp: block, and only when all three
+# required vars are set. Existing smtp: settings are left alone otherwise.
+# ---------------------------------------------------------------------------
+if [[ -n "${SMTP_HOST:-}" && -n "${SMTP_USER:-}" && -n "${SMTP_PASS:-}" ]]; then
+  step "Writing smtp: settings to config.yaml"
+  "${APP_DIR}/.venv/bin/python" - "${CONFIG_FILE}" \
+      "${SMTP_HOST}" "${SMTP_PORT:-2525}" "${SMTP_USER}" "${SMTP_PASS}" \
+      "${SMTP_FROM:-${SMTP_USER}}" \
+      "${SMTP_USE_TLS:-true}" "${SMTP_USE_SSL:-false}" <<'PY'
+import sys, yaml
+path, host, port, user, pw, from_addr, use_tls, use_ssl = sys.argv[1:9]
+try:
+    with open(path) as f: data = yaml.safe_load(f) or {}
+except Exception:
+    data = {}
+smtp = data.get("smtp") or {}
+smtp.update({"host": host, "port": int(port), "username": user, "password": pw,
+             "from_addr": from_addr,
+             "use_tls": use_tls.lower() == "true",
+             "use_ssl": use_ssl.lower() == "true"})
+smtp.setdefault("to_addrs", [])
+smtp.setdefault("subject_prefix", "[EasyMikrotik]")
+smtp.setdefault("min_severity", "WARNING")
+data["smtp"] = smtp
+with open(path, "w") as f: yaml.safe_dump(data, f, sort_keys=False)
+print("smtp config written to", path, "(host:", host, "port:", port, ")")
+PY
+  log "SMTP relay configured (credentials not stored in this script or git)."
+else
+  log "SMTP not set via env vars — leaving config.yaml's smtp: block as-is."
+  log "To (re)configure it non-interactively next time:"
+  log "  SMTP_HOST=... SMTP_USER=... SMTP_PASS=... sudo -E bash deploy/install.sh"
+fi
+
+# ---------------------------------------------------------------------------
 # 8. Firewall — open the dashboard port  (ufw is idempotent)
 # ---------------------------------------------------------------------------
 step "Opening firewall port ${WEB_PORT}/tcp"

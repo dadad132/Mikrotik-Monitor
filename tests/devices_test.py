@@ -150,8 +150,10 @@ locked = web._provision_script(
     hub_pubkey="HUBKEY=", wg_priv="PRIV=", tunnel_ip="10.10.0.2",
     subnet="10.10.0.0/24", lock_api=True)
 check("lock-API binds api + api-ssl to the tunnel subnet (plain API, no cert)",
-      "/ip service set api address=10.10.0.0/24" in locked
-      and "/ip service set api-ssl address=10.10.0.0/24" in locked
+      # /16 (not /24): matches the peer's allowed-address widening so any
+      # device on the hub's 10.10.x.x range can still reach the API.
+      "/ip service set api address=10.10.0.0/16" in locked
+      and "/ip service set api-ssl address=10.10.0.0/16" in locked
       and "certificate add" not in locked
       and "api-ssl certificate=" not in locked)
 check("tunnel-accept firewall rule is moved FIRST so a drop can't block it",
@@ -275,8 +277,10 @@ try:
     raw = saved.raw("WebR1")
     check("device added via web", raw is not None and raw["host"] == "9.9.9.9")
     check("API timeout captured from form", raw.get("timeout") == 25)
+    # "resources" matches the default (True) so storage omits it as redundant;
+    # "security" is a real override (False) and is stored explicitly.
     check("checks captured from form",
-          raw["checks"]["resources"] and not raw["checks"]["security"])
+          raw["checks"].get("resources", True) and not raw["checks"]["security"])
     check("3 WAN links captured in priority order",
           [l["name"] for l in raw["wan"]["links"]] == ["Vodacom", "MTN", "LTE"])
     saved.close()
@@ -288,8 +292,9 @@ try:
         "checks": ["resources"]})
     saved = DevicesStore(wdb)
     raw = saved.raw("DialHome")
+    # Allocated from the full 10.10.0.0/16 (not just .0.x) — see _alloc_tunnel_ip.
     check("blank host -> device saved with a tunnel IP (no public IP)",
-          raw is not None and raw["host"].startswith("10.10.0."))
+          raw is not None and raw["host"].startswith("10.10."))
     check("blank-host add redirects to the provisioning script tab",
           redir == 303)
     saved.delete("DialHome")
@@ -330,8 +335,10 @@ try:
     # The per-device Remove button still purges any leftover series from the DB.
     forget_st = post_status(admin, "/device/forget",
                             {"csrf": csrf, "device": "GhostR"})
+    # /device/forget now renders an offboard-result page (200) instead of
+    # redirecting, so the admin can see whether the router cleanup succeeded.
     check("Remove button purges an orphan device's metrics from the DB",
-          forget_st in (302, 303)
+          forget_st == 200
           and "GhostR" not in MetricsStore(mdb).devices())
     # --- Backups tab (config-push engine) wired into the web UI ---
     st, body = get(admin, "/device?name=WebR1")
@@ -350,7 +357,7 @@ try:
     # --- all engines opened: device tabs + activity log ---
     st, body = get(admin, "/device?name=WebR1")
     check("device tab bar links every engine (wan/security/qos/portfwd)",
-          all(s in body for s in ("tab=sdwan", "tab=security", "tab=qos",
+          all(s in body for s in ("tab=wan", "tab=security", "tab=qos",
                                   "tab=portfwd", "tab=nextdns", "tab=remote",
                                   "tab=interfaces", "tab=scripts", "tab=harden",
                                   "tab=tunnel", "tab=update",
@@ -379,9 +386,8 @@ try:
     check("non-admin blocked from editing WAN (403)", st == 403)
     # --- Provision tab: generate a bootstrap script + save strong creds ---
     st, body = get(admin, "/device?name=WebR1&tab=provision")
-    check("admin can open the Provision tab", st == 200 and "Connect (WinBox)" in body)
-    check("credentials are hidden until revealed (masked + Show toggle)",
-          'type="password"' in body and "mmReveal" in body)
+    check("admin can open the Provision tab",
+          st == 200 and "Generate provisioning script" in body)
     st, body = post(admin, "/device/provision",
                     {"csrf": csrf, "device": "WebR1", "pwuser": "mikromon",
                      "transport": "wg", "hub": "102.36.140.219",
@@ -389,6 +395,9 @@ try:
     check("provision generates a bootstrap script (user + API)",
           st == 200 and "/user add name=mikromon" in body
           and "/ip service set api disabled=no" in body)
+    # Credentials shown after generating are masked until "Show" is clicked.
+    check("credentials are hidden until revealed (masked + Show toggle)",
+          'type="password"' in body and "mmReveal" in body)
     check("provision script is guarded/idempotent (safe on configured units)",
           ":if ([:len [/user find name=mikromon]] = 0)" in body
           and '[/system identity get name] = &quot;MikroTik&quot;' in body)

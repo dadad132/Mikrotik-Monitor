@@ -583,6 +583,7 @@ _DEVICE_TABS = ["Overview", "Provision", "Routes", "WAN", "Security",
                 "DNS", "Queues", "Port forwarding",
                 "Tunnel", "Scripts"]
 _MAINT_ITEMS = [("Update", "update"), ("Backups", "backups"),
+                ("Restrict access", "harden"), ("Remote access", "remote"),
                 ("Temp Access", "tempaccess")]
 # label -> url slug (all tabs are wired to the engine now)
 _LIVE_TABS = {"Overview": "", "Provision": "provision",
@@ -3261,6 +3262,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             try:
                 cfg = build_device(raw, defaults)
                 dev = rw_device(cfg)
+                # Quick bounded probe first (deleting an already-dead/offline
+                # device is the common case) so this doesn't hang the delete
+                # request for the device's full configured timeout.
+                if not dev.reachable():
+                    return {"steps": [],
+                            "error": "router unreachable — skipped live cleanup "
+                                     "(remove its WireGuard peer + user by hand "
+                                     "if it comes back online)",
+                            "username": username}
                 api = PushApi(dev)
                 try:
                     api.connect()

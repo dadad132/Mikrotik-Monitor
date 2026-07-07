@@ -50,15 +50,18 @@ class DevicesStore:
         self._migrate_checks()
 
     def _migrate_checks(self) -> None:
-        """Strip stored check values that are redundant or stale.
+        """Strip stored check values that are redundant with the current default,
+        so raising a default from False→True automatically applies to devices
+        that never explicitly stored anything for that key.
 
-        Two cases:
-        - Stored value matches current default → remove (redundant; device
-          inherits the default anyway).
-        - Stored value is False but current default is True → remove (this was
-          the old default before a False→True flip; keeping it would silently
-          override the new default and prevent the check from running).
-        Any other stored value (a genuine user override) is left untouched."""
+        This only removes values that EQUAL the current default (a pure storage
+        compaction — inheriting the default is behaviourally identical to the
+        stored value). It must never remove a stored False against a True
+        default as "stale": this runs on every DevicesStore() construction (i.e.
+        on nearly every request), so that would silently and repeatedly revert
+        any device where a user deliberately unchecked a check that defaults to
+        on (e.g. turning off "security" or "interfaces" monitoring for one
+        site) — the checkbox would look reset the next time the page loads."""
         changed = False
         with self._lock:
             rows = self.db.execute(
@@ -66,11 +69,8 @@ class DevicesStore:
             for name, blob in rows:
                 raw = json.loads(blob)
                 checks = raw.get("checks") or {}
-                pruned = {
-                    k: v for k, v in checks.items()
-                    if v != DEFAULT_CHECKS.get(k)                    # not redundant
-                    and not (v is False and DEFAULT_CHECKS.get(k) is True)  # not stale False
-                }
+                pruned = {k: v for k, v in checks.items()
+                          if v != DEFAULT_CHECKS.get(k)}
                 if pruned != checks:
                     raw["checks"] = pruned
                     self.db.execute(
