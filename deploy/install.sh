@@ -253,8 +253,14 @@ if [[ -f "${CONFIG_FILE}" ]]; then
   # sudo) — writing auth.db as root here leaves root-owned bits behind
   # (WAL/SHM sidecar files in particular) that the actual mikromon-web
   # service, running unprivileged, can then fail to read/write correctly.
-  sudo -u "${SERVICE_USER}" "${APP_DIR}/.venv/bin/python" -m mikromon set-superadmin \
-      --user barnard.juanpierre@gmail.com -c "${CONFIG_FILE}" \
+  # Also must run FROM ${APP_DIR}: `python -m mikromon` finds the package
+  # via the current directory (it's never pip-installed), and this script's
+  # own cwd is wherever it was invoked from (e.g. a clone under /root),
+  # which the unprivileged mikromon user can't traverse into — that
+  # produces a confusing "No module named mikromon" rather than a
+  # permission error.
+  (cd "${APP_DIR}" && sudo -u "${SERVICE_USER}" "${APP_DIR}/.venv/bin/python" -m mikromon \
+      set-superadmin --user barnard.juanpierre@gmail.com -c "${CONFIG_FILE}") \
       && log "Granted superadmin to barnard.juanpierre@gmail.com" \
       || log "Skipped superadmin grant (account may not exist yet — sign up first, then re-run)"
 fi
@@ -279,10 +285,13 @@ step "Registering systemd services"
 WEB_UNIT=/etc/systemd/system/mikromon-web.service
 
 # Stop running services before replacing their unit files so the new code
-# is fully in place before anything restarts.
+# is fully in place before anything restarts. Tolerate a failed/canceled stop
+# (e.g. racing an in-flight Restart=always cycle if the service was already
+# crash-looping) — the "Enabling and starting" step below re-checks and
+# fixes the end state regardless, so this must not abort the whole install.
 for svc in mikromon-web mikromon; do
     if systemctl is-active --quiet "${svc}" 2>/dev/null; then
-        systemctl stop "${svc}"
+        systemctl stop "${svc}" || log "WARN: stop ${svc} did not complete cleanly — continuing"
         log "Stopped ${svc} for upgrade"
     fi
 done
