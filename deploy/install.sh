@@ -243,6 +243,19 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# TEMPORARY — one-off superadmin grant for this migration. Remove this block
+# on the next push; new installs don't need it (signup now grants the first
+# superadmin automatically). Best-effort: does nothing if the account doesn't
+# exist yet or auth: isn't configured, so it never fails the install.
+# ---------------------------------------------------------------------------
+if [[ -f "${CONFIG_FILE}" ]]; then
+  "${APP_DIR}/.venv/bin/python" -m mikromon set-superadmin \
+      --user barnard.juanpierre@gmail.com -c "${CONFIG_FILE}" \
+      && log "Granted superadmin to barnard.juanpierre@gmail.com" \
+      || log "Skipped superadmin grant (account may not exist yet — sign up first, then re-run)"
+fi
+
+# ---------------------------------------------------------------------------
 # 8. Firewall — open the dashboard port  (ufw is idempotent)
 # ---------------------------------------------------------------------------
 step "Opening firewall port ${WEB_PORT}/tcp"
