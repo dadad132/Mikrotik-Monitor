@@ -80,13 +80,19 @@ def _add_sqlite_snapshot(tar: tarfile.TarFile, arcname: str, path: str,
         os.unlink(tmp_path)
 
 
-def build_archive(paths: dict) -> bytes:
-    """Tar+gzip every existing file in `paths` (archive name -> source path).
-    Missing files (e.g. a DB feature that was never enabled) are silently
-    skipped rather than failing the whole backup."""
+def build_archive_to_file(paths: dict, out_path: str) -> None:
+    """Tar+gzip every existing file in `paths` (archive name -> source path)
+    straight to `out_path` on disk. Missing files (e.g. a DB feature that
+    was never enabled) are silently skipped rather than failing the whole
+    backup.
+
+    Writes to disk rather than building the archive in memory: metrics.db
+    can grow large, and holding a full in-memory copy (on top of the SQLite
+    snapshot machinery and the HTTP response buffer) risks the server
+    process getting OOM-killed mid-request on a small VPS — exactly the
+    kind of failure a backup feature must not cause."""
     now = time.time()
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+    with tarfile.open(out_path, mode="w:gz") as tar:
         for arcname, path in paths.items():
             if not path or not os.path.isfile(path):
                 continue
@@ -94,7 +100,21 @@ def build_archive(paths: dict) -> bytes:
                 _add_sqlite_snapshot(tar, arcname, path, now)
             else:
                 tar.add(path, arcname=arcname)
-    return buf.getvalue()
+
+
+def build_archive(paths: dict) -> bytes:
+    """Convenience wrapper returning the archive as bytes — fine for tests
+    and small archives. Prefer build_archive_to_file for anything that might
+    be large (see its docstring); the web download handler and the CLI's
+    backup-server command both use it directly."""
+    fd, tmp_path = tempfile.mkstemp(suffix=".tar.gz")
+    os.close(fd)
+    try:
+        build_archive_to_file(paths, tmp_path)
+        with open(tmp_path, "rb") as fh:
+            return fh.read()
+    finally:
+        os.unlink(tmp_path)
 
 
 def backup_filename(prefix: str = "mikromon-backup") -> str:

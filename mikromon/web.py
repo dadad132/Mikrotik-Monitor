@@ -24,6 +24,8 @@ import math
 import os
 import re
 import secrets
+import shutil
+import tempfile
 import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -2828,6 +2830,22 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if self.command != "HEAD":
                 self.wfile.write(data)
 
+        def _send_file(self, code, path, ctype, headers=None):
+            """Stream a file from disk in chunks rather than reading it
+            fully into memory first — important for anything that could be
+            large (e.g. the superadmin server-backup download), so serving
+            it can't spike memory enough to get the process OOM-killed."""
+            size = os.path.getsize(path)
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(size))
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            if self.command != "HEAD":
+                with open(path, "rb") as fh:
+                    shutil.copyfileobj(fh, self.wfile, length=1024 * 1024)
+
         def _redirect(self, location, headers=None):
             self.send_response(303)
             self.send_header("Location", location)
@@ -3164,7 +3182,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             what is (and isn't) included."""
             if not user.get("is_superadmin"):
                 return self._send(403, "forbidden")
-            from .backup import backup_filename, backup_paths, build_archive
+            from .backup import backup_filename, backup_paths, build_archive_to_file
             paths = backup_paths(
                 config_path=config_path, auth_db=auth.path if auth else None,
                 devices_db=devices_db, metrics_db=metrics_db,
@@ -3172,11 +3190,16 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 billing_db=billing_cfg.get("db"),
                 state_file=state_file,
                 access_grants_file=access_cfg.get("grants_file"))
-            data = build_archive(paths)
             fname = backup_filename()
-            return self._send(200, data, "application/gzip",
-                              headers={"Content-Disposition":
-                                       f'attachment; filename="{fname}"'})
+            fd, tmp_path = tempfile.mkstemp(suffix=".tar.gz")
+            os.close(fd)
+            try:
+                build_archive_to_file(paths, tmp_path)
+                return self._send_file(200, tmp_path, "application/gzip",
+                                       headers={"Content-Disposition":
+                                                f'attachment; filename="{fname}"'})
+            finally:
+                os.unlink(tmp_path)
 
         # ---- device management (admin only) ----
         def _serve_devices(self, url, user):

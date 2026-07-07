@@ -282,7 +282,7 @@ def _cmd_backup_server(args, config) -> int:
     billing/metrics/push-log DBs, the tunnel-IP registry, alert state) into
     one archive — for moving the whole install to a new server. See
     mikromon/backup.py for exactly what is (and isn't) included."""
-    from .backup import backup_filename, backup_paths, build_archive
+    from .backup import backup_filename, backup_paths, build_archive_to_file
 
     paths = backup_paths(
         config_path=args.config, auth_db=config.auth_db,
@@ -296,12 +296,10 @@ def _cmd_backup_server(args, config) -> int:
         print("Nothing to back up — no configured data files were found.",
               file=sys.stderr)
         return 2
-    data = build_archive(paths)
     out_path = args.out or backup_filename()
-    with open(out_path, "wb") as fh:
-        fh.write(data)
-    print(f"Wrote {out_path} ({len(data):,} bytes) containing: "
-          f"{', '.join(included)}")
+    build_archive_to_file(paths, out_path)
+    print(f"Wrote {out_path} ({os.path.getsize(out_path):,} bytes) "
+          f"containing: {', '.join(included)}")
     if "config.yaml" not in included:
         print("NOTE: config.yaml wasn't found at the path passed via -c — "
               "double-check it's included.", file=sys.stderr)
