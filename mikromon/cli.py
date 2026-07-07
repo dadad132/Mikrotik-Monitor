@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 from . import __version__
@@ -36,11 +37,12 @@ def build_parser() -> argparse.ArgumentParser:
                             "test-connection", "test-email", "list-checks",
                             "useradd", "userlist", "userdel", "passwd",
                             "set-devices", "backup-list", "backup-now",
-                            "access-apply"],
+                            "backup-server", "restore-server", "access-apply"],
                    help="run | once | demo | dashboard | test-connection | "
                         "test-email | list-checks | useradd | userlist | "
                         "userdel | passwd | set-devices | backup-list | "
-                        "backup-now | access-apply")
+                        "backup-now | backup-server | restore-server | "
+                        "access-apply")
     p.add_argument("-c", "--config", default="config.yaml",
                    help="path to config file (default: config.yaml)")
     p.add_argument("--dry-run", action="store_true",
@@ -70,6 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device",
                    help="limit a push command (backup-*) to one device by name")
     p.add_argument("--name", help="backup file name (backup-now)")
+    p.add_argument("-o", "--out", help="output file path (backup-server)")
+    p.add_argument("--archive", help="backup archive to read (restore-server)")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="enable DEBUG logging")
     p.add_argument("--version", action="version", version=f"mikromon {__version__}")
@@ -106,6 +110,12 @@ def main(argv=None) -> int:
     if args.command in ("backup-list", "backup-now"):
         return _cmd_push(args, config)
 
+    if args.command == "backup-server":
+        return _cmd_backup_server(args, config)
+
+    if args.command == "restore-server":
+        return _cmd_restore_server(args, config)
+
     if args.command == "access-apply":
         return _cmd_access_apply(config)
 
@@ -122,7 +132,8 @@ def main(argv=None) -> int:
                   metrics_token=config.metrics_token,
                   devices_db=config.devices_db, defaults=config.defaults,
                   push_log_db=config.push_log_db, access_cfg=config.access,
-                  billing_cfg=config.billing, smtp_cfg=config.smtp)
+                  billing_cfg=config.billing, smtp_cfg=config.smtp,
+                  config_path=args.config)
         return 0
 
     if args.command == "list-checks":
@@ -264,6 +275,83 @@ def _push_device_cfgs(config):
         finally:
             store.close()
     return []
+
+
+def _cmd_backup_server(args, config) -> int:
+    """Bundle every configured mikromon data file (config, auth/devices/
+    billing/metrics/push-log DBs, the tunnel-IP registry, alert state) into
+    one archive — for moving the whole install to a new server. See
+    mikromon/backup.py for exactly what is (and isn't) included."""
+    from .backup import backup_filename, backup_paths, build_archive
+
+    paths = backup_paths(
+        config_path=args.config, auth_db=config.auth_db,
+        devices_db=config.devices_db, metrics_db=config.metrics_db,
+        push_log_db=config.push_log_db,
+        billing_db=(config.billing or {}).get("db"),
+        state_file=config.state_file,
+        access_grants_file=(config.access or {}).get("grants_file"))
+    included = [name for name, path in paths.items() if os.path.isfile(path)]
+    if not included:
+        print("Nothing to back up — no configured data files were found.",
+              file=sys.stderr)
+        return 2
+    data = build_archive(paths)
+    out_path = args.out or backup_filename()
+    with open(out_path, "wb") as fh:
+        fh.write(data)
+    print(f"Wrote {out_path} ({len(data):,} bytes) containing: "
+          f"{', '.join(included)}")
+    if "config.yaml" not in included:
+        print("NOTE: config.yaml wasn't found at the path passed via -c — "
+              "double-check it's included.", file=sys.stderr)
+    print("NOTE: this does NOT include the hub's WireGuard identity "
+          "(/etc/wireguard/ on this server) — copy that separately so "
+          "already-provisioned routers keep dialing home without changes.")
+    return 0
+
+
+def _cmd_restore_server(args, config) -> int:
+    """Restore a backup-server archive onto THIS install, overwriting its
+    config/auth/devices/billing/metrics/push-log files with the archive's
+    contents. Dry-run by default (shows what would be overwritten); pass
+    --apply to actually write. Run with the mikromon/mikromon-web services
+    STOPPED — this does not coordinate with a live process holding these
+    files open."""
+    from .backup import backup_paths, restore_archive
+
+    if not args.archive:
+        print("Specify the backup to restore with --archive path/to/backup.tar.gz",
+              file=sys.stderr)
+        return 2
+    if not os.path.isfile(args.archive):
+        print(f"No such file: {args.archive}", file=sys.stderr)
+        return 2
+    paths = backup_paths(
+        config_path=args.config, auth_db=config.auth_db,
+        devices_db=config.devices_db, metrics_db=config.metrics_db,
+        push_log_db=config.push_log_db,
+        billing_db=(config.billing or {}).get("db"),
+        state_file=config.state_file,
+        access_grants_file=(config.access or {}).get("grants_file"))
+    if not args.apply:
+        print("DRY RUN — would overwrite (stop the services, then re-run "
+              "with --apply):")
+        for name, dest in paths.items():
+            print(f"  {name} -> {dest}")
+        return 0
+    with open(args.archive, "rb") as fh:
+        data = fh.read()
+    written = restore_archive(data, paths)
+    print(f"Restored {len(written)} file(s): {', '.join(written)}")
+    print("If you use the on-demand remote-access (Winbox/WebFig) feature, "
+          "the restored config.yaml's access: block still points at the OLD "
+          "server — re-run 'sudo ACCESS_HOST=<this server> bash "
+          "deploy/install.sh' to regenerate it (and the TLS cert) for this "
+          "host. It's safe to re-run.")
+    print("Now start the services: "
+          "sudo systemctl enable --now mikromon mikromon-web")
+    return 0
 
 
 def _cmd_access_apply(config) -> int:

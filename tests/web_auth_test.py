@@ -8,11 +8,13 @@ Run:  ./.venv/Scripts/python.exe tests/web_auth_test.py
 from __future__ import annotations
 
 import http.cookiejar
+import io
 import json
 import os
 import re
 import sqlite3
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -150,8 +152,12 @@ am.close()
 print("Self-signup (anyone creates a company):")
 adb_empty = os.path.join(tmp, "empty.db")
 AuthStore(adb_empty).close()
+cfg_path = os.path.join(tmp, "cfg.yaml")
+with open(cfg_path, "w") as fh:
+    fh.write("poll_interval: 60\n")
 srv0 = ThreadingHTTPServer(("127.0.0.1", 8097), web.make_handler(
-    mdb, sfile, AuthStore(adb_empty), web.SessionManager()))
+    mdb, sfile, AuthStore(adb_empty), web.SessionManager(),
+    config_path=cfg_path))
 threading.Thread(target=srv0.serve_forever, daemon=True).start()
 B0 = "http://127.0.0.1:8097"
 try:
@@ -174,6 +180,38 @@ try:
     check("new account persisted as owner of its company",
           u and u["role"] == "owner" and a3.org_name(u["org_id"]) == "Startup")
     a3.close()
+
+    print("Superadmin server backup (first login ever becomes superadmin):")
+    # Signup alone doesn't call verify(), so log in explicitly to trigger the
+    # first-login superadmin promotion.
+    op_founder = opener()
+    req(op_founder, "/login",
+        {"email": "founder@startup.test", "password": "startup1"}, B0)
+    a4 = AuthStore(adb_empty)
+    org_id = a4.get_user("founder@startup.test")["org_id"]
+    a4.add_member(org_id, "helper@startup.test", "helper123", role="member")
+    a4.close()
+    op_helper = opener()
+    req(op_helper, "/login",
+        {"email": "helper@startup.test", "password": "helper123"}, B0)
+
+    r = op_founder.open(urllib.request.Request(B0 + "/superadmin/backup"))
+    ctype = r.headers.get("Content-Type", "")
+    payload = r.read()
+    check("superadmin backup download has a gzip content-type",
+          ctype.startswith("application/gzip"))
+    check("superadmin backup payload is a real gzip stream",
+          payload[:2] == b"\x1f\x8b")
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tar:
+        check("superadmin backup contains this server's config + auth db",
+              "config.yaml" in tar.getnames() and "auth.db" in tar.getnames())
+    try:
+        op_helper.open(urllib.request.Request(B0 + "/superadmin/backup"))
+        check("non-superadmin member blocked from the backup download (403)",
+              False)
+    except urllib.error.HTTPError as e:
+        check("non-superadmin member blocked from the backup download (403)",
+              e.code == 403)
 finally:
     srv0.shutdown()
     srv0.server_close()

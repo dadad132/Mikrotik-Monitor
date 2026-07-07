@@ -2793,7 +2793,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                  sessions: SessionManager, secure_cookies=False,
                  metrics_token=None, devices_db=None, defaults=None,
                  push_log_db=None, access_cfg=None, billing_cfg=None,
-                 smtp_cfg=None):
+                 smtp_cfg=None, config_path=None):
     defaults = defaults or {}
     access_cfg = access_cfg or {}
     billing_cfg = billing_cfg or {}
@@ -2944,6 +2944,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._serve_billing(url, user)
             if path == "/superadmin":
                 return self._serve_superadmin(url, user)
+            if path == "/superadmin/backup":
+                return self._serve_superadmin_backup(user)
             if path == "/account":
                 q = parse_qs(url.query)
                 org_data = auth.org(user["org_id"]) if auth else None
@@ -3153,6 +3155,28 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 msg=q.get("ok", [""])[0],
                 error=q.get("error", [""])[0]),
                 "text/html; charset=utf-8")
+
+        def _serve_superadmin_backup(self, user):
+            """Superadmin-only: download every configured mikromon data file
+            (config, auth/devices/billing/metrics/push-log DBs, tunnel-IP
+            registry, alert state) as one archive, for moving the whole
+            install to a new server. See mikromon/backup.py for exactly
+            what is (and isn't) included."""
+            if not user.get("is_superadmin"):
+                return self._send(403, "forbidden")
+            from .backup import backup_filename, backup_paths, build_archive
+            paths = backup_paths(
+                config_path=config_path, auth_db=auth.path if auth else None,
+                devices_db=devices_db, metrics_db=metrics_db,
+                push_log_db=push_log_db,
+                billing_db=billing_cfg.get("db"),
+                state_file=state_file,
+                access_grants_file=access_cfg.get("grants_file"))
+            data = build_archive(paths)
+            fname = backup_filename()
+            return self._send(200, data, "application/gzip",
+                              headers={"Content-Disposition":
+                                       f'attachment; filename="{fname}"'})
 
         # ---- device management (admin only) ----
         def _serve_devices(self, url, user):
@@ -4844,7 +4868,7 @@ def _register_hub_peer(device_name: str, api, flat: dict, devices_db: str) -> No
 def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,
           secure_cookies=False, metrics_token=None, devices_db=None,
           defaults=None, push_log_db=None, access_cfg=None, billing_cfg=None,
-          smtp_cfg=None):
+          smtp_cfg=None, config_path=None):
     if metrics_db and not os.path.exists(metrics_db):
         log.warning("metrics DB %s not found yet — start the monitor first",
                     metrics_db)
@@ -4857,7 +4881,7 @@ def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,
         (host, port), make_handler(metrics_db, state_file, auth, sessions,
                                    secure_cookies, metrics_token, devices_db,
                                    defaults, push_log_db, access_cfg,
-                                   billing_cfg, smtp_cfg))
+                                   billing_cfg, smtp_cfg, config_path))
     scheme = "auth ON" if auth else "auth OFF (open)"
     billing_note = "  billing ON" if (billing_cfg or {}).get("db") else ""
     log.info("Dashboard at http://%s:%d  [%s]%s  Prometheus: /metrics",

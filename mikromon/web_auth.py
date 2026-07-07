@@ -517,7 +517,24 @@ def _render_superadmin(user, rows: list, msg: str = "", error: str = "") -> str:
         f'</tbody></table></div>'
     )
 
-    inner = (f'<div class="wrap"><h1>Platform admin</h1>{note}{tiles}{table}</div>')
+    backup_box = (
+        f'<div class="box"><h2>Server backup</h2>'
+        f'<p class="muted">Download every configured mikromon data file '
+        f'(config, all companies\' accounts/devices/billing/metrics, the '
+        f'tunnel-IP registry) as one archive — for moving this install to a '
+        f'new server.</p>'
+        f'<p class="muted" style="border-left:3px solid #d97706;padding-left:8px">'
+        f'⚠ This does <b>not</b> include the hub\'s WireGuard identity '
+        f'(<code>/etc/wireguard/</code> on this server) — copy that '
+        f'separately (as root) so already-provisioned routers keep dialing '
+        f'home without changes. Full restore steps: '
+        f'<code>deploy/SERVER-MIGRATION.md</code>.</p>'
+        f'<a class="btn" href="/superadmin/backup">Download full backup</a>'
+        f'</div>'
+    )
+
+    inner = (f'<div class="wrap"><h1>Platform admin</h1>{note}{tiles}{table}'
+             f'{backup_box}</div>')
     return _page("Platform Admin", _header(user, "/superadmin") + inner)
 
 
