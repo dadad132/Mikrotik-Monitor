@@ -36,13 +36,14 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["run", "once", "demo", "dashboard",
                             "test-connection", "test-email", "list-checks",
                             "useradd", "userlist", "userdel", "passwd",
-                            "set-devices", "backup-list", "backup-now",
-                            "backup-server", "restore-server", "access-apply"],
+                            "set-devices", "set-superadmin", "backup-list",
+                            "backup-now", "backup-server", "restore-server",
+                            "access-apply"],
                    help="run | once | demo | dashboard | test-connection | "
                         "test-email | list-checks | useradd | userlist | "
-                        "userdel | passwd | set-devices | backup-list | "
-                        "backup-now | backup-server | restore-server | "
-                        "access-apply")
+                        "userdel | passwd | set-devices | set-superadmin | "
+                        "backup-list | backup-now | backup-server | "
+                        "restore-server | access-apply")
     p.add_argument("-c", "--config", default="config.yaml",
                    help="path to config file (default: config.yaml)")
     p.add_argument("--dry-run", action="store_true",
@@ -54,7 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=None,
                    help="web dashboard port (default: 8080)")
     # user-management arguments
-    p.add_argument("--user", help="email (useradd/userdel/passwd/set-devices)")
+    p.add_argument("--user",
+                   help="email (useradd/userdel/passwd/set-devices/set-superadmin)")
     p.add_argument("--password", help="password (useradd/passwd)")
     p.add_argument("--role", choices=["owner", "member"], default="member",
                    help="role for useradd (default: member)")
@@ -66,6 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--devices", default="",
                    help="comma-separated device names this user may see, or '*' "
                         "for all (useradd/set-devices)")
+    p.add_argument("--revoke", action="store_true",
+                   help="revoke instead of grant (set-superadmin)")
     # config-push arguments
     p.add_argument("--apply", action="store_true",
                    help="actually apply a config-push (default is a safe dry-run)")
@@ -104,7 +108,7 @@ def main(argv=None) -> int:
     _setup_logging("DEBUG" if args.verbose else config.log_level)
 
     if args.command in ("useradd", "userlist", "userdel", "passwd",
-                        "set-devices"):
+                        "set-devices", "set-superadmin"):
         return _cmd_users(args, config)
 
     if args.command in ("backup-list", "backup-now"):
@@ -251,6 +255,10 @@ def _cmd_users(args, config) -> int:
         elif args.command == "set-devices":
             store.set_devices(args.user, args.devices or None)
             print(f"Devices for '{args.user}' set to: {args.devices or '(none)'}")
+        elif args.command == "set-superadmin":
+            store.set_superadmin(args.user, not args.revoke)
+            print(f"'{args.user}' is now "
+                  f"{'NOT ' if args.revoke else ''}the platform superadmin.")
         elif args.command == "userdel":
             store.delete_user(args.user)
             print(f"Deleted '{args.user}'.")

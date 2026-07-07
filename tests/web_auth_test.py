@@ -198,11 +198,14 @@ try:
     u = a3.get_user("founder@startup.test")
     check("new account persisted as owner of its company",
           u and u["role"] == "owner" and a3.org_name(u["org_id"]) == "Startup")
+    check("signup alone (no login yet) already granted first-ever superadmin",
+          u and u["is_superadmin"])
     a3.close()
 
-    print("Superadmin server backup (first login ever becomes superadmin):")
-    # Signup alone doesn't call verify(), so log in explicitly to trigger the
-    # first-login superadmin promotion.
+    print("Superadmin server backup:")
+    # Log in as the founder to get a session for the backup requests below
+    # (signup already granted superadmin above — this login doesn't need to
+    # trigger that promotion itself, just establish op_founder's cookie).
     op_founder = opener()
     req(op_founder, "/login",
         {"email": "founder@startup.test", "password": "startup1"}, B0)

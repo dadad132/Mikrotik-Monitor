@@ -187,6 +187,12 @@ class AuthStore:
                role: str = "owner", phone: str = "") -> int:
         """Self-service registration: create a new company + its owner.
 
+        If no superadmin exists yet anywhere on this server (a fresh
+        install), the new user becomes the platform superadmin immediately
+        — the same "first one in" rule verify() applies on login, so a
+        fresh server's very first signup reaches the Platform admin panel
+        without needing a separate login step first.
+
         Returns the new org id.
         """
         email = _norm_email(email)
@@ -201,13 +207,20 @@ class AuthStore:
                 "INSERT INTO orgs (name, plan, created) VALUES (?, 'free', ?)",
                 (company, time.time()))
             org_id = cur.lastrowid
-            self.db.execute(
+            user_cur = self.db.execute(
                 "INSERT INTO users (username, email, phone, pw_hash, salt, "
                 "iterations, role, org_id, devices, created) "
                 "VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (email, phone or None, pw_hash, salt, iters, _norm_role(role),
                  org_id, _dump_devices("*" if _norm_role(role) == "owner" else None),
                  time.time()))
+            # Inlined (not _grant_first_superadmin(), which takes this same
+            # lock and would deadlock re-entering it here).
+            if not self.db.execute(
+                    "SELECT 1 FROM users WHERE is_superadmin = 1 LIMIT 1"
+            ).fetchone():
+                self.db.execute("UPDATE users SET is_superadmin = 1 WHERE id = ?",
+                                (user_cur.lastrowid,))
             self.db.commit()
         return org_id
 
@@ -262,6 +275,14 @@ class AuthStore:
 
     def set_role(self, identifier: str, role: str) -> None:
         self._update(self._require(identifier)["id"], role=_norm_role(role))
+
+    def set_superadmin(self, identifier: str, value: bool) -> None:
+        """Grant or revoke the platform superadmin flag directly — a manual
+        override for when the normal "first one ever to sign up/log in"
+        promotion didn't land on the account it should have (e.g. restoring
+        a backup onto a server where a throwaway bootstrap account already
+        holds it)."""
+        self._update(self._require(identifier)["id"], is_superadmin=int(bool(value)))
 
     def delete_user(self, identifier: str) -> None:
         user = self.get_user(identifier)
