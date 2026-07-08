@@ -30,6 +30,26 @@ def _should_notify(alert) -> bool:
     return alert.key in _NOTIFY_KEYS or alert.key.startswith("wan_link:")
 
 
+def effective_smtp(auth, fallback):
+    """Prefer the SMTP relay the superadmin configured in the dashboard (stored
+    in auth.db) over the smtp: block in config.yaml. `auth` is an open AuthStore
+    (or None). Returns a SmtpConfig; falls back unchanged when nothing is set."""
+    try:
+        d = auth.get_smtp() if auth is not None else None
+    except Exception:  # noqa: BLE001 — never let settings lookup break alerts
+        d = None
+    if not d:
+        return fallback
+    from ..config import SmtpConfig
+    prefix = (d.get("subject_prefix")
+              or (fallback.subject_prefix if fallback else "[EasyMikrotik]"))
+    return SmtpConfig(
+        host=d.get("host", ""), port=int(d.get("port") or 587),
+        username=d.get("username", ""), password=d.get("password", ""),
+        use_tls=bool(d.get("use_tls", True)), use_ssl=bool(d.get("use_ssl", False)),
+        from_addr=d.get("from_addr", ""), subject_prefix=prefix)
+
+
 def _smtp_send(smtp_cfg, msg: EmailMessage) -> None:
     """Send a pre-built EmailMessage via the configured SMTP relay."""
     ctx = ssl.create_default_context()
@@ -192,6 +212,7 @@ class OrgEmailNotifier(Notifier):
             return
 
         try:
+            smtp = effective_smtp(auth, self._smtp)
             by_org: dict[int, list] = {}
             for a in targets:
                 org_id = ds.org_of(a.device)
@@ -203,7 +224,7 @@ class OrgEmailNotifier(Notifier):
                 if not recipients:
                     continue
                 try:
-                    self._deliver(recipients, org_alerts)
+                    self._deliver(recipients, org_alerts, smtp)
                 except Exception:  # noqa: BLE001
                     log.exception("OrgEmailNotifier: delivery failed for org %s",
                                   org_id)
@@ -227,8 +248,9 @@ class OrgEmailNotifier(Notifier):
             due = auth.orgs_with_report_due(now)
             if not due:
                 return
+            smtp = effective_smtp(auth, self._smtp)
             state_data = state.data if state is not None else {}
-            prefix = self._smtp.subject_prefix
+            prefix = smtp.subject_prefix
             for org in due:
                 recipients = org["alert_emails"]
                 if not recipients:
@@ -244,11 +266,11 @@ class OrgEmailNotifier(Notifier):
                         org["schedule"], prefix)
                     msg = EmailMessage()
                     msg["Subject"] = subj
-                    msg["From"] = self._smtp.from_addr
+                    msg["From"] = smtp.from_addr
                     msg["To"] = ", ".join(recipients)
                     msg.set_content(txt)
                     msg.add_alternative(htm, subtype="html")
-                    _smtp_send(self._smtp, msg)
+                    _smtp_send(smtp, msg)
                     log.info("Scheduled %s report sent for org '%s' to %d recipient(s)",
                              org["schedule"], org["name"], len(recipients))
                 except Exception:  # noqa: BLE001
@@ -261,20 +283,21 @@ class OrgEmailNotifier(Notifier):
         finally:
             auth.close()
 
-    def _deliver(self, to_addrs: list[str], alerts) -> None:
-        subject = render.subject(self._smtp.subject_prefix, alerts)
+    def _deliver(self, to_addrs: list[str], alerts, smtp=None) -> None:
+        smtp = smtp or self._smtp
+        subject = render.subject(smtp.subject_prefix, alerts)
         text = render.render_text(alerts)
         html = render.render_html(alerts)
 
         msg = EmailMessage()
         msg["Subject"] = subject
-        msg["From"] = self._smtp.from_addr
+        msg["From"] = smtp.from_addr
         msg["To"] = ", ".join(to_addrs)
         msg.set_content(text)
         msg.add_alternative(html, subtype="html")
 
         try:
-            _smtp_send(self._smtp, msg)
+            _smtp_send(smtp, msg)
             log.info("Org WAN alert sent to %d recipient(s): %s",
                      len(to_addrs), subject)
         except (smtplib.SMTPException, OSError, socket.error) as exc:

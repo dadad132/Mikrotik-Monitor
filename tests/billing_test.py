@@ -161,6 +161,33 @@ check("a grace deadline in the past locks the org",
       store.is_locked(3) and store.billing_status(3) == "locked"
       and not store.in_grace_period(3))
 
+# Manual superadmin plan assignment (payment handled off-platform).
+print("Manual plan assignment (superadmin):")
+p_small = next(p for p in billing.PLANS if p["name"] == "small")
+store.set_plan(10, "small")
+check("set_plan activates the org with the plan's device cap",
+      store.billing_status(10) == "active"
+      and store.device_limit(10) == p_small["devices"]
+      and store.get(10)["plan"] == "small")
+check("assigned plan is not locked and enforces the cap",
+      not store.is_locked(10)
+      and store.can_add(10, p_small["devices"] - 1)
+      and not store.can_add(10, p_small["devices"]))
+store.set_unlimited(10)
+check("set_unlimited gives an unlimited (0) cap, still active",
+      store.device_limit(10) == 0 and store.can_add(10, 99999)
+      and store.billing_status(10) == "active")
+store.set_free(10)
+check("set_free drops back to the free cap",
+      store.device_limit(10) == billing.FREE_DEVICES
+      and store.can_add(10, billing.FREE_DEVICES - 1)
+      and not store.can_add(10, billing.FREE_DEVICES))
+try:
+    store.set_plan(10, "no-such-plan")
+    check("set_plan rejects an unknown plan", False)
+except ValueError:
+    check("set_plan rejects an unknown plan", True)
+
 store.close()
 
 print()

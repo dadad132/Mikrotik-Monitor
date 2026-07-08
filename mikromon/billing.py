@@ -306,6 +306,28 @@ class BillingStore:
         # is_locked() is False for this state, so stay consistent with it.
         return "none"
 
+    def set_plan(self, org_id: int, plan_name: str) -> None:
+        """Superadmin MANUALLY activates a paid plan for a company (payment
+        handled off-platform, e.g. EFT/manual). Sets the device cap from the
+        plan and marks the org active with no grace deadline."""
+        plan = _PLAN_MAP.get(plan_name)
+        if plan is None:
+            raise ValueError(f"Unknown plan: {plan_name!r}")
+        self._upsert(org_id, status="active", plan=plan_name,
+                     device_limit=plan["devices"], grace_period_end=None,
+                     pf_token=None)
+
+    def set_unlimited(self, org_id: int) -> None:
+        """Grant a company an UNLIMITED device cap (device_limit 0), active."""
+        self._upsert(org_id, status="active", plan="unlimited",
+                     device_limit=0, grace_period_end=None)
+
+    def set_free(self, org_id: int) -> None:
+        """Put a company back on the FREE plan (no paid subscription)."""
+        self._upsert(org_id, status="inactive", plan=None,
+                     device_limit=FREE_DEVICES, grace_period_end=None,
+                     pf_token=None)
+
     def start_trial(self, org_id: int) -> None:
         trial_end = time.time() + _TRIAL_DAYS * 86400
         grace_end = trial_end + _GRACE_SECS

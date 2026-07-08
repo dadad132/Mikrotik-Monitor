@@ -3172,10 +3172,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     _ds.close()
             from .backup import list_backups
             backups = list_backups(backups_dir)
+            smtp_settings = auth.get_smtp() if auth else None
             return self._send(200, _render_superadmin(
                 user, rows, backups, self._session()["csrf"],
                 msg=q.get("ok", [""])[0],
-                error=q.get("error", [""])[0]),
+                error=q.get("error", [""])[0],
+                smtp=smtp_settings, billing_on=billing is not None),
                 "text/html; charset=utf-8")
 
         def _backup_paths(self):
@@ -3204,6 +3206,68 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._send_file(200, path, "application/gzip",
                                    headers={"Content-Disposition":
                                             f'attachment; filename="{name}"'})
+
+        def _post_superadmin_billing(self, user):
+            """Superadmin-only: manually assign a company's plan (device cap) —
+            used when a client pays off-platform and we grant them a package."""
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if billing is None:
+                return self._redirect("/superadmin?error=" +
+                                      quote("Billing is not enabled on this server."))
+            try:
+                org_id = int(flat.get("org_id", "0"))
+            except (ValueError, TypeError):
+                org_id = 0
+            plan = flat.get("plan", "")
+            try:
+                if plan == "free":
+                    billing.set_free(org_id)
+                elif plan == "unlimited":
+                    billing.set_unlimited(org_id)
+                else:
+                    billing.set_plan(org_id, plan)
+            except Exception as exc:  # noqa: BLE001
+                return self._redirect("/superadmin?error=" + quote(str(exc)))
+            return self._redirect("/superadmin?ok=" +
+                                  quote("Company plan updated."))
+
+        def _post_superadmin_smtp(self, user):
+            """Superadmin-only: save the platform SMTP relay in the DB so email
+            alerts work without editing config.yaml. Blank password keeps the
+            stored one (the field is masked)."""
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if auth is None:
+                return self._redirect("/superadmin?error=" +
+                                      quote("Auth store is not enabled."))
+            try:
+                port = int(flat.get("port") or 587)
+            except (ValueError, TypeError):
+                port = 587
+            cfg = {
+                "host": flat.get("host", "").strip(),
+                "port": port,
+                "username": flat.get("username", "").strip(),
+                "from_addr": flat.get("from_addr", "").strip(),
+                "use_tls": flat.get("use_tls") == "1",
+                "use_ssl": flat.get("use_ssl") == "1",
+                "subject_prefix": (flat.get("subject_prefix", "").strip()
+                                   or "[EasyMikrotik]"),
+            }
+            pw = flat.get("password", "")
+            cfg["password"] = pw or (auth.get_smtp() or {}).get("password", "")
+            auth.set_smtp(cfg)
+            return self._redirect("/superadmin?ok=" +
+                                  quote("Email (SMTP) settings saved."))
 
         def _post_superadmin_backup_create(self, user):
             """Superadmin-only: build a new backup archive (config, every
@@ -4439,6 +4503,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_backup_restore(user)
             if path == "/superadmin/backup/restore-upload":
                 return self._post_superadmin_backup_restore_upload(user)
+            if path == "/superadmin/billing":
+                return self._post_superadmin_billing(user)
+            if path == "/superadmin/smtp":
+                return self._post_superadmin_smtp(user)
             # Everything below requires an owner + a valid CSRF token.
             if not AuthStore.is_admin(user or {}):
                 return self._send(403, "forbidden")
@@ -4721,11 +4789,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return _json_resp(False, error="Bad CSRF token — please reload the page.")
             if not AuthStore.is_owner(user):
                 return _json_resp(False, error="Only the account owner can send test emails.")
-            if not smtp_cfg:
+            from .notify.org_email import effective_smtp, send_test_email
+            eff = effective_smtp(auth, smtp_cfg)
+            if not eff:
                 return _json_resp(False,
-                                  error="SMTP is not configured on this server. "
-                                        "Ask your administrator to add smtp: settings "
-                                        "to the config file.")
+                                  error="SMTP is not configured. Ask the platform "
+                                        "superadmin to add email settings under "
+                                        "Platform → Email settings.")
             recipients = auth.get_alert_emails(user["org_id"]) if auth else []
             if not recipients:
                 return _json_resp(False,
@@ -4733,10 +4803,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                         "Add at least one address in the WAN alert recipients "
                                         "field above and save first.")
             try:
-                from .notify.org_email import send_test_email
-                prefix = smtp_cfg.subject_prefix if smtp_cfg else "[EasyMikrotik]"
+                prefix = eff.subject_prefix or "[EasyMikrotik]"
                 org_name = auth.org_name(user["org_id"]) if auth else ""
-                send_test_email(smtp_cfg, recipients, org_name, prefix)
+                send_test_email(eff, recipients, org_name, prefix)
             except Exception as exc:  # noqa: BLE001
                 return _json_resp(False,
                                   error=f"SMTP error ({type(exc).__name__}): {exc}")

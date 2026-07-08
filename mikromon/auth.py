@@ -128,6 +128,12 @@ class AuthStore:
         self._add_col_if_missing("orgs", "report_schedule",
                                  "TEXT NOT NULL DEFAULT 'none'")
         self._add_col_if_missing("orgs", "report_next_due", "REAL")
+        # Platform-wide key/value settings (e.g. the SMTP relay the superadmin
+        # configures from the dashboard instead of editing config.yaml).
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS platform_settings ("
+            "key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        self.db.commit()
 
     def _add_col_if_missing(self, table: str, col: str, col_def: str) -> None:
         try:
@@ -394,6 +400,34 @@ class AuthStore:
                  address.strip() or None, vat_number.strip() or None,
                  int(org_id)))
             self.db.commit()
+
+    # ----- platform settings (superadmin-managed) ---------------------------
+    def get_setting(self, key: str, default=None):
+        row = self.db.execute(
+            "SELECT value FROM platform_settings WHERE key = ?", (key,)).fetchone()
+        if not row:
+            return default
+        try:
+            return json.loads(row[0])
+        except (json.JSONDecodeError, TypeError):
+            return default
+
+    def set_setting(self, key: str, value) -> None:
+        with self._lock:
+            self.db.execute(
+                "INSERT INTO platform_settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, json.dumps(value)))
+            self.db.commit()
+
+    def get_smtp(self) -> dict | None:
+        """The SMTP relay the superadmin configured in the dashboard, or None to
+        fall back to the smtp: block in config.yaml."""
+        d = self.get_setting("smtp")
+        return d if isinstance(d, dict) and d.get("host") else None
+
+    def set_smtp(self, cfg: dict) -> None:
+        self.set_setting("smtp", cfg)
 
     def get_alert_emails(self, org_id: int) -> list:
         row = self.db.execute(

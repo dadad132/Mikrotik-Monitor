@@ -128,6 +128,24 @@ check("member scoped to allowed", a.allowed_devices(bob, ["R1", "R2"]) == ["R2"]
 check("can_see honours the device's org",
       a.can_see(admin, "R1", device_org=acme)
       and not a.can_see(admin, "R3", device_org=other))
+
+# Platform SMTP settings (superadmin configures the relay from the dashboard)
+from mikromon.notify.org_email import effective_smtp
+from mikromon.config import SmtpConfig
+fallback = SmtpConfig(host="config-host", port=25)
+check("no DB SMTP -> falls back to config.yaml relay",
+      effective_smtp(a, fallback).host == "config-host")
+check("get_smtp is None until set", a.get_smtp() is None)
+a.set_smtp({"host": "mail-eu.smtp2go.com", "port": 2525,
+            "username": "noreply@x.com", "password": "sekret",
+            "use_tls": True, "use_ssl": False, "from_addr": "noreply@x.com"})
+check("get_smtp round-trips what was saved",
+      a.get_smtp()["host"] == "mail-eu.smtp2go.com"
+      and a.get_smtp()["port"] == 2525)
+eff = effective_smtp(a, fallback)
+check("effective_smtp now prefers the DB relay over config",
+      eff.host == "mail-eu.smtp2go.com" and eff.port == 2525
+      and eff.use_tls and not eff.use_ssl and eff.password == "sekret")
 a.close()
 
 # ---- legacy -> multi-tenant migration --------------------------------------

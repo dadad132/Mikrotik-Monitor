@@ -444,8 +444,67 @@ _STATUS_COLOR = {
 }
 
 
+def _plan_select(org_id, current_plan, csrf) -> str:
+    """A per-company plan-assign control for the superadmin (manual billing)."""
+    opts = ['<option value="">— assign —</option>']
+    for p in PLANS:
+        sel = " selected" if current_plan == p["name"] else ""
+        opts.append(f'<option value="{esc(p["name"])}"{sel}>'
+                    f'{esc(p["label"])} · {p["devices"]} dev · '
+                    f'R{p["price_zar"]:.0f}/mo</option>')
+    opts.append('<option value="unlimited"'
+                + (" selected" if current_plan == "unlimited" else "")
+                + '>Unlimited</option>')
+    opts.append('<option value="free">Free (5)</option>')
+    return (f'<form method="POST" action="/superadmin/billing" '
+            f'style="display:flex;gap:4px">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="org_id" value="{esc(str(org_id))}">'
+            f'<select name="plan" style="font-size:12px">{"".join(opts)}</select>'
+            f'<button class="btn ghost" type="submit" '
+            f'style="font-size:12px;padding:2px 8px">Set</button></form>')
+
+
+def _smtp_settings_box(smtp, csrf) -> str:
+    """Superadmin email-relay settings form (stored in the DB, not config.yaml)."""
+    s = smtp or {}
+    def v(k, d=""):
+        return esc(str(s.get(k, d)))
+    chk = lambda k, on: " checked" if s.get(k, on) else ""
+    has_pw = "•••••• (saved)" if s.get("password") else ""
+    return (
+        f'<div class="box"><h2>Email (SMTP) settings</h2>'
+        f'<p class="muted">The relay used to send WAN-alert emails to every '
+        f'company. Set it here once — no need to edit config.yaml. Companies pick '
+        f'their own recipient addresses on their Company details page.</p>'
+        f'<form method="POST" action="/superadmin/smtp">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">'
+        f'<label>SMTP host<br><input name="host" value="{v("host")}" '
+        f'placeholder="mail-eu.smtp2go.com" style="width:100%"></label>'
+        f'<label>Port<br><input name="port" value="{v("port","587")}" '
+        f'placeholder="2525" style="width:100%"></label>'
+        f'<label>Username<br><input name="username" value="{v("username")}" '
+        f'style="width:100%"></label>'
+        f'<label>Password<br><input name="password" type="password" '
+        f'placeholder="{has_pw or "SMTP password"}" style="width:100%"></label>'
+        f'<label>From address<br><input name="from_addr" value="{v("from_addr")}" '
+        f'placeholder="alerts@yourdomain.com" style="width:100%"></label>'
+        f'<label>Subject prefix<br><input name="subject_prefix" '
+        f'value="{v("subject_prefix","[EasyMikrotik]")}" style="width:100%"></label>'
+        f'</div>'
+        f'<div style="margin:10px 0"><label class="chk"><input type="checkbox" '
+        f'name="use_tls" value="1"{chk("use_tls", True)}> STARTTLS (ports 587 / '
+        f'2525)</label> &nbsp; <label class="chk"><input type="checkbox" '
+        f'name="use_ssl" value="1"{chk("use_ssl", False)}> SSL (port 465)</label>'
+        f'</div>'
+        f'<button class="btn" type="submit">Save email settings</button>'
+        f'</form></div>')
+
+
 def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
-                       msg: str = "", error: str = "") -> str:
+                       msg: str = "", error: str = "", smtp=None,
+                       billing_on: bool = False) -> str:
     """Platform superadmin panel — shows all orgs, billing status, and device counts."""
     note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
            (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
@@ -487,7 +546,9 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
             f'{"" if active_count == device_count else f" <span class=\"muted\" style=\"font-size:11px\">({device_count} total)</span>"}'
             f' / {device_limit if device_limit else "∞"}</td>'
             f'<td>{created_str}</td>'
-            f'</tr>'
+            + (f'<td>{_plan_select(r.get("id"), plan, csrf)}</td>'
+               if billing_on else "")
+            + '</tr>'
         )
 
     # Summary tiles
@@ -515,7 +576,8 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
         f'<table style="min-width:700px"><thead><tr>'
         f'<th>Company</th><th>Status</th><th>Plan</th>'
         f'<th>Devices</th><th>Joined</th>'
-        f'</tr></thead><tbody>{tbody or "<tr><td colspan=5 class=muted>No organisations yet.</td></tr>"}'
+        + ("<th>Assign plan</th>" if billing_on else "")
+        + f'</tr></thead><tbody>{tbody or "<tr><td colspan=6 class=muted>No organisations yet.</td></tr>"}'
         f'</tbody></table></div>'
     )
 
@@ -586,7 +648,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
     )
 
     inner = (f'<div class="wrap"><h1>Platform admin</h1>{note}{tiles}{table}'
-             f'{backup_box}</div>')
+             f'{_smtp_settings_box(smtp, csrf)}{backup_box}</div>')
     return _page("Platform Admin", _header(user, "/superadmin") + inner)
 
 
