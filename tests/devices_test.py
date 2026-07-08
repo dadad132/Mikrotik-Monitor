@@ -208,6 +208,8 @@ with open(sfile, "w") as fh:
 a = AuthStore(adb)
 org = a.signup("admin@acme.test", "admin123", "Acme")   # owner of Acme
 a.add_member(org, "bob@acme.test", "bob123", devices=[])  # member, no devices
+a.add_member(org, "carol@acme.test", "carol123",         # member allocated WebR1
+             devices=["WebR1"])
 a.close()
 DevicesStore(wdb).close()
 
@@ -349,11 +351,36 @@ try:
     check("backup dry-run preview works without a router",
           st == 200 and "Dry run" in body and "unittest" in body
           and "Confirm" in body)
+    # A member NOT allocated the device is blocked from managing it. Use a
+    # VALID CSRF so we're testing the permission (403), not CSRF (400).
     nobody = op_login("bob@acme.test", "bob123")
+    _, bacct = get(nobody, "/account")
+    bcsrf = re.search(r'name="csrf" value="([^"]+)"', bacct).group(1)
     st, _ = get(nobody, "/device?name=WebR1&tab=backups")
-    check("non-admin blocked from the Backups tab (403)", st == 403)
-    st, _ = post(nobody, "/device/backup", {"csrf": "x", "device": "WebR1"})
-    check("non-admin blocked from creating a backup (403)", st == 403)
+    check("unallocated member blocked from the Backups tab (403)", st == 403)
+    st, _ = post(nobody, "/device/backup", {"csrf": bcsrf, "device": "WebR1"})
+    check("unallocated member blocked from creating a backup (403)", st == 403)
+    # A member the device IS allocated to gets full device management. (We test
+    # the offline management paths — backup dry-run + WAN save — since a live
+    # push/connect would hang on the unreachable test host; the permission gate
+    # is the same for all device routes.)
+    ally = op_login("carol@acme.test", "carol123")
+    _, cacct = get(ally, "/account")
+    ccsrf = re.search(r'name="csrf" value="([^"]+)"', cacct).group(1)
+    st, _ = get(ally, "/device?name=WebR1")
+    check("allocated member CAN open the device page", st == 200)
+    st, body = post(ally, "/device/backup",
+                    {"csrf": ccsrf, "device": "WebR1", "bkname": "memtest"})
+    check("allocated member can run a device action (backup dry-run)",
+          st == 200 and "Dry run" in body)
+    st = post_status(ally, "/device/wan",
+                     {"csrf": ccsrf, "device": "WebR1",
+                      "link_name": ["Fibre"], "link_iface": ["ether1"],
+                      "link_gw": [""]})
+    check("allocated member can save device config (WAN uplinks) — 303", st == 303)
+    st, _ = get(ally, "/devices")
+    check("allocated member is still blocked from device inventory (403)",
+          st == 403)
     # --- all engines opened: device tabs + activity log ---
     st, body = get(admin, "/device?name=WebR1")
     check("device tab bar links every engine (wan/security/qos/portfwd)",
@@ -368,8 +395,8 @@ try:
     st, _ = get(nobody, "/logs")
     check("non-admin blocked from the activity log (403)", st == 403)
     st, _ = post(nobody, "/device/push",
-                 {"csrf": "x", "device": "WebR1", "feature": "security"})
-    check("non-admin blocked from pushing config (403)", st == 403)
+                 {"csrf": bcsrf, "device": "WebR1", "feature": "security"})
+    check("unallocated member blocked from pushing config (403)", st == 403)
     # --- WAN uplinks editable from the SD-WAN tab (saved to the device) ---
     st = post_status(admin, "/device/wan",
                      {"csrf": csrf, "device": "WebR1",
@@ -382,8 +409,8 @@ try:
           [l["interface"] for l in raw["wan"]["links"]] == ["ether1", "lte1"])
     saved.close()
     st = post_status(nobody, "/device/wan",
-                     {"csrf": "x", "device": "WebR1", "link_iface": ["x"]})
-    check("non-admin blocked from editing WAN (403)", st == 403)
+                     {"csrf": bcsrf, "device": "WebR1", "link_iface": ["x"]})
+    check("unallocated member blocked from editing WAN (403)", st == 403)
     # --- Provision tab: generate a bootstrap script + save strong creds ---
     st, body = get(admin, "/device?name=WebR1&tab=provision")
     check("admin can open the Provision tab",
@@ -417,8 +444,8 @@ try:
           and not raw.get("push_username"))
     saved.close()
     st = post_status(nobody, "/device/provision",
-                     {"csrf": "x", "device": "WebR1"})
-    check("non-admin blocked from provisioning (403)", st == 403)
+                     {"csrf": bcsrf, "device": "WebR1"})
+    check("unallocated member blocked from provisioning (403)", st == 403)
     # seed leftover metrics + saved state, then prove delete purges them so the
     # device stops showing on the dashboard (it lists anything with samples).
     from mikromon.state import StateStore
@@ -443,10 +470,13 @@ try:
           "WebR1" not in state_after.get("devices", {}))
     # non-admin is blocked
     bob = op_login("bob@acme.test", "bob123")
+    _, bacct2 = get(bob, "/account")
+    bcsrf2 = re.search(r'name="csrf" value="([^"]+)"', bacct2).group(1)
     st, _ = get(bob, "/devices")
-    check("non-admin blocked from /devices (403)", st == 403)
-    st, _ = post(bob, "/devices/save", {"csrf": "x", "name": "X", "host": "1.1.1.1"})
-    check("non-admin blocked from saving (403)", st == 403)
+    check("member blocked from /devices inventory (403)", st == 403)
+    st, _ = post(bob, "/devices/save",
+                 {"csrf": bcsrf2, "name": "X", "host": "1.1.1.1"})
+    check("member blocked from adding a device (owner-only, 403)", st == 403)
 finally:
     srv.shutdown()
     srv.server_close()

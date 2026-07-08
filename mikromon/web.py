@@ -689,7 +689,8 @@ def _render_inventory(store, state, user, allowed) -> str:
 
 
 def _render_device(store, state, name, user, csrf="",
-                   last_change=None, others_down=0, access_html="") -> str:
+                   last_change=None, others_down=0, access_html="",
+                   can_manage=None) -> str:
     d = _device_view(store, state, name)
     f = d["facts"]
     sev = _severity(d)
@@ -698,7 +699,9 @@ def _render_device(store, state, name, user, csrf="",
     m = d["metrics"]
     q = quote(name)
 
-    tabbar = _device_tabbar(name, "overview", AuthStore.is_admin(user or {}), csrf)
+    if can_manage is None:
+        can_manage = AuthStore.is_admin(user or {})
+    tabbar = _device_tabbar(name, "overview", can_manage, csrf)
 
     # ── speedometer gauge (220° arc, 0% at lower-left, 100% at lower-right) ──
     def gauge_card(label, val_str, pct, color):
@@ -2350,8 +2353,10 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                         msg="", recent=None, facts=None, unmanaged=None,
                         confirm_action="/device/push", cfg=None,
                         extra_html="", extra_actions="", report_html="",
-                        wan_ifaces=None) -> str:
-    tabbar = _device_tabbar(name, slug, AuthStore.is_admin(user or {}), csrf)
+                        wan_ifaces=None, can_manage=None) -> str:
+    if can_manage is None:
+        can_manage = AuthStore.is_admin(user or {})
+    tabbar = _device_tabbar(name, slug, can_manage, csrf)
     q = quote(name)
     banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
               f'</div>' if msg else "")
@@ -3015,21 +3020,25 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         return self._send(404, "no such device")
                     if allowed is not None and dev not in allowed:
                         return self._send(403, "forbidden")
+                    # Full device management for the owner AND any member the
+                    # device is allocated to (they already passed the visibility
+                    # gate above, so on this page viewing == managing).
+                    can_manage = self._can_manage_device(user, dev)
                     tab = q.get("tab", [""])[0]
                     if tab == "backups":
-                        if user is not None and not AuthStore.is_admin(user):
+                        if not can_manage:
                             return self._send(403, "forbidden")
                         return self._device_backups_page(
                             dev, user, msg=q.get("msg", [""])[0])
                     if tab == "tempaccess":
-                        if user is not None and not AuthStore.is_admin(user):
+                        if not can_manage:
                             return self._send(403, "forbidden")
                         return self._device_tempaccess_page(
                             dev, user, creds=None,
                             msg=q.get("msg", [""])[0],
                             error=q.get("error", [""])[0])
                     if tab == "provision":
-                        if user is not None and not AuthStore.is_admin(user):
+                        if not can_manage:
                             return self._send(403, "forbidden")
                         return self._device_provision_page(
                             dev, user, msg=q.get("msg", [""])[0])
@@ -3050,11 +3059,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         1 for dd in _all_devices(store, state, allowed)
                         if dd.get("device") != dev and not dd.get("up", True))
                     access_html = (self._access_box_html(dev, csrf)
-                                  if AuthStore.is_admin(user or {}) else "")
+                                  if can_manage else "")
                     return self._send(200, _render_device(store, state, dev, user,
                                       csrf, last_change=last_change,
                                       others_down=others_down,
-                                      access_html=access_html),
+                                      access_html=access_html,
+                                      can_manage=can_manage),
                                       "text/html; charset=utf-8")
                 if path == "/api/devices":
                     return self._send(200, json.dumps(
@@ -3568,7 +3578,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._send(200, page, "text/html; charset=utf-8")
 
         def _device_provision_post(self, flat, user):
-            if not AuthStore.is_admin(user or {}):
+            if not self._can_manage_device(user, flat.get("device", "")):
                 return self._send(403, "forbidden")
             if flat.get("auto") == "1":
                 return self._device_provision_apply(flat, user)
@@ -3829,7 +3839,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             raw = self._device_raw(name)
             if raw is None:
                 return self._send(400, "device not managed in the dashboard")
-            if feature.get("write") and not AuthStore.is_admin(user or {}):
+            can_manage = self._can_manage_device(user, name)
+            if feature.get("write") and not can_manage:
                 return self._send(403, "forbidden")
             facts = (_load_state(state_file).get("devices", {})
                      .get(name, {}).get("facts", {}))
@@ -3895,11 +3906,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 msg=msg, recent=recent, facts=facts, unmanaged=unmanaged,
                 confirm_action=confirm_action, cfg=cfg, extra_html=extra_html,
                 extra_actions=extra_actions, report_html=_report_html,
-                wan_ifaces=wan_ifaces)
+                wan_ifaces=wan_ifaces, can_manage=can_manage)
             return self._send(200, page, "text/html; charset=utf-8")
 
         def _device_wan_post(self, flat, multi, user):
-            if not AuthStore.is_admin(user or {}):
+            if not self._can_manage_device(user, flat.get("device", "")):
                 return self._send(403, "forbidden")
             name = flat.get("device", "")
             store = self._devstore()
@@ -3951,7 +3962,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             raw = self._device_raw(name)
             if feature is None or raw is None or not feature.get("adopt"):
                 return self._send(404, "not found")
-            if not AuthStore.is_admin(user or {}):
+            if not self._can_manage_device(user, name):
                 return self._send(403, "forbidden")
             cfg = build_device(raw, defaults)
             commit = flat.get("apply") == "1"
@@ -3999,7 +4010,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             raw = self._device_raw(name)
             if feature is None or raw is None:
                 return self._send(404, "not found")
-            if feature.get("write") and not AuthStore.is_admin(user or {}):
+            if feature.get("write") and not self._can_manage_device(user, name):
                 return self._send(403, "forbidden")
             cfg = build_device(raw, defaults)
             commit = flat.get("apply") == "1"
@@ -4163,7 +4174,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             from .push import Pusher, PushError, rw_device
             from .push.api import PushApi
 
-            if not AuthStore.is_admin(user or {}):
+            if not self._can_manage_device(user, flat.get("device", "")):
                 return self._send(403, "forbidden")
             name = flat.get("device", "")
             slug = flat.get("feature", "")
@@ -4238,7 +4249,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             from .push import PushError, rw_device, wireguard_repair
             from .push.api import PushApi
 
-            if not AuthStore.is_admin(user or {}):
+            if not self._can_manage_device(user, flat.get("device", "")):
                 return self._send(403, "forbidden")
             name = flat.get("device", "")
             raw = self._device_raw(name)
@@ -4507,13 +4518,48 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_billing(user)
             if path == "/superadmin/smtp":
                 return self._post_superadmin_smtp(user)
-            # Everything below requires an owner + a valid CSRF token.
-            if not AuthStore.is_admin(user or {}):
+            # Everything below requires a logged-in user + a valid CSRF token.
+            if not user:
                 return self._send(403, "forbidden")
             flat, multi = self._form()
             sess = self._session()
             if sess is None or flat.get("csrf") != sess["csrf"]:
                 return self._send(400, "bad csrf token")
+            # Device-scoped management is open to the company OWNER (any of their
+            # devices) AND a MEMBER the device is allocated to — members get
+            # owner-level control (scripts, push, backups, reboot, …) but only on
+            # their allocated units. Each handler re-checks _can_manage_device.
+            _DEVICE_WRITE = ("/device/backup", "/device/tempaccess",
+                             "/device/provision", "/device/push",
+                             "/device/wg-repair", "/device/adopt", "/device/wan",
+                             "/device/reboot", "/device/access", "/device/confirm")
+            if path in _DEVICE_WRITE:
+                if not self._can_manage_device(user, flat.get("device", "")):
+                    return self._send(403, "forbidden")
+                if path == "/device/backup":
+                    return self._device_backup_post(flat, user)
+                if path == "/device/tempaccess":
+                    return self._post_tempaccess(flat, user)
+                if path == "/device/provision":
+                    return self._device_provision_post(flat, user)
+                if path == "/device/push":
+                    return self._device_push_post(flat, multi, user)
+                if path == "/device/wg-repair":
+                    return self._device_wg_repair_post(flat, user)
+                if path == "/device/adopt":
+                    return self._device_adopt_post(flat, user)
+                if path == "/device/wan":
+                    return self._device_wan_post(flat, multi, user)
+                if path == "/device/reboot":
+                    return self._device_reboot_post(flat, user)
+                if path == "/device/access":
+                    return self._device_access_post(flat, user)
+                if path == "/device/confirm":
+                    return self._device_confirm_post(flat, user)
+            # Everything below is OWNER-ONLY (org-level: inventory, users,
+            # billing, server ops).
+            if not AuthStore.is_admin(user or {}):
+                return self._send(403, "forbidden")
             # Billing routes (owner only, no device ownership check needed).
             if path == "/billing/subscribe":
                 return self._post_billing_subscribe(flat, user)
@@ -4524,30 +4570,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(403, "forbidden")
             if path.startswith("/devices/"):
                 return self._devices_post(path, flat, multi, user)
-            if path == "/device/backup":
-                return self._device_backup_post(flat, user)
-            if path == "/device/tempaccess":
-                return self._post_tempaccess(flat, user)
-            if path == "/device/provision":
-                return self._device_provision_post(flat, user)
-            if path == "/device/push":
-                return self._device_push_post(flat, multi, user)
             if path == "/device/forget":
                 return self._device_forget_post(flat, user)
-            if path == "/device/wg-repair":
-                return self._device_wg_repair_post(flat, user)
             if path == "/hub/reload-peers":
                 return self._hub_reload_peers_post(flat, user)
-            if path == "/device/adopt":
-                return self._device_adopt_post(flat, user)
-            if path == "/device/wan":
-                return self._device_wan_post(flat, multi, user)
-            if path == "/device/reboot":
-                return self._device_reboot_post(flat, user)
-            if path == "/device/access":
-                return self._device_access_post(flat, user)
-            if path == "/device/confirm":
-                return self._device_confirm_post(flat, user)
             if path == "/admin/company":
                 return self._post_company(flat, user)
             try:
@@ -4580,6 +4606,27 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             owner's company."""
             target = auth.get_user(identifier) if identifier else None
             return bool(target) and target.get("org_id") == user.get("org_id")
+
+        def _can_manage_device(self, user, name) -> bool:
+            """Full device management is allowed for the company OWNER (any of
+            their devices) and for a MEMBER the device is allocated to. Members
+            get owner-level control — scripts, config push, backups, reboot — but
+            only on their allocated units. Org-level actions (add/remove devices,
+            manage users, billing) stay owner-only and are gated separately."""
+            if auth is None:      # auth disabled (demo/open mode) -> allow
+                return True
+            if not user or not name:
+                return False
+            org = None
+            if devices_db:
+                ds = self._devstore()
+                try:
+                    org = ds.org_of(name) if ds else None
+                finally:
+                    if ds:
+                        ds.close()
+            # can_see: owner of the device's org, or a member it's allocated to.
+            return AuthStore.can_see(user, name, org)
 
         def _owns_target(self, flat, user) -> bool:
             """For device-targeted POSTs, every *existing* device the request
@@ -4941,7 +4988,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                               "text/html; charset=utf-8")
 
         def _post_tempaccess(self, flat, user):
-            if not AuthStore.is_admin(user or {}):
+            if not self._can_manage_device(user, flat.get("device", "")):
                 return self._send(403, "forbidden")
             name = flat.get("device", "")
             raw = self._device_raw(name)
