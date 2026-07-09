@@ -67,15 +67,6 @@ _NETWATCH = ("tool", "netwatch")
 _PPP_ACTIVE = ("ppp", "active")
 _IP_ADDRESS = ("ip", "address")
 _FAILOVER_TAG = "mikromon:failover:"
-_DEFAULT_DOWN_COUNT = 2  # consecutive failed pings required before failing over
-
-
-def _fo_role(idx: int) -> str:
-    """Route-comment role name for the link at this rank (0 = highest
-    priority). Keeps the original "primary"/"secondary" names for the first
-    two (what every existing router's routes are already tagged with) and
-    generalizes beyond that for a 3rd+ managed uplink."""
-    return "primary" if idx == 0 else "secondary" if idx == 1 else f"link{idx + 1}"
 
 
 def _default_routes(api):
@@ -150,31 +141,23 @@ def routes_summary(current, cfg):
     for c in current.get("dhcp", []):
         iface = c.get("interface", "?")
         status = c.get("status", "unknown")
-        fo_comment = _fo_comment_for_client(c, cfg, "dhcp")
-        dist = (c.get("default-route-distance", "")
-               or _dist_from_routes(routes, c, "dhcp", fo_comment) or "?")
+        dist = c.get("default-route-distance", "?")
         if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
-            rs = _route_status_for(routes, c, "dhcp", fo_comment)
-            rs_str = f" ({rs})" if rs else ""
-            lines.append(f"DHCP {iface} · no default route{rs_str}")
+            lines.append(f"DHCP {iface} · no default route")
         else:
-            rs = _route_status_for(routes, c, "dhcp", fo_comment)
+            rs = _route_status_for(routes, c, "dhcp")
             rs_str = f" · route {rs}" if rs else ""
             lines.append(f"DHCP {iface} · {status}{rs_str} · distance {dist}")
     for c in current.get("ppp", []):
         ctype = c.get("_type", "ppp").upper()
         name = c.get("name", "?")
         running = str(c.get("running", "false")).lower() in ("true", "yes")
-        fo_comment = _fo_comment_for_client(c, cfg, c.get("_type", "ppp"))
-        dist = (c.get("default-route-distance", "")
-               or _dist_from_routes(routes, c, c.get("_type", "ppp"), fo_comment) or "?")
+        dist = c.get("default-route-distance", "?")
         if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
-            rs = _route_status_for(routes, c, c.get("_type", "ppp"), fo_comment)
-            rs_str = f" ({rs})" if rs else ""
-            lines.append(f"{ctype} {name} · no default route{rs_str}")
+            lines.append(f"{ctype} {name} · no default route")
         else:
             state = "connected" if running else "disconnected"
-            rs = _route_status_for(routes, c, c.get("_type", "ppp"), fo_comment)
+            rs = _route_status_for(routes, c, c.get("_type", "ppp"))
             rs_str = f" · route {rs}" if rs else ""
             lines.append(f"{ctype} {name} · {state}{rs_str} · distance {dist}")
     for r in current.get("routes", []):
@@ -199,84 +182,53 @@ def routes_summary(current, cfg):
     return lines or ["No internet lines found on this router."]
 
 
-def _fo_comment_for_client(client, cfg, ctype):
-    """The mikromon:failover:<role> comment this client's managed static
-    route would carry, if it's one of the device's configured WAN uplinks —
-    lets distance/status lookups below find that route even when matching
-    purely by gateway IP can't (the client's own "gateway" field is blank or
-    stale once add-default-route=no, since it's no longer the one creating
-    the route)."""
-    if cfg is None:
-        return None
-    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
-    name = client.get("interface", "") if ctype == "dhcp" else client.get("name", "")
-    if not name:
-        return None
-    for idx, link in enumerate(links):
-        if getattr(link, "interface", "") == name:
-            return f"{_FAILOVER_TAG}{_fo_role(idx)}"
-    return None
-
-
-def _route_status_for(routes, client, ctype, fo_comment=None):
+def _route_status_for(routes, client, ctype):
     """Return 'active', 'inactive', or '' (no matching default route found).
 
     DHCP routes are matched by gateway IP; PPPoE/L2TP routes are matched by the
     interface/client name.  The RouterOS 'active' flag is True when the route is
     in the forwarding table — reliable for interface-down detection but only
-    reflects internet reachability if check-gateway is also configured.
-    fo_comment (see _fo_comment_for_client) is a fallback for when gateway
-    matching misses a mikromon-managed static route entirely."""
+    reflects internet reachability if check-gateway is also configured."""
     if ctype == "dhcp":
         gw = str(client.get("gateway", ""))
     else:
         gw = str(client.get("name", ""))
+    if not gw:
+        return ""
     for r in routes:
-        if gw and str(r.get("gateway", "")) == gw:
+        if str(r.get("gateway", "")) == gw:
             active = str(r.get("active", "true")).lower() not in ("false", "no")
             return "active" if active else "inactive"
-    if fo_comment:
-        for r in routes:
-            if str(r.get("comment", "")) == fo_comment:
-                active = str(r.get("active", "true")).lower() not in ("false", "no")
-                return "active" if active else "inactive"
     return ""
 
 
-def _dist_from_routes(routes, client, ctype, fo_comment=None):
+def _dist_from_routes(routes, client, ctype):
     """Find the distance of the matching 0.0.0.0/0 route for this client.
 
     RouterOS omits default-route-distance from the API response when
     add-default-route=no, so we fall back to reading the distance from the
-    actual route table (which includes our managed static failover routes) —
-    matched by gateway IP first, then by the managed route's own comment tag
-    (fo_comment) when gateway matching can't find it."""
+    actual route table (which includes our managed static failover routes)."""
     gw = str(client.get("gateway", "")) if ctype == "dhcp" else str(client.get("name", ""))
+    if not gw:
+        return ""
     for r in routes:
-        if gw and str(r.get("gateway", "")) == gw:
+        if str(r.get("gateway", "")) == gw:
             return str(r.get("distance", ""))
-    if fo_comment:
-        for r in routes:
-            if str(r.get("comment", "")) == fo_comment:
-                return str(r.get("distance", ""))
     return ""
 
 
-def _wan_sortable_items(current, cfg=None):
+def _wan_sortable_items(current):
     routes = current.get("routes", [])
     items = []
     for c in current.get("dhcp", []):
         iface = c.get("interface", "?")
         status = c.get("status", "unknown")
-        fo_comment = _fo_comment_for_client(c, cfg, "dhcp")
-        dist = (c.get("default-route-distance", "")
-               or _dist_from_routes(routes, c, "dhcp", fo_comment) or "1")
+        dist = c.get("default-route-distance", "") or _dist_from_routes(routes, c, "dhcp") or "1"
         rid = c.get(".id", "").lstrip("*")
         if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
-            rs = _route_status_for(routes, c, "dhcp", fo_comment)
-            conn_info = f"{status} · no default route" + (f" ({rs})" if rs else "")
+            conn_info = f"{status} · no default route"
         else:
-            rs = _route_status_for(routes, c, "dhcp", fo_comment)
+            rs = _route_status_for(routes, c, "dhcp")
             conn_info = f"{status}" + (f" · route {rs}" if rs else "")
         items.append({
             "id": f"dhcp:{rid}",
@@ -287,16 +239,13 @@ def _wan_sortable_items(current, cfg=None):
         ctype = c.get("_type", "ppp").upper()
         name = c.get("name", "?")
         running = str(c.get("running", "false")).lower() in ("true", "yes")
-        fo_comment = _fo_comment_for_client(c, cfg, c.get("_type", "ppp"))
-        dist = (c.get("default-route-distance", "")
-               or _dist_from_routes(routes, c, c.get("_type", "ppp"), fo_comment) or "1")
+        dist = c.get("default-route-distance", "") or _dist_from_routes(routes, c, c.get("_type", "ppp")) or "1"
         rid = c.get(".id", "").lstrip("*")
         state = "connected" if running else "disconnected"
         if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
-            rs = _route_status_for(routes, c, c.get("_type", "ppp"), fo_comment)
-            conn_info = f"{state} · no default route" + (f" ({rs})" if rs else "")
+            conn_info = f"{state} · no default route"
         else:
-            rs = _route_status_for(routes, c, c.get("_type", "ppp"), fo_comment)
+            rs = _route_status_for(routes, c, c.get("_type", "ppp"))
             conn_info = f"{state}" + (f" · route {rs}" if rs else "")
         items.append({
             "id": f"{c.get('_type', 'ppp')}:{rid}",
@@ -340,16 +289,13 @@ def _wan_gateway_for(client):
 
 
 def routes_form(current, cfg):
-    items = _wan_sortable_items(current, cfg)
+    items = _wan_sortable_items(current)
 
-    # Pre-fill check IPs, interval and down-count from existing failover
-    # watch config, so re-opening this tab shows what's actually deployed
-    # rather than resetting to the defaults every time.
+    # Pre-fill check IPs and interval from existing failover watch config
     fo_enabled = bool(current.get("failover_routes"))
     primary_check = "1.1.1.1"
     secondary_check = "8.8.8.8"
     interval = "30s"
-    down_count = str(_DEFAULT_DOWN_COUNT)
     for w in current.get("failover_watch", []):
         c = w.get("comment", "")
         if c == f"{_FAILOVER_TAG}watch:primary" and w.get("host"):
@@ -358,9 +304,6 @@ def routes_form(current, cfg):
             secondary_check = w["host"]
         if w.get("interval"):
             interval = w["interval"]
-        m = re.search(r">=\s*(\d+)", str(w.get("down-script", "")))
-        if m:
-            down_count = m.group(1)
 
     links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
 
@@ -374,53 +317,30 @@ def routes_form(current, cfg):
                  "that line reconnects or renews its DHCP lease. To apply immediately: "
                  "disconnect and reconnect the line from RouterOS after applying."},
         {"type": "heading", "label": "Gateway Failover",
-         "hint": "Static routes with check-gateway=ping + Netwatch, one per configured "
-                 "uplink (not just the top two). Gateways are detected automatically. "
-                 "Uplinks alternate which check IP they ping — 1st, 3rd, 5th... use the "
-                 "Primary check IP; 2nd, 4th, 6th... use the Secondary check IP — so a "
-                 "problem with one DNS resolver can't look like every other line failed."},
+         "hint": "Static routes with check-gateway=ping + Netwatch. "
+                 "Gateways are detected automatically from the configured WAN uplinks."},
         {"type": "toggle", "name": "fo_enabled", "value": "1",
          "on": fo_enabled, "label": "Enable gateway failover"},
         {"type": "text", "name": "fo_primary_check",
          "label": "Primary check IP", "value": primary_check,
          "placeholder": "1.1.1.1",
-         "hint": "Pinged by uplink 1, 3, 5, ... (priority order) to confirm it has internet."},
+         "hint": "Netwatch pings this IP to confirm the primary line has internet."},
     ]
     if len(links) > 1:
         fields.append({"type": "text", "name": "fo_secondary_check",
                        "label": "Secondary check IP", "value": secondary_check,
                        "placeholder": "8.8.8.8",
-                       "hint": "Pinged by uplink 2, 4, 6, ... (priority order) to confirm "
-                               "it has internet."})
-    fields.append({"type": "text", "name": "fo_interval",
-                   "label": "Check interval", "value": interval,
-                   "placeholder": "30s",
-                   "hint": "How often each uplink is pinged. Shorter reacts faster but "
-                           "pings more; RouterOS duration format (e.g. 10s, 1m)."})
-    fields.append({"type": "text", "name": "fo_down_count",
-                   "label": "Consecutive failed pings before failing over",
-                   "value": down_count, "placeholder": str(_DEFAULT_DOWN_COUNT),
-                   "hint": "A single dropped/delayed ping does NOT fail a line over — it "
-                           "must fail this many checks in a row. Raise this if a line "
-                           "keeps flapping back and forth for no real reason; lower it to "
-                           "react faster to a genuine outage."})
+                       "hint": "Netwatch pings this IP to confirm the backup line has internet."})
     return fields
 
 
-def _apply_wan_order(ops, order, pusher, fo_enabled=False):
+def _apply_wan_order(ops, order, pusher):
     """Build distance-change ops from a wan_order list.
 
     RouterOS dynamic routes (DHCP / PPPoE / L2TP) are read-only in /ip/route —
     attempting to set their distance returns 'no such item'. The only supported
     path is setting default-route-distance on the client itself, which takes
-    effect on the next connection or DHCP renewal.
-
-    With gateway failover OFF, distances start at 10 (10, 11, 12, ...) rather
-    than 1, 2, 3 — 1/2/3 is what the MANAGED static failover routes use (see
-    _apply_failover), so leaving individual clients at 1/2/3 too would tie
-    with them (or with each other) the moment more than one is up. 1/2/3 in
-    plain rank order is only correct while failover's own routes aren't also
-    claiming those same distances."""
+    effect on the next connection or DHCP renewal."""
     if not order:
         return
     dhcp_clients = _safe_fetch(pusher.api, _DHCP_CLIENT)
@@ -436,9 +356,8 @@ def _apply_wan_order(ops, order, pusher, fo_enabled=False):
     for c in l2tp_clients:
         rid = c.get(".id", "").lstrip("*")
         client_map[f"l2tp:{rid}"] = (_L2TP_CLIENT, c, f"L2TP {c.get('name','?')}")
-    base = 0 if fo_enabled else 9
     for rank, item_id in enumerate(order, start=1):
-        want = str(base + rank)
+        want = str(rank)
         if item_id not in client_map:
             continue
         cpath, c, clabel = client_map[item_id]
@@ -489,91 +408,41 @@ def _gateway_for_link(link, pppoe_names, dhcp_by_iface,
     return ""
 
 
-def _reorder_links_by_wan_order(links, order, pusher):
-    """Re-rank cfg.wan.links to match the CURRENT drag order from the Routes
-    tab, so gateway failover's primary/secondary picks follow what the user
-    just dragged instead of a fixed device-config order with no control for
-    it on this tab. Falls back to the original position for any link whose
-    interface isn't found in `order` (e.g. a link with no matching client
-    yet)."""
-    if not order or not links:
-        return links
-    dhcp_clients = _safe_fetch(pusher.api, _DHCP_CLIENT)
-    pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
-    l2tp_clients = _safe_fetch(pusher.api, _L2TP_CLIENT)
-    iface_by_item_id = {}
-    for c in dhcp_clients:
-        iface_by_item_id[f"dhcp:{c.get('.id', '').lstrip('*')}"] = c.get("interface", "")
-    for c in pppoe_clients:
-        iface_by_item_id[f"pppoe:{c.get('.id', '').lstrip('*')}"] = c.get("name", "")
-    for c in l2tp_clients:
-        iface_by_item_id[f"l2tp:{c.get('.id', '').lstrip('*')}"] = c.get("name", "")
-    order_rank = {}
-    for rank, item_id in enumerate(order):
-        iface = iface_by_item_id.get(item_id)
-        if iface:
-            order_rank.setdefault(iface, rank)
-
-    def _key(link):
-        return order_rank.get(getattr(link, "interface", "") or "", 9999)
-
-    return sorted(links, key=_key)
-
-
-def _apply_failover(ops, flat, pusher, cfg, wan_order=None):
+def _apply_failover(ops, flat, pusher, cfg):
     """Reconcile static failover routes and Netwatch entries.
 
     Gateways are derived from cfg.wan.links (the WAN uplinks the user
-    configured), re-ranked by `wan_order` (the Routes tab's current drag
-    order) if given, matched against live PPPoE/DHCP data on the router.
-    Only the check IPs (public addresses Netwatch pings) and interval come
-    from the form."""
+    configured) matched against live PPPoE/DHCP data on the router.  Only
+    the check IPs (public addresses Netwatch pings) and interval come from
+    the form."""
     fo_owns = _prefix_owner(_FAILOVER_TAG)
     all_routes = _safe_fetch(pusher.api, _ROUTE)
     netwatch = _safe_fetch(pusher.api, _NETWATCH)
-    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
-    links = _reorder_links_by_wan_order(links, wan_order, pusher)
 
     if not flat.get("fo_enabled"):
-        # "Off" means off: tear down every managed static route (primary/
-        # secondary/link3/... + their check-routes) and Netwatch entries, and
-        # give control back to the WAN client's own normal default route
-        # (add-default-route=yes) — no mikromon-managed route left behind.
         ops.extend(reconcile_list(_ROUTE, "comment", [], all_routes,
                                   owns=fo_owns, label="failover route"))
         ops.extend(reconcile_list(_NETWATCH, "comment", [], netwatch,
                                   owns=fo_owns, label="netwatch"))
-        # The distinct, non-colliding distance (10, 11, 12, ...) each client
-        # needs is set directly on it by _apply_wan_order (called alongside
-        # this in routes_plan) using the SAME rank order — covering every
-        # client in the Routes tab's drag list, not just the ones configured
-        # as WAN uplinks here. NOTE: RouterOS only applies a CHANGED
-        # default-route-distance to a dynamic DHCP/PPPoE route on that
-        # client's next reconnect or DHCP lease renewal — the field is set
-        # immediately, but the router keeps routing at the OLD distance
-        # until then. Disconnect/reconnect that line (or wait for its lease
-        # to renew) if you need the new priority to take effect right away.
+        # Restore automatic default routes on the WAN clients
         pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
         dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
+        links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
         for link in links:
             iface = getattr(link, "interface", "") or ""
             if not iface:
                 continue
             for c in pppoe_clients:
                 if c.get("name") == iface and c.get("add-default-route", "yes") == "no":
-                    ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route",
-                                          "yes", f"PPPoE {iface}"))
+                    ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route", "yes",
+                                          f"PPPoE {iface}"))
             for c in dhcp_clients:
                 if c.get("interface") == iface and c.get("add-default-route", "yes") == "no":
-                    ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route",
-                                          "yes", f"DHCP {iface}"))
+                    ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route", "yes",
+                                          f"DHCP {iface}"))
         return
 
-    # Detect gateways live from the router at apply time, for EVERY managed
-    # link, not just the first two — each one gets its own rank-based
-    # distance (1, 2, 3, ...) matching its position in `links` (already
-    # re-ranked by the current drag order above), instead of the first two
-    # being hardcoded to 1/2 regardless of how many uplinks are configured.
+    # Detect gateways live from the router at apply time
     pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
     dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
     pppoe_names = {c.get("name", "") for c in pppoe_clients if c.get("name")}
@@ -582,93 +451,76 @@ def _apply_failover(ops, flat, pusher, cfg, wan_order=None):
                           for s in _safe_fetch(pusher.api, _PPP_ACTIVE) if s.get("name")}
     ip_addr_by_iface = {a.get("interface", ""): a
                         for a in _safe_fetch(pusher.api, _IP_ADDRESS) if a.get("interface")}
-    fo_by_comment = {r.get("comment", ""): r for r in all_routes if fo_owns(r)}
-
-    gateways = []
-    for idx, link in enumerate(links):
-        gw = _gateway_for_link(link, pppoe_names, dhcp_by_iface,
-                               ppp_active_by_name, ip_addr_by_iface)
-        if not gw:
-            # Fall back to the gateway already on the router from a previous
-            # apply (e.g. a PPPoE session that isn't up right now).
-            existing = fo_by_comment.get(f"{_FAILOVER_TAG}{_fo_role(idx)}")
-            if existing and existing.get("gateway"):
-                gw = existing["gateway"]
-        gateways.append(gw)
-    if not gateways or not gateways[0]:
+    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
+    primary_gw = (_gateway_for_link(links[0], pppoe_names, dhcp_by_iface,
+                                    ppp_active_by_name, ip_addr_by_iface) if links else "")
+    secondary_gw = (_gateway_for_link(links[1], pppoe_names, dhcp_by_iface,
+                                      ppp_active_by_name, ip_addr_by_iface)
+                    if len(links) > 1 else "")
+    # Fall back to gateways already on the router from a previous apply
+    for r in all_routes:
+        c = r.get("comment", "")
+        if c == f"{_FAILOVER_TAG}primary" and r.get("gateway") and not primary_gw:
+            primary_gw = r["gateway"]
+        elif c == f"{_FAILOVER_TAG}secondary" and r.get("gateway") and not secondary_gw:
+            secondary_gw = r["gateway"]
+    if not primary_gw:
         return  # primary gateway not detectable — cannot build routes
 
     primary_check = flat.get("fo_primary_check", "").strip() or "1.1.1.1"
     secondary_check = flat.get("fo_secondary_check", "").strip() or "8.8.8.8"
     interval = flat.get("fo_interval", "").strip() or "30s"
-    try:
-        down_count = max(1, int(flat.get("fo_down_count", "").strip()
-                                or _DEFAULT_DOWN_COUNT))
-    except (ValueError, TypeError):
-        down_count = _DEFAULT_DOWN_COUNT
 
     def _net(ip):
         return ip if "/" in ip else f"{ip}/32"
 
-    # Matches the standard MikroTik recursive-check failover pattern, now
-    # extended to EVERY configured uplink (not just the top two) — each one
-    # gets its own managed static route, check-route, and Netwatch entry.
+    primary_host = primary_check.split("/")[0]
+    secondary_host = secondary_check.split("/")[0]
+
+    # Matches the standard MikroTik recursive-check failover pattern.
     #
-    # Uplinks alternate which public IP they check (1st/3rd/5th... use
-    # primary_check, 2nd/4th/6th... use secondary_check) so a problem with
-    # one DNS resolver can't make every OTHER line look down too — each
-    # check route forces its Netwatch ping out through its OWN gateway, so
-    # all of them can run simultaneously without interfering with each other.
+    # The check routes (1.1.1.1/32, 8.8.8.8/32) are the critical piece:
+    # they force each Netwatch ping through its OWN ISP gateway, so the
+    # secondary Netwatch continues to reach 8.8.8.8 via the secondary
+    # interface even when the primary default route is disabled — making
+    # both Netwatch entries safe to run simultaneously.
     #
     # scope=30 / target-scope=10 on all routes matches the pattern; the
     # default routes resolve their gateway via ARP (directly-connected,
     # scope=0 ≤ target-scope=10). The check routes are not used for
     # recursive next-hop resolution — they exist solely to give Netwatch
     # a dedicated, interface-specific path to its check IP.
-    #
-    # down-script requires `down_count` CONSECUTIVE failed pings (tracked in
-    # a global variable scoped to this link) before actually failing over —
-    # a single dropped/delayed ping (common; many gateways deprioritize
-    # ICMP) does not flip anything. Recovery is immediate: the first
-    # successful ping resets the counter and restores the link's real
-    # distance right away.
-    desired_routes = []
-    desired_watch = []
-    for idx, gw in enumerate(gateways):
-        if not gw:
-            continue
-        role = _fo_role(idx)
-        dist = str(idx + 1)
-        desired_routes.append({
-            "comment": f"{_FAILOVER_TAG}{role}",
-            "dst-address": "0.0.0.0/0", "gateway": gw,
-            "distance": dist, "check-gateway": "ping",
-            "scope": "30", "target-scope": "10",
-        })
-        check_ip = primary_check if idx % 2 == 0 else secondary_check
-        host = check_ip.split("/")[0]
-        var = f"mmfail_{role}"
-        desired_routes.append({
-            "comment": f"{_FAILOVER_TAG}check:{role}",
-            "dst-address": _net(host), "gateway": gw,
-            "distance": "1", "scope": "30", "target-scope": "10",
-        })
-        desired_watch.append({
-            "comment": f"{_FAILOVER_TAG}watch:{role}",
-            "host": host, "interval": interval,
-            "down-script": (
-                f':global {var}\r\n'
-                f':if ([:typeof ${var}] = "nothing") do={{:set {var} 0}}\r\n'
-                f':set {var} (${var} + 1)\r\n'
-                f':if (${var} >= {down_count}) do={{'
-                f'/ip route set [find comment="{_FAILOVER_TAG}{role}"] distance=10}}'
-            ),
-            "up-script": (
-                f':global {var}\r\n'
-                f':set {var} 0\r\n'
-                f'/ip route set [find comment="{_FAILOVER_TAG}{role}"] distance={dist}'
-            ),
-        })
+    desired_routes = [
+        {"comment": f"{_FAILOVER_TAG}primary",
+         "dst-address": "0.0.0.0/0", "gateway": primary_gw,
+         "distance": "1", "check-gateway": "ping",
+         "scope": "30", "target-scope": "10"},
+        {"comment": f"{_FAILOVER_TAG}check:primary",
+         "dst-address": _net(primary_host), "gateway": primary_gw,
+         "distance": "1", "scope": "30", "target-scope": "10"},
+    ]
+    desired_watch = [
+        {"comment": f"{_FAILOVER_TAG}watch:primary",
+         "host": primary_host, "interval": interval,
+         "down-script": f'/ip route set [find comment="{_FAILOVER_TAG}primary"] distance=10',
+         "up-script":   f'/ip route set [find comment="{_FAILOVER_TAG}primary"] distance=1'},
+    ]
+    if secondary_gw:
+        desired_routes += [
+            {"comment": f"{_FAILOVER_TAG}secondary",
+             "dst-address": "0.0.0.0/0", "gateway": secondary_gw,
+             "distance": "2", "check-gateway": "ping",
+             "scope": "30", "target-scope": "10"},
+            {"comment": f"{_FAILOVER_TAG}check:secondary",
+             "dst-address": _net(secondary_host), "gateway": secondary_gw,
+             "distance": "1", "scope": "30", "target-scope": "10"},
+        ]
+        desired_watch.append(
+            {"comment": f"{_FAILOVER_TAG}watch:secondary",
+             "host": secondary_host, "interval": interval,
+             "down-script": f'/ip route set [find comment="{_FAILOVER_TAG}secondary"] distance=10',
+             "up-script":   f'/ip route set [find comment="{_FAILOVER_TAG}secondary"] distance=2'},
+        )
 
     ops.extend(reconcile_list(_ROUTE, "comment", desired_routes, all_routes,
                               owns=fo_owns, label="failover route"))
@@ -698,9 +550,8 @@ def _apply_failover(ops, flat, pusher, cfg, wan_order=None):
 
 def routes_plan(pusher, cfg, flat, multi):
     ops = []
-    order = multi.get("wan_order", [])
-    _apply_wan_order(ops, order, pusher, fo_enabled=bool(flat.get("fo_enabled")))
-    _apply_failover(ops, flat, pusher, cfg, wan_order=order)
+    _apply_wan_order(ops, multi.get("wan_order", []), pusher)
+    _apply_failover(ops, flat, pusher, cfg)
     return Plan(cfg.name, ops, summary="routes / failover")
 
 
