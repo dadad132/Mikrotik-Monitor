@@ -57,11 +57,22 @@ def _label(route: dict) -> str:
     return f"{gw} (distance {dist})"
 
 
-def _matches_endpoint(route: dict, ep) -> bool:
+def _matches_endpoint(route: dict, ep, dhcp_by_iface: dict | None = None) -> bool:
     if ep.gateway and str(route.get("gateway", "")) == ep.gateway:
         return True
     if ep.interface and _iface_of(route) == ep.interface:
         return True
+    # Most reliable of all: look up this interface's OWN DHCP client and
+    # compare its ACTUAL, live gateway field directly — rather than only
+    # depending on gateway-status TEXT happening to contain "via <interface>"
+    # in exactly the expected format. Confirmed live: that text format
+    # doesn't always parse cleanly for every link on the same router, making
+    # a genuinely healthy uplink look like "no route found" (reported
+    # offline) while its siblings on the same device matched fine.
+    if dhcp_by_iface is not None and ep.interface in dhcp_by_iface:
+        dhcp_gw = str(dhcp_by_iface[ep.interface].get("gateway", ""))
+        if dhcp_gw and str(route.get("gateway", "")) == dhcp_gw:
+            return True
     return False
 
 
@@ -76,7 +87,7 @@ def _fo_role(idx: int) -> str:
 
 class WanCheck(Check):
     flags = ("wan_failover", "internet_down")
-    requires = ("route",)
+    requires = ("route", "dhcp_client")
     name = "wan"
 
     def run(self, snap, dev, ctx) -> None:
@@ -84,6 +95,8 @@ class WanCheck(Check):
         want_failover = dev.check_enabled("wan_failover")
         want_down = dev.check_enabled("internet_down")
         links = dev.wan.links
+        dhcp_by_iface = {c.get("interface", ""): c
+                        for c in snap.rows("dhcp_client") if c.get("interface")}
 
         # ---- clear stale wan_failover / wan_link:N conditions -------------
         # Confirmed live: a device with wan_failover monitoring turned off
@@ -133,7 +146,8 @@ class WanCheck(Check):
                     if idx == 0:
                         continue  # primary: covered by the failover alert below
                     link_name = ep.label(idx)
-                    ep_routes = [r for r in defaults if _matches_endpoint(r, ep)]
+                    ep_routes = [r for r in defaults
+                                if _matches_endpoint(r, ep, dhcp_by_iface)]
                     if not ep_routes:
                         fo_comment = f"mikromon:failover:{_fo_role(idx)}"
                         ep_routes = [r for r in defaults
@@ -201,14 +215,14 @@ class WanCheck(Check):
 
         current = min(active, key=by_distance)
         _FO_PRI = "mikromon:failover:primary"
-        _FO_SEC = "mikromon:failover:secondary"
         if links:
             cur_comment = str(current.get("comment", ""))
             # Preferred = the highest-priority configured uplink (links[0]).
             # Try interface/gateway match first, fall back to mikromon comment tag
             # (needed when the failover route gateway is a PPP remote IP that
             # doesn't match the uplink's interface name via gateway-status).
-            primary_routes = [r for r in defaults if _matches_endpoint(r, links[0])]
+            primary_routes = [r for r in defaults
+                              if _matches_endpoint(r, links[0], dhcp_by_iface)]
             if not primary_routes:
                 primary_routes = [r for r in defaults
                                   if r.get("comment", "") == _FO_PRI]
@@ -220,14 +234,14 @@ class WanCheck(Check):
             elif cur_comment.startswith("mikromon:failover:") and cur_comment != _FO_PRI:
                 on_backup = True
             else:
-                on_backup = not _matches_endpoint(current, links[0])
+                on_backup = not _matches_endpoint(current, links[0], dhcp_by_iface)
             # Which configured link is currently carrying traffic? Falls back
             # to the managed route's own comment tag (mikromon:failover:role)
             # for ANY configured link, not just primary/secondary — same
             # reason as above: gateway/interface matching can miss a PPP
             # remote IP or unparseable gateway-status text.
             cur_idx = next((i for i, ep in enumerate(links)
-                            if _matches_endpoint(current, ep)), None)
+                            if _matches_endpoint(current, ep, dhcp_by_iface)), None)
             if cur_idx is None and cur_comment.startswith("mikromon:failover:"):
                 cur_idx = next((i for i in range(len(links))
                                 if cur_comment == f"mikromon:failover:{_fo_role(i)}"),

@@ -29,6 +29,7 @@ DATASETS = {
     "history": ("system", "history"),
     "active": ("user", "active"),
     "dhcp_lease": ("ip", "dhcp-server", "lease"),
+    "dhcp_client": ("ip", "dhcp-client"),  # WAN-side client (not the lease table above)
     # client-count sources (any may be absent on a given board -> tolerated)
     "wireless_reg": ("interface", "wireless", "registration-table"),
     "wifi_reg": ("interface", "wifi", "registration-table"),  # wifiwave2 (v7)

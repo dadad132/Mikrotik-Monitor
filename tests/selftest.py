@@ -197,6 +197,44 @@ check("the SAME route reported down is correctly alerted, not masked by "
       "the comment-tag fallback always assuming it's fine",
       keys(a) == ["wan_link:1"] and "Backup" in a[0].title)
 
+print("WAN per-link check: a PLAIN (unmanaged, failover-off) dynamic route "
+      "found via the DHCP client's own live gateway field, not just text-"
+      "parsing gateway-status (confirmed live: some ISPs on a router showed "
+      "offline while others on the SAME router matched fine, because "
+      "gateway-status text parsing is inherently inconsistent):")
+dev6 = mkdev("TestRouter6", wan=WanConfig(links=[
+    WanEndpoint(interface="ether2-terana", gateway="", name="Main"),
+    WanEndpoint(interface="ether3-vodacom", gateway="", name="Backup"),
+]))
+plain_but_up = {
+    "route": [
+        {"dst-address": "0.0.0.0/0", "gateway": "1.1.1.1", "distance": "1",
+         "active": "true", "gateway-status": "1.1.1.1 reachable via ether2-terana"},
+        # No "via <iface>" text at all, and the gateway is a bare IP with no
+        # managed mikromon:failover: comment — a genuinely plain dynamic
+        # DHCP-client-created route, exactly as it looks with failover off.
+        {"dst-address": "0.0.0.0/0", "gateway": "10.9.9.9", "distance": "2",
+         "active": "true", "gateway-status": "10.9.9.9 reachable"},
+    ],
+    "dhcp_client": [
+        {"interface": "ether2-terana", "gateway": "1.1.1.1"},
+        {"interface": "ether3-vodacom", "gateway": "10.9.9.9"},
+    ],
+}
+a = run(WanCheck(), plain_but_up, dev6, store)
+check("a genuinely-up plain dynamic route is found via the DHCP client's "
+      "own gateway field, not misreported as 'no route found'", a == [])
+
+plain_and_down = {
+    "route": [plain_but_up["route"][0],
+             {"dst-address": "0.0.0.0/0", "gateway": "10.9.9.9", "distance": "2",
+              "active": "false", "gateway-status": "10.9.9.9 unreachable"}],
+    "dhcp_client": plain_but_up["dhcp_client"],
+}
+a = run(WanCheck(), plain_and_down, dev6, store)
+check("the SAME plain route reported down is correctly alerted",
+      keys(a) == ["wan_link:1"] and "Backup" in a[0].title)
+
 print("WAN check: stale wan_failover/wan_link conditions clear instead of "
       "freezing forever (confirmed live: a device with WAN-failover "
       "monitoring turned off kept showing every uplink permanently offline "
