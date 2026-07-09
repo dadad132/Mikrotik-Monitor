@@ -67,6 +67,7 @@ _NETWATCH = ("tool", "netwatch")
 _PPP_ACTIVE = ("ppp", "active")
 _IP_ADDRESS = ("ip", "address")
 _FAILOVER_TAG = "mikromon:failover:"
+_DEFAULT_DOWN_COUNT = 2  # consecutive failed pings required before failing over
 
 
 def _fo_role(idx: int) -> str:
@@ -341,11 +342,14 @@ def _wan_gateway_for(client):
 def routes_form(current, cfg):
     items = _wan_sortable_items(current, cfg)
 
-    # Pre-fill check IPs and interval from existing failover watch config
+    # Pre-fill check IPs, interval and down-count from existing failover
+    # watch config, so re-opening this tab shows what's actually deployed
+    # rather than resetting to the defaults every time.
     fo_enabled = bool(current.get("failover_routes"))
     primary_check = "1.1.1.1"
     secondary_check = "8.8.8.8"
     interval = "30s"
+    down_count = str(_DEFAULT_DOWN_COUNT)
     for w in current.get("failover_watch", []):
         c = w.get("comment", "")
         if c == f"{_FAILOVER_TAG}watch:primary" and w.get("host"):
@@ -354,6 +358,9 @@ def routes_form(current, cfg):
             secondary_check = w["host"]
         if w.get("interval"):
             interval = w["interval"]
+        m = re.search(r">=\s*(\d+)", str(w.get("down-script", "")))
+        if m:
+            down_count = m.group(1)
 
     links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
 
@@ -367,20 +374,36 @@ def routes_form(current, cfg):
                  "that line reconnects or renews its DHCP lease. To apply immediately: "
                  "disconnect and reconnect the line from RouterOS after applying."},
         {"type": "heading", "label": "Gateway Failover",
-         "hint": "Static routes with check-gateway=ping + Netwatch. "
-                 "Gateways are detected automatically from the configured WAN uplinks."},
+         "hint": "Static routes with check-gateway=ping + Netwatch, one per configured "
+                 "uplink (not just the top two). Gateways are detected automatically. "
+                 "Uplinks alternate which check IP they ping — 1st, 3rd, 5th... use the "
+                 "Primary check IP; 2nd, 4th, 6th... use the Secondary check IP — so a "
+                 "problem with one DNS resolver can't look like every other line failed."},
         {"type": "toggle", "name": "fo_enabled", "value": "1",
          "on": fo_enabled, "label": "Enable gateway failover"},
         {"type": "text", "name": "fo_primary_check",
          "label": "Primary check IP", "value": primary_check,
          "placeholder": "1.1.1.1",
-         "hint": "Netwatch pings this IP to confirm the primary line has internet."},
+         "hint": "Pinged by uplink 1, 3, 5, ... (priority order) to confirm it has internet."},
     ]
     if len(links) > 1:
         fields.append({"type": "text", "name": "fo_secondary_check",
                        "label": "Secondary check IP", "value": secondary_check,
                        "placeholder": "8.8.8.8",
-                       "hint": "Netwatch pings this IP to confirm the backup line has internet."})
+                       "hint": "Pinged by uplink 2, 4, 6, ... (priority order) to confirm "
+                               "it has internet."})
+    fields.append({"type": "text", "name": "fo_interval",
+                   "label": "Check interval", "value": interval,
+                   "placeholder": "30s",
+                   "hint": "How often each uplink is pinged. Shorter reacts faster but "
+                           "pings more; RouterOS duration format (e.g. 10s, 1m)."})
+    fields.append({"type": "text", "name": "fo_down_count",
+                   "label": "Consecutive failed pings before failing over",
+                   "value": down_count, "placeholder": str(_DEFAULT_DOWN_COUNT),
+                   "hint": "A single dropped/delayed ping does NOT fail a line over — it "
+                           "must fail this many checks in a row. Raise this if a line "
+                           "keeps flapping back and forth for no real reason; lower it to "
+                           "react faster to a genuine outage."})
     return fields
 
 
@@ -578,31 +601,37 @@ def _apply_failover(ops, flat, pusher, cfg, wan_order=None):
     primary_check = flat.get("fo_primary_check", "").strip() or "1.1.1.1"
     secondary_check = flat.get("fo_secondary_check", "").strip() or "8.8.8.8"
     interval = flat.get("fo_interval", "").strip() or "30s"
-    # Only the first two (primary/secondary) get active Netwatch monitoring
-    # and a scripted distance flip — that's the extent of automatic up/down
-    # switching this feature implements. A 3rd+ managed uplink still gets a
-    # real static route at its own rank distance (so it can't collide with
-    # anything), with RouterOS's own check-gateway=ping giving native,
-    # unscripted reachability detection, just without Netwatch's logging or
-    # the flip-to-10-then-back behavior.
-    checks = [primary_check, secondary_check]
+    try:
+        down_count = max(1, int(flat.get("fo_down_count", "").strip()
+                                or _DEFAULT_DOWN_COUNT))
+    except (ValueError, TypeError):
+        down_count = _DEFAULT_DOWN_COUNT
 
     def _net(ip):
         return ip if "/" in ip else f"{ip}/32"
 
-    # Matches the standard MikroTik recursive-check failover pattern.
+    # Matches the standard MikroTik recursive-check failover pattern, now
+    # extended to EVERY configured uplink (not just the top two) — each one
+    # gets its own managed static route, check-route, and Netwatch entry.
     #
-    # The check routes (1.1.1.1/32, 8.8.8.8/32) are the critical piece:
-    # they force each Netwatch ping through its OWN ISP gateway, so the
-    # secondary Netwatch continues to reach 8.8.8.8 via the secondary
-    # interface even when the primary default route is disabled — making
-    # both Netwatch entries safe to run simultaneously.
+    # Uplinks alternate which public IP they check (1st/3rd/5th... use
+    # primary_check, 2nd/4th/6th... use secondary_check) so a problem with
+    # one DNS resolver can't make every OTHER line look down too — each
+    # check route forces its Netwatch ping out through its OWN gateway, so
+    # all of them can run simultaneously without interfering with each other.
     #
     # scope=30 / target-scope=10 on all routes matches the pattern; the
     # default routes resolve their gateway via ARP (directly-connected,
     # scope=0 ≤ target-scope=10). The check routes are not used for
     # recursive next-hop resolution — they exist solely to give Netwatch
     # a dedicated, interface-specific path to its check IP.
+    #
+    # down-script requires `down_count` CONSECUTIVE failed pings (tracked in
+    # a global variable scoped to this link) before actually failing over —
+    # a single dropped/delayed ping (common; many gateways deprioritize
+    # ICMP) does not flip anything. Recovery is immediate: the first
+    # successful ping resets the counter and restores the link's real
+    # distance right away.
     desired_routes = []
     desired_watch = []
     for idx, gw in enumerate(gateways):
@@ -616,21 +645,30 @@ def _apply_failover(ops, flat, pusher, cfg, wan_order=None):
             "distance": dist, "check-gateway": "ping",
             "scope": "30", "target-scope": "10",
         })
-        if idx < len(checks):
-            host = checks[idx].split("/")[0]
-            desired_routes.append({
-                "comment": f"{_FAILOVER_TAG}check:{role}",
-                "dst-address": _net(host), "gateway": gw,
-                "distance": "1", "scope": "30", "target-scope": "10",
-            })
-            desired_watch.append({
-                "comment": f"{_FAILOVER_TAG}watch:{role}",
-                "host": host, "interval": interval,
-                "down-script": f'/ip route set [find comment="{_FAILOVER_TAG}{role}"] '
-                               f'distance=10',
-                "up-script":   f'/ip route set [find comment="{_FAILOVER_TAG}{role}"] '
-                               f'distance={dist}',
-            })
+        check_ip = primary_check if idx % 2 == 0 else secondary_check
+        host = check_ip.split("/")[0]
+        var = f"mmfail_{role}"
+        desired_routes.append({
+            "comment": f"{_FAILOVER_TAG}check:{role}",
+            "dst-address": _net(host), "gateway": gw,
+            "distance": "1", "scope": "30", "target-scope": "10",
+        })
+        desired_watch.append({
+            "comment": f"{_FAILOVER_TAG}watch:{role}",
+            "host": host, "interval": interval,
+            "down-script": (
+                f':global {var}\r\n'
+                f':if ([:typeof ${var}] = "nothing") do={{:set {var} 0}}\r\n'
+                f':set {var} ($({var}) + 1)\r\n'
+                f':if ($({var}) >= {down_count}) do={{'
+                f'/ip route set [find comment="{_FAILOVER_TAG}{role}"] distance=10}}'
+            ),
+            "up-script": (
+                f':global {var}\r\n'
+                f':set {var} 0\r\n'
+                f'/ip route set [find comment="{_FAILOVER_TAG}{role}"] distance={dist}'
+            ),
+        })
 
     ops.extend(reconcile_list(_ROUTE, "comment", desired_routes, all_routes,
                               owns=fo_owns, label="failover route"))

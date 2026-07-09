@@ -760,16 +760,39 @@ check("a 3rd configured WAN link gets its own managed static route at "
       "distance 3 (not left to collide with whatever else is at 2)",
       added3.get("mikromon:failover:link3", {}).get("distance") == "3"
       and added3.get("mikromon:failover:link3", {}).get("gateway") == "41.0.0.1")
-check("primary/secondary still get their own check-route + Netwatch (active "
-      "monitoring), the 3rd does not (static route + native check-gateway only)",
+check("every configured link gets its own check-route + active Netwatch "
+      "monitoring, not just the first two",
       "mikromon:failover:check:primary" in added3
       and "mikromon:failover:check:secondary" in added3
-      and "mikromon:failover:check:link3" not in added3)
-watch3 = {o.params.get("comment") for o in plan3.ops
+      and "mikromon:failover:check:link3" in added3)
+watch3 = {o.params.get("comment"): o.params for o in plan3.ops
          if o.action == "add" and o.path == ("tool", "netwatch")}
-check("no Netwatch entry is created for the 3rd link",
-      "mikromon:failover:watch:link3" not in watch3
-      and {"mikromon:failover:watch:primary", "mikromon:failover:watch:secondary"} <= watch3)
+check("a Netwatch entry IS created for the 3rd link too",
+      "mikromon:failover:watch:link3" in watch3
+      and {"mikromon:failover:watch:primary", "mikromon:failover:watch:secondary"}
+      <= set(watch3))
+check("odd-position uplinks (1st, 3rd) check the primary (1.1.1.1) DNS, "
+      "even-position (2nd) checks the secondary (8.8.8.8)",
+      watch3["mikromon:failover:watch:primary"]["host"] == "1.1.1.1"
+      and watch3["mikromon:failover:watch:secondary"]["host"] == "8.8.8.8"
+      and watch3["mikromon:failover:watch:link3"]["host"] == "1.1.1.1")
+check("down-script requires 2 consecutive failures (default) before failing "
+      "over — a single dropped ping must not flap the link",
+      "mmfail_primary" in watch3["mikromon:failover:watch:primary"]["down-script"]
+      and ">= 2" in watch3["mikromon:failover:watch:primary"]["down-script"])
+check("up-script resets the fail counter and restores this link's real "
+      "distance immediately on recovery",
+      "mmfail_primary" in watch3["mikromon:failover:watch:primary"]["up-script"]
+      and "distance=1" in watch3["mikromon:failover:watch:primary"]["up-script"])
+
+# The user-tunable down-count: raising it (e.g. because a line keeps
+# flapping back and forth for no real reason) must be honored, not ignored.
+plan4 = F.routes_plan(o3p, o3cfg, {"fo_enabled": "1", "fo_down_count": "5"},
+                      {"wan_order": ["dhcp:1", "dhcp:2", "dhcp:3"]})
+watch4 = {o.params.get("comment"): o.params for o in plan4.ops
+         if o.action == "add" and o.path == ("tool", "netwatch")}
+check("a custom down-count is honored in the generated down-script",
+      ">= 5" in watch4["mikromon:failover:watch:primary"]["down-script"])
 
 print("Routes tab display: comment-tag fallback when gateway matching can't "
       "find the managed route (confirmed live: two different lines both "
