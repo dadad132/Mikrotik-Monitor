@@ -121,6 +121,34 @@ check("the detected port sorts to the top of the dropdown",
 check("the detection note only shows when ifaces (live router data) is available",
       "has an active internet connection" not in wed  # no ifaces passed above
       and "mikromon detected an active internet connection" in wed_detect)
+
+# WAN Status dashboard box: a backup link that's individually down (its own
+# wan_link:N condition is a "problem") must show Offline, not just infer
+# "Online" from the overall picture looking fine. Confirmed live: a stopped
+# DHCP client backup still showed "[Online] (Inactive)" here while the
+# Routes tab correctly showed it as stopped/no default route.
+wan_mdb = os.path.join(tmp, "wan-metrics.db")
+wan_store = MetricsStore(wan_mdb)
+wan_state = {"devices": {"R1": {
+    "facts": {"wan_links": ["Wikiworx", "Backup", "VOIP"]},
+    "conditions": {
+        "reachability": {"status": "ok"},
+        "wan_link:1": {"status": "problem", "level": "problem"},
+    },
+}}}
+wan_page = web._render_device(wan_store, wan_state, "R1",
+                              {"role": "owner", "email": "test@test.com"})
+wan_store.close()
+check("primary (index 0, no problem) shows Online",
+      "Wikiworx</span>" in wan_page)
+row1 = wan_page[wan_page.index("Backup</span>"):wan_page.index("VOIP</span>")]
+check("a backup with its own wan_link:N problem shows Offline, not "
+      "Online/Inactive, even though the overall WAN health is 'full'",
+      "[Offline]" in row1 and "[Online]" not in row1)
+row2 = wan_page[wan_page.index("VOIP</span>"):]
+check("a backup with NO problem of its own still shows Online (Inactive) "
+      "as before", "[Online]" in row2 and "Inactive" in row2)
+
 check("reorder JS is defined on feature tabs", "function pushMoveRow" in web._FEATURE_JS)
 check("toggles render as on/off sliders",
       'class="switch"' in web._field_html(

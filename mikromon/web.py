@@ -820,10 +820,17 @@ def _render_device(store, state, name, user, csrf="",
 
     # ── center: WAN status bar ─────────────────────────────────────────────────
     wl = f.get("wan_links") or []
+    # Per-backup-link health (idx>=1) tracked independently by the wan_link:N
+    # check — without this, a backup could be individually down (stopped
+    # DHCP client, dead PPPoE session, ...) while the OVERALL picture still
+    # looks "full" (primary is fine), and this box would otherwise just
+    # assume every backup is "Online" purely from the aggregate state.
+    problem_keys = {p["key"] for p in d["problems"]}
     wan_rows = ""
     for i, wname in enumerate(wl):
         router_down = not d["up"]
         health = d["wan_health"]
+        link_down = i > 0 and f"wan_link:{i}" in problem_keys
         if router_down or health == "down":
             # Router offline or full outage
             dot_c = "#dc2626"; row_bg = "#fef2f2"; row_br = "#fecaca"
@@ -831,6 +838,12 @@ def _render_device(store, state, name, user, csrf="",
             slabel = "Offline"; sub = ""; glow = ""
         elif health == "partial" and i == 0:
             # Primary has failed — it is offline, not "in failover"
+            dot_c = "#dc2626"; row_bg = "#fef2f2"; row_br = "#fecaca"
+            bdg_bg = "#fee2e2"; bdg_c = "#b91c1c"
+            slabel = "Offline"; sub = ""; glow = ""
+        elif health == "partial" and i > 0 and link_down:
+            # Another backup, itself confirmed down — not the one actually
+            # carrying traffic during this failover, whichever that is.
             dot_c = "#dc2626"; row_bg = "#fef2f2"; row_br = "#fecaca"
             bdg_bg = "#fee2e2"; bdg_c = "#b91c1c"
             slabel = "Offline"; sub = ""; glow = ""
@@ -844,6 +857,12 @@ def _render_device(store, state, name, user, csrf="",
             dot_c = "#16a34a"; row_bg = "#f0fdf4"; row_br = "#bbf7d0"
             bdg_bg = "#dcfce7"; bdg_c = "#15803d"
             slabel = "Online"; sub = ""; glow = "box-shadow:0 0 0 4px rgba(22,163,74,0.18);"
+        elif health == "full" and i > 0 and link_down:
+            # Backup link is itself confirmed down (stopped/unreachable) —
+            # standing by is not possible if it's dead.
+            dot_c = "#dc2626"; row_bg = "#fef2f2"; row_br = "#fecaca"
+            bdg_bg = "#fee2e2"; bdg_c = "#b91c1c"
+            slabel = "Offline"; sub = ""; glow = ""
         else:
             # health == "full" and i > 0: backup link is up but not routing
             dot_c = "#4ade80"; row_bg = "#f0fdf4"; row_br = "#d1fae5"
