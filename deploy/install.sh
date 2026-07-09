@@ -324,6 +324,40 @@ else:
 PY
 
 # ---------------------------------------------------------------------------
+# TEMPORARY — one-off diagnostic dump for the Mobilis Boksburg WAN-status
+# investigation. Remove this block on the next push. Writes every device's
+# stored condition state to a plain text file so it can be opened and
+# screenshotted directly, instead of typing a diagnostic command by hand.
+# Best-effort: never fails the install if state.json doesn't exist yet.
+# ---------------------------------------------------------------------------
+step "Writing a diagnostic state dump for support"
+sudo -u "${SERVICE_USER}" "${APP_DIR}/.venv/bin/python" -c "
+import json
+path = '${APP_DIR}/state.json'
+out = '${APP_DIR}/diagnostic-state-dump.txt'
+try:
+    with open(path) as f:
+        data = json.load(f)
+except Exception as exc:
+    with open(out, 'w') as f:
+        f.write(f'Could not read {path}: {exc}\n')
+else:
+    lines = []
+    for name, dnode in sorted(data.get('devices', {}).items()):
+        lines.append(f'=== {name} ===')
+        conds = dnode.get('conditions', {})
+        if not conds:
+            lines.append('  (no conditions recorded)')
+        for key, cond in sorted(conds.items()):
+            lines.append(f'  {key}: {cond}')
+        lines.append('')
+    with open(out, 'w') as f:
+        f.write('\n'.join(lines) if lines else 'No devices in state.json yet.\n')
+    print(f'Wrote {out}')
+" && log "Diagnostic dump written to ${APP_DIR}/diagnostic-state-dump.txt — open it and screenshot" \
+    || log "WARN: could not write diagnostic state dump"
+
+# ---------------------------------------------------------------------------
 # 8. Firewall — open the dashboard port  (ufw is idempotent)
 # ---------------------------------------------------------------------------
 step "Opening firewall port ${WEB_PORT}/tcp"
