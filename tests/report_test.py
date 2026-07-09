@@ -13,8 +13,15 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from mikromon.alert import Alert, Severity
 from mikromon.alert_log import AlertLog
-from mikromon.notify.org_email import _build_report, _event_line, _pair_events
+from mikromon.auth import AuthStore
+from mikromon.config import SmtpConfig
+from mikromon.devices_store import DevicesStore
+from mikromon.notify import org_email
+from mikromon.notify.org_email import (OrgEmailNotifier, _build_report,
+                                       _event_line, _pair_events,
+                                       _should_notify)
 
 FAILS = []
 
@@ -134,6 +141,60 @@ check("without alert_log configured, falls back to the live snapshot",
 check("the resolved (no-longer-active) failover is NOT in the fallback "
       "snapshot (it can only see live state, not history)",
       "Primary WAN is DOWN" not in txt2)
+
+print("_should_notify: a recovery alert for a WAN condition is not filtered out:")
+problem_alert = Alert("R1", "wan_failover", Severity.WARNING,
+                      "Primary WAN \"Main\" is DOWN — running on backup \"Backup\"",
+                      recovery=False, ts=T0)
+recovery_alert = Alert("R1", "wan_failover", Severity.INFO,
+                       "WAN restored — back on primary uplink Main",
+                       recovery=True, ts=T0 + 900)
+check("the DOWN (problem) alert passes the notify filter",
+      _should_notify(problem_alert))
+check("the RESTORED (recovery) alert ALSO passes the notify filter — same "
+      "key, only severity/recovery differ, neither of which _should_notify "
+      "checks", _should_notify(recovery_alert))
+
+print("OrgEmailNotifier.send(): a recovery alert is actually delivered, "
+      "not silently dropped:")
+sent = []
+
+
+def _fake_smtp_send(smtp_cfg, msg):
+    sent.append(msg)
+
+
+_orig_smtp_send = org_email._smtp_send
+org_email._smtp_send = _fake_smtp_send
+try:
+    tmp2 = tempfile.mkdtemp()
+    adb = os.path.join(tmp2, "auth.db")
+    wdb = os.path.join(tmp2, "devices.db")
+    auth = AuthStore(adb)
+    org_id = auth.signup("owner@acme.test", "password123", "Acme")
+    auth.set_alert_emails(org_id, ["it@acme.test"])
+    auth.close()
+    ds = DevicesStore(wdb)
+    ds.upsert({"name": "R1", "host": "10.0.0.1"}, {}, org_id=org_id)
+    ds.close()
+
+    smtp_cfg = SmtpConfig(host="smtp.example.test", port=587,
+                         from_addr="alerts@example.test")
+    notifier = OrgEmailNotifier(smtp_cfg, adb, wdb)
+
+    notifier.send([problem_alert])
+    check("the DOWN alert is actually delivered (one email sent)",
+          len(sent) == 1 and "To" in sent[0]
+          and sent[0]["To"] == "it@acme.test")
+
+    notifier.send([recovery_alert])
+    check("the RESTORED alert is ALSO delivered — a second, separate email, "
+          "not silently dropped after the first",
+          len(sent) == 2)
+    check("the recovery email's subject is tagged RESOLVED, not a severity "
+          "label", "RESOLVED" in sent[1]["Subject"])
+finally:
+    org_email._smtp_send = _orig_smtp_send
 
 print()
 if FAILS:
