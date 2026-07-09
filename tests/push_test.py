@@ -214,6 +214,34 @@ check("plan_delete_backup removes the file by id",
 check("plan_delete_backup on a missing file is an empty (safe) plan",
       p.plan_delete_backup("nope.backup").empty)
 
+print("backups: pruning keeps only the newest 10 across BOTH prefixes:")
+# On-demand ("mikromon-...") and automatic pre-change safety-net
+# ("before-<feature>-...") backups share one combined 10-slot budget. Mixed
+# on purpose so pruning must sort by the trailing timestamp, not by name
+# (which would wrongly group all "before-..." before all "mikromon-...").
+managed_files = [
+    {".id": "*1", "name": "mikromon-20260101-000000.backup"},
+    {".id": "*2", "name": "before-wan-20260102-000000.backup"},
+    {".id": "*3", "name": "mikromon-20260103-000000.backup"},
+    {".id": "*4", "name": "before-dns-20260104-000000.backup"},
+    {".id": "*5", "name": "mikromon-20260105-000000.backup"},
+    {".id": "*6", "name": "before-wan-20260106-000000.backup"},
+    {".id": "*7", "name": "mikromon-20260107-000000.backup"},
+    {".id": "*8", "name": "before-dns-20260108-000000.backup"},
+    {".id": "*9", "name": "mikromon-20260109-000000.backup"},
+    {".id": "*10", "name": "before-wan-20260110-000000.backup"},
+    {".id": "*11", "name": "mikromon-20260111-000000.backup"},
+    {".id": "*12", "name": "my-custom-name.backup"},  # user-named: never touched
+]
+api = FakeApi({("file",): managed_files})
+p = Pusher(cfg, api, dry_run=True)
+plan = p.plan_backup(None, keep=10)  # about to add an 12th managed backup
+prune_ops = [op for op in plan.ops if op.action == "remove"]
+check("adding one more prunes exactly the 2 oldest managed backups (11+1-10)",
+      {op.params[".id"] for op in prune_ops} == {"*1", "*2"})
+check("the user's custom-named backup is never pruned",
+      "*12" not in {op.params[".id"] for op in prune_ops})
+
 # ---- 5b. commit-confirm auto-revert (safe mode) ---------------------------
 print("commit-confirm auto-revert:")
 api = FakeApi({("system", "scheduler"): []})

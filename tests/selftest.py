@@ -102,6 +102,63 @@ a = run(WanCheck(), down_routes, dev, store)
 check("no active route -> internet_down CRITICAL",
       keys(a) == ["internet_down"] and a[0].severity.label == "CRITICAL")
 
+print("WAN 3-tier alerting (named Main + Backup links, one email per tier):")
+dev2 = mkdev("TestRouter2", wan=WanConfig(links=[
+    WanEndpoint(interface="ether1", gateway="1.1.1.1", name="Main"),
+    WanEndpoint(interface="lte1", gateway="10.0.0.1", name="Backup"),
+]))
+both_up = {"route": [
+    {"dst-address": "0.0.0.0/0", "gateway": "1.1.1.1", "distance": "1",
+     "active": "true", "gateway-status": "1.1.1.1 reachable via ether1"},
+    {"dst-address": "0.0.0.0/0", "gateway": "10.0.0.1", "distance": "2",
+     "active": "true", "gateway-status": "10.0.0.1 reachable via lte1"},
+]}
+main_down = {"route": [
+    {"dst-address": "0.0.0.0/0", "gateway": "1.1.1.1", "distance": "1",
+     "active": "false", "gateway-status": "1.1.1.1 unreachable"},
+    {"dst-address": "0.0.0.0/0", "gateway": "10.0.0.1", "distance": "2",
+     "active": "true", "gateway-status": "10.0.0.1 reachable via lte1"},
+]}
+backup_down = {"route": [
+    {"dst-address": "0.0.0.0/0", "gateway": "1.1.1.1", "distance": "1",
+     "active": "true", "gateway-status": "1.1.1.1 reachable via ether1"},
+    {"dst-address": "0.0.0.0/0", "gateway": "10.0.0.1", "distance": "2",
+     "active": "false", "gateway-status": "10.0.0.1 unreachable"},
+]}
+both_down2 = {"route": [
+    {"dst-address": "0.0.0.0/0", "gateway": "1.1.1.1", "distance": "1",
+     "active": "false", "gateway-status": "1.1.1.1 unreachable"},
+    {"dst-address": "0.0.0.0/0", "gateway": "10.0.0.1", "distance": "2",
+     "active": "false", "gateway-status": "10.0.0.1 unreachable"},
+]}
+
+a = run(WanCheck(), both_up, dev2, store)
+check("both links up (seed) -> no alert", a == [])
+
+a = run(WanCheck(), main_down, dev2, store)
+check("tier 1: main down, backup up -> exactly one alert (wan_failover)",
+      keys(a) == ["wan_failover"] and "DOWN" in a[0].title
+      and "Main" in a[0].title and "Backup" in a[0].title)
+
+a = run(WanCheck(), both_up, dev2, store)
+check("tier 1 recovers", len(a) == 1 and a[0].recovery and a[0].key == "wan_failover")
+
+a = run(WanCheck(), backup_down, dev2, store)
+check("tier 2: backup down, main up -> exactly one alert (wan_link:1)",
+      keys(a) == ["wan_link:1"] and "Backup" in a[0].title
+      and "still up" in a[0].title)
+
+a = run(WanCheck(), both_up, dev2, store)
+check("tier 2 recovers", len(a) == 1 and a[0].recovery and a[0].key == "wan_link:1")
+
+a = run(WanCheck(), both_down2, dev2, store)
+check("tier 3: both down -> exactly one alert (internet_down), "
+      "not one per link too",
+      keys(a) == ["internet_down"] and a[0].severity.label == "CRITICAL")
+
+a = run(WanCheck(), both_up, dev2, store)
+check("tier 3 recovers", len(a) == 1 and a[0].recovery and a[0].key == "internet_down")
+
 print("Resources (reboot / CPU):")
 run(ResourceCheck(), {"resource": [{"uptime": "1h", "cpu-load": "5",
     "version": "7.14", "total-memory": "1000", "free-memory": "800"}],

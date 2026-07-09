@@ -40,15 +40,19 @@ _PF_SANDBOX_URL = "https://sandbox.payfast.co.za/eng/process"
 _PF_VALIDATE_LIVE = "https://www.payfast.co.za/eng/query/validate"
 _PF_VALIDATE_SANDBOX = "https://sandbox.payfast.co.za/eng/query/validate"
 
+# price_usd is what's shown to users everywhere (a universal, ISP-agnostic
+# figure) — price_zar is ONLY used internally to build the actual PayFast
+# charge (build_payment_data below), since PayFast is a South African
+# gateway that settles in ZAR regardless of what currency is displayed.
 PLANS = [
-    {"name": "starter",  "label": "Starter",        "devices": 5,    "price_zar": 460.00},
-    {"name": "small",    "label": "Small",           "devices": 15,   "price_zar": 1270.00},
-    {"name": "medium",   "label": "Medium",          "devices": 30,   "price_zar": 2490.00},
-    {"name": "business", "label": "Business",        "devices": 50,   "price_zar": 3870.00},
-    {"name": "pro",      "label": "Professional",    "devices": 100,  "price_zar": 7360.00},
-    {"name": "ent250",   "label": "Enterprise 250",  "devices": 250,  "price_zar": 17030.00},
-    {"name": "ent500",   "label": "Enterprise 500",  "devices": 500,  "price_zar": 32210.00},
-    {"name": "ent1000",  "label": "Enterprise 1000", "devices": 1000, "price_zar": 55230.00},
+    {"name": "starter",  "label": "Starter",        "devices": 5,    "price_usd": 25,   "price_zar": 460.00},
+    {"name": "small",    "label": "Small",           "devices": 15,   "price_usd": 69,   "price_zar": 1270.00},
+    {"name": "medium",   "label": "Medium",          "devices": 30,   "price_usd": 135,  "price_zar": 2490.00},
+    {"name": "business", "label": "Business",        "devices": 50,   "price_usd": 210,  "price_zar": 3870.00},
+    {"name": "pro",      "label": "Professional",    "devices": 100,  "price_usd": 400,  "price_zar": 7360.00},
+    {"name": "ent250",   "label": "Enterprise 250",  "devices": 250,  "price_usd": 925,  "price_zar": 17030.00},
+    {"name": "ent500",   "label": "Enterprise 500",  "devices": 500,  "price_usd": 1750, "price_zar": 32210.00},
+    {"name": "ent1000",  "label": "Enterprise 1000", "devices": 1000, "price_usd": 3000, "price_zar": 55230.00},
 ]
 
 _PLAN_MAP = {p["name"]: p for p in PLANS}

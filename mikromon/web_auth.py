@@ -385,7 +385,7 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
         plan_rows = ""
         for p in PLANS:
             is_current = (status in ("active", "trialing") and plan_name == p["name"])
-            per_dev = p["price_zar"] / p["devices"]
+            per_dev = p["price_usd"] / p["devices"]
             if is_current:
                 btn = '<span class="badge ok">Current plan</span>'
             else:
@@ -397,12 +397,12 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
             plan_rows += (f'<tr>'
                           f'<td><b>{esc(p["label"])}</b></td>'
                           f'<td>{p["devices"]}</td>'
-                          f'<td><b>R{p["price_zar"]:,.2f}</b>/mo</td>'
-                          f'<td>R{per_dev:,.2f}/device</td>'
+                          f'<td><b>${p["price_usd"]:,.2f}</b>/mo</td>'
+                          f'<td>${per_dev:,.2f}/device</td>'
                           f'<td>{btn}</td>'
                           f'</tr>')
         plans_html = (f'<div class="box"><h2>Choose a plan</h2>'
-                      f'<p class="muted" style="margin-top:0">All prices in ZAR, '
+                      f'<p class="muted" style="margin-top:0">All prices in USD, '
                       f'billed monthly via PayFast. Cancel anytime.</p>'
                       f'<table><thead><tr>'
                       f'<th>Plan</th><th>Devices</th><th>Monthly</th>'
@@ -451,7 +451,7 @@ def _plan_select(org_id, current_plan, csrf) -> str:
         sel = " selected" if current_plan == p["name"] else ""
         opts.append(f'<option value="{esc(p["name"])}"{sel}>'
                     f'{esc(p["label"])} · {p["devices"]} dev · '
-                    f'R{p["price_zar"]:.0f}/mo</option>')
+                    f'${p["price_usd"]:.0f}/mo</option>')
     opts.append('<option value="unlimited"'
                 + (" selected" if current_plan == "unlimited" else "")
                 + '>Unlimited</option>')

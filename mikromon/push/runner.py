@@ -91,21 +91,38 @@ class Pusher:
         return Plan(self.cfg.name, [op] + self._prune_backup_ops(keep - 1),
                     summary="backup")
 
-    def _prune_backup_ops(self, keep: int) -> list:
-        """Return remove ops for system-created backups beyond the newest `keep`.
+    # Prefixes for backups THIS app creates: on-demand ones from the Backups
+    # tab ("mikromon-YYYYMMDD-HHMMSS") and the automatic pre-change safety net
+    # ("before-<feature>-YYYYMMDD-HHMMSS", written by _device_push_post before
+    # every committed config change). Both are pruned from the SAME pool of
+    # `keep` so the router never accumulates more than that many regardless of
+    # which one made them.
+    _MANAGED_PREFIXES = ("mikromon-", "before-")
 
-        Only targets files whose name matches the mikromon-YYYYMMDD-HHMMSS.backup
-        pattern created by plan_backup().  Backups the user created manually on
-        the router (different name prefix) are never touched."""
+    @staticmethod
+    def _backup_ts_key(fname: str) -> str:
+        """The trailing YYYYMMDD-HHMMSS both naming schemes share, so sorting
+        by it (rather than the whole name) interleaves the two prefixes in
+        true chronological order instead of grouping alphabetically by
+        prefix ("before-..." < "mikromon-..." for every timestamp)."""
+        stem = fname[:-len(".backup")] if fname.endswith(".backup") else fname
+        parts = stem.split("-")
+        return "-".join(parts[-2:]) if len(parts) >= 2 else stem
+
+    def _prune_backup_ops(self, keep: int) -> list:
+        """Return remove ops for mikromon-created backups beyond the newest
+        `keep`, across every prefix this app creates (see _MANAGED_PREFIXES).
+        Backups the user created manually under any other name are never
+        touched."""
         try:
             all_files = self.api.fetch(("file",))
         except Exception:
             return []
         managed = sorted(
             [r for r in all_files
-             if str(r.get("name", "")).startswith("mikromon-")
+             if str(r.get("name", "")).startswith(self._MANAGED_PREFIXES)
              and str(r.get("name", "")).endswith(".backup")],
-            key=lambda r: str(r.get("name", "")),  # YYYYMMDD-HHMMSS sorts correctly
+            key=lambda r: self._backup_ts_key(str(r.get("name", ""))),
             reverse=True,  # newest first
         )
         return [

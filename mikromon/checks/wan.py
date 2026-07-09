@@ -76,27 +76,42 @@ class WanCheck(Check):
         want_down = dev.check_enabled("internet_down")
         links = dev.wan.links
 
-        # ---- per-uplink status (one alert per configured link) ------------
-        # Fires whenever an individual link's gateway becomes unreachable or
-        # recovers, regardless of whether overall internet access is up.
-        if want_failover and links:
-            for idx, ep in enumerate(links):
-                link_name = ep.label(idx)
-                ep_routes = [r for r in defaults if _matches_endpoint(r, ep)]
-                if ep_routes:
-                    link_up = any(_is_active(r) for r in ep_routes)
-                    gw_status = str(ep_routes[0].get("gateway-status", "unknown"))
-                else:
-                    link_up = False
-                    gw_status = "no route found"
-                ctx.transition(
-                    f"wan_link:{idx}", healthy=link_up,
-                    severity=Severity.WARNING,
-                    title=f"WAN uplink \"{link_name}\" is DOWN",
-                    cause=(f"Gateway status: {gw_status}." if not link_up else ""),
-                    recovery_title=f"WAN uplink \"{link_name}\" is back UP",
-                    recovery_detail=f"Gateway: {gw_status}.",
-                )
+        # ---- per-uplink status for BACKUP links only (one alert each) -----
+        # Three mutually-exclusive tiers, each with its own single email:
+        #   1. the primary (links[0]) goes down -> the "wan_failover" alert
+        #      below (it already frames this as "primary down, on backup X").
+        #   2. a backup link (links[1:]) goes down while the primary is still
+        #      up -> alerted here.
+        #   3. every configured link is down -> "internet_down" below.
+        # The primary's own up/down transition is intentionally NOT alerted
+        # here too — that would just be a second, less informative email for
+        # the same event tier 1 already covers. And backup links are only
+        # evaluated when NOT everything is down, so a full outage produces
+        # exactly one "internet down" email instead of one per link plus one
+        # overall.
+        if want_failover and len(links) > 1:
+            all_down = not defaults or not any(_is_active(r) for r in defaults)
+            if not all_down:
+                for idx, ep in enumerate(links):
+                    if idx == 0:
+                        continue  # primary: covered by the failover alert below
+                    link_name = ep.label(idx)
+                    ep_routes = [r for r in defaults if _matches_endpoint(r, ep)]
+                    if ep_routes:
+                        link_up = any(_is_active(r) for r in ep_routes)
+                        gw_status = str(ep_routes[0].get("gateway-status", "unknown"))
+                    else:
+                        link_up = False
+                        gw_status = "no route found"
+                    ctx.transition(
+                        f"wan_link:{idx}", healthy=link_up,
+                        severity=Severity.WARNING,
+                        title=f"Backup WAN uplink \"{link_name}\" is DOWN "
+                              f"(primary is still up)",
+                        cause=(f"Gateway status: {gw_status}." if not link_up else ""),
+                        recovery_title=f"Backup WAN uplink \"{link_name}\" is back UP",
+                        recovery_detail=f"Gateway: {gw_status}.",
+                    )
 
         if not defaults:
             # Nothing routes to the internet at all.
@@ -193,7 +208,8 @@ class WanCheck(Check):
                      f"{cur_name} ({_label(current)}).")
         ctx.transition(
             "wan_failover", healthy=not on_backup, severity=Severity.WARNING,
-            title=f"WAN failover — now on backup uplink {cur_name}{rank}",
+            title=f"Primary WAN \"{prim_name}\" is DOWN — running on backup "
+                  f"\"{cur_name}\"{rank}",
             detail=f"Active default route: {_label(current)}.",
             cause=cause,
             facts={"current": _label(current), "preferred": _label(preferred),
