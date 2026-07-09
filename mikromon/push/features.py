@@ -308,13 +308,20 @@ def routes_form(current, cfg):
     return fields
 
 
-def _apply_wan_order(ops, order, pusher):
+def _apply_wan_order(ops, order, pusher, fo_enabled=False):
     """Build distance-change ops from a wan_order list.
 
     RouterOS dynamic routes (DHCP / PPPoE / L2TP) are read-only in /ip/route —
     attempting to set their distance returns 'no such item'. The only supported
     path is setting default-route-distance on the client itself, which takes
-    effect on the next connection or DHCP renewal."""
+    effect on the next connection or DHCP renewal.
+
+    With gateway failover OFF, distances start at 10 (10, 11, 12, ...) rather
+    than 1, 2, 3 — 1/2/3 is what the MANAGED static failover routes use (see
+    _apply_failover), so leaving individual clients at 1/2/3 too would tie
+    with them (or with each other) the moment more than one is up. 1/2/3 in
+    plain rank order is only correct while failover's own routes aren't also
+    claiming those same distances."""
     if not order:
         return
     dhcp_clients = _safe_fetch(pusher.api, _DHCP_CLIENT)
@@ -330,8 +337,9 @@ def _apply_wan_order(ops, order, pusher):
     for c in l2tp_clients:
         rid = c.get(".id", "").lstrip("*")
         client_map[f"l2tp:{rid}"] = (_L2TP_CLIENT, c, f"L2TP {c.get('name','?')}")
+    base = 0 if fo_enabled else 9
     for rank, item_id in enumerate(order, start=1):
-        want = str(rank)
+        want = str(base + rank)
         if item_id not in client_map:
             continue
         cpath, c, clabel = client_map[item_id]
@@ -432,38 +440,27 @@ def _apply_failover(ops, flat, pusher, cfg, wan_order=None):
                                   owns=fo_owns, label="failover route"))
         ops.extend(reconcile_list(_NETWATCH, "comment", [], netwatch,
                                   owns=fo_owns, label="netwatch"))
-        # Restore automatic default routes on the WAN clients — but give each
-        # one its own distinct, high default-route-distance (10, 11, 12, ...
-        # in link priority order) rather than leaving RouterOS's implicit
-        # default. Left unset, EVERY client defaults to distance 1, so as
-        # soon as more than one uplink is up they tie at distance 1 with no
-        # defined winner. This keeps a sane (if unmonitored) priority order
-        # even with automatic failover switched off.
+        # Restore automatic default routes on the WAN clients. The distinct,
+        # high default-route-distance (10, 11, 12, ...) each one needs so
+        # they don't all tie at RouterOS's implicit default of 1 is handled
+        # by _apply_wan_order (called alongside this in routes_plan) — it
+        # covers every client in the Routes tab's drag list, not just the
+        # ones configured as WAN uplinks here, and uses the SAME offset
+        # scheme keyed off the current drag order.
         pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
         dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
-        for idx, link in enumerate(links):
+        for link in links:
             iface = getattr(link, "interface", "") or ""
             if not iface:
                 continue
-            want_dist = str(10 + idx)
             for c in pppoe_clients:
-                if c.get("name") == iface:
-                    if c.get("add-default-route", "yes") == "no":
-                        ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route",
-                                              "yes", f"PPPoE {iface}"))
-                    if _norm(str(c.get("default-route-distance", "") or "")) != want_dist:
-                        ops.append(_set_field(_PPPOE_CLIENT, c,
-                                              "default-route-distance", want_dist,
-                                              f"PPPoE {iface}"))
+                if c.get("name") == iface and c.get("add-default-route", "yes") == "no":
+                    ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route",
+                                          "yes", f"PPPoE {iface}"))
             for c in dhcp_clients:
-                if c.get("interface") == iface:
-                    if c.get("add-default-route", "yes") == "no":
-                        ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route",
-                                              "yes", f"DHCP {iface}"))
-                    if _norm(str(c.get("default-route-distance", "") or "")) != want_dist:
-                        ops.append(_set_field(_DHCP_CLIENT, c,
-                                              "default-route-distance", want_dist,
-                                              f"DHCP {iface}"))
+                if c.get("interface") == iface and c.get("add-default-route", "yes") == "no":
+                    ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route",
+                                          "yes", f"DHCP {iface}"))
         return
 
     # Detect gateways live from the router at apply time
@@ -574,7 +571,7 @@ def _apply_failover(ops, flat, pusher, cfg, wan_order=None):
 def routes_plan(pusher, cfg, flat, multi):
     ops = []
     order = multi.get("wan_order", [])
-    _apply_wan_order(ops, order, pusher)
+    _apply_wan_order(ops, order, pusher, fo_enabled=bool(flat.get("fo_enabled")))
     _apply_failover(ops, flat, pusher, cfg, wan_order=order)
     return Plan(cfg.name, ops, summary="routes / failover")
 

@@ -619,7 +619,10 @@ fapi = FakeApi({
     ],
 })
 fp = Pusher(fcfg, fapi, dry_run=True)
-foff = F.routes_plan(fp, fcfg, {}, {})  # fo_enabled absent -> failover OFF
+# fo_enabled absent -> failover OFF; wan_order is whatever the Routes tab was
+# showing (unchanged order here) — it's submitted on every Routes tab push
+# regardless of the failover toggle, same as it would be from the real UI.
+foff = F.routes_plan(fp, fcfg, {}, {"wan_order": ["dhcp:1", "dhcp:2"]})
 dist_ops = {o.params.get(".id"): o.params.get("default-route-distance")
            for o in foff.ops if "default-route-distance" in o.params}
 check("failover OFF gives the primary link a distinct high distance (10)",
@@ -629,6 +632,27 @@ check("failover OFF gives the secondary link a distinct high distance (11), "
       dist_ops.get("*2") == "11")
 check("failover OFF also restores add-default-route=yes on both",
       sum(1 for o in foff.ops if o.params.get("add-default-route") == "yes") == 2)
+
+# The exact bug reported live: turning failover OFF while the Routes tab's
+# drag list still submits its own order must NOT fall back to plain 1,2,3 —
+# _apply_wan_order itself must know failover is off and use the high offset.
+fapi2 = FakeApi({
+    ("ip", "route"): [], ("tool", "netwatch"): [],
+    ("interface", "pppoe-client"): [],
+    ("ip", "dhcp-client"): [
+        {".id": "*1", "interface": "ether2-terana", "add-default-route": "yes"},
+        {".id": "*2", "interface": "ether3-vodacom", "add-default-route": "yes"},
+        {".id": "*3", "interface": "ether4-afrihost", "add-default-route": "yes"},
+    ],
+})
+fp2 = Pusher(fcfg, fapi2, dry_run=True)
+foff2 = F.routes_plan(fp2, fcfg, {}, {"wan_order": ["dhcp:1", "dhcp:2", "dhcp:3"]})
+dist_ops2 = {o.params.get(".id"): o.params.get("default-route-distance")
+            for o in foff2.ops if "default-route-distance" in o.params}
+check("failover OFF: a 3rd, unmanaged uplink in the drag list also gets a "
+      "high distance (12), never plain rank 1/2/3",
+      dist_ops2.get("*1") == "10" and dist_ops2.get("*2") == "11"
+      and dist_ops2.get("*3") == "12")
 
 # gateway failover switched ON: dragging a link to the top of the Routes tab
 # list must make failover treat THAT one as primary — previously it always
