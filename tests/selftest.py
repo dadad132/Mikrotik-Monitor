@@ -159,6 +159,43 @@ check("tier 3: both down -> exactly one alert (internet_down), "
 a = run(WanCheck(), both_up, dev2, store)
 check("tier 3 recovers", len(a) == 1 and a[0].recovery and a[0].key == "internet_down")
 
+print("WAN per-link check: managed static route found by its comment tag "
+      "when gateway/interface matching can't (confirmed live: a genuinely "
+      "active backup was reported DOWN because its route's gateway-status "
+      "text didn't parse to match the configured interface name):")
+dev3 = mkdev("TestRouter3", wan=WanConfig(links=[
+    WanEndpoint(interface="ether1", gateway="1.1.1.1", name="Main"),
+    WanEndpoint(interface="ether2-backup", gateway="", name="Backup"),
+]))
+# The backup's managed static route: active and genuinely fine, but its
+# gateway-status has no "via ether2-backup" text at all (e.g. a PPP remote
+# IP or a static route RouterOS didn't annotate that way) — interface/
+# gateway matching alone would miss it; only the comment tag identifies it.
+unparseable_but_up = {"route": [
+    {"dst-address": "0.0.0.0/0", "gateway": "1.1.1.1", "distance": "1",
+     "active": "true", "gateway-status": "1.1.1.1 reachable via ether1",
+     "comment": "mikromon:failover:primary"},
+    {"dst-address": "0.0.0.0/0", "gateway": "10.9.9.9", "distance": "2",
+     "active": "true", "gateway-status": "10.9.9.9 reachable",
+     "comment": "mikromon:failover:secondary"},
+]}
+a = run(WanCheck(), unparseable_but_up, dev3, store)
+check("a genuinely-up backup found via its failover comment tag raises no "
+      "alert (not misreported as 'no route found')", a == [])
+
+# Same route, but now actually down — the comment-tag fallback must still
+# correctly detect that, not just always report "up" once it finds a match.
+unparseable_and_down = {"route": [
+    unparseable_but_up["route"][0],
+    {"dst-address": "0.0.0.0/0", "gateway": "10.9.9.9", "distance": "2",
+     "active": "false", "gateway-status": "10.9.9.9 unreachable",
+     "comment": "mikromon:failover:secondary"},
+]}
+a = run(WanCheck(), unparseable_and_down, dev3, store)
+check("the SAME route reported down is correctly alerted, not masked by "
+      "the comment-tag fallback always assuming it's fine",
+      keys(a) == ["wan_link:1"] and "Backup" in a[0].title)
+
 print("Resources (reboot / CPU):")
 run(ResourceCheck(), {"resource": [{"uptime": "1h", "cpu-load": "5",
     "version": "7.14", "total-memory": "1000", "free-memory": "800"}],

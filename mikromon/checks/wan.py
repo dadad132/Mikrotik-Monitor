@@ -65,6 +65,15 @@ def _matches_endpoint(route: dict, ep) -> bool:
     return False
 
 
+def _fo_role(idx: int) -> str:
+    """Same role-naming scheme push/features.py's gateway-failover route
+    builder uses ("mikromon:failover:primary"/"secondary"/"linkN"), so a
+    managed route can be found by its own tag when gateway/interface
+    matching doesn't — e.g. a PPP remote IP, or gateway-status text that
+    doesn't parse to literally match the configured interface name."""
+    return "primary" if idx == 0 else "secondary" if idx == 1 else f"link{idx + 1}"
+
+
 class WanCheck(Check):
     flags = ("wan_failover", "internet_down")
     requires = ("route",)
@@ -97,6 +106,10 @@ class WanCheck(Check):
                         continue  # primary: covered by the failover alert below
                     link_name = ep.label(idx)
                     ep_routes = [r for r in defaults if _matches_endpoint(r, ep)]
+                    if not ep_routes:
+                        fo_comment = f"mikromon:failover:{_fo_role(idx)}"
+                        ep_routes = [r for r in defaults
+                                    if r.get("comment", "") == fo_comment]
                     if ep_routes:
                         link_up = any(_is_active(r) for r in ep_routes)
                         gw_status = str(ep_routes[0].get("gateway-status", "unknown"))
@@ -180,14 +193,17 @@ class WanCheck(Check):
                 on_backup = True
             else:
                 on_backup = not _matches_endpoint(current, links[0])
-            # Which configured link is currently carrying traffic?
+            # Which configured link is currently carrying traffic? Falls back
+            # to the managed route's own comment tag (mikromon:failover:role)
+            # for ANY configured link, not just primary/secondary — same
+            # reason as above: gateway/interface matching can miss a PPP
+            # remote IP or unparseable gateway-status text.
             cur_idx = next((i for i, ep in enumerate(links)
                             if _matches_endpoint(current, ep)), None)
-            if cur_idx is None:
-                if cur_comment == _FO_PRI:
-                    cur_idx = 0
-                elif cur_comment == _FO_SEC:
-                    cur_idx = 1
+            if cur_idx is None and cur_comment.startswith("mikromon:failover:"):
+                cur_idx = next((i for i in range(len(links))
+                                if cur_comment == f"mikromon:failover:{_fo_role(i)}"),
+                               None)
             cur_name = (links[cur_idx].label(cur_idx) if cur_idx is not None
                         else (_iface_of(current) or current.get("gateway", "?")))
             prim_name = links[0].label(0)
