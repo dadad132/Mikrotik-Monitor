@@ -104,6 +104,23 @@ cfgwan = build_device({"name": "R", "host": "1.1.1.1", "wan": {"links": [
 wed = web._wan_uplink_editor("R", cfgwan, "csrf")
 check("SD-WAN WAN editor has up/down reorder controls",
       "pushMoveRow(this,-1)" in wed and "pushMoveRow(this,1)" in wed)
+
+# Detecting which port actually has the ISP plugged in (varies per install —
+# some start on ether1, others ether5) so it doesn't have to be guessed.
+wed_detect = web._wan_uplink_editor(
+    "R", cfgwan, "csrf",
+    ifaces=[{"name": "ether1"}, {"name": "ether5"}, {"name": "lte1"}],
+    online_ifaces={"ether5"})
+check("a port with a detected live internet connection is flagged in the dropdown",
+      "ether5  \U0001f310 has an active internet connection" in wed_detect)
+check("a port with no detected connection is listed plainly",
+      '<option value="ether1">ether1</option>' in wed_detect)
+check("the detected port sorts to the top of the dropdown",
+      wed_detect.index('value="ether5"') < wed_detect.index('value="ether1"')
+      and wed_detect.index('value="ether5"') < wed_detect.index('value="lte1"'))
+check("the detection note only shows when ifaces (live router data) is available",
+      "has an active internet connection" not in wed  # no ifaces passed above
+      and "mikromon detected an active internet connection" in wed_detect)
 check("reorder JS is defined on feature tabs", "function pushMoveRow" in web._FEATURE_JS)
 check("toggles render as on/off sliders",
       'class="switch"' in web._field_html(

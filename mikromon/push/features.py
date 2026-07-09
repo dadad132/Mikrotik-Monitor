@@ -96,6 +96,32 @@ def _safe_fetch(api, path):
         return []
 
 
+def detect_isp_ifaces(api) -> set:
+    """Interface names that look like they're ACTUALLY carrying an internet
+    connection right now — a bound DHCP lease, a running PPPoE/L2TP session,
+    or the live gateway of an active default route. Used to point out which
+    physical port the ISP is plugged into when setting up a router from
+    scratch, since that varies (ether1 on one job, ether5 on another) and
+    otherwise has to be guessed."""
+    online = set()
+    for c in _safe_fetch(api, _DHCP_CLIENT):
+        if str(c.get("status", "")).lower() == "bound" and c.get("interface"):
+            online.add(c["interface"])
+    for c in _safe_fetch(api, _PPPOE_CLIENT):
+        if str(c.get("running", "false")).lower() in ("true", "yes") and c.get("name"):
+            online.add(c["name"])
+    for c in _safe_fetch(api, _L2TP_CLIENT):
+        if str(c.get("running", "false")).lower() in ("true", "yes") and c.get("name"):
+            online.add(c["name"])
+    for r in _safe_fetch(api, _ROUTE):
+        if (str(r.get("dst-address", "")).startswith("0.0.0.0/0")
+                and str(r.get("active", "true")).lower() not in ("false", "no")):
+            m = re.search(r"via\s+(\S+)", str(r.get("gateway-status", "")))
+            if m:
+                online.add(m.group(1))
+    return online
+
+
 def routes_read(pusher, cfg):
     dhcp = _safe_fetch(pusher.api, _DHCP_CLIENT)
     pppoe = _safe_fetch(pusher.api, _PPPOE_CLIENT)

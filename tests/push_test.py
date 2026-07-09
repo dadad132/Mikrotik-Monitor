@@ -771,6 +771,37 @@ check("no Netwatch entry is created for the 3rd link",
       "mikromon:failover:watch:link3" not in watch3
       and {"mikromon:failover:watch:primary", "mikromon:failover:watch:secondary"} <= watch3)
 
+print("detect_isp_ifaces: find which port actually has the internet:")
+isp_api = FakeApi({
+    ("ip", "dhcp-client"): [
+        {"interface": "ether1", "status": "bound"},
+        {"interface": "ether2", "status": "searching"},  # not bound: no lease yet
+    ],
+    ("interface", "pppoe-client"): [
+        {"name": "pppoe-out1", "running": "true"},
+        {"name": "pppoe-out2", "running": "false"},
+    ],
+    ("interface", "l2tp-client"): [],
+    ("ip", "route"): [
+        {"dst-address": "0.0.0.0/0", "active": "true",
+         "gateway-status": "10.0.0.1 reachable via ether5"},
+        {"dst-address": "0.0.0.0/0", "active": "false",
+         "gateway-status": "10.0.0.2 unreachable via ether6"},
+        {"dst-address": "192.168.1.0/24", "active": "true"},  # not a default route
+    ],
+})
+online = F.detect_isp_ifaces(isp_api)
+check("a bound DHCP client's interface is detected",
+      "ether1" in online)
+check("a DHCP client still searching (no lease) is NOT detected",
+      "ether2" not in online)
+check("a running PPPoE session is detected", "pppoe-out1" in online)
+check("a non-running PPPoE session is NOT detected", "pppoe-out2" not in online)
+check("the gateway interface of an ACTIVE default route is detected",
+      "ether5" in online)
+check("an inactive default route's interface is NOT detected",
+      "ether6" not in online)
+
 
 # ---- 12. custom scripts: add / run / remove, ownership-scoped --------------
 print("custom scripts:")

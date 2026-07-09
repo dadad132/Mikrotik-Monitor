@@ -2204,11 +2204,18 @@ def _norm_html(v) -> str:
     return "true" if v in (True, "true") else str(v)
 
 
-def _wan_uplink_editor(name, cfg, csrf, ifaces=None) -> str:
+def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None) -> str:
     """Editable WAN uplink list (saved to the device record, not pushed).
 
     When ifaces is a list of interface dicts (fetched live from the router),
-    the interface column renders as a <select> dropdown instead of a text input."""
+    the interface column renders as a <select> dropdown instead of a text input.
+    online_ifaces (interface names with a bound DHCP lease, a running PPPoE/
+    L2TP session, or a live default route) get flagged in the dropdown and
+    sorted to the top — so which physical port the ISP is actually plugged
+    into doesn't have to be guessed when setting up a router from scratch
+    (some jobs start the ISP on ether1, others on ether5, ...)."""
+    online = online_ifaces or set()
+
     def _iface_field(selected=""):
         if ifaces is None:
             return (f'<input name="link_iface" placeholder="ether1 / lte1" '
@@ -2217,13 +2224,16 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None) -> str:
         names = [i.get("name", "") for i in ifaces]
         if selected and selected not in names:
             opts += f'<option value="{esc(selected)}" selected>{esc(selected)}</option>'
-        for iface in sorted(ifaces, key=lambda i: i.get("name", "")):
+        for iface in sorted(ifaces, key=lambda i: (i.get("name", "") not in online,
+                                                    i.get("name", ""))):
             iname = iface.get("name", "")
             if not iname:
                 continue
             itype = iface.get("type", "")
             sel = " selected" if iname == selected else ""
             lbl = iname + (f"  ({itype})" if itype and itype != "ether" else "")
+            if iname in online:
+                lbl += "  \U0001f310 has an active internet connection"
             opts += f'<option value="{esc(iname)}"{sel}>{esc(lbl)}</option>'
         return f'<select name="link_iface" style="width:100%">{opts}</select>'
 
@@ -2243,12 +2253,17 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None) -> str:
                 f'onclick="this.closest(\'tr\').remove()">&times;</button></td></tr>')
     links = list(getattr(cfg.wan, "links", [])) if cfg else []
     body = "".join(row(link) for link in links) + row(None)
+    detect_note = (f'<p class="muted">\U0001f310 = mikromon detected an active '
+                   f'internet connection on that port right now (bound DHCP lease, '
+                   f'running PPPoE/L2TP session, or a live default route) — use it '
+                   f'to find which port the ISP is actually plugged into instead of '
+                   f'guessing.</p>' if ifaces is not None else "")
     return (f'<div class="box"><h2>WAN uplinks</h2>'
             f'<p class="muted">List your internet links in <b>priority order</b> — '
             f'<b>top = primary</b>, 2nd = first backup, and so on. <b>Drag the '
             f'&#9776; handle</b> (or use the &uarr;/&darr; buttons) to reorder; '
             f'failover/load-balancing below uses this order. Saved on the device '
-            f'— no router change.</p>'
+            f'— no router change.</p>{detect_note}'
             f'<form method="POST" action="/device/wan">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="device" value="{esc(name)}">'
@@ -2353,7 +2368,8 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                         msg="", recent=None, facts=None, unmanaged=None,
                         confirm_action="/device/push", cfg=None,
                         extra_html="", extra_actions="", report_html="",
-                        wan_ifaces=None, can_manage=None) -> str:
+                        wan_ifaces=None, online_ifaces=None,
+                        can_manage=None) -> str:
     if can_manage is None:
         can_manage = AuthStore.is_admin(user or {})
     tabbar = _device_tabbar(name, slug, can_manage, csrf)
@@ -2420,7 +2436,8 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
 
     # The SD-WAN tab gets an inline WAN-uplink editor (device metadata, so it
     # works even when the router is unreachable). Hidden during the confirm step.
-    wan_editor = (_wan_uplink_editor(name, cfg, csrf, ifaces=wan_ifaces)
+    wan_editor = (_wan_uplink_editor(name, cfg, csrf, ifaces=wan_ifaces,
+                                     online_ifaces=online_ifaces)
                   if slug == "wan" and preview is None else "")
     logbox = _recent_log_box(recent or [], device=name)
     intro = (f'<p class="muted" style="margin:-6px 0 14px">{_TAB_INTRO[slug]}</p>'
@@ -3859,6 +3876,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # the WAN uplink dropdown works even when push credentials aren't set.
             cached_ifaces = [{"name": n} for n in (facts.get("interfaces") or [])]
             wan_ifaces = cached_ifaces or None
+            online_ifaces = set()
             _report_html = report_html  # local copy; may be overridden below
             if preview is None and not error:
                 from .device import DeviceError
@@ -3881,6 +3899,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                           if i.get("name")]
                         except Exception:
                             wan_ifaces = None
+                        try:
+                            from .push.features import detect_isp_ifaces
+                            online_ifaces = detect_isp_ifaces(api)
+                        except Exception:
+                            online_ifaces = set()
                     if "unmanaged" in feature:
                         unmanaged = feature["unmanaged"](pusher, cfg)
                     if slug == "scripts":
@@ -3906,7 +3929,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 msg=msg, recent=recent, facts=facts, unmanaged=unmanaged,
                 confirm_action=confirm_action, cfg=cfg, extra_html=extra_html,
                 extra_actions=extra_actions, report_html=_report_html,
-                wan_ifaces=wan_ifaces, can_manage=can_manage)
+                wan_ifaces=wan_ifaces, online_ifaces=online_ifaces,
+                can_manage=can_manage)
             return self._send(200, page, "text/html; charset=utf-8")
 
         def _device_wan_post(self, flat, multi, user):
