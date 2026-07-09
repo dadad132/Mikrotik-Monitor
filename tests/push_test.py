@@ -794,6 +794,17 @@ watch4 = {o.params.get("comment"): o.params for o in plan4.ops
 check("a custom down-count is honored in the generated down-script",
       ">= 5" in watch4["mikromon:failover:watch:primary"]["down-script"])
 
+# RouterOS scripting syntax regression guard: variables are referenced as
+# $name directly — "$(name)" is shell-style command substitution and is NOT
+# valid RouterOS script syntax (this exact typo shipped once and, if the
+# script fails to parse when pushed, can abort the whole plan mid-apply and
+# leave the router in a broken in-between state — every uplink offline).
+for w in watch3.values():
+    check(f"{w['comment']}: down-script has no invalid $(...) RouterOS syntax",
+          "$(" not in w["down-script"])
+    check(f"{w['comment']}: up-script has no invalid $(...) RouterOS syntax",
+          "$(" not in w["up-script"])
+
 print("Routes tab display: comment-tag fallback when gateway matching can't "
       "find the managed route (confirmed live: two different lines both "
       "showed 'distance 1' because gateway-only matching missed their own "

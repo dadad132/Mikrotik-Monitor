@@ -659,8 +659,8 @@ def _apply_failover(ops, flat, pusher, cfg, wan_order=None):
             "down-script": (
                 f':global {var}\r\n'
                 f':if ([:typeof ${var}] = "nothing") do={{:set {var} 0}}\r\n'
-                f':set {var} ($({var}) + 1)\r\n'
-                f':if ($({var}) >= {down_count}) do={{'
+                f':set {var} (${var} + 1)\r\n'
+                f':if (${var} >= {down_count}) do={{'
                 f'/ip route set [find comment="{_FAILOVER_TAG}{role}"] distance=10}}'
             ),
             "up-script": (
