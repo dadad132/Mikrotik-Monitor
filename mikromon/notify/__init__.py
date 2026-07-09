@@ -24,5 +24,6 @@ def build_notifiers(config):
             and getattr(config, "auth_db", None)
             and getattr(config, "devices_db", None)):
         notifiers.append(OrgEmailNotifier(
-            config.smtp, config.auth_db, config.devices_db))
+            config.smtp, config.auth_db, config.devices_db,
+            alert_log_db=getattr(config, "alert_log_db", None)))
     return notifiers

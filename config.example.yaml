@@ -73,6 +73,13 @@ devices_db: ./devices.db
 # backups' history. Leave commented to disable logging entirely.
 push_log_db: ./push_log.db
 
+# WAN/reachability alert history -> SQLite file. Powers the "what actually
+# happened this period" summary in each company's scheduled status report
+# (Account -> Company details -> Status report emails). Without this, that
+# report can only show live current status, not a period summary. Leave
+# commented to disable.
+alert_log_db: ./alert_log.db
+
 # On-demand WebFig / Winbox access through the hub. When set, each device page
 # gets "Open WebFig" / "Open Winbox" buttons that expose a time-limited public
 # port on the hub, proxied to the router over the WireGuard tunnel, then auto-

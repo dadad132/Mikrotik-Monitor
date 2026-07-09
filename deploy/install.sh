@@ -302,6 +302,28 @@ else:
 PY
 
 # ---------------------------------------------------------------------------
+# Alert history — ensure alert_log_db is set so scheduled status reports
+# (Account -> Company details) can summarize what actually happened during
+# the report period, not just a live snapshot. Idempotent: only fills it in
+# if the key is completely absent.
+# ---------------------------------------------------------------------------
+step "Ensuring alert_log_db is configured"
+"${APP_DIR}/.venv/bin/python" - "${CONFIG_FILE}" <<'PY'
+import sys, yaml
+path = sys.argv[1]
+try:
+    with open(path) as f: data = yaml.safe_load(f) or {}
+except Exception:
+    data = {}
+if not data.get("alert_log_db"):
+    data["alert_log_db"] = "./alert_log.db"
+    with open(path, "w") as f: yaml.safe_dump(data, f, sort_keys=False)
+    print("alert_log_db enabled (status reports now summarize the full period)")
+else:
+    print("alert_log_db already configured — left as-is")
+PY
+
+# ---------------------------------------------------------------------------
 # TEMPORARY — one-off superadmin grant for this migration. Remove this block
 # on the next push; new installs don't need it (signup now grants the first
 # superadmin automatically). Best-effort: does nothing if the account doesn't

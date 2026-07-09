@@ -61,10 +61,12 @@ CREATE TABLE IF NOT EXISTS users (
 """
 
 
+REPORT_INTERVALS = {"weekly": 7 * 86400, "biweekly": 14 * 86400, "monthly": 30 * 86400}
+
+
 def _next_report_due(schedule: str, from_ts: float | None = None) -> float | None:
     """Return the unix timestamp when the next scheduled report should fire."""
-    intervals = {"weekly": 7 * 86400, "biweekly": 14 * 86400, "monthly": 30 * 86400}
-    secs = intervals.get(schedule)
+    secs = REPORT_INTERVALS.get(schedule)
     if secs is None:
         return None
     return (from_ts or time.time()) + secs
@@ -480,7 +482,7 @@ class AuthStore:
                 emails = []
             result.append({
                 "org_id": r[0], "name": r[1], "schedule": r[2],
-                "alert_emails": emails,
+                "alert_emails": emails, "due": r[4],
             })
         return result
 
