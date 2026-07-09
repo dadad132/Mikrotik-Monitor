@@ -143,6 +143,13 @@ class AppConfig:
     state_file: str = "./state.json"
     log_level: str = "INFO"
     confirmations: int = 2
+    startup_grace_minutes: int = 20  # suppress alert emails for this long right
+                                      # after the monitor (re)starts — devices
+                                      # reconnecting their hub tunnel after a
+                                      # server restart look "down" for a while,
+                                      # which isn't a real outage. Anything
+                                      # still unhealthy once the window ends
+                                      # gets alerted then. 0 disables this.
     smtp: SmtpConfig | None = None
     outbox_dir: str | None = None  # if set, also write alert digests as .eml/.html
     metrics_db: str | None = None  # if set, record time-series to this SQLite file
@@ -245,6 +252,7 @@ def load_config(path: str) -> AppConfig:
         state_file=str(raw.get("state_file", "./state.json")),
         log_level=str(raw.get("log_level", "INFO")).upper(),
         confirmations=int(raw.get("confirmations", 2)),
+        startup_grace_minutes=int(raw.get("startup_grace_minutes", 20)),
         smtp=smtp,
         outbox_dir=raw.get("outbox_dir") or None,
         metrics_db=raw.get("metrics_db") or None,

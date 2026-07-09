@@ -57,6 +57,44 @@ class Engine:
         # dashboard even though they're gone from the Devices tab.
         if self.devices_store is not None and self.metrics is not None:
             self.metrics.keep_only(known)
+        # Startup grace period: suppress alert emails right after the monitor
+        # (re)starts, since every device can look unreachable for a while as
+        # hub tunnels reconnect — that's not a real outage. Whatever's still
+        # unhealthy once the window elapses gets a proper alert then (see
+        # _maybe_resync_after_grace).
+        self._start_ts = self.now_fn()
+        self._grace_seconds = max(0, int(getattr(config, "startup_grace_minutes", 20))) * 60
+        self._grace_resynced = self._grace_seconds == 0
+
+    def _in_startup_grace(self) -> bool:
+        return self._grace_seconds > 0 and self.now_fn() - self._start_ts < self._grace_seconds
+
+    def _maybe_resync_after_grace(self) -> None:
+        """Called once, right as the startup grace period ends: anything
+        still unhealthy at that point gets a fresh alert dispatched now,
+        since transition() only fires on a STATE CHANGE and won't naturally
+        re-announce a condition that was already "problem" (and suppressed)
+        throughout the grace window."""
+        if self._grace_resynced or self._in_startup_grace():
+            return
+        self._grace_resynced = True
+        still_down = []
+        for device, dnode in self.state.data.get("devices", {}).items():
+            for key, cond in dnode.get("conditions", {}).items():
+                if cond.get("status") == "problem":
+                    from .alert import Alert
+                    grace_min = self._grace_seconds // 60
+                    still_down.append(Alert(
+                        device, key,
+                        Severity(cond.get("severity", Severity.WARNING)),
+                        cond.get("title") or f"{key} is still unhealthy",
+                        detail=f"Still unresolved after the {grace_min}-minute "
+                              f"startup grace period.",
+                        recovery=False, ts=self.now_fn()))
+        if still_down:
+            log.info("Startup grace period ended; %d condition(s) still "
+                     "unhealthy, alerting now", len(still_down))
+            self.dispatch(still_down)
 
     def _devices_from_store(self):
         return [Device(c) for c in
@@ -148,6 +186,7 @@ class Engine:
         for device in self.devices:
             batch.extend(self._poll_device(device))
         self.dispatch(batch)
+        self._maybe_resync_after_grace()
         self.state.save()
         self._check_scheduled_reports()
         return batch
@@ -233,6 +272,10 @@ class Engine:
         for a in alerts:
             log.info("ALERT %s", a.one_line())
         if self.dry_run:
+            return
+        if self._in_startup_grace():
+            log.info("Suppressing %d alert(s) during the %ds startup grace "
+                     "period", len(alerts), self._grace_seconds)
             return
         if not self.notifiers:
             log.warning("%d alert(s) but no notifiers configured", len(alerts))

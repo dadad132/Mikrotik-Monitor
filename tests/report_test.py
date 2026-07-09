@@ -100,11 +100,11 @@ check("an event that started before the window says so",
 print("_build_report: period summary vs. live-snapshot fallback:")
 state_data = {"devices": {
     "R1": {"conditions": {
-        "reachability": {"healthy": True},
-        "wan_link:1": {"healthy": False, "title": "Backup WAN uplink is DOWN",
+        "reachability": {"status": "ok"},
+        "wan_link:1": {"status": "problem", "title": "Backup WAN uplink is DOWN",
                        "since": T0 + 2000, "severity": 20},
     }, "facts": {"identity": "R1", "model": "hAP ac2", "version": "7.14"}},
-    "R2": {"conditions": {"reachability": {"healthy": True}},
+    "R2": {"conditions": {"reachability": {"status": "ok"}},
            "facts": {"identity": "R2"}},
 }}
 events_by_device = {

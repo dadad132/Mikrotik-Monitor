@@ -78,6 +78,11 @@ class CheckContext:
         cond["pending_n"] = 0
 
         if desired == "problem":
+            # Persisted so a still-unhealthy condition can be re-announced
+            # later without re-deriving it (e.g. after a startup grace
+            # period, or when building a report from live state).
+            cond["title"] = title
+            cond["severity"] = int(severity)
             self._emit(Alert(self.device, key, severity, title, detail, cause,
                              recovery=False, ts=self.now, facts=facts or {}))
         else:

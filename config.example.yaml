@@ -105,6 +105,13 @@ alert_log_db: ./alert_log.db
 # 2 means a single bad poll (a blip) will NOT page you — it must persist.
 confirmations: 2
 
+# Suppress alert emails for this many minutes right after the monitor
+# (re)starts (e.g. a server reboot) — devices reconnecting their hub tunnel
+# can look unreachable for a while, which isn't a real outage. Anything
+# still unhealthy once this window elapses gets a proper alert then. 0 to
+# disable (alert immediately on every restart, like before this existed).
+startup_grace_minutes: 20
+
 # ----------------------------------------------------------------------------
 # Email / SMTP — where alerts are delivered.
 # ----------------------------------------------------------------------------

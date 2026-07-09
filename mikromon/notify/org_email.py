@@ -161,7 +161,7 @@ def _build_report(org_name: str, device_names: list[str], state_data: dict,
         model = facts.get("model") or ""
         version = facts.get("version") or ""
         identity = facts.get("identity") or name
-        reachable = conditions.get("reachability", {}).get("healthy", True)
+        reachable = conditions.get("reachability", {}).get("status") != "problem"
         status = "UP" if reachable else "DOWN"
 
         dev_rows = (events_by_device or {}).get(name, [])
@@ -174,7 +174,7 @@ def _build_report(org_name: str, device_names: list[str], state_data: dict,
         logged_keys = {r["key"] for r in dev_rows}
         for key, cond in conditions.items():
             if (not history_available or key not in logged_keys) \
-                    and not cond.get("healthy", True):
+                    and cond.get("status") == "problem":
                 events.append({"title": cond.get("title", key),
                               "start": cond.get("since"), "end": None})
 

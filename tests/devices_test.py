@@ -97,6 +97,80 @@ mse.close()
 check("engine sweep keeps managed-device metrics, purges orphan metrics",
       "E1" in left and "Ghost" not in left)
 
+print("Startup grace period: suppress alerts right after the monitor "
+      "restarts, then re-alert on anything still down:")
+
+
+class _FakeNotifier:
+    name = "fake"
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, alerts):
+        self.sent.append(list(alerts))
+
+
+from mikromon.alert import Alert, Severity  # noqa: E402
+
+fn = _FakeNotifier()
+gcfg = AppConfig(state_file=os.path.join(tmp, "grace.json"),
+                 defaults=DEF, devices=[], startup_grace_minutes=20)
+geng = Engine(gcfg, notifiers=[fn], devices=[])
+clock = [1_000_000.0]
+geng.now_fn = lambda: clock[0]
+geng._start_ts = clock[0]
+
+down_alert = Alert("R1", "reachability", Severity.CRITICAL, "Device UNREACHABLE")
+geng.dispatch([down_alert])
+check("an alert during the grace window is logged but NOT sent",
+      fn.sent == [])
+
+clock[0] += 5 * 60  # 5 minutes in — still well inside the 20-minute window
+geng.dispatch([down_alert])
+check("still suppressed 5 minutes in (grace window hasn't elapsed)",
+      fn.sent == [])
+
+# Simulate this condition having been persisted as "problem" by a real
+# transition() call during the (suppressed) grace window.
+cond = geng.state.condition("R1", "reachability")
+cond.update({"status": "problem", "since": clock[0], "title": "Device UNREACHABLE",
+            "severity": int(Severity.CRITICAL)})
+
+clock[0] += 16 * 60  # 21 minutes total — grace period has now elapsed
+geng._maybe_resync_after_grace()
+check("once the grace period elapses, anything still down gets a fresh alert",
+      len(fn.sent) == 1 and len(fn.sent[0]) == 1
+      and fn.sent[0][0].device == "R1" and fn.sent[0][0].key == "reachability"
+      and "20-minute" in fn.sent[0][0].detail)
+
+fn.sent.clear()
+geng._maybe_resync_after_grace()
+check("the resync only fires once (not every poll after grace ends)",
+      fn.sent == [])
+
+fn.sent.clear()
+clock[0] += 60
+geng.dispatch([Alert("R1", "reachability", Severity.INFO, "Resolved",
+                    recovery=True)])
+check("normal delivery resumes for new alerts after the grace period",
+      len(fn.sent) == 1)
+
+# A condition that recovered DURING the grace window (before it elapsed)
+# must not be re-announced at resync time — only what's still actually down.
+fn.sent.clear()
+gcfg2 = AppConfig(state_file=os.path.join(tmp, "grace2.json"),
+                  defaults=DEF, devices=[], startup_grace_minutes=20)
+geng2 = Engine(gcfg2, notifiers=[fn], devices=[])
+clock2 = [2_000_000.0]
+geng2.now_fn = lambda: clock2[0]
+geng2._start_ts = clock2[0]
+geng2.state.condition("R2", "reachability").update({"status": "ok"})
+clock2[0] += 21 * 60
+geng2._maybe_resync_after_grace()
+check("a condition that's healthy by the time grace ends is not re-alerted",
+      fn.sent == [])
+
 print("Web render helpers (offline):")
 cfgwan = build_device({"name": "R", "host": "1.1.1.1", "wan": {"links": [
     {"name": "Fibre", "interface": "ether1"},
