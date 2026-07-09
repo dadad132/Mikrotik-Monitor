@@ -424,22 +424,47 @@ def _apply_failover(ops, flat, pusher, cfg):
                                   owns=fo_owns, label="failover route"))
         ops.extend(reconcile_list(_NETWATCH, "comment", [], netwatch,
                                   owns=fo_owns, label="netwatch"))
-        # Restore automatic default routes on the WAN clients
+        # Restore automatic default routes on the WAN clients — plain field
+        # sets only, no scripting: add-default-route=yes so the client
+        # creates its own route again, default-route-distance set to a
+        # distinct value per link (10, 11, 12... in priority order) so
+        # multiple uplinks don't collide at RouterOS's implicit default of
+        # 1, and disabled=no in case an earlier troubleshooting step left
+        # the client itself switched off. Equivalent to running, per link:
+        #   /ip dhcp-client set [find name="..."] add-default-route=yes \
+        #       default-route-distance=<N> disabled=no
         pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
         dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
         links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
-        for link in links:
+        for idx, link in enumerate(links):
             iface = getattr(link, "interface", "") or ""
             if not iface:
                 continue
+            want_dist = str(10 + idx)
             for c in pppoe_clients:
-                if c.get("name") == iface and c.get("add-default-route", "yes") == "no":
-                    ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route", "yes",
-                                          f"PPPoE {iface}"))
+                if c.get("name") == iface:
+                    if c.get("add-default-route", "yes") == "no":
+                        ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route",
+                                              "yes", f"PPPoE {iface}"))
+                    if _norm(str(c.get("default-route-distance", "") or "")) != want_dist:
+                        ops.append(_set_field(_PPPOE_CLIENT, c,
+                                              "default-route-distance", want_dist,
+                                              f"PPPoE {iface}"))
+                    if c.get("disabled", "false") not in ("false", "no", False):
+                        ops.append(_set_field(_PPPOE_CLIENT, c, "disabled", "no",
+                                              f"PPPoE {iface}"))
             for c in dhcp_clients:
-                if c.get("interface") == iface and c.get("add-default-route", "yes") == "no":
-                    ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route", "yes",
-                                          f"DHCP {iface}"))
+                if c.get("interface") == iface:
+                    if c.get("add-default-route", "yes") == "no":
+                        ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route",
+                                              "yes", f"DHCP {iface}"))
+                    if _norm(str(c.get("default-route-distance", "") or "")) != want_dist:
+                        ops.append(_set_field(_DHCP_CLIENT, c,
+                                              "default-route-distance", want_dist,
+                                              f"DHCP {iface}"))
+                    if c.get("disabled", "false") not in ("false", "no", False):
+                        ops.append(_set_field(_DHCP_CLIENT, c, "disabled", "no",
+                                              f"DHCP {iface}"))
         return
 
     # Detect gateways live from the router at apply time
