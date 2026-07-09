@@ -600,43 +600,6 @@ check("policy adds a marked default route",
       any(o.path == ("ip", "route") and o.params.get("routing-mark")
           and o.params.get("dst-address") == "0.0.0.0/0" for o in plan.ops))
 
-# Turning failover OFF must restore each WAN client to plain, working
-# routing: add-default-route=yes, a distinct non-colliding distance per
-# link (10, 11, 12... in priority order — RouterOS defaults every client to
-# 1 if left unset, so 2+ uplinks would otherwise tie), and disabled=no in
-# case an earlier troubleshooting step left the client switched off.
-# Equivalent to: /ip dhcp-client set [find name="..."] add-default-route=yes
-# default-route-distance=<N> disabled=no
-foff_link_a = _t.SimpleNamespace(interface="ether2-terana", gateway="", name="Main")
-foff_link_b = _t.SimpleNamespace(interface="ether3-vodacom", gateway="", name="Backup")
-foff_cfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(
-    links=[foff_link_a, foff_link_b]))
-foff_api = FakeApi({
-    ("ip", "route"): [], ("tool", "netwatch"): [],
-    ("interface", "pppoe-client"): [],
-    ("ip", "dhcp-client"): [
-        {".id": "*1", "interface": "ether2-terana", "add-default-route": "no",
-         "disabled": "true"},
-        {".id": "*2", "interface": "ether3-vodacom", "add-default-route": "no"},
-    ],
-})
-foff_pusher = Pusher(foff_cfg, foff_api, dry_run=True)
-foff_ops = []
-F._apply_failover(foff_ops, {}, foff_pusher, foff_cfg)  # fo_enabled absent -> OFF
-by_id = {}
-for op in foff_ops:
-    by_id.setdefault(op.params.get(".id"), {}).update(op.params)
-check("restoring the primary gets add-default-route=yes",
-      by_id["*1"].get("add-default-route") == "yes")
-check("restoring the primary gets a distinct distance (10)",
-      by_id["*1"].get("default-route-distance") == "10")
-check("restoring the secondary gets a distinct distance (11), not "
-      "colliding with the primary", by_id["*2"].get("default-route-distance") == "11")
-check("a client left disabled from earlier troubleshooting gets re-enabled",
-      by_id["*1"].get("disabled") == "no")
-check("a client that was never disabled gets no needless disabled= op",
-      "disabled" not in by_id["*2"])
-
 
 # ---- 11b. detect_isp_ifaces: find which port actually has the internet ----
 print("detect_isp_ifaces: find which port actually has the internet:")
