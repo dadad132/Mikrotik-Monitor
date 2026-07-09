@@ -85,6 +85,34 @@ class WanCheck(Check):
         want_down = dev.check_enabled("internet_down")
         links = dev.wan.links
 
+        # ---- clear stale wan_failover / wan_link:N conditions -------------
+        # Confirmed live: a device with wan_failover monitoring turned off
+        # kept showing every uplink as permanently offline, because nothing
+        # below ever runs again to say otherwise once want_failover is
+        # false — transition() only clears a condition when it's actually
+        # called with healthy=True, so a real "problem" recorded before the
+        # check was disabled (or before a link was removed, dropping to <=1
+        # configured uplinks) just stays frozen indefinitely. Clear anything
+        # the code below won't reach this poll, using confirm=1 so it
+        # doesn't linger for another debounce cycle.
+        existing = ctx.store.data.get("devices", {}).get(ctx.device, {}).get("conditions", {})
+        if not want_failover:
+            for key in list(existing):
+                if key == "wan_failover" or key.startswith("wan_link:"):
+                    ctx.transition(
+                        key, healthy=True, severity=Severity.WARNING, title="",
+                        recovery_title="WAN failover monitoring is off — "
+                                      "clearing this stale alert",
+                        confirm=1)
+        elif len(links) <= 1:
+            for key in list(existing):
+                if key.startswith("wan_link:"):
+                    ctx.transition(
+                        key, healthy=True, severity=Severity.WARNING, title="",
+                        recovery_title="No backup uplink is configured anymore — "
+                                      "clearing this stale alert",
+                        confirm=1)
+
         # ---- per-uplink status for BACKUP links only (one alert each) -----
         # Three mutually-exclusive tiers, each with its own single email:
         #   1. the primary (links[0]) goes down -> the "wan_failover" alert

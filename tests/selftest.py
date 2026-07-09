@@ -25,7 +25,8 @@ from mikromon.checks.interfaces import InterfaceCheck
 from mikromon.checks.security import SecurityCheck
 from mikromon.checks.clients import ClientCountCheck
 from mikromon.checks.client_usage import ClientUsageCheck
-from mikromon.config import DEFAULT_THRESHOLDS, DeviceConfig, SmtpConfig, WanConfig, WanEndpoint
+from mikromon.config import (DEFAULT_CHECKS, DEFAULT_THRESHOLDS, DeviceConfig,
+                             SmtpConfig, WanConfig, WanEndpoint)
 from mikromon.context import CheckContext
 from mikromon.device import Snapshot
 from mikromon.notify.email_smtp import EmailNotifier
@@ -195,6 +196,50 @@ a = run(WanCheck(), unparseable_and_down, dev3, store)
 check("the SAME route reported down is correctly alerted, not masked by "
       "the comment-tag fallback always assuming it's fine",
       keys(a) == ["wan_link:1"] and "Backup" in a[0].title)
+
+print("WAN check: stale wan_failover/wan_link conditions clear instead of "
+      "freezing forever (confirmed live: a device with WAN-failover "
+      "monitoring turned off kept showing every uplink permanently offline "
+      "— a real problem recorded before the check was disabled just never "
+      "got re-evaluated to clear it):")
+dev4 = mkdev("TestRouter4", wan=WanConfig(links=[
+    WanEndpoint(interface="ether1", gateway="1.1.1.1", name="Main"),
+    WanEndpoint(interface="lte1", gateway="10.0.0.1", name="Backup"),
+]), checks={**DEFAULT_CHECKS, "wan_failover": False})
+# Pre-seed stale "problem" conditions, as if a real outage had been recorded
+# before monitoring was switched off for this device.
+for key in ("wan_failover", "wan_link:1", "wan_link:0"):
+    cond = store.condition("TestRouter4", key)
+    cond.update({"status": "problem", "since": 1_000_000.0})
+a = run(WanCheck(), both_up, dev4, store)
+cleared = {al.key for al in a if al.recovery}
+check("wan_failover check disabled: stale wan_failover clears",
+      "wan_failover" in cleared)
+check("wan_failover check disabled: stale wan_link:1 clears",
+      "wan_link:1" in cleared)
+check("wan_failover check disabled: stale wan_link:0 (an old leftover key "
+      "no longer ever written) clears too", "wan_link:0" in cleared)
+check("the conditions are genuinely healthy now, not just alerted once",
+      store.condition("TestRouter4", "wan_failover").get("status") == "ok"
+      and store.condition("TestRouter4", "wan_link:1").get("status") == "ok")
+
+# Same idea, but the check is still ON — only the LINK COUNT dropped to 1,
+# so per-link backup checks can't mean anything anymore (nothing to compare
+# against), while wan_failover itself is left alone (still meaningful).
+dev5 = mkdev("TestRouter5", wan=WanConfig(links=[
+    WanEndpoint(interface="ether1", gateway="1.1.1.1", name="Main"),
+]), checks={**DEFAULT_CHECKS, "wan_failover": True})
+for key in ("wan_link:1", "wan_link:2"):
+    store.condition("TestRouter5", key).update(
+        {"status": "problem", "since": 1_000_000.0})
+single_link_routes = {"route": [
+    {"dst-address": "0.0.0.0/0", "gateway": "1.1.1.1", "distance": "1",
+     "active": "true", "gateway-status": "1.1.1.1 reachable via ether1"},
+]}
+a = run(WanCheck(), single_link_routes, dev5, store)
+cleared5 = {al.key for al in a if al.recovery}
+check("only 1 link configured now: stale wan_link:N entries clear",
+      "wan_link:1" in cleared5 and "wan_link:2" in cleared5)
 
 print("Resources (reboot / CPU):")
 run(ResourceCheck(), {"resource": [{"uptime": "1h", "cpu-load": "5",
