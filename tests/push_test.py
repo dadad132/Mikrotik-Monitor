@@ -600,6 +600,36 @@ check("policy adds a marked default route",
       any(o.path == ("ip", "route") and o.params.get("routing-mark")
           and o.params.get("dst-address") == "0.0.0.0/0" for o in plan.ops))
 
+# gateway failover switched OFF: restoring add-default-route must give each
+# configured WAN link its own distinct, high distance (10, 11, ...) instead
+# of leaving RouterOS's implicit default (1 for every client) — otherwise
+# every uplink ties at distance 1 as soon as more than one is up.
+link_a = _t.SimpleNamespace(interface="ether2-terana", gateway="", name="Main",
+                            label=lambda i=0: "Main")
+link_b = _t.SimpleNamespace(interface="ether3-vodacom", gateway="", name="Backup",
+                            label=lambda i=0: "Backup")
+fcfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[link_a, link_b]))
+fapi = FakeApi({
+    ("ip", "route"): [],
+    ("tool", "netwatch"): [],
+    ("interface", "pppoe-client"): [],
+    ("ip", "dhcp-client"): [
+        {".id": "*1", "interface": "ether2-terana", "add-default-route": "no"},
+        {".id": "*2", "interface": "ether3-vodacom", "add-default-route": "no"},
+    ],
+})
+fp = Pusher(fcfg, fapi, dry_run=True)
+foff = F.routes_plan(fp, fcfg, {}, {})  # fo_enabled absent -> failover OFF
+dist_ops = {o.params.get(".id"): o.params.get("default-route-distance")
+           for o in foff.ops if "default-route-distance" in o.params}
+check("failover OFF gives the primary link a distinct high distance (10)",
+      dist_ops.get("*1") == "10")
+check("failover OFF gives the secondary link a distinct high distance (11), "
+      "not colliding with the primary at 1",
+      dist_ops.get("*2") == "11")
+check("failover OFF also restores add-default-route=yes on both",
+      sum(1 for o in foff.ops if o.params.get("add-default-route") == "yes") == 2)
+
 
 # ---- 12. custom scripts: add / run / remove, ownership-scoped --------------
 print("custom scripts:")
