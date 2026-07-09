@@ -279,6 +279,29 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Billing — ensure billing.db is set so trials/free-plan device caps and the
+# superadmin "Assign plan" control work out of the box. Idempotent: only
+# fills in billing.db if the billing: block is completely absent, so an
+# existing install's payfast_* settings (or an intentional opt-out) are never
+# touched or overwritten.
+# ---------------------------------------------------------------------------
+step "Ensuring billing.db is configured"
+"${APP_DIR}/.venv/bin/python" - "${CONFIG_FILE}" <<'PY'
+import sys, yaml
+path = sys.argv[1]
+try:
+    with open(path) as f: data = yaml.safe_load(f) or {}
+except Exception:
+    data = {}
+if not data.get("billing"):
+    data["billing"] = {"db": "./billing.db"}
+    with open(path, "w") as f: yaml.safe_dump(data, f, sort_keys=False)
+    print("billing.db enabled (trials, free-plan caps, manual plan assignment)")
+else:
+    print("billing: already configured — left as-is")
+PY
+
+# ---------------------------------------------------------------------------
 # TEMPORARY — one-off superadmin grant for this migration. Remove this block
 # on the next push; new installs don't need it (signup now grants the first
 # superadmin automatically). Best-effort: does nothing if the account doesn't
