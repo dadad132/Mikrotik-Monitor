@@ -630,8 +630,53 @@ check("failover OFF gives the primary link a distinct high distance (10)",
 check("failover OFF gives the secondary link a distinct high distance (11), "
       "not colliding with the primary at 1",
       dist_ops.get("*2") == "11")
-check("failover OFF also restores add-default-route=yes on both",
-      sum(1 for o in foff.ops if o.params.get("add-default-route") == "yes") == 2)
+check("failover OFF leaves add-default-route alone (stays no) — the client's "
+      "own dynamic route must not compete with the kept static one",
+      not any(o.params.get("add-default-route") == "yes" for o in foff.ops))
+
+# The exact live scenario reported: failover WAS on (static primary/secondary
+# routes + check-routes + netwatch already exist at distance 1/2), then
+# switched off. The primary/secondary routes must be KEPT and renumbered to
+# 10/11 directly (immediate — no DHCP-client reconnect needed), not deleted.
+existing_fo_routes = [
+    {".id": "*10", "comment": "mikromon:failover:primary", "gateway": "196.39.82.159",
+     "dst-address": "0.0.0.0/0", "distance": "1"},
+    {".id": "*11", "comment": "mikromon:failover:secondary", "gateway": "102.214.189.2",
+     "dst-address": "0.0.0.0/0", "distance": "2"},
+    {".id": "*12", "comment": "mikromon:failover:check:primary", "gateway": "196.39.82.159",
+     "dst-address": "8.8.8.8/32", "distance": "1"},
+    {".id": "*13", "comment": "mikromon:failover:check:secondary", "gateway": "102.214.189.2",
+     "dst-address": "1.1.1.1/32", "distance": "1"},
+]
+existing_netwatch = [
+    {".id": "*20", "comment": "mikromon:failover:watch:primary", "host": "8.8.8.8"},
+    {".id": "*21", "comment": "mikromon:failover:watch:secondary", "host": "1.1.1.1"},
+]
+fapi3 = FakeApi({
+    ("ip", "route"): existing_fo_routes,
+    ("tool", "netwatch"): existing_netwatch,
+    ("interface", "pppoe-client"): [],
+    ("ip", "dhcp-client"): [
+        {".id": "*1", "interface": "ether2-terana", "add-default-route": "no"},
+        {".id": "*2", "interface": "ether3-vodacom", "add-default-route": "no"},
+    ],
+})
+fp3 = Pusher(fcfg, fapi3, dry_run=False)
+foff3 = fp3.apply(F.routes_plan(fp3, fcfg, {}, {"wan_order": ["dhcp:1", "dhcp:2"]}),
+                  feature="routes")
+live_routes = {r["comment"]: r for r in fapi3.fetch(("ip", "route"))}
+check("the primary route is KEPT (not deleted) and renumbered to 10",
+      "mikromon:failover:primary" in live_routes
+      and live_routes["mikromon:failover:primary"]["distance"] == "10"
+      and live_routes["mikromon:failover:primary"]["gateway"] == "196.39.82.159")
+check("the secondary route is KEPT and renumbered to 11",
+      "mikromon:failover:secondary" in live_routes
+      and live_routes["mikromon:failover:secondary"]["distance"] == "11")
+check("the check-routes are removed (no active monitoring while disabled)",
+      "mikromon:failover:check:primary" not in live_routes
+      and "mikromon:failover:check:secondary" not in live_routes)
+check("netwatch entries are removed",
+      fapi3.fetch(("tool", "netwatch")) == [])
 
 # The exact bug reported live: turning failover OFF while the Routes tab's
 # drag list still submits its own order must NOT fall back to plain 1,2,3 —

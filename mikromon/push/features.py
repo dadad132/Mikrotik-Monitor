@@ -436,31 +436,39 @@ def _apply_failover(ops, flat, pusher, cfg, wan_order=None):
     links = _reorder_links_by_wan_order(links, wan_order, pusher)
 
     if not flat.get("fo_enabled"):
-        ops.extend(reconcile_list(_ROUTE, "comment", [], all_routes,
+        # Keep the primary/secondary ROUTES themselves (re-numbered to a
+        # high, non-colliding distance) instead of tearing them down and
+        # falling back to the WAN client's own dynamic route. RouterOS only
+        # applies a changed default-route-distance to a DYNAMIC DHCP/PPPoE
+        # route on its NEXT reconnect or lease renewal — confirmed live, this
+        # left the router sitting at the OLD (colliding, distance 1/2)
+        # static route indefinitely. A STATIC route's distance, in contrast,
+        # takes effect immediately on `set`, with no reconnect needed — so
+        # renumber it directly rather than deleting and recreating via the
+        # client. The check:primary/check:secondary routes and Netwatch
+        # entries ARE removed (no active monitoring while "disabled"); the
+        # kept route's own check-gateway=ping still gives native, Netwatch-
+        # independent reachability detection at the new, deprioritized
+        # distance. add-default-route stays "no" on the underlying client —
+        # otherwise its own dynamic route would appear as a SECOND,
+        # competing default route alongside the one kept here.
+        fo_by_comment = {r.get("comment", ""): r for r in all_routes if fo_owns(r)}
+        keep_routes = []
+        for idx, role in enumerate(("primary", "secondary")):
+            if idx >= len(links):
+                break
+            r = fo_by_comment.get(f"{_FAILOVER_TAG}{role}")
+            if r and r.get("gateway"):
+                keep_routes.append({
+                    "comment": f"{_FAILOVER_TAG}{role}",
+                    "dst-address": "0.0.0.0/0", "gateway": r["gateway"],
+                    "distance": str(10 + idx), "check-gateway": "ping",
+                    "scope": "30", "target-scope": "10",
+                })
+        ops.extend(reconcile_list(_ROUTE, "comment", keep_routes, all_routes,
                                   owns=fo_owns, label="failover route"))
         ops.extend(reconcile_list(_NETWATCH, "comment", [], netwatch,
                                   owns=fo_owns, label="netwatch"))
-        # Restore automatic default routes on the WAN clients. The distinct,
-        # high default-route-distance (10, 11, 12, ...) each one needs so
-        # they don't all tie at RouterOS's implicit default of 1 is handled
-        # by _apply_wan_order (called alongside this in routes_plan) — it
-        # covers every client in the Routes tab's drag list, not just the
-        # ones configured as WAN uplinks here, and uses the SAME offset
-        # scheme keyed off the current drag order.
-        pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
-        dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
-        for link in links:
-            iface = getattr(link, "interface", "") or ""
-            if not iface:
-                continue
-            for c in pppoe_clients:
-                if c.get("name") == iface and c.get("add-default-route", "yes") == "no":
-                    ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route",
-                                          "yes", f"PPPoE {iface}"))
-            for c in dhcp_clients:
-                if c.get("interface") == iface and c.get("add-default-route", "yes") == "no":
-                    ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route",
-                                          "yes", f"DHCP {iface}"))
         return
 
     # Detect gateways live from the router at apply time
