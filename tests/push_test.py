@@ -771,6 +771,48 @@ check("no Netwatch entry is created for the 3rd link",
       "mikromon:failover:watch:link3" not in watch3
       and {"mikromon:failover:watch:primary", "mikromon:failover:watch:secondary"} <= watch3)
 
+print("Routes tab display: comment-tag fallback when gateway matching can't "
+      "find the managed route (confirmed live: two different lines both "
+      "showed 'distance 1' because gateway-only matching missed their own "
+      "managed static failover routes):")
+rlink_a = _t.SimpleNamespace(interface="pppoe-wikiworx", gateway="", name="Wikiworx",
+                             label=lambda i=0: "Wikiworx")
+rlink_b = _t.SimpleNamespace(interface="ether2-backup", gateway="", name="Backup",
+                             label=lambda i=0: "Backup")
+rcfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[rlink_a, rlink_b]))
+r_current = {
+    "routes": [
+        {"comment": "mikromon:failover:primary", "gateway": "41.1.1.1",
+         "distance": "1", "active": "true", "dst-address": "0.0.0.0/0"},
+        {"comment": "mikromon:failover:secondary", "gateway": "41.2.2.2",
+         "distance": "2", "active": "true", "dst-address": "0.0.0.0/0"},
+    ],
+    "dhcp": [
+        {".id": "*2", "interface": "ether2-backup", "status": "bound",
+         "add-default-route": "no"},  # no "gateway" field once add-default-route=no
+    ],
+    "ppp": [
+        {"_type": "pppoe", ".id": "*1", "name": "pppoe-wikiworx",
+         "running": "true", "add-default-route": "no"},
+    ],
+}
+items = F._wan_sortable_items(r_current, rcfg)
+by_id = {it["id"]: it for it in items}
+check("Wikiworx (PPPoE) resolves its true distance (1) via the comment tag, "
+      "instead of coincidentally matching the hardcoded '1' fallback",
+      by_id["pppoe:1"]["_dist"] == "1" and "distance 1" in by_id["pppoe:1"]["label"])
+check("Backup (DHCP) resolves its true distance (2) via the comment tag, "
+      "not silently colliding with Wikiworx's fallback '1'",
+      by_id["dhcp:2"]["_dist"] == "2" and "distance 2" in by_id["dhcp:2"]["label"])
+check("Backup's label now also shows the managed route's real active status "
+      "even though it has 'no default route' set on the client itself",
+      "no default route (active)" in by_id["dhcp:2"]["label"])
+
+summary = F.routes_summary(r_current, rcfg)
+check("routes_summary shows the same resolved distance, not '?'",
+      any("distance 1" in ln for ln in summary)
+      and any("distance 2" in ln for ln in summary))
+
 print("detect_isp_ifaces: find which port actually has the internet:")
 isp_api = FakeApi({
     ("ip", "dhcp-client"): [

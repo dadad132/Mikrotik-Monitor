@@ -149,23 +149,31 @@ def routes_summary(current, cfg):
     for c in current.get("dhcp", []):
         iface = c.get("interface", "?")
         status = c.get("status", "unknown")
-        dist = c.get("default-route-distance", "?")
+        fo_comment = _fo_comment_for_client(c, cfg, "dhcp")
+        dist = (c.get("default-route-distance", "")
+               or _dist_from_routes(routes, c, "dhcp", fo_comment) or "?")
         if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
-            lines.append(f"DHCP {iface} · no default route")
+            rs = _route_status_for(routes, c, "dhcp", fo_comment)
+            rs_str = f" ({rs})" if rs else ""
+            lines.append(f"DHCP {iface} · no default route{rs_str}")
         else:
-            rs = _route_status_for(routes, c, "dhcp")
+            rs = _route_status_for(routes, c, "dhcp", fo_comment)
             rs_str = f" · route {rs}" if rs else ""
             lines.append(f"DHCP {iface} · {status}{rs_str} · distance {dist}")
     for c in current.get("ppp", []):
         ctype = c.get("_type", "ppp").upper()
         name = c.get("name", "?")
         running = str(c.get("running", "false")).lower() in ("true", "yes")
-        dist = c.get("default-route-distance", "?")
+        fo_comment = _fo_comment_for_client(c, cfg, c.get("_type", "ppp"))
+        dist = (c.get("default-route-distance", "")
+               or _dist_from_routes(routes, c, c.get("_type", "ppp"), fo_comment) or "?")
         if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
-            lines.append(f"{ctype} {name} · no default route")
+            rs = _route_status_for(routes, c, c.get("_type", "ppp"), fo_comment)
+            rs_str = f" ({rs})" if rs else ""
+            lines.append(f"{ctype} {name} · no default route{rs_str}")
         else:
             state = "connected" if running else "disconnected"
-            rs = _route_status_for(routes, c, c.get("_type", "ppp"))
+            rs = _route_status_for(routes, c, c.get("_type", "ppp"), fo_comment)
             rs_str = f" · route {rs}" if rs else ""
             lines.append(f"{ctype} {name} · {state}{rs_str} · distance {dist}")
     for r in current.get("routes", []):
@@ -190,53 +198,84 @@ def routes_summary(current, cfg):
     return lines or ["No internet lines found on this router."]
 
 
-def _route_status_for(routes, client, ctype):
+def _fo_comment_for_client(client, cfg, ctype):
+    """The mikromon:failover:<role> comment this client's managed static
+    route would carry, if it's one of the device's configured WAN uplinks —
+    lets distance/status lookups below find that route even when matching
+    purely by gateway IP can't (the client's own "gateway" field is blank or
+    stale once add-default-route=no, since it's no longer the one creating
+    the route)."""
+    if cfg is None:
+        return None
+    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
+    name = client.get("interface", "") if ctype == "dhcp" else client.get("name", "")
+    if not name:
+        return None
+    for idx, link in enumerate(links):
+        if getattr(link, "interface", "") == name:
+            return f"{_FAILOVER_TAG}{_fo_role(idx)}"
+    return None
+
+
+def _route_status_for(routes, client, ctype, fo_comment=None):
     """Return 'active', 'inactive', or '' (no matching default route found).
 
     DHCP routes are matched by gateway IP; PPPoE/L2TP routes are matched by the
     interface/client name.  The RouterOS 'active' flag is True when the route is
     in the forwarding table — reliable for interface-down detection but only
-    reflects internet reachability if check-gateway is also configured."""
+    reflects internet reachability if check-gateway is also configured.
+    fo_comment (see _fo_comment_for_client) is a fallback for when gateway
+    matching misses a mikromon-managed static route entirely."""
     if ctype == "dhcp":
         gw = str(client.get("gateway", ""))
     else:
         gw = str(client.get("name", ""))
-    if not gw:
-        return ""
     for r in routes:
-        if str(r.get("gateway", "")) == gw:
+        if gw and str(r.get("gateway", "")) == gw:
             active = str(r.get("active", "true")).lower() not in ("false", "no")
             return "active" if active else "inactive"
+    if fo_comment:
+        for r in routes:
+            if str(r.get("comment", "")) == fo_comment:
+                active = str(r.get("active", "true")).lower() not in ("false", "no")
+                return "active" if active else "inactive"
     return ""
 
 
-def _dist_from_routes(routes, client, ctype):
+def _dist_from_routes(routes, client, ctype, fo_comment=None):
     """Find the distance of the matching 0.0.0.0/0 route for this client.
 
     RouterOS omits default-route-distance from the API response when
     add-default-route=no, so we fall back to reading the distance from the
-    actual route table (which includes our managed static failover routes)."""
+    actual route table (which includes our managed static failover routes) —
+    matched by gateway IP first, then by the managed route's own comment tag
+    (fo_comment) when gateway matching can't find it."""
     gw = str(client.get("gateway", "")) if ctype == "dhcp" else str(client.get("name", ""))
-    if not gw:
-        return ""
     for r in routes:
-        if str(r.get("gateway", "")) == gw:
+        if gw and str(r.get("gateway", "")) == gw:
             return str(r.get("distance", ""))
+    if fo_comment:
+        for r in routes:
+            if str(r.get("comment", "")) == fo_comment:
+                return str(r.get("distance", ""))
     return ""
 
 
-def _wan_sortable_items(current):
+def _wan_sortable_items(current, cfg=None):
     routes = current.get("routes", [])
     items = []
     for c in current.get("dhcp", []):
         iface = c.get("interface", "?")
         status = c.get("status", "unknown")
-        dist = c.get("default-route-distance", "") or _dist_from_routes(routes, c, "dhcp") or "1"
+        fo_comment = _fo_comment_for_client(c, cfg, "dhcp")
+        dist = (c.get("default-route-distance", "")
+               or _dist_from_routes(routes, c, "dhcp", fo_comment) or "1")
         rid = c.get(".id", "").lstrip("*")
         if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
-            conn_info = f"{status} · no default route"
+            rs = _route_status_for(routes, c, "dhcp", fo_comment)
+            conn_info = f"{status} · no default route" + (f" ({rs})" if rs else "")
         else:
-            rs = _route_status_for(routes, c, "dhcp")
+            rs = _route_status_for(routes, c, "dhcp", fo_comment)
             conn_info = f"{status}" + (f" · route {rs}" if rs else "")
         items.append({
             "id": f"dhcp:{rid}",
@@ -247,13 +286,16 @@ def _wan_sortable_items(current):
         ctype = c.get("_type", "ppp").upper()
         name = c.get("name", "?")
         running = str(c.get("running", "false")).lower() in ("true", "yes")
-        dist = c.get("default-route-distance", "") or _dist_from_routes(routes, c, c.get("_type", "ppp")) or "1"
+        fo_comment = _fo_comment_for_client(c, cfg, c.get("_type", "ppp"))
+        dist = (c.get("default-route-distance", "")
+               or _dist_from_routes(routes, c, c.get("_type", "ppp"), fo_comment) or "1")
         rid = c.get(".id", "").lstrip("*")
         state = "connected" if running else "disconnected"
         if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
-            conn_info = f"{state} · no default route"
+            rs = _route_status_for(routes, c, c.get("_type", "ppp"), fo_comment)
+            conn_info = f"{state} · no default route" + (f" ({rs})" if rs else "")
         else:
-            rs = _route_status_for(routes, c, c.get("_type", "ppp"))
+            rs = _route_status_for(routes, c, c.get("_type", "ppp"), fo_comment)
             conn_info = f"{state}" + (f" · route {rs}" if rs else "")
         items.append({
             "id": f"{c.get('_type', 'ppp')}:{rid}",
@@ -297,7 +339,7 @@ def _wan_gateway_for(client):
 
 
 def routes_form(current, cfg):
-    items = _wan_sortable_items(current)
+    items = _wan_sortable_items(current, cfg)
 
     # Pre-fill check IPs and interval from existing failover watch config
     fo_enabled = bool(current.get("failover_routes"))
