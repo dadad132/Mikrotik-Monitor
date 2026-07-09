@@ -729,6 +729,48 @@ check("dragging Backup to the top makes IT the failover primary (distance 1)",
 check("Main (dragged to 2nd) becomes the failover secondary (distance 2)",
       added_routes.get("mikromon:failover:secondary", {}).get("gateway") == "10.0.0.1")
 
+# The exact live bug: with a 3rd uplink ALSO configured as a WAN link,
+# failover ON must give it its own rank-based distance (3) via a real static
+# route — previously only links[0]/[1] ever got a managed route (hardcoded
+# distance 1/2), so a 3rd configured link's intended distance never applied
+# and it kept colliding with whatever ELSE happened to sit at distance 2.
+link_fibre = _t.SimpleNamespace(interface="ether2-terana", gateway="196.39.82.159",
+                                name="Fibre", label=lambda i=0: "Fibre")
+link_backup3 = _t.SimpleNamespace(interface="ether3-vodacom", gateway="102.214.189.2",
+                                  name="Backup", label=lambda i=0: "Backup")
+link_afrihost = _t.SimpleNamespace(interface="ether4-afrihost", gateway="41.0.0.1",
+                                   name="Afrihost", label=lambda i=0: "Afrihost")
+o3cfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(
+    links=[link_fibre, link_backup3, link_afrihost]))
+o3api = FakeApi({
+    ("ip", "route"): [], ("tool", "netwatch"): [],
+    ("interface", "pppoe-client"): [], ("interface", "l2tp-client"): [],
+    ("ip", "dhcp-client"): [
+        {".id": "*1", "interface": "ether2-terana", "add-default-route": "yes"},
+        {".id": "*2", "interface": "ether3-vodacom", "add-default-route": "yes"},
+        {".id": "*3", "interface": "ether4-afrihost", "add-default-route": "yes"},
+    ],
+})
+o3p = Pusher(o3cfg, o3api, dry_run=True)
+plan3 = F.routes_plan(o3p, o3cfg, {"fo_enabled": "1"},
+                      {"wan_order": ["dhcp:1", "dhcp:2", "dhcp:3"]})
+added3 = {o.params.get("comment"): o.params for o in plan3.ops
+         if o.action == "add" and o.path == ("ip", "route")}
+check("a 3rd configured WAN link gets its own managed static route at "
+      "distance 3 (not left to collide with whatever else is at 2)",
+      added3.get("mikromon:failover:link3", {}).get("distance") == "3"
+      and added3.get("mikromon:failover:link3", {}).get("gateway") == "41.0.0.1")
+check("primary/secondary still get their own check-route + Netwatch (active "
+      "monitoring), the 3rd does not (static route + native check-gateway only)",
+      "mikromon:failover:check:primary" in added3
+      and "mikromon:failover:check:secondary" in added3
+      and "mikromon:failover:check:link3" not in added3)
+watch3 = {o.params.get("comment") for o in plan3.ops
+         if o.action == "add" and o.path == ("tool", "netwatch")}
+check("no Netwatch entry is created for the 3rd link",
+      "mikromon:failover:watch:link3" not in watch3
+      and {"mikromon:failover:watch:primary", "mikromon:failover:watch:secondary"} <= watch3)
+
 
 # ---- 12. custom scripts: add / run / remove, ownership-scoped --------------
 print("custom scripts:")
