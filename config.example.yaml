@@ -46,7 +46,12 @@ web:
 auth_db: ./auth.db
 
 # ----------------------------------------------------------------------------
-# Billing (PayFast) — leave commented for unlimited free access.
+# Billing — leave commented for unlimited free access (no device caps at all).
+# `db:` alone is enough to turn on trials + free-plan device caps and the
+# superadmin "Assign plan" control (Platform admin -> manual, off-platform
+# billing). The payfast_* fields are ONLY needed if you also want the
+# self-serve "Subscribe" buttons / online checkout; without them those
+# buttons stay hidden and everything else still works.
 # Set ITN notify URL in your PayFast dashboard to:
 #   https://yourdomain.com/billing/itn
 # ----------------------------------------------------------------------------

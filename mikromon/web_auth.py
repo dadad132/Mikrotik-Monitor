@@ -341,8 +341,10 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
     elif status == "trial":
         te_fmt = (time.strftime("%d %b %Y", time.localtime(trial_end))
                   if trial_end else "soon")
+        limit_label = (f"{device_limit} device{'s' if device_limit != 1 else ''}"
+                       if device_limit else "unlimited devices")
         status_html = (f'<p style="margin:0"><span style="color:#2563eb;font-weight:700">'
-                       f'Free Trial</span> &middot; {FREE_DEVICES} devices &middot; '
+                       f'Free Trial</span> &middot; {limit_label} &middot; '
                        f'expires {te_fmt}</p>')
     elif status in ("grace",):
         ge_fmt = (time.strftime("%d %b %Y", time.localtime(grace_end))
@@ -429,8 +431,6 @@ def _render_locked(user) -> str:
              f'</div></div>')
     return _page("Account Suspended", _header(user, "") + inner)
 
-
-_TRIAL_DEVICES = FREE_DEVICES
 
 _STATUS_COLOR = {
     "active":   ("#16a34a", "Active"),

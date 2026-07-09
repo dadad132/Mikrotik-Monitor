@@ -132,7 +132,7 @@ check("free-plan cap is enforced", store.can_add(1, billing.FREE_DEVICES - 1)
 store.start_trial(2)
 check("start_trial sets status=trial with the trial device cap",
       store.billing_status(2) == "trial"
-      and store.device_limit(2) == billing.FREE_DEVICES
+      and store.device_limit(2) == billing.TRIAL_DEVICES
       and not store.is_locked(2))
 
 # A completed payment activates the org at the plan's device limit.

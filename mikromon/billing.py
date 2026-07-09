@@ -2,7 +2,7 @@
 
 Design:
   * Orgs without a billing record are on the FREE plan (FREE_DEVICES cap).
-  * New orgs get a 30-day free trial (FREE_DEVICES limit).
+  * New orgs get a 30-day free trial (TRIAL_DEVICES limit).
   * Owners subscribe via PayFast's hosted payment page; the subscription token
     arrives via ITN and is stored for recurring billing tracking.
   * Missed payment → 7-day grace period banner → full org lockout.
@@ -32,8 +32,8 @@ log = logging.getLogger(__name__)
 GRACE_DAYS = 7
 _GRACE_SECS = GRACE_DAYS * 86400
 _TRIAL_DAYS = 30
-FREE_DEVICES = 5     # cap for free plan and trial
-_TRIAL_DEVICES = FREE_DEVICES
+FREE_DEVICES = 5     # cap once a company has no active billing (lapsed/free)
+TRIAL_DEVICES = 1   # cap for a brand-new company's 30-day trial
 
 _PF_LIVE_URL = "https://www.payfast.co.za/eng/process"
 _PF_SANDBOX_URL = "https://sandbox.payfast.co.za/eng/process"
@@ -240,7 +240,7 @@ class BillingStore:
         if status == "trial":
             te = row.get("trial_end")
             if te and time.time() <= te:
-                return int(row.get("device_limit") or FREE_DEVICES)
+                return int(row.get("device_limit") or TRIAL_DEVICES)
         # lapsed / grace / locked — still enforce the cap from last sub, or free
         return int(row.get("device_limit") or FREE_DEVICES)
 
@@ -331,7 +331,7 @@ class BillingStore:
     def start_trial(self, org_id: int) -> None:
         trial_end = time.time() + _TRIAL_DAYS * 86400
         grace_end = trial_end + _GRACE_SECS
-        self._upsert(org_id, status="trial", device_limit=_TRIAL_DEVICES,
+        self._upsert(org_id, status="trial", device_limit=TRIAL_DEVICES,
                      trial_end=trial_end, grace_period_end=grace_end)
 
     def apply_itn(self, itn: dict) -> None:
