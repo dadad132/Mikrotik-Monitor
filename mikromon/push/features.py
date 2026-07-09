@@ -382,16 +382,50 @@ def _gateway_for_link(link, pppoe_names, dhcp_by_iface,
     return ""
 
 
-def _apply_failover(ops, flat, pusher, cfg):
+def _reorder_links_by_wan_order(links, order, pusher):
+    """Re-rank cfg.wan.links to match the CURRENT drag order from the Routes
+    tab, so gateway failover's primary/secondary picks follow what the user
+    just dragged instead of a fixed device-config order with no control for
+    it on this tab. Falls back to the original position for any link whose
+    interface isn't found in `order` (e.g. a link with no matching client
+    yet)."""
+    if not order or not links:
+        return links
+    dhcp_clients = _safe_fetch(pusher.api, _DHCP_CLIENT)
+    pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
+    l2tp_clients = _safe_fetch(pusher.api, _L2TP_CLIENT)
+    iface_by_item_id = {}
+    for c in dhcp_clients:
+        iface_by_item_id[f"dhcp:{c.get('.id', '').lstrip('*')}"] = c.get("interface", "")
+    for c in pppoe_clients:
+        iface_by_item_id[f"pppoe:{c.get('.id', '').lstrip('*')}"] = c.get("name", "")
+    for c in l2tp_clients:
+        iface_by_item_id[f"l2tp:{c.get('.id', '').lstrip('*')}"] = c.get("name", "")
+    order_rank = {}
+    for rank, item_id in enumerate(order):
+        iface = iface_by_item_id.get(item_id)
+        if iface:
+            order_rank.setdefault(iface, rank)
+
+    def _key(link):
+        return order_rank.get(getattr(link, "interface", "") or "", 9999)
+
+    return sorted(links, key=_key)
+
+
+def _apply_failover(ops, flat, pusher, cfg, wan_order=None):
     """Reconcile static failover routes and Netwatch entries.
 
     Gateways are derived from cfg.wan.links (the WAN uplinks the user
-    configured) matched against live PPPoE/DHCP data on the router.  Only
-    the check IPs (public addresses Netwatch pings) and interval come from
-    the form."""
+    configured), re-ranked by `wan_order` (the Routes tab's current drag
+    order) if given, matched against live PPPoE/DHCP data on the router.
+    Only the check IPs (public addresses Netwatch pings) and interval come
+    from the form."""
     fo_owns = _prefix_owner(_FAILOVER_TAG)
     all_routes = _safe_fetch(pusher.api, _ROUTE)
     netwatch = _safe_fetch(pusher.api, _NETWATCH)
+    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
+    links = _reorder_links_by_wan_order(links, wan_order, pusher)
 
     if not flat.get("fo_enabled"):
         ops.extend(reconcile_list(_ROUTE, "comment", [], all_routes,
@@ -407,7 +441,6 @@ def _apply_failover(ops, flat, pusher, cfg):
         # even with automatic failover switched off.
         pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
         dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
-        links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
         for idx, link in enumerate(links):
             iface = getattr(link, "interface", "") or ""
             if not iface:
@@ -442,7 +475,6 @@ def _apply_failover(ops, flat, pusher, cfg):
                           for s in _safe_fetch(pusher.api, _PPP_ACTIVE) if s.get("name")}
     ip_addr_by_iface = {a.get("interface", ""): a
                         for a in _safe_fetch(pusher.api, _IP_ADDRESS) if a.get("interface")}
-    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
     primary_gw = (_gateway_for_link(links[0], pppoe_names, dhcp_by_iface,
                                     ppp_active_by_name, ip_addr_by_iface) if links else "")
     secondary_gw = (_gateway_for_link(links[1], pppoe_names, dhcp_by_iface,
@@ -541,8 +573,9 @@ def _apply_failover(ops, flat, pusher, cfg):
 
 def routes_plan(pusher, cfg, flat, multi):
     ops = []
-    _apply_wan_order(ops, multi.get("wan_order", []), pusher)
-    _apply_failover(ops, flat, pusher, cfg)
+    order = multi.get("wan_order", [])
+    _apply_wan_order(ops, order, pusher)
+    _apply_failover(ops, flat, pusher, cfg, wan_order=order)
     return Plan(cfg.name, ops, summary="routes / failover")
 
 

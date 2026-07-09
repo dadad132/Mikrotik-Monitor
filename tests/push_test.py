@@ -630,6 +630,36 @@ check("failover OFF gives the secondary link a distinct high distance (11), "
 check("failover OFF also restores add-default-route=yes on both",
       sum(1 for o in foff.ops if o.params.get("add-default-route") == "yes") == 2)
 
+# gateway failover switched ON: dragging a link to the top of the Routes tab
+# list must make failover treat THAT one as primary — previously it always
+# used cfg.wan.links[0]/[1] regardless of the drag order, so reordering had
+# no effect on which uplink actually became distance 1.
+link_main = _t.SimpleNamespace(interface="ether2-terana", gateway="10.0.0.1",
+                               name="Main", label=lambda i=0: "Main")
+link_backup = _t.SimpleNamespace(interface="ether3-vodacom", gateway="10.0.1.1",
+                                 name="Backup", label=lambda i=0: "Backup")
+o2cfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[link_main, link_backup]))
+o2api = FakeApi({
+    ("ip", "route"): [],
+    ("tool", "netwatch"): [],
+    ("interface", "pppoe-client"): [],
+    ("interface", "l2tp-client"): [],
+    ("ip", "dhcp-client"): [
+        {".id": "*1", "interface": "ether2-terana", "add-default-route": "yes"},
+        {".id": "*2", "interface": "ether3-vodacom", "add-default-route": "yes"},
+    ],
+})
+o2p = Pusher(o2cfg, o2api, dry_run=True)
+# Backup (client *2) dragged to rank 0 (top / primary); Main (client *1) to rank 1.
+reordered = F.routes_plan(o2p, o2cfg, {"fo_enabled": "1"},
+                          {"wan_order": ["dhcp:2", "dhcp:1"]})
+added_routes = {o.params.get("comment"): o.params for o in reordered.ops
+               if o.action == "add" and o.path == ("ip", "route")}
+check("dragging Backup to the top makes IT the failover primary (distance 1)",
+      added_routes.get("mikromon:failover:primary", {}).get("gateway") == "10.0.1.1")
+check("Main (dragged to 2nd) becomes the failover secondary (distance 2)",
+      added_routes.get("mikromon:failover:secondary", {}).get("gateway") == "10.0.0.1")
+
 
 # ---- 12. custom scripts: add / run / remove, ownership-scoped --------------
 print("custom scripts:")
