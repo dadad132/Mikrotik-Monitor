@@ -1072,7 +1072,7 @@ def nextdns_form(current, cfg):
     cur_ip = next((r.get("address") for r in current.get("static", [])
                    if r.get("address")), "") or "127.0.0.1"
     cur_preset = _active_preset(dns)
-    fields = [
+    fields: list[dict] = [
         {"type": "static", "label": "Quick DNS provider",
          "value": "Flip one on to point the router at that DNS — only one at a "
                   "time (turning one on switches the others off). The one that "
@@ -1483,7 +1483,7 @@ def tunnel_form(current, cfg):
             "keepalive": str(p.get("persistent-keepalive", "")),
         })
 
-    fields = []
+    fields: list[dict] = []
     if not ifaces:
         fields.append({
             "type": "static", "label": "No WireGuard interfaces yet",
@@ -2233,7 +2233,8 @@ def adopt_plan(pusher, cfg, feature, row_id):
     new_comment = prefix + feature["adopt_name"](row)
     op = _set_field(path, row, "comment", new_comment, "rule")
     op.desc = f"adopt {'/'.join(path)} row → manage it as '{new_comment}'"
-    op.inverse.desc = "release (restore previous comment)"
+    if op.inverse:
+        op.inverse.desc = "release (restore previous comment)"
     return Plan(cfg.name, [op], summary="adopt")
 
 
