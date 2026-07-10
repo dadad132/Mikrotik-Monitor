@@ -487,6 +487,7 @@ def _cmd_demo(args) -> int:
         from . import web
         from .devices_store import DevicesStore
 
+        assert config.auth_db and config.devices_db  # always set by demo_config()
         seed_demo_users(config.auth_db)
         ds = DevicesStore(config.devices_db)  # populate the /devices page
         ds.seed_from(config.devices, config.defaults)

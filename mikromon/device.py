@@ -12,6 +12,7 @@ import logging
 import socket
 
 import librouteros
+import librouteros.exceptions
 
 log = logging.getLogger(__name__)
 

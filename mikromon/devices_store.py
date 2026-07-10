@@ -96,7 +96,7 @@ class DevicesStore:
                 row = self.db.execute(
                     "SELECT org_id FROM devices WHERE name = ?",
                     (original_name or dev.name,)).fetchone()
-                org_id = row[0] if row else 1
+                org_id = int(row[0]) if row else 1
             self.db.execute(
                 "INSERT INTO devices (name, config, updated, org_id) "
                 "VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET "

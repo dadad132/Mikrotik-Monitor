@@ -214,6 +214,7 @@ class AuthStore:
             cur = self.db.execute(
                 "INSERT INTO orgs (name, plan, created) VALUES (?, 'free', ?)",
                 (company, time.time()))
+            assert cur.lastrowid is not None  # always set after a successful INSERT
             org_id = cur.lastrowid
             user_cur = self.db.execute(
                 "INSERT INTO users (username, email, phone, pw_hash, salt, "

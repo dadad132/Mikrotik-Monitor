@@ -38,8 +38,9 @@ def reconcile_list(path, key, desired, current, *, manage_tag=None,
     ops: list[Operation] = []
 
     if owns is None:
-        def owns(row):
+        def _default_owns(row):
             return manage_tag is None or str(row.get("comment", "")) == manage_tag
+        owns = _default_owns
 
     def owned(row) -> bool:
         return owns(row)

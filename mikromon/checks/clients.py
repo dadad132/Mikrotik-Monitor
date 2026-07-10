@@ -49,8 +49,8 @@ class ClientCountCheck(Check):
     name = "client_count"
 
     @classmethod
-    def datasets(cls, cfg) -> set:
-        srcs = set(cfg.client_count_sources)
+    def datasets(cls, device_cfg) -> set:
+        srcs = set(device_cfg.client_count_sources)
         ds = set()
         if "bridge" in srcs:
             ds.add("bridge_host")
