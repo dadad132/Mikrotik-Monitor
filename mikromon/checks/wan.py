@@ -77,12 +77,29 @@ def _matches_endpoint(route: dict, ep, dhcp_by_iface: dict | None = None) -> boo
 
 
 def _fo_role(idx: int) -> str:
-    """Same role-naming scheme push/features.py's gateway-failover route
-    builder uses ("mikromon:failover:primary"/"secondary"/"linkN"), so a
-    managed route can be found by its own tag when gateway/interface
-    matching doesn't — e.g. a PPP remote IP, or gateway-status text that
-    doesn't parse to literally match the configured interface name."""
+    """Old role-naming scheme push/features.py's gateway-failover route
+    builder used to tag comments with ("mikromon:failover:primary"/
+    "secondary") before it switched to using each uplink's own configured
+    name. Kept only for _fo_route_idx's back-compat matching, for routers
+    not yet re-pushed after that switch."""
     return "primary" if idx == 0 else "secondary" if idx == 1 else f"link{idx + 1}"
+
+
+def _fo_route_idx(comment: str, links) -> int | None:
+    """Which configured link (if any) a mikromon-managed failover route
+    belongs to, judged purely by its comment — needed when gateway/interface
+    matching can't tell, e.g. a PPP remote-address gateway that doesn't match
+    the uplink's interface name via gateway-status. Recognizes both the
+    current scheme (the uplink's own configured name) and the older internal
+    tag scheme (for routers not yet re-pushed after the switch)."""
+    for i, ep in enumerate(links[:2]):
+        if comment == ep.label(i):
+            return i
+    if comment.startswith("mikromon:failover:"):
+        for i in range(min(len(links), 2)):
+            if comment == f"mikromon:failover:{_fo_role(i)}":
+                return i
+    return None
 
 
 class WanCheck(Check):
@@ -149,9 +166,8 @@ class WanCheck(Check):
                     ep_routes = [r for r in defaults
                                 if _matches_endpoint(r, ep, dhcp_by_iface)]
                     if not ep_routes:
-                        fo_comment = f"mikromon:failover:{_fo_role(idx)}"
                         ep_routes = [r for r in defaults
-                                    if r.get("comment", "") == fo_comment]
+                                    if _fo_route_idx(str(r.get("comment", "")), links) == idx]
                     if ep_routes:
                         link_up = any(_is_active(r) for r in ep_routes)
                         gw_status = str(ep_routes[0].get("gateway-status", "unknown"))
@@ -214,41 +230,33 @@ class WanCheck(Check):
             return
 
         current = min(active, key=by_distance)
-        _FO_PRI = "mikromon:failover:primary"
         if links:
             cur_comment = str(current.get("comment", ""))
+            prim_name = links[0].label(0)
             # Preferred = the highest-priority configured uplink (links[0]).
-            # Try interface/gateway match first, fall back to mikromon comment tag
-            # (needed when the failover route gateway is a PPP remote IP that
-            # doesn't match the uplink's interface name via gateway-status).
+            # Try interface/gateway match first, fall back to the route's own
+            # comment (needed when the failover route's gateway is a PPP
+            # remote IP that doesn't match the uplink's interface name via
+            # gateway-status).
             primary_routes = [r for r in defaults
                               if _matches_endpoint(r, links[0], dhcp_by_iface)]
             if not primary_routes:
                 primary_routes = [r for r in defaults
-                                  if r.get("comment", "") == _FO_PRI]
+                                  if _fo_route_idx(str(r.get("comment", "")), links) == 0]
             preferred = (min(primary_routes, key=by_distance)
                          if primary_routes else min(defaults, key=by_distance))
-            # Determine on_backup using comment tag for mikromon-managed routes
-            if cur_comment == _FO_PRI:
-                on_backup = False
-            elif cur_comment.startswith("mikromon:failover:") and cur_comment != _FO_PRI:
-                on_backup = True
-            else:
-                on_backup = not _matches_endpoint(current, links[0], dhcp_by_iface)
             # Which configured link is currently carrying traffic? Falls back
-            # to the managed route's own comment tag (mikromon:failover:role)
-            # for ANY configured link, not just primary/secondary — same
-            # reason as above: gateway/interface matching can miss a PPP
-            # remote IP or unparseable gateway-status text.
+            # to the managed route's own comment — either the uplink's own
+            # name (current scheme) or the older internal tag (routers not
+            # yet re-pushed after the switch) — for the same reason as above.
             cur_idx = next((i for i, ep in enumerate(links)
                             if _matches_endpoint(current, ep, dhcp_by_iface)), None)
-            if cur_idx is None and cur_comment.startswith("mikromon:failover:"):
-                cur_idx = next((i for i in range(len(links))
-                                if cur_comment == f"mikromon:failover:{_fo_role(i)}"),
-                               None)
+            if cur_idx is None:
+                cur_idx = _fo_route_idx(cur_comment, links)
+            on_backup = ((cur_idx != 0) if cur_idx is not None
+                        else not _matches_endpoint(current, links[0], dhcp_by_iface))
             cur_name = (links[cur_idx].label(cur_idx) if cur_idx is not None
                         else (_iface_of(current) or current.get("gateway", "?")))
-            prim_name = links[0].label(0)
             rank = (f" (priority {cur_idx + 1} of {len(links)})"
                     if cur_idx is not None else "")
         else:

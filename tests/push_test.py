@@ -1140,6 +1140,130 @@ check("install is detached too (survives the reboot disconnect)",
       inst.ops[0].detach is True)
 
 
+# ---- 15. gateway failover: name-based routes + disable/enable netwatch ----
+print("gateway failover (routes tab):")
+from mikromon.config import WanEndpoint  # noqa: E402
+
+link_fibre = WanEndpoint(interface="ether1", name="Fibre")
+link_backup = WanEndpoint(interface="ether5", name="Backup")
+link_wireless = WanEndpoint(interface="ether10", name="Wireless")
+fo_cfg = _t.SimpleNamespace(
+    name="R1", wan=_t.SimpleNamespace(links=[link_fibre, link_backup, link_wireless]))
+fo_router_state = {
+    ("ip", "route"): [],
+    ("tool", "netwatch"): [],
+    ("interface", "pppoe-client"): [],
+    ("ip", "dhcp-client"): [
+        {".id": "*1", "interface": "ether1", "gateway": "10.0.0.1"},
+        {".id": "*2", "interface": "ether5", "gateway": "10.0.1.1"},
+        {".id": "*3", "interface": "ether10", "gateway": "10.0.2.1", "disabled": "true"},
+    ],
+    ("interface", "l2tp-client"): [],
+    ("ppp", "active"): [],
+    ("ip", "address"): [],
+}
+fo_api = FakeApi(dict(fo_router_state))
+fo_pusher = Pusher(fo_cfg, fo_api, dry_run=False)
+enable_plan = F.routes_plan(fo_pusher, fo_cfg,
+                            {"fo_enabled": "1", "fo_primary_check": "1.1.1.1",
+                             "fo_secondary_check": "8.8.8.8"}, {})
+route_adds = [o for o in enable_plan.ops if o.path == ("ip", "route") and o.action == "add"]
+watch_adds = [o for o in enable_plan.ops if o.path == ("tool", "netwatch") and o.action == "add"]
+
+check("only the top 2 configured links get failover routes (not Wireless)",
+      {o.params["comment"] for o in route_adds} ==
+      {"Fibre", "Fibre-Check", "Backup", "Backup-Check"})
+check("route comments are the uplink's own name, not an internal tag",
+      any(o.params["comment"] == "Fibre" for o in route_adds)
+      and not any("mikromon:failover" in o.params["comment"] for o in route_adds))
+check("check-route comment is '<name>-Check'",
+      any(o.params["comment"] == "Fibre-Check"
+          and o.params["dst-address"] == "1.1.1.1/32" for o in route_adds))
+check("primary always checks 1.1.1.1",
+      any(w.params["comment"] == "Fibre" and w.params["host"] == "1.1.1.1"
+          for w in watch_adds))
+check("secondary always checks 8.8.8.8",
+      any(w.params["comment"] == "Backup" and w.params["host"] == "8.8.8.8"
+          for w in watch_adds))
+check("netwatch interval is 5s",
+      all(w.params["interval"] == "5s" for w in watch_adds))
+check("down-script disables the route by its own name (not a distance-set)",
+      any(w.params["down-script"] == '/ip route disable [find comment="Fibre"]'
+          for w in watch_adds))
+check("up-script enables the route by its own name",
+      any(w.params["up-script"] == '/ip route enable [find comment="Fibre"]'
+          for w in watch_adds))
+check("no RouterOS scripts use invalid $(var) shell-style syntax",
+      not any("$(" in str(v) for o in enable_plan.ops
+             for v in o.params.values() if isinstance(v, str)))
+check("the 2 managed WAN clients get add-default-route=no (so they don't compete)",
+      sum(1 for o in enable_plan.ops if o.action == "set"
+          and o.params.get("add-default-route") == "no") == 2)
+
+# Apply it, then re-plan: should be a no-op (idempotent, no flapping churn).
+for op in enable_plan.ops:
+    fo_api.execute(op)
+replan = F.routes_plan(fo_pusher, fo_cfg,
+                       {"fo_enabled": "1", "fo_primary_check": "1.1.1.1",
+                        "fo_secondary_check": "8.8.8.8"}, {})
+check("re-applying the same enabled config is a no-op (no churn/flapping)",
+      not any(o.path in (("ip", "route"), ("tool", "netwatch")) for o in replan.ops))
+
+# Now disable failover: must remove the managed routes/netwatch AND restore
+# every configured link's own routing — not just the 2 that failover managed.
+disable_plan = F.routes_plan(fo_pusher, fo_cfg, {"fo_enabled": ""}, {})
+removed_routes = {o.params[".id"] for o in disable_plan.ops
+                  if o.path == ("ip", "route") and o.action == "remove"}
+removed_watch = {o.params[".id"] for o in disable_plan.ops
+                 if o.path == ("tool", "netwatch") and o.action == "remove"}
+check("disabling removes all 4 managed failover routes",
+      len(removed_routes) == 4)
+check("disabling removes both managed netwatch entries",
+      len(removed_watch) == 2)
+dhcp_restores = [o for o in disable_plan.ops if o.path == ("ip", "dhcp-client")]
+check("ALL 3 configured links get restored, not just the 2 failover managed",
+      {o.params[".id"] for o in dhcp_restores} == {"*1", "*2", "*3"})
+check("restored clients get add-default-route=yes",
+      any(o.params.get("add-default-route") == "yes"
+          and o.params[".id"] == "*1" for o in dhcp_restores))
+check("restored clients get distinct per-link distances (10, 11, 12)",
+      {o.params.get("default-route-distance") for o in dhcp_restores
+       if "default-route-distance" in o.params} == {"10", "11", "12"})
+check("restored clients get disabled=no",
+      any(o.params.get("disabled") == "no" and o.params[".id"] == "*3"
+          for o in dhcp_restores))
+
+# Back-compat: an old mikromon:failover:-tagged route from before the switch
+# to name-based comments must still be recognized as ours and cleaned up.
+legacy_api = FakeApi({
+    ("ip", "route"): [
+        {".id": "*9", "comment": "mikromon:failover:primary",
+         "dst-address": "0.0.0.0/0", "gateway": "10.0.0.1", "distance": "1"},
+        {".id": "*10", "comment": "mikromon:failover:check:primary",
+         "dst-address": "1.1.1.1/32", "gateway": "10.0.0.1", "distance": "1"},
+    ],
+    ("tool", "netwatch"): [
+        {".id": "*11", "comment": "mikromon:failover:watch:primary", "host": "1.1.1.1"},
+    ],
+    ("interface", "pppoe-client"): [],
+    ("ip", "dhcp-client"): [
+        {".id": "*1", "interface": "ether1", "gateway": "10.0.0.1"},
+    ],
+    ("interface", "l2tp-client"): [],
+    ("ppp", "active"): [],
+    ("ip", "address"): [],
+})
+legacy_cfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[link_fibre]))
+legacy_pusher = Pusher(legacy_cfg, legacy_api, dry_run=False)
+legacy_disable = F.routes_plan(legacy_pusher, legacy_cfg, {"fo_enabled": ""}, {})
+check("old tag-based failover routes are still recognized as ours and removed",
+      {o.params[".id"] for o in legacy_disable.ops
+       if o.path == ("ip", "route") and o.action == "remove"} == {"*9", "*10"})
+check("old tag-based netwatch entry is still recognized as ours and removed",
+      {o.params[".id"] for o in legacy_disable.ops
+       if o.path == ("tool", "netwatch") and o.action == "remove"} == {"*11"})
+
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

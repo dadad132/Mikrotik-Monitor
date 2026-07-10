@@ -197,6 +197,37 @@ check("the SAME route reported down is correctly alerted, not masked by "
       "the comment-tag fallback always assuming it's fine",
       keys(a) == ["wan_link:1"] and "Backup" in a[0].title)
 
+print("WAN per-link check: same fallback, but for the CURRENT push/features.py "
+      "comment scheme — the uplink's own configured name, not the old internal "
+      "tag (confirms the switch to name-based route comments didn't quietly "
+      "break the very fallback the two tests above exist to guard):")
+dev7 = mkdev("TestRouter7", wan=WanConfig(links=[
+    WanEndpoint(interface="ether1", gateway="1.1.1.1", name="Main"),
+    WanEndpoint(interface="ether2-backup", gateway="", name="Backup"),
+]))
+named_but_up = {"route": [
+    {"dst-address": "0.0.0.0/0", "gateway": "1.1.1.1", "distance": "1",
+     "active": "true", "gateway-status": "1.1.1.1 reachable via ether1",
+     "comment": "Main"},
+    {"dst-address": "0.0.0.0/0", "gateway": "10.9.9.9", "distance": "2",
+     "active": "true", "gateway-status": "10.9.9.9 reachable",
+     "comment": "Backup"},
+]}
+a = run(WanCheck(), named_but_up, dev7, store)
+check("a genuinely-up backup found via its CURRENT name-based route comment "
+      "raises no alert (not misreported as 'no route found')", a == [])
+
+named_and_down = {"route": [
+    named_but_up["route"][0],
+    {"dst-address": "0.0.0.0/0", "gateway": "10.9.9.9", "distance": "2",
+     "active": "false", "gateway-status": "10.9.9.9 unreachable",
+     "comment": "Backup"},
+]}
+a = run(WanCheck(), named_and_down, dev7, store)
+check("the SAME route reported down is correctly alerted under the "
+      "name-based comment scheme too",
+      keys(a) == ["wan_link:1"] and "Backup" in a[0].title)
+
 print("WAN per-link check: a PLAIN (unmanaged, failover-off) dynamic route "
       "found via the DHCP client's own live gateway field, not just text-"
       "parsing gateway-status (confirmed live: some ISPs on a router showed "
