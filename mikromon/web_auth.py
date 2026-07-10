@@ -353,8 +353,8 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                        f'Grace Period</span> &middot; subscribe before {ge_fmt} to '
                        f'avoid lockout</p>')
     elif status in ("canceled", "locked", "inactive"):
-        status_html = (f'<p style="margin:0"><span style="color:#dc2626;font-weight:700">'
-                       f'Suspended</span> &middot; choose a plan below to reactivate</p>')
+        status_html = ('<p style="margin:0"><span style="color:#dc2626;font-weight:700">'
+                       'Suspended</span> &middot; choose a plan below to reactivate</p>')
     else:
         status_html = (f'<p style="margin:0"><span style="color:#64748b;font-weight:700">'
                        f'Free plan</span> &middot; {FREE_DEVICES} devices &middot; '
@@ -409,9 +409,9 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                       f'<th>Per device</th><th></th>'
                       f'</tr></thead><tbody>{plan_rows}</tbody></table></div>')
     else:
-        plans_html = (f'<div class="box"><p class="muted">PayFast billing is not '
-                      f'yet configured on this server. Add a <code>billing:</code> '
-                      f'section to config.yaml to enable subscriptions.</p></div>')
+        plans_html = ('<div class="box"><p class="muted">PayFast billing is not '
+                      'yet configured on this server. Add a <code>billing:</code> '
+                      'section to config.yaml to enable subscriptions.</p></div>')
 
     inner = (f'<div class="wrap"><h1>Billing</h1>{note}'
              f'{status_box}{plans_html}</div>')
@@ -572,10 +572,10 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
     )
 
     table = (
-        f'<div class="box" style="overflow-x:auto">'
-        f'<table style="min-width:700px"><thead><tr>'
-        f'<th>Company</th><th>Status</th><th>Plan</th>'
-        f'<th>Devices</th><th>Joined</th>'
+        '<div class="box" style="overflow-x:auto">'
+        '<table style="min-width:700px"><thead><tr>'
+        '<th>Company</th><th>Status</th><th>Plan</th>'
+        '<th>Devices</th><th>Joined</th>'
         + ("<th>Assign plan</th>" if billing_on else "")
         + f'</tr></thead><tbody>{tbody or "<tr><td colspan=6 class=muted>No organisations yet.</td></tr>"}'
         f'</tbody></table></div>'

@@ -241,8 +241,8 @@ def _build_report(org_name: str, device_names: list[str], state_data: dict,
         f'<th style="padding:6px 12px;text-align:left">Device</th>'
         f'<th style="padding:6px 12px;text-align:left">This period</th></tr>'
         + "".join(rows_html)
-        + f'</table>'
-        f'<p style="color:#999;font-size:12px;margin-top:16px">— EasyMikrotik</p></div>'
+        + '</table>'
+        '<p style="color:#999;font-size:12px;margin-top:16px">— EasyMikrotik</p></div>'
     )
     return subject, text_body, html_body
 

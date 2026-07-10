@@ -336,7 +336,6 @@ class AuthStore:
                 "is_superadmin": bool(row[10])}
 
     def list_users(self, org_id: int | None = None) -> list:
-        cols = ("id", "username", "email", "role", "org_id", "devices", "created")
         sql = ("SELECT id, username, email, role, org_id, devices, created "
                "FROM users")
         args: tuple = ()

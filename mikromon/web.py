@@ -36,11 +36,11 @@ from .metrics import MetricsStore
 from .util import human_bps
 from .web_shared import (
     esc, _BRAND, _REVERT_MINUTES, _PAGE_CSS,
-    _nav, _who, _header, _page, parse_multipart_form,
+    _header, _page, parse_multipart_form,
 )
 from .web_auth import (
     _render_login, _render_signup, _render_account,
-    _render_admin, _device_chips, _ADMIN_JS,
+    _render_admin,
     _render_billing, _render_locked, _grace_banner_html,
     _render_superadmin,
 )
@@ -77,7 +77,8 @@ def _device_view(store, state, name) -> dict:
     dnode = state.get("devices", {}).get(name, {})
     conditions = dnode.get("conditions", {})
     facts = dnode.get("facts", {})
-    metrics, throughput = {}, {}
+    metrics: dict = {}
+    throughput: dict[str, dict] = {}
     for (metric, label), rec in latest.items():
         if metric in ("rx_bps", "tx_bps"):
             throughput.setdefault(label, {})[metric] = rec["value"]
@@ -456,7 +457,7 @@ def _gauge(label, pct, unit="%", good_high=False) -> str:
 
 
 def _version_panel(devs) -> str:
-    counts = {}
+    counts: dict[str, int] = {}
     for d in devs:
         ver = d["facts"].get("version") or "unknown"
         counts[ver] = counts.get(ver, 0) + 1
@@ -1015,10 +1016,10 @@ def _access_box(name, csrf, hub_host, tunnel_ip, creds, grants) -> str:
     if not hub_host:
         return ""
     if not tunnel_ip:
-        return (f'<div class="box"><h2>Remote access</h2>'
-                f'<p class="muted">This device has no hub tunnel yet. Provision it '
-                f'(Maintenance &rarr; Provision) so it dials home, then you can '
-                f'open WebFig / Winbox here.</p></div>')
+        return ('<div class="box"><h2>Remote access</h2>'
+                '<p class="muted">This device has no hub tunnel yet. Provision it '
+                '(Maintenance &rarr; Provision) so it dials home, then you can '
+                'open WebFig / Winbox here.</p></div>')
     u, pw = esc(creds.get("user", "")), esc(creds.get("pwd", ""))
 
     def row(kind, label, how):
@@ -1135,10 +1136,10 @@ def _render_offboard_page(name, result, back_url, user) -> str:
             f'<div class="box" style="border-left:4px solid {border};margin-top:16px">'
             f'<b>Router cleanup</b>'
             f'<div style="margin-top:8px;font-size:14px">{rows}</div>'
-            + (f'<p class="muted" style="margin-top:8px">Some steps failed — '
-               f'check the router manually if the tunnel or user persists.</p>'
+            + ('<p class="muted" style="margin-top:8px">Some steps failed — '
+               'check the router manually if the tunnel or user persists.</p>'
                if has_err else "")
-            + f'</div>')
+            + '</div>')
     else:
         router_box = ""
     body = (
@@ -1796,8 +1797,8 @@ def _field_html(desc) -> str:
                 f'</tr>')
 
         body = "".join(sort_row(item) for item in items)
-        empty = (f'<tr><td colspan="4" class="muted" style="padding:8px">'
-                 f'No WAN clients found on this router.</td></tr>') if not items else ""
+        empty = ('<tr><td colspan="4" class="muted" style="padding:8px">'
+                 'No WAN clients found on this router.</td></tr>') if not items else ""
         return (f'<div class="f full"><label class="f">{esc(label)}</label>'
                 f'<table class="rowtbl" id="sortable-{esc(name)}">'
                 f'<tbody>{body}{empty}</tbody></table>{hint}</div>')
@@ -2187,7 +2188,7 @@ def _interfaces_table(current) -> str:
         return ('<div class="box"><h2>Interfaces</h2>'
                 '<p class="muted">No interfaces read from the router.</p></div>')
     # map interface name -> list of IP addresses configured on it
-    ips = {}
+    ips: dict[str, list] = {}
     for a in current.get("addrs", []):
         ifc = a.get("interface") or a.get("actual-interface")
         if ifc:
@@ -2272,11 +2273,11 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None) -> str:
                 f'onclick="this.closest(\'tr\').remove()">&times;</button></td></tr>')
     links = list(getattr(cfg.wan, "links", [])) if cfg else []
     body = "".join(row(link) for link in links) + row(None)
-    detect_note = (f'<p class="muted">\U0001f310 = mikromon detected an active '
-                   f'internet connection on that port right now (bound DHCP lease, '
-                   f'running PPPoE/L2TP session, or a live default route) — use it '
-                   f'to find which port the ISP is actually plugged into instead of '
-                   f'guessing.</p>' if ifaces is not None else "")
+    detect_note = ('<p class="muted">\U0001f310 = mikromon detected an active '
+                   'internet connection on that port right now (bound DHCP lease, '
+                   'running PPPoE/L2TP session, or a live default route) — use it '
+                   'to find which port the ISP is actually plugged into instead of '
+                   'guessing.</p>' if ifaces is not None else "")
     return (f'<div class="box"><h2>WAN uplinks</h2>'
             f'<p class="muted">List your internet links in <b>priority order</b> — '
             f'<b>top = primary</b>, 2nd = first backup, and so on. <b>Drag the '
@@ -2646,9 +2647,6 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
                  '<b>Add device</b> — you\'ll be taken to the Provision tab to generate '
                  'a script or connect directly.</p>')
 
-    # Separate fields without pre-filled values for Add modal
-    pre_add = {}
-    wan_add = {}
     sources_add = set(["bridge", "wireless"])
     src_add = "".join(
         f'<label><input type="checkbox" name="sources" value="{s}"'
@@ -2670,7 +2668,7 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
         field_add("Name", '<input name="name" value="">')
         + field_add("Host / IP <span class='muted'>(leave BLANK to provision over the tunnel)</span>",
                     '<input name="host" placeholder="leave blank to provision" value="">')
-        + field_add(f"API port <span class='muted'>(blank = 8728)</span>",
+        + field_add("API port <span class='muted'>(blank = 8728)</span>",
                     '<input name="api_port" placeholder="8728" value="8728">')
         + field_add("API timeout <span class='muted'>(seconds)</span>",
                     '<input name="timeout" value="60">')
@@ -2706,8 +2704,8 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
         f'<th>Host / IP</th><th>Update available</th><th>Status</th><th>Actions</th></tr>'
         f'{trows}</table></div>')
 
-    auto_open = (f'<script>document.getElementById("edit-modal")'
-                 f'.classList.add("open");</script>') if edit_name else ""
+    auto_open = ('<script>document.getElementById("edit-modal")'
+                 '.classList.add("open");</script>') if edit_name else ""
 
     inv_js = ('<script>'
               'function invFilter(){var t=document.getElementById("iq")'
@@ -3551,7 +3549,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 detail = "; ".join(s["msg"] for s in steps) or "no changes"
                 audit.append(name, uname, "device", "offboard",
                              "error" if has_err else "ok",
-                             f"offboard on delete", detail)
+                             "offboard on delete", detail)
                 audit.close()
             return {"steps": steps, "error": None, "username": username}
 
@@ -3708,7 +3706,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             (user, API, WireGuard tunnel) — no script to paste."""
             from .config import build_device
             from .device import DeviceError
-            from .push import Pusher, PushError, provision_apply, rw_device
+            from .push import PushError, provision_apply, rw_device
             from .push.api import PushApi
 
             name = flat.get("device", "")
@@ -4761,7 +4759,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             base = f"{scheme}://{host}"
             owner_email = user.get("email") or user.get("username") or ""
             org_name = auth.org_name(user["org_id"]) if auth else ""
-            from .billing import build_payment_data, payment_url, PLANS
+            from .billing import build_payment_data, payment_url
             try:
                 data = build_payment_data(
                     merchant_id=_pf_merchant_id,
@@ -4914,7 +4912,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             csrf = sess["csrf"] if sess else ""
             tabbar = _device_tabbar(name, "tempaccess", True, csrf)
             host = facts.get("host") or raw.get("host", "")
-            api_port = raw.get("api_port", 8728)
             note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
                    (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
             creds_html = ""
@@ -4936,11 +4933,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         f'<span style="color:#64748b;font-size:12px;margin-left:8px">'
                         f'(browser)</span></td></tr>') if wf else ""
                     how_note = (
-                        f'<div style="margin:14px 0 0;padding:10px 12px;background:#dcfce7;'
-                        f'border-left:3px solid #16a34a;border-radius:4px;font-size:13px">'
-                        f'<b>No VPN needed.</b> These addresses are proxied through the '
-                        f'hub and work from anywhere on the internet. The connection '
-                        f'closes automatically when the timer runs out.</div>')
+                        '<div style="margin:14px 0 0;padding:10px 12px;background:#dcfce7;'
+                        'border-left:3px solid #16a34a;border-radius:4px;font-size:13px">'
+                        '<b>No VPN needed.</b> These addresses are proxied through the '
+                        'hub and work from anywhere on the internet. The connection '
+                        'closes automatically when the timer runs out.</div>')
                 else:
                     winbox_row = (
                         f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Winbox</td>'
@@ -4991,12 +4988,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     f'automatically when the login expires.</p>')
             else:
                 sec_note = (
-                    f'<p class="muted" style="margin:0;font-size:13px;padding:10px 12px;'
-                    f'background:#f1f5f9;border-radius:6px;border-left:3px solid #38bdf8">'
-                    f'<b>Network security:</b> Access is via the WireGuard tunnel '
-                    f'(address <code>10.10.0.x</code>). Only devices enrolled as WireGuard '
-                    f'peers can reach the router &mdash; so no additional IP restriction is '
-                    f'needed.</p>')
+                    '<p class="muted" style="margin:0;font-size:13px;padding:10px 12px;'
+                    'background:#f1f5f9;border-radius:6px;border-left:3px solid #38bdf8">'
+                    '<b>Network security:</b> Access is via the WireGuard tunnel '
+                    '(address <code>10.10.0.x</code>). Only devices enrolled as WireGuard '
+                    'peers can reach the router &mdash; so no additional IP restriction is '
+                    'needed.</p>')
             form = (
                 f'<div class="box"><h2>Create temporary login</h2>'
                 f'<p class="muted" style="margin-top:0">Generates a random username '

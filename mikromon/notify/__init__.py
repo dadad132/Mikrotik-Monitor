@@ -6,14 +6,14 @@ deliberately pluggable: add a TelegramNotifier / WebhookNotifier with the same
 """
 from __future__ import annotations
 
-from .base import Notifier  # noqa: F401  (re-export)
+from .base import Notifier
 from .email_smtp import EmailNotifier
 from .file_outbox import OutboxNotifier
 from .org_email import OrgEmailNotifier  # noqa: F401  (re-export)
 
 
 def build_notifiers(config):
-    notifiers = []
+    notifiers: list[Notifier] = []
     if config.smtp:
         notifiers.append(EmailNotifier(config.smtp))
     if getattr(config, "outbox_dir", None):

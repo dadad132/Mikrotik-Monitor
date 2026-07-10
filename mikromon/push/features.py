@@ -591,7 +591,7 @@ def _apply_failover(ops, flat, pusher, cfg):
 
 
 def routes_plan(pusher, cfg, flat, multi):
-    ops = []
+    ops: list[Operation] = []
     _apply_wan_order(ops, multi.get("wan_order", []), pusher)
     _apply_failover(ops, flat, pusher, cfg)
     return Plan(cfg.name, ops, summary="routes / failover")
@@ -897,7 +897,7 @@ def security_plan(pusher, cfg, flat, multi):
     # set, only emitted when the desired state differs from the router's, so the
     # toggle (which mirrors the live state) never churns.
     want_syn = "syn_cookies" in opts
-    srow = next(iter(pusher.api.fetch(_IP_SETTINGS)), {})
+    srow: dict = next(iter(pusher.api.fetch(_IP_SETTINGS)), {})
     if srow and (_norm(srow.get("tcp-syncookies", "")) in ("true", "yes")) != want_syn:
         ops.append(Operation(
             "set", _IP_SETTINGS, {"tcp-syncookies": "yes" if want_syn else "no"},
@@ -1307,7 +1307,7 @@ def interfaces_read(pusher, cfg):
 def interfaces_summary(current, cfg):
     ifaces = current.get("ifaces", []) if isinstance(current, dict) else current
     up = sum(1 for r in ifaces if _norm(r.get("running", "")) == "true")
-    by_type = {}
+    by_type: dict[str, int] = {}
     for r in ifaces:
         t = str(r.get("type", "?"))
         by_type[t] = by_type.get(t, 0) + 1

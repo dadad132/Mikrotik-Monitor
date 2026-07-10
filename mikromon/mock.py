@@ -73,8 +73,8 @@ def _leases(macs):
             for i, m in enumerate(macs)]
 
 
-_CALM_PLAN = [(8, "primary", _BASE_MACS, True, _RX_NORMAL, _Q_NORMAL, [], [],
-               "healthy") for _ in range(12)]
+_CALM_PLAN: list[tuple] = [(8, "primary", _BASE_MACS, True, _RX_NORMAL, _Q_NORMAL, [], [],
+                            "healthy") for _ in range(12)]
 
 
 def build_frames(incident: bool = True):

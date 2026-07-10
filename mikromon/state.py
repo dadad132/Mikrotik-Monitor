@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import tempfile
-from typing import Any
 
 log = logging.getLogger(__name__)
 

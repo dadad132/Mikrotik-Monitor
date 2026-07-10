@@ -209,6 +209,8 @@ def _restore_from_tar(tar: tarfile.TarFile, paths: dict) -> list:
         if arcname not in members or not dest:
             continue
         member = tar.extractfile(arcname)
+        if member is None:
+            continue  # not a regular file (e.g. a directory entry) — skip it
         os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
         tmp = f"{dest}.restoring"
         content = member.read()
