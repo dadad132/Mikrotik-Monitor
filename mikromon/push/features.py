@@ -114,31 +114,6 @@ def detect_isp_ifaces(api) -> set:
     return online
 
 
-def _fo_names(cfg):
-    """Label for each of the (up to 2) managed failover links — each
-    uplink's own configured name/interface (WanEndpoint.label), not an
-    internal tag, so route/Netwatch comments on the router match what was
-    typed into the WAN uplinks editor."""
-    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])[:2]
-    return [link.label(idx) for idx, link in enumerate(links)]
-
-
-def _fo_owns(cfg):
-    """Predicate for routes/netwatch entries mikromon's gateway failover
-    manages: comment equals a link's own name or its '<name>-Check'
-    companion route, OR (back-compat) starts with the old internal
-    mikromon:failover: tag used before comments switched to the link's own
-    name — so routers not yet re-pushed after the switch still get their
-    old entries recognized, cleaned up, and replaced."""
-    names = _fo_names(cfg)
-    owned = set(names) | {f"{n}-Check" for n in names}
-
-    def _owns(r):
-        c = str(r.get("comment", ""))
-        return c in owned or c.startswith(_FAILOVER_TAG)
-    return _owns
-
-
 def routes_read(pusher, cfg):
     dhcp = _safe_fetch(pusher.api, _DHCP_CLIENT)
     pppoe = _safe_fetch(pusher.api, _PPPOE_CLIENT)
@@ -150,10 +125,11 @@ def routes_read(pusher, cfg):
     routes = [r for r in all_routes
               if str(r.get("dst-address", "")).startswith("0.0.0.0/0")
               and not str(r.get("comment", "")).startswith("mikromon:sdwan")]
-    fo_owns = _fo_owns(cfg)
-    failover_routes = [r for r in all_routes if fo_owns(r)]
+    failover_routes = [r for r in all_routes
+                       if str(r.get("comment", "")).startswith(_FAILOVER_TAG)]
     netwatch = _safe_fetch(pusher.api, _NETWATCH)
-    failover_watch = [w for w in netwatch if fo_owns(w)]
+    failover_watch = [w for w in netwatch
+                      if str(w.get("comment", "")).startswith(_FAILOVER_TAG)]
     return {"routes": routes, "dhcp": dhcp, "ppp": ppp,
             "ppp_active": ppp_active, "ip_addrs": ip_addrs,
             "failover_routes": failover_routes, "failover_watch": failover_watch}
@@ -191,20 +167,18 @@ def routes_summary(current, cfg):
         lines.append(f"route via {gw} · distance {dist}"
                      + ("" if active else " · inactive"))
     # Failover summary
-    names = _fo_names(cfg)
-    fo_by_comment = {r.get("comment", ""): r for r in current.get("failover_routes", [])
-                     if not str(r.get("comment", "")).endswith("-Check")}
+    fo_by_comment = {r.get("comment", ""): r for r in current.get("failover_routes", [])}
     watch_by_comment = {w.get("comment", ""): w for w in current.get("failover_watch", [])}
-    for idx, name in enumerate(names):
-        role = "primary" if idx == 0 else "secondary"
-        r = fo_by_comment.get(name)
-        w = watch_by_comment.get(name)
+    for role, rc, wc in (("primary", f"{_FAILOVER_TAG}primary", f"{_FAILOVER_TAG}watch:primary"),
+                         ("secondary", f"{_FAILOVER_TAG}secondary", f"{_FAILOVER_TAG}watch:secondary")):
+        r = fo_by_comment.get(rc)
+        w = watch_by_comment.get(wc)
         if r:
             active = str(r.get("active", "true")).lower() not in ("false", "no")
             disabled = str(r.get("disabled", "false")).lower() in ("true", "yes")
             state = "disabled by netwatch" if disabled else ("route active" if active else "route inactive")
             watch_info = f"watch {w['host']} every {w.get('interval','?')}" if w else "no netwatch"
-            lines.append(f"Failover {role} \"{name}\" {r.get('gateway','?')} · {state} · {watch_info}")
+            lines.append(f"Failover {role} {r.get('gateway','?')} · {state} · {watch_info}")
     return lines or ["No internet lines found on this router."]
 
 
@@ -321,12 +295,11 @@ def routes_form(current, cfg):
     fo_enabled = bool(current.get("failover_routes"))
     primary_check = "1.1.1.1"
     secondary_check = "8.8.8.8"
-    names = _fo_names(cfg)
     for w in current.get("failover_watch", []):
         c = w.get("comment", "")
-        if names and c == names[0] and w.get("host"):
+        if c == f"{_FAILOVER_TAG}watch:primary" and w.get("host"):
             primary_check = w["host"]
-        elif len(names) > 1 and c == names[1] and w.get("host"):
+        elif c == f"{_FAILOVER_TAG}watch:secondary" and w.get("host"):
             secondary_check = w["host"]
 
     links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
@@ -433,35 +406,20 @@ def _gateway_for_link(link, pppoe_names, dhcp_by_iface,
 
 
 def _apply_failover(ops, flat, pusher, cfg):
-    """Reconcile gateway-failover routes + Netwatch entries — the standard,
-    hand-written MikroTik failover pattern: two static default routes
-    (primary distance 1, secondary distance 2) each with check-gateway=ping,
-    plus a Netwatch probe per link that disables/enables ITS OWN route based
-    on reachability of a public IP, reached via a dedicated check-route
-    forced out that same gateway (so the two probes never interfere with
-    each other). No custom scripting beyond the single-line disable/enable
-    commands below — no distance-flipping, no debounce counters.
+    """Reconcile static failover routes and Netwatch entries.
 
-    Route/Netwatch comments use each uplink's own configured name (e.g.
-    "Fibre", "Backup" — whatever was typed into the WAN uplinks editor), not
-    an internal tag, so what's on the router matches what the link is
-    called. Only the top two configured links are managed, matching the
-    fixed primary/secondary check-IP fields below. If an uplink is renamed
-    later, the OLD name's route/Netwatch entry is orphaned (no longer
-    recognized as ours) and needs manual cleanup — the trade-off of using
-    the link's own name instead of a fixed internal tag."""
+    Gateways are derived from cfg.wan.links (the WAN uplinks the user
+    configured) matched against live PPPoE/DHCP data on the router.  Only
+    the check IPs (public addresses Netwatch pings) come from the form."""
+    fo_owns = _prefix_owner(_FAILOVER_TAG)
     all_routes = _safe_fetch(pusher.api, _ROUTE)
     netwatch = _safe_fetch(pusher.api, _NETWATCH)
-    all_links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
-    links = all_links[:2]
-    names = _fo_names(cfg)
-    owns = _fo_owns(cfg)
 
     if not flat.get("fo_enabled"):
         ops.extend(reconcile_list(_ROUTE, "comment", [], all_routes,
-                                  owns=owns, label="failover route"))
+                                  owns=fo_owns, label="failover route"))
         ops.extend(reconcile_list(_NETWATCH, "comment", [], netwatch,
-                                  owns=owns, label="netwatch"))
+                                  owns=fo_owns, label="netwatch"))
         # Restore each WAN client to plain, working routing — equivalent to
         # running, per link:
         #   /ip dhcp-client set [find name="..."] add-default-route=yes \
@@ -472,7 +430,8 @@ def _apply_failover(ops, flat, pusher, cfg):
         # troubleshooting step left the client itself switched off.
         pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
         dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
-        for idx, link in enumerate(all_links):
+        links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
+        for idx, link in enumerate(links):
             iface = getattr(link, "interface", "") or ""
             if not iface:
                 continue
@@ -503,7 +462,7 @@ def _apply_failover(ops, flat, pusher, cfg):
                                               f"DHCP {iface}"))
         return
 
-    # ---- enabled: detect gateways live from the router at apply time ------
+    # Detect gateways live from the router at apply time
     pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
     dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
     pppoe_names = {c.get("name", "") for c in pppoe_clients if c.get("name")}
@@ -512,70 +471,89 @@ def _apply_failover(ops, flat, pusher, cfg):
                           for s in _safe_fetch(pusher.api, _PPP_ACTIVE) if s.get("name")}
     ip_addr_by_iface = {a.get("interface", ""): a
                         for a in _safe_fetch(pusher.api, _IP_ADDRESS) if a.get("interface")}
-    fo_by_comment = {r.get("comment", ""): r for r in all_routes if owns(r)}
-
-    gateways = []
-    for idx, link in enumerate(links):
-        gw = _gateway_for_link(link, pppoe_names, dhcp_by_iface,
-                               ppp_active_by_name, ip_addr_by_iface)
-        if not gw:
-            # Fall back to the gateway already on the router from a
-            # previous apply (e.g. a PPPoE session that isn't up right now).
-            existing = fo_by_comment.get(names[idx])
-            if existing and existing.get("gateway"):
-                gw = existing["gateway"]
-        gateways.append(gw)
-    if not gateways or not gateways[0]:
+    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
+    primary_gw = (_gateway_for_link(links[0], pppoe_names, dhcp_by_iface,
+                                    ppp_active_by_name, ip_addr_by_iface) if links else "")
+    secondary_gw = (_gateway_for_link(links[1], pppoe_names, dhcp_by_iface,
+                                      ppp_active_by_name, ip_addr_by_iface)
+                    if len(links) > 1 else "")
+    # Fall back to gateways already on the router from a previous apply
+    for r in all_routes:
+        c = r.get("comment", "")
+        if c == f"{_FAILOVER_TAG}primary" and r.get("gateway") and not primary_gw:
+            primary_gw = r["gateway"]
+        elif c == f"{_FAILOVER_TAG}secondary" and r.get("gateway") and not secondary_gw:
+            secondary_gw = r["gateway"]
+    if not primary_gw:
         return  # primary gateway not detectable — cannot build routes
 
-    # Primary always checks 1.1.1.1, secondary always checks 8.8.8.8 — fixed
-    # roles, matching the form fields.
-    check_ips = [flat.get("fo_primary_check", "").strip() or "1.1.1.1",
-                flat.get("fo_secondary_check", "").strip() or "8.8.8.8"]
+    primary_check = flat.get("fo_primary_check", "").strip() or "1.1.1.1"
+    secondary_check = flat.get("fo_secondary_check", "").strip() or "8.8.8.8"
+    interval = flat.get("fo_interval", "").strip() or "30s"
 
     def _net(ip):
         return ip if "/" in ip else f"{ip}/32"
 
-    # The check routes are the critical piece: each forces ITS Netwatch ping
-    # through its OWN gateway, so both probes are safe to run at the same
-    # time without one route's disable affecting the other's check path.
-    # scope=30 / target-scope=10 on every route matches the standard
-    # pattern; the default routes resolve their gateway via ARP (directly
-    # connected, scope=0 <= target-scope=10).
-    desired_routes = []
-    desired_watch = []
-    for idx, gw in enumerate(gateways):
-        if not gw:
-            continue
-        name = names[idx]
-        host = check_ips[idx].split("/")[0]
-        desired_routes.append({
-            "comment": name, "dst-address": "0.0.0.0/0", "gateway": gw,
-            "distance": str(idx + 1), "check-gateway": "ping",
-            "scope": "30", "target-scope": "10",
-        })
-        desired_routes.append({
-            "comment": f"{name}-Check", "dst-address": _net(host), "gateway": gw,
-            "distance": "1", "scope": "30", "target-scope": "10",
-        })
-        desired_watch.append({
-            "comment": name, "host": host, "interval": "5s",
-            "down-script": f'/ip route disable [find comment="{name}"]',
-            "up-script":   f'/ip route enable [find comment="{name}"]',
-        })
+    primary_host = primary_check.split("/")[0]
+    secondary_host = secondary_check.split("/")[0]
+
+    # Matches the standard MikroTik recursive-check failover pattern.
+    #
+    # The check routes (1.1.1.1/32, 8.8.8.8/32) are the critical piece:
+    # they force each Netwatch ping through its OWN ISP gateway, so the
+    # secondary Netwatch continues to reach 8.8.8.8 via the secondary
+    # interface even when the primary default route is disabled — making
+    # both Netwatch entries safe to run simultaneously.
+    #
+    # scope=30 / target-scope=10 on all routes matches the pattern; the
+    # default routes resolve their gateway via ARP (directly-connected,
+    # scope=0 ≤ target-scope=10). The check routes are not used for
+    # recursive next-hop resolution — they exist solely to give Netwatch
+    # a dedicated, interface-specific path to its check IP.
+    desired_routes = [
+        {"comment": f"{_FAILOVER_TAG}primary",
+         "dst-address": "0.0.0.0/0", "gateway": primary_gw,
+         "distance": "1", "check-gateway": "ping",
+         "scope": "30", "target-scope": "10"},
+        {"comment": f"{_FAILOVER_TAG}check:primary",
+         "dst-address": _net(primary_host), "gateway": primary_gw,
+         "distance": "1", "scope": "30", "target-scope": "10"},
+    ]
+    desired_watch = [
+        {"comment": f"{_FAILOVER_TAG}watch:primary",
+         "host": primary_host, "interval": interval,
+         "down-script": f'/ip route disable [find comment="{_FAILOVER_TAG}primary"]',
+         "up-script":   f'/ip route enable  [find comment="{_FAILOVER_TAG}primary"]'},
+    ]
+    if secondary_gw:
+        desired_routes += [
+            {"comment": f"{_FAILOVER_TAG}secondary",
+             "dst-address": "0.0.0.0/0", "gateway": secondary_gw,
+             "distance": "2", "check-gateway": "ping",
+             "scope": "30", "target-scope": "10"},
+            {"comment": f"{_FAILOVER_TAG}check:secondary",
+             "dst-address": _net(secondary_host), "gateway": secondary_gw,
+             "distance": "1", "scope": "30", "target-scope": "10"},
+        ]
+        desired_watch.append(
+            {"comment": f"{_FAILOVER_TAG}watch:secondary",
+             "host": secondary_host, "interval": interval,
+             "down-script": f'/ip route disable [find comment="{_FAILOVER_TAG}secondary"]',
+             "up-script":   f'/ip route enable  [find comment="{_FAILOVER_TAG}secondary"]'},
+        )
 
     ops.extend(reconcile_list(_ROUTE, "comment", desired_routes, all_routes,
-                              owns=owns, label="failover route"))
+                              owns=fo_owns, label="failover route"))
     ops.extend(reconcile_list(_NETWATCH, "comment", desired_watch, netwatch,
-                              owns=owns, label="netwatch"))
+                              owns=fo_owns, label="netwatch"))
 
-    # Stop these WAN clients creating their own dynamic default routes — they
-    # compete with our static routes and prevent failover from working. When
-    # the client has add-default-route=yes, it creates a dynamic route at
-    # distance=1 that stays active even when Netwatch disables our static
-    # primary route, so the secondary static never wins. Setting
-    # add-default-route=no removes the dynamic route immediately on active
-    # connections and leaves only our managed static routes in control.
+    # Stop WAN clients creating their own dynamic default routes — they compete
+    # with our static routes and prevent failover from working.  When the PPPoE
+    # client has add-default-route=yes, it creates a dynamic route at distance=1
+    # that stays active even when Netwatch disables our static primary route,
+    # so the secondary static (distance=2) never wins.
+    # Setting add-default-route=no removes the dynamic route immediately on
+    # active connections and leaves only our managed static routes in control.
     for link in links:
         iface = getattr(link, "interface", "") or ""
         if not iface:
@@ -612,12 +590,12 @@ def sdwan_read(pusher, cfg):
               and not str(r.get("comment", "")).startswith("mikromon:sdwan")]
     policy = [r for r in _safe_fetch(pusher.api, _MANGLE)
               if str(r.get("comment", "")).startswith(_POL_TAG)]
-    fo_owns = _fo_owns(cfg)
     failover_routes = [r for r in all_routes
-                       if fo_owns(r) and not str(r.get("comment", "")).endswith("-Check")
+                       if str(r.get("comment", "")).startswith(_FAILOVER_TAG)
                        and str(r.get("dst-address", "")).startswith("0.0.0.0/0")]
     netwatch = _safe_fetch(pusher.api, _NETWATCH)
-    failover_watch = [w for w in netwatch if fo_owns(w)]
+    failover_watch = [w for w in netwatch
+                      if str(w.get("comment", "")).startswith(_FAILOVER_TAG)]
     return {"routes": routes, "policy": policy,
             "failover_routes": failover_routes, "failover_watch": failover_watch}
 
@@ -634,19 +612,22 @@ def _policy_rows(current):
 def sdwan_summary(current, cfg):
     links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
     lines = []
-    names = _fo_names(cfg)
     fo_routes = {r.get("comment", ""): r for r in current.get("failover_routes", [])}
     fo_watch  = {w.get("comment", ""): w for w in current.get("failover_watch", [])}
-    for name in names:
-        r = fo_routes.get(name)
+    for idx, (role, rc, wc) in enumerate((
+            ("primary",   f"{_FAILOVER_TAG}primary",   f"{_FAILOVER_TAG}watch:primary"),
+            ("secondary", f"{_FAILOVER_TAG}secondary",  f"{_FAILOVER_TAG}watch:secondary"))):
+        r = fo_routes.get(rc)
         if not r:
             continue
+        link = links[idx] if idx < len(links) else None
+        name = link.label(idx) if link else role.title()
         gw = r.get("gateway", "?")
         dist = r.get("distance", "?")
         disabled = str(r.get("disabled", "false")).lower() in ("true", "yes")
         active   = str(r.get("active",   "true" )).lower() not in ("false", "no")
         state = "disabled" if disabled else ("active" if active else "inactive")
-        w = fo_watch.get(name)
+        w = fo_watch.get(wc)
         watch = f" · watch {w['host']} every {w.get('interval','?')}" if w else ""
         lines.append(f"{name} via {gw} · distance {dist} · {state}{watch}")
     # If no managed failover routes, fall back to plain default routes
