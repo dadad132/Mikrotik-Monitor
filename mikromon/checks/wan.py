@@ -24,6 +24,15 @@ from .base import Check
 _DEFAULT_DST = ("0.0.0.0/0", "0.0.0.0/0%main")
 
 
+def _norm_iface(s) -> str:
+    """Case/whitespace-insensitive interface name — matches push/features.py's
+    helper of the same name. The WAN uplinks editor's typed/selected
+    Interface text can differ in case from the router's own interface
+    name for the same link; an exact == match would silently (no error)
+    treat that link as unmatched."""
+    return str(s or "").strip().lower()
+
+
 def _is_default(route: dict) -> bool:
     dst = str(route.get("dst-address", ""))
     return dst in _DEFAULT_DST or dst.startswith("0.0.0.0/0")
@@ -60,7 +69,7 @@ def _label(route: dict) -> str:
 def _matches_endpoint(route: dict, ep, dhcp_by_iface: dict | None = None) -> bool:
     if ep.gateway and str(route.get("gateway", "")) == ep.gateway:
         return True
-    if ep.interface and _iface_of(route) == ep.interface:
+    if ep.interface and _norm_iface(_iface_of(route)) == _norm_iface(ep.interface):
         return True
     # Most reliable of all: look up this interface's OWN DHCP client and
     # compare its ACTUAL, live gateway field directly — rather than only
@@ -69,10 +78,12 @@ def _matches_endpoint(route: dict, ep, dhcp_by_iface: dict | None = None) -> boo
     # doesn't always parse cleanly for every link on the same router, making
     # a genuinely healthy uplink look like "no route found" (reported
     # offline) while its siblings on the same device matched fine.
-    if dhcp_by_iface is not None and ep.interface in dhcp_by_iface:
-        dhcp_gw = str(dhcp_by_iface[ep.interface].get("gateway", ""))
-        if dhcp_gw and str(route.get("gateway", "")) == dhcp_gw:
-            return True
+    if dhcp_by_iface is not None:
+        dhcp = dhcp_by_iface.get(_norm_iface(ep.interface))
+        if dhcp:
+            dhcp_gw = str(dhcp.get("gateway", ""))
+            if dhcp_gw and str(route.get("gateway", "")) == dhcp_gw:
+                return True
     return False
 
 
@@ -109,7 +120,7 @@ class WanCheck(Check):
         want_failover = dev.check_enabled("wan_failover")
         want_down = dev.check_enabled("internet_down")
         links = dev.wan.links
-        dhcp_by_iface = {c.get("interface", ""): c
+        dhcp_by_iface = {_norm_iface(c.get("interface", "")): c
                         for c in snap.rows("dhcp_client") if c.get("interface")}
 
         # ---- clear stale wan_failover / wan_link:N conditions -------------

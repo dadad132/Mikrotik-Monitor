@@ -76,6 +76,17 @@ def _safe_fetch(api, path):
         return []
 
 
+def _norm_iface(s) -> str:
+    """Case/whitespace-insensitive interface name for matching a WAN
+    uplink's configured Interface (human-typed, or picked from a dropdown)
+    against the router's actual PPPoE client name / DHCP client interface.
+    Confirmed live: an exact `==` match silently fails on a stray case or
+    whitespace difference — no error, the link just never gets processed
+    at all, which looks identical to "nothing is wrong" until you check
+    the router's own log and see mikromon never touched that interface."""
+    return str(s or "").strip().lower()
+
+
 def detect_isp_ifaces(api) -> set:
     """Interface names that look like they're ACTUALLY carrying an internet
     connection right now — a bound DHCP lease, a running PPPoE/L2TP session,
@@ -382,25 +393,28 @@ def _gateway_for_link(link, pppoe_names, dhcp_by_iface,
     iface = getattr(link, "interface", "") or ""
     if not iface:
         return ""
+    iface_key = _norm_iface(iface)
 
-    if iface in pppoe_names:
+    if iface_key in pppoe_names:
         # Try /ppp/active first — some RouterOS versions expose remote-address
         if ppp_active_by_name:
-            sess = ppp_active_by_name.get(iface, {})
+            sess = ppp_active_by_name.get(iface_key, {})
             remote = sess.get("remote-address", "")
             if remote:
                 return remote
         # Try /ip/address — PPP assigns a /32 local with 'network' = remote end
         if ip_addr_by_iface:
-            addr = ip_addr_by_iface.get(iface, {})
+            addr = ip_addr_by_iface.get(iface_key, {})
             network = addr.get("network", "")
             if network and network not in ("0.0.0.0", ""):
                 return network
-        # Last resort: use the interface name (RouterOS accepts it as a gateway)
-        return iface
+        # Last resort: use the router's OWN (correctly-cased) name for this
+        # PPPoE client as the gateway — not the WAN editor's possibly
+        # differently-cased text, which RouterOS wouldn't recognize.
+        return pppoe_names[iface_key]
 
     # Not PPP — check DHCP client for this interface
-    dhcp = dhcp_by_iface.get(iface)
+    dhcp = dhcp_by_iface.get(iface_key)
     if dhcp:
         return dhcp.get("gateway", "")
     return ""
@@ -509,8 +523,9 @@ def _apply_failover(ops, flat, pusher, cfg):
                 continue
             explicit_dist = getattr(link, "distance", None)
             want_dist = str(explicit_dist) if explicit_dist else None
+            iface_key = _norm_iface(iface)
             for c in pppoe_clients:
-                if c.get("name") == iface:
+                if _norm_iface(c.get("name")) == iface_key:
                     if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
                         ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route",
                                               "yes", f"PPPoE {iface}"))
@@ -523,7 +538,7 @@ def _apply_failover(ops, flat, pusher, cfg):
                         ops.append(_set_field(_PPPOE_CLIENT, c, "disabled", "no",
                                               f"PPPoE {iface}"))
             for c in dhcp_clients:
-                if c.get("interface") == iface:
+                if _norm_iface(c.get("interface")) == iface_key:
                     if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
                         ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route",
                                               "yes", f"DHCP {iface}"))
@@ -540,14 +555,21 @@ def _apply_failover(ops, flat, pusher, cfg):
     if not links:
         return
 
-    # Detect gateways live from the router at apply time
+    # Detect gateways live from the router at apply time. Lookups are keyed
+    # by normalized (case/whitespace-insensitive) interface name — see
+    # _norm_iface — since the WAN uplinks editor's typed/selected Interface
+    # text can differ in case from the router's own name for the same
+    # client, which a plain == match would silently (no error) treat as
+    # "no such interface", skipping that link entirely.
     pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
     dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
-    pppoe_names = {c.get("name", "") for c in pppoe_clients if c.get("name")}
-    dhcp_by_iface = {c.get("interface", ""): c for c in dhcp_clients if c.get("interface")}
-    ppp_active_by_name = {s.get("name", ""): s
+    pppoe_names = {_norm_iface(c.get("name", "")): c.get("name", "")
+                  for c in pppoe_clients if c.get("name")}
+    dhcp_by_iface = {_norm_iface(c.get("interface", "")): c
+                     for c in dhcp_clients if c.get("interface")}
+    ppp_active_by_name = {_norm_iface(s.get("name", "")): s
                           for s in _safe_fetch(pusher.api, _PPP_ACTIVE) if s.get("name")}
-    ip_addr_by_iface = {a.get("interface", ""): a
+    ip_addr_by_iface = {_norm_iface(a.get("interface", "")): a
                         for a in _safe_fetch(pusher.api, _IP_ADDRESS) if a.get("interface")}
     fo_by_comment = {r.get("comment", ""): r for r in all_routes if fo_owns(r)}
 
@@ -634,13 +656,14 @@ def _apply_failover(ops, flat, pusher, cfg):
         iface = getattr(link, "interface", "") or ""
         if not iface:
             continue
+        iface_key = _norm_iface(iface)
         for c in pppoe_clients:
-            if (c.get("name") == iface
+            if (_norm_iface(c.get("name")) == iface_key
                     and str(c.get("add-default-route", "yes")).lower() not in ("no", "false")):
                 ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route", "no",
                                       f"PPPoE {iface}"))
         for c in dhcp_clients:
-            if (c.get("interface") == iface
+            if (_norm_iface(c.get("interface")) == iface_key
                     and str(c.get("add-default-route", "yes")).lower() not in ("no", "false")):
                 ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route", "no",
                                       f"DHCP {iface}"))

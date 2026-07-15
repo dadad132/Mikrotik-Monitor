@@ -266,6 +266,43 @@ a = run(WanCheck(), plain_and_down, dev6, store)
 check("the SAME plain route reported down is correctly alerted",
       keys(a) == ["wan_link:1"] and "Backup" in a[0].title)
 
+print("WAN per-link check: DHCP-client matching tolerates a case difference "
+      "between the WAN uplinks editor's Interface text and the router's own "
+      "interface name (confirmed live: an exact match silently, with no "
+      "error, treated a case-mismatched link as unmatched):")
+dev8 = mkdev("TestRouter8", wan=WanConfig(links=[
+    WanEndpoint(interface="Wikiworx", gateway="", name="Main"),
+    WanEndpoint(interface="ether3-vodacom", gateway="", name="Backup"),
+]))
+case_but_up = {
+    "route": [
+        {"dst-address": "0.0.0.0/0", "gateway": "1.1.1.1", "distance": "1",
+         "active": "true", "gateway-status": "1.1.1.1 reachable"},
+        {"dst-address": "0.0.0.0/0", "gateway": "10.9.9.9", "distance": "2",
+         "active": "true", "gateway-status": "10.9.9.9 reachable"},
+    ],
+    # The router's actual DHCP client interface is "wikiworx" (lowercase) —
+    # differs in case from the WAN uplinks editor's "Wikiworx".
+    "dhcp_client": [
+        {"interface": "wikiworx", "gateway": "1.1.1.1"},
+        {"interface": "ether3-vodacom", "gateway": "10.9.9.9"},
+    ],
+}
+a = run(WanCheck(), case_but_up, dev8, store)
+check("a genuinely-up link is still matched despite the case difference "
+      "(not misreported as 'no route found')", a == [])
+
+case_and_down = {
+    "route": [case_but_up["route"][0],
+             {"dst-address": "0.0.0.0/0", "gateway": "10.9.9.9", "distance": "2",
+              "active": "false", "gateway-status": "10.9.9.9 unreachable"}],
+    "dhcp_client": case_but_up["dhcp_client"],
+}
+a = run(WanCheck(), case_and_down, dev8, store)
+check("the SAME case-insensitively-matched route reported down is "
+      "correctly alerted",
+      keys(a) == ["wan_link:1"] and "Backup" in a[0].title)
+
 print("WAN check: stale wan_failover/wan_link conditions clear instead of "
       "freezing forever (confirmed live: a device with WAN-failover "
       "monitoring turned off kept showing every uplink permanently offline "

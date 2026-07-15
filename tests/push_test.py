@@ -1311,6 +1311,63 @@ check("a client already off (\"false\") is not redundantly re-set to no "
       not any(o.path == ("interface", "pppoe-client") and o.action == "set"
              and "add-default-route" in o.params for o in tf_plan_on.ops))
 
+# Confirmed live via the router's own system log: mikromon never sent a
+# single "pppoe client changed" command for a link, while its DHCP-based
+# siblings got restored fine — because the WAN uplinks editor's Interface
+# text ("Wikiworx") differed in case from the router's actual PPPoE client
+# name ("wikiworx"). An exact == match silently (no error) treats that as
+# "not found" and skips the link entirely, indistinguishable from nothing
+# being wrong until you check the router's own log.
+case_link = WanEndpoint(interface="Wikiworx", name="Wikiworx")
+case_cfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[case_link]))
+case_api = FakeApi({
+    ("ip", "route"): [
+        {".id": "*10", "comment": "mikromon:failover:primary",
+         "dst-address": "0.0.0.0/0", "gateway": "10.0.0.1", "distance": "1"},
+        {".id": "*11", "comment": "mikromon:failover:check:primary",
+         "dst-address": "1.1.1.1/32", "gateway": "10.0.0.1", "distance": "1"},
+    ],
+    ("tool", "netwatch"): [
+        {".id": "*20", "comment": "mikromon:failover:watch:primary", "host": "1.1.1.1"},
+    ],
+    # The router's own PPPoE client is "wikiworx" — lowercase, unlike the
+    # WAN uplinks editor's "Wikiworx".
+    ("interface", "pppoe-client"): [
+        {".id": "*1", "name": "wikiworx", "add-default-route": "no", "disabled": "false"},
+    ],
+    ("ip", "dhcp-client"): [],
+    ("interface", "l2tp-client"): [], ("ppp", "active"): [], ("ip", "address"): [],
+})
+case_plan = F.routes_plan(Pusher(case_cfg, case_api, dry_run=False), case_cfg,
+                          {"fo_enabled": ""}, {})
+check("a case mismatch between the WAN uplinks editor's Interface text and "
+      "the router's actual PPPoE client name is still matched and restored "
+      "(not silently skipped)",
+      any(o.path == ("interface", "pppoe-client") and o.action == "set"
+          and o.params.get("add-default-route") == "yes" for o in case_plan.ops))
+
+# Same case-insensitive matching needed when ENABLING failover (the
+# "stop this client creating its own route" step) and for gateway
+# detection — not just the disable/restore path.
+case_api_on = FakeApi({
+    ("ip", "route"): [], ("tool", "netwatch"): [],
+    ("interface", "pppoe-client"): [
+        {".id": "*1", "name": "wikiworx", "add-default-route": "yes", "disabled": "false"}],
+    ("ip", "dhcp-client"): [],
+    ("interface", "l2tp-client"): [],
+    ("ppp", "active"): [{"name": "wikiworx", "remote-address": "10.0.0.1"}],
+    ("ip", "address"): [],
+})
+case_plan_on = F.routes_plan(Pusher(case_cfg, case_api_on, dry_run=False), case_cfg,
+                            {"fo_enabled": "1", "fo_primary_check": "1.1.1.1"}, {})
+check("gateway detection and the add-default-route=no step both still "
+      "match the client despite the case difference when enabling",
+      any(o.path == ("ip", "route") and o.action == "add"
+          and o.params.get("comment") == "mikromon:failover:primary"
+          and o.params.get("gateway") == "10.0.0.1" for o in case_plan_on.ops)
+      and any(o.path == ("interface", "pppoe-client") and o.action == "set"
+             and o.params.get("add-default-route") == "no" for o in case_plan_on.ops))
+
 # 4 uplinks: every link's check IP must be globally unique. RouterOS only
 # ever has ONE active route to a given host — if two links' check-routes
 # both pointed at the same IP, only one link would actually get pinged
