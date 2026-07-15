@@ -579,15 +579,14 @@ check("portfwd_unmanaged offers only dst-nat rules (not masquerade)",
       [u["id"] for u in um] == ["*1"])
 
 
-# ---- 11. sd-wan: failover distances + per-subnet policy --------------------
-# Distance is pushed to the DHCP/PPPoE CLIENT's own default-route-distance,
-# never to the route itself — a default route created by a DHCP/PPPoE
-# client is dynamic and read-only in /ip/route (RouterOS rejects a direct
-# "set" on it with "no such item"); the client-level field is what's
-# actually settable.
-print("sd-wan:")
+# ---- 11. sd-wan (WAN tab): per-subnet policy routing only ------------------
+# WAN uplink Distance and the full Gateway Failover feature live entirely
+# on the Routes tab now (via _apply_failover) — the WAN tab no longer has
+# its own separate, overlapping distance-setting mode, to avoid there being
+# two different places that look like they control the same thing.
+print("sd-wan (WAN tab — policy routing only):")
 link1 = _t.SimpleNamespace(interface="ether1", gateway="", name="ISP1",
-                           label=lambda i=0: "ISP1", distance=None)
+                           label=lambda i=0: "ISP1", distance=10)
 scfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[link1]))
 sapi = FakeApi({
     ("ip", "route"): [],
@@ -596,54 +595,18 @@ sapi = FakeApi({
         {".id": "*1", "interface": "ether1", "default-route-distance": "5"}],
     ("ip", "firewall", "mangle"): []})
 sp = Pusher(scfg, sapi, dry_run=True)
-plan = F.sdwan_plan(sp, scfg, {"mode": "failover"},
+plan = F.sdwan_plan(sp, scfg, {},
                     {"pol__subnet": ["10.0.0.0/24"], "pol__via": ["ether2"]})
-check("failover sets the primary link's OWN CLIENT distance to 1 (not the "
-      "route, which would fail on a dynamic DHCP/PPPoE-created route)",
-      any(o.path == ("ip", "dhcp-client") and o.action == "set"
-          and o.params.get("default-route-distance") == "1" for o in plan.ops))
+check("the WAN tab never touches a WAN client's own distance (that's the "
+      "Routes tab's job, exclusively)",
+      not any(o.path in (("ip", "dhcp-client"), ("interface", "pppoe-client"))
+             for o in plan.ops))
 check("policy adds a mangle mark-routing rule",
       any(o.path == ("ip", "firewall", "mangle")
           and o.params.get("action") == "mark-routing" for o in plan.ops))
 check("policy adds a marked default route",
       any(o.path == ("ip", "route") and o.params.get("routing-mark")
           and o.params.get("dst-address") == "0.0.0.0/0" for o in plan.ops))
-
-# "manual" mode (the tab's default) pushes each link's own explicit Distance
-# (WAN uplinks editor) — this is the field the user actually sets and, until
-# this fix, this code path did absolutely nothing with it.
-manual_link = _t.SimpleNamespace(interface="ether1", gateway="", name="ISP1",
-                                 label=lambda i=0: "ISP1", distance=10)
-manual_cfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[manual_link]))
-manual_api = FakeApi({
-    ("ip", "route"): [],
-    ("interface", "pppoe-client"): [],
-    ("ip", "dhcp-client"): [
-        {".id": "*1", "interface": "ether1", "default-route-distance": "1"}],
-    ("ip", "firewall", "mangle"): []})
-manual_plan = F.sdwan_plan(Pusher(manual_cfg, manual_api, dry_run=True),
-                          manual_cfg, {"mode": "manual"}, {})
-check("manual mode (the WAN tab's default) pushes the link's own explicit "
-      "Distance to its client — this used to do nothing at all",
-      any(o.path == ("ip", "dhcp-client") and o.action == "set"
-          and o.params.get("default-route-distance") == "10"
-          for o in manual_plan.ops))
-
-# A link with no explicit Distance in manual mode is left alone entirely —
-# no guess, no churn.
-noexp_link = _t.SimpleNamespace(interface="ether1", gateway="", name="ISP1",
-                                label=lambda i=0: "ISP1", distance=None)
-noexp_cfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[noexp_link]))
-noexp_api = FakeApi({
-    ("ip", "route"): [],
-    ("interface", "pppoe-client"): [],
-    ("ip", "dhcp-client"): [
-        {".id": "*1", "interface": "ether1", "default-route-distance": "1"}],
-    ("ip", "firewall", "mangle"): []})
-noexp_plan = F.sdwan_plan(Pusher(noexp_cfg, noexp_api, dry_run=True),
-                          noexp_cfg, {"mode": "manual"}, {})
-check("manual mode with no explicit Distance touches nothing for that link",
-      not any(o.path == ("ip", "dhcp-client") for o in noexp_plan.ops))
 
 
 # ---- 11b. detect_isp_ifaces: find which port actually has the internet ----

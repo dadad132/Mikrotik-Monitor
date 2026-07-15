@@ -694,24 +694,12 @@ def sdwan_summary(current, cfg):
 def sdwan_form(current, cfg):
     links = ", ".join(e.label(i) for i, e in enumerate(cfg.wan.links)) or "(none)"
     return [
-        {"type": "select", "name": "mode",
-         "label": "Auto-set distances for configured WAN uplinks",
-         "options": [
-             ("manual", "Manual — use each uplink's own Distance below"),
-             ("failover", "Failover — strict priority (1, 2, 3 … in link order)"),
-             ("loadbalance", "Load balance — all equal (distance 1)"),
-         ],
-         "value": "manual",
-         "hint": "Manual pushes each configured uplink's own Distance (set on "
-                 "the WAN uplinks tab) straight to its DHCP/PPPoE client — "
-                 "leave a link's Distance blank there to leave it untouched "
-                 "here. Failover/load-balance instead auto-assign every "
-                 "uplink's distance by its position in the list. For the "
-                 "full Gateway Failover feature (Netwatch health checks, "
-                 "automatic switchover) use the Routes tab."},
         {"type": "static", "label": "Configured WAN uplinks (priority order)",
          "value": links,
-         "hint": "Edit them on the Devices page → WAN uplinks section."},
+         "hint": "Edit them, including each link's own route Distance, on "
+                 "the Devices page → WAN uplinks section. Gateway Failover "
+                 "(Netwatch health checks, automatic switchover) lives on "
+                 "the Routes tab."},
         {"type": "rows", "name": "pol",
          "label": "Send specific LAN subnets out a chosen WAN (policy routing)",
          "cols": [("subnet", "LAN subnet or host", "192.168.88.0/24"),
@@ -723,40 +711,9 @@ def sdwan_form(current, cfg):
 
 
 def sdwan_plan(pusher, cfg, flat, multi):
-    """"manual" mode pushes each link's own explicit Distance (WAN uplinks
-    editor) to its DHCP/PPPoE client; "failover"/"loadbalance" auto-assign
-    instead. All three target the CLIENT's own default-route-distance, not
-    the route itself — RouterOS default routes created by a DHCP/PPPoE
-    client are dynamic and read-only in /ip/route (a direct "set" on them
-    fails with "no such item"); the client-level field is the only one
-    that's actually settable, and takes effect on that line's next
-    reconnect."""
-    mode = flat.get("mode", "manual")
-    ops = []
-    pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
-    dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
-    for i, link in enumerate(cfg.wan.links):
-        iface = getattr(link, "interface", "") or ""
-        if not iface:
-            continue
-        if mode == "manual":
-            explicit = getattr(link, "distance", None)
-            if not explicit:
-                continue  # nothing chosen for this link — leave it alone
-            want = str(explicit)
-        else:
-            want = "1" if mode == "loadbalance" else str(i + 1)
-        label = link.label(i)
-        for c in pppoe_clients:
-            if (c.get("name") == iface
-                    and _norm(str(c.get("default-route-distance", "") or "")) != want):
-                ops.append(_set_field(_PPPOE_CLIENT, c, "default-route-distance",
-                                      want, f"PPPoE {label}"))
-        for c in dhcp_clients:
-            if (c.get("interface") == iface
-                    and _norm(str(c.get("default-route-distance", "") or "")) != want):
-                ops.append(_set_field(_DHCP_CLIENT, c, "default-route-distance",
-                                      want, f"DHCP {label}"))
+    """Per-subnet policy routing only — WAN uplink Distance (and the full
+    Gateway Failover feature) lives entirely on the Routes tab now, so
+    there's only ever one place to manage it."""
     mangle_desired, route_desired = [], []
     for r in _rows(multi, "pol", ("subnet", "via")):
         subnet, via = r["subnet"], r["via"]
@@ -776,8 +733,8 @@ def sdwan_plan(pusher, cfg, flat, multi):
     route_plan = pusher.plan_managed_list(
         _ROUTE, "comment", route_desired,
         owns=_prefix_owner(_RT_TAG), label="policy route")
-    return Plan(cfg.name, ops + mangle_plan.ops + route_plan.ops,
-                summary=f"wan {mode}")
+    return Plan(cfg.name, mangle_plan.ops + route_plan.ops,
+                summary="wan policy routing")
 
 
 # ===========================================================================
