@@ -336,39 +336,21 @@ def routes_form(current, cfg):
     return fields
 
 
-def _force_client_reconnect(ops, path, client, label):
-    """A DHCP or PPPoE client only applies a changed default-route-distance
-    (or add-default-route) to its NEXT connection — an already-established
-    session (or active DHCP lease) keeps routing exactly as it did when it
-    came up, no matter what the config now says. (Confirmed live: a new
-    distance showed up in the dry-run preview and even in the client's own
-    saved config on the router, but the actual live default route never
-    changed.) Toggling disabled off/on forces an immediate reconnect (a
-    fresh DHCP lease request, or a fresh PPP session) so the new setting
-    actually takes effect now, at the cost of a brief (few-second) drop on
-    that WAN link."""
-    rid = client[".id"]
-    ops.append(Operation(
-        "set", path, {".id": rid, "disabled": "yes"},
-        desc=f"reconnect {label} (apply new route settings)",
-        inverse=Operation("set", path, {".id": rid, "disabled": "no"},
-                          desc=f"revert {label} reconnect")))
-    ops.append(Operation(
-        "set", path, {".id": rid, "disabled": "no"},
-        desc=f"bring {label} back up",
-        inverse=Operation("set", path, {".id": rid, "disabled": "yes"},
-                          desc=f"revert {label} reconnect")))
-
-
 def _apply_wan_order(ops, order, pusher):
     """Build distance-change ops from a wan_order list.
 
     RouterOS dynamic routes (DHCP / PPPoE / L2TP) are read-only in /ip/route —
     attempting to set their distance returns 'no such item'. The only supported
-    path is setting default-route-distance on the client itself — which, on an
-    already-connected line, only takes effect after a reconnect (see
-    _force_client_reconnect); L2TP isn't force-reconnected here since this
-    codebase doesn't otherwise manage L2TP client connections."""
+    path is setting default-route-distance on the client itself, which takes
+    effect on the next connection or DHCP renewal.
+
+    Deliberately NOT forced live via a disable/enable bounce: the interface
+    being changed is very often the one carrying mikromon's own WireGuard
+    tunnel back to the hub. Disabling it can cut that tunnel mid-apply, and
+    if the follow-up "re-enable" command can no longer reach the router
+    (because the very link it needed just went down), the interface is left
+    stuck disabled with no remaining path to fix it remotely. A change here
+    is safe to leave pending until the line's next natural reconnect."""
     if not order:
         return
     dhcp_clients = _safe_fetch(pusher.api, _DHCP_CLIENT)
@@ -391,9 +373,6 @@ def _apply_wan_order(ops, order, pusher):
         cpath, c, clabel = client_map[item_id]
         if _norm(str(c.get("default-route-distance", "1"))) != want:
             ops.append(_set_field(cpath, c, "default-route-distance", want, clabel))
-            if (cpath in (_PPPOE_CLIENT, _DHCP_CLIENT)
-                    and c.get("disabled", "false") in ("false", "no", False)):
-                _force_client_reconnect(ops, cpath, c, clabel)
 
 
 def _gateway_for_link(link, pppoe_names, dhcp_by_iface,
@@ -494,9 +473,15 @@ def _apply_failover(ops, flat, pusher, cfg):
         # was before failover was ever turned on — that IS the restore, we
         # simply don't overwrite it with a guess.
         # disabled=no in case an earlier troubleshooting step left the
-        # client itself switched off. A reconnect is forced whenever
-        # add-default-route or the distance is actually changing on an
-        # already-connected line — see _force_client_reconnect.
+        # client itself switched off.
+        #
+        # None of this is forced live via a disable/enable bounce — see
+        # _apply_wan_order's docstring for why: the interface being changed
+        # is very often the one carrying mikromon's own WireGuard tunnel
+        # back to the hub, so bouncing it automatically risks cutting off
+        # our own remote access mid-apply with no way to fix it back. A
+        # pending add-default-route/distance change takes effect on that
+        # line's next natural reconnect.
         pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
         dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
         for link in links:
@@ -507,42 +492,30 @@ def _apply_failover(ops, flat, pusher, cfg):
             want_dist = str(explicit_dist) if explicit_dist else None
             for c in pppoe_clients:
                 if c.get("name") == iface:
-                    changed = False
                     if c.get("add-default-route", "yes") == "no":
                         ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route",
                                               "yes", f"PPPoE {iface}"))
-                        changed = True
                     if (want_dist is not None
                             and _norm(str(c.get("default-route-distance", "") or "")) != want_dist):
                         ops.append(_set_field(_PPPOE_CLIENT, c,
                                               "default-route-distance", want_dist,
                                               f"PPPoE {iface}"))
-                        changed = True
                     if c.get("disabled", "false") not in ("false", "no", False):
-                        # Already off — enabling it is itself a fresh
-                        # connect, no separate reconnect needed.
                         ops.append(_set_field(_PPPOE_CLIENT, c, "disabled", "no",
                                               f"PPPoE {iface}"))
-                    elif changed:
-                        _force_client_reconnect(ops, _PPPOE_CLIENT, c, f"PPPoE {iface}")
             for c in dhcp_clients:
                 if c.get("interface") == iface:
-                    changed = False
                     if c.get("add-default-route", "yes") == "no":
                         ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route",
                                               "yes", f"DHCP {iface}"))
-                        changed = True
                     if (want_dist is not None
                             and _norm(str(c.get("default-route-distance", "") or "")) != want_dist):
                         ops.append(_set_field(_DHCP_CLIENT, c,
                                               "default-route-distance", want_dist,
                                               f"DHCP {iface}"))
-                        changed = True
                     if c.get("disabled", "false") not in ("false", "no", False):
                         ops.append(_set_field(_DHCP_CLIENT, c, "disabled", "no",
                                               f"DHCP {iface}"))
-                    elif changed:
-                        _force_client_reconnect(ops, _DHCP_CLIENT, c, f"DHCP {iface}")
         return
 
     if not links:

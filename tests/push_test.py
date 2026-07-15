@@ -1246,10 +1246,11 @@ check("none of these links has an explicit Distance, so default-route-"
 check("restored clients get disabled=no",
       any(o.params.get("disabled") == "no" and o.params[".id"] == "*3"
           for o in dhcp_restores))
-check("an already-connected client whose distance is changing gets a "
-      "forced reconnect (disable then enable)",
-      [o.params.get("disabled") for o in disable_plan.ops
-       if o.params.get(".id") == "*1" and "disabled" in o.params] == ["yes", "no"])
+check("no interface is ever bounced (disable/enable) to force a change "
+      "live — that line may carry mikromon's own connection to the "
+      "router, so an automatic reconnect risks a self-lockout",
+      not any(o.params.get(".id") == "*1" and "disabled" in o.params
+             for o in disable_plan.ops))
 
 # Pre-existing tag-based failover routes/netwatch (from an earlier apply)
 # must be recognized as ours and cleaned up when disabling.
@@ -1282,8 +1283,8 @@ check("tag-based netwatch entry is recognized as ours and removed",
        if o.path == ("tool", "netwatch") and o.action == "remove"} == {"*11"})
 
 # ---- 16. explicit per-uplink Distance (WAN uplinks editor) -----------------
-print("explicit WAN uplink distance (auto-detects the router client, forces "
-      "a reconnect so a changed distance actually takes effect immediately):")
+print("explicit WAN uplink distance (auto-detects the router client; saved "
+      "immediately but NOT force-reconnected — see the safety note above):")
 dist_wiki = WanEndpoint(interface="Wikiworx", name="Wikiworx", distance=1)
 dist_backup = WanEndpoint(interface="ether2-backup", name="Backup", distance=5)
 dist_voip = WanEndpoint(interface="ether3-voip", name="VoIP")  # no explicit distance
@@ -1317,12 +1318,11 @@ check("Wikiworx is already at its chosen distance (1) — no churn for it",
 check("the changed link's distance is set to the chosen value (5)",
       any(o.params[".id"] == "*2" and o.params["default-route-distance"] == "5"
           for o in dist_sets))
-check("changing the distance on an already-connected line forces a "
-      "reconnect (disable then enable) so it takes effect immediately",
-      [o.params.get("disabled") for o in dist_plan.ops if o.params.get(".id") == "*2"]
-      == ["5", "yes", "no"] or
-      [o.params.get("disabled") for o in dist_plan.ops
-       if o.params.get(".id") == "*2" and "disabled" in o.params] == ["yes", "no"])
+check("changing the distance does NOT bounce the interface — it's saved on "
+      "the client for the next natural reconnect, not forced live (that "
+      "line may carry mikromon's own connection to the router)",
+      not any(o.params.get(".id") == "*2" and "disabled" in o.params
+             for o in dist_plan.ops))
 check("a link with no explicit distance never gets its default-route-"
       "distance touched (left exactly as it was before failover started)",
       not any(o.params.get(".id") == "*3" and "default-route-distance" in o.params
@@ -1421,10 +1421,12 @@ check("a link with NO explicit Distance keeps its untouched pre-failover "
       "value (42) — nothing computed, nothing overwritten",
       not any(o.params.get(".id") == "*2" and "default-route-distance" in o.params
              for o in snap_plan.ops))
-check("both links still get add-default-route=yes and a forced reconnect "
-      "regardless of whether their distance changed",
+check("both links get add-default-route=yes (never left at no) regardless "
+      "of whether their distance changed",
       all(any(o.params.get(".id") == cid and o.params.get("add-default-route") == "yes"
              for o in snap_plan.ops) for cid in ("*1", "*2")))
+check("neither link is bounced (disabled/enabled) to force anything live",
+      not any("disabled" in o.params for o in snap_plan.ops))
 
 
 print()
