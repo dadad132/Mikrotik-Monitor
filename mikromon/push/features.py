@@ -447,12 +447,15 @@ def _fo_role(idx):
 
 
 def _fo_distance(idx, link):
-    """A link's route distance: its own explicit Distance (set in the WAN
-    uplinks editor) if chosen, else its position + 1 (1, 2, 3... in
-    priority order). The SAME value is used whether this link's route is
-    the static failover route (failover on) or the client's own
-    default-route-distance (failover off) — so turning failover off always
-    restores exactly the priority that was active before."""
+    """Distance for this link's STATIC FAILOVER ROUTE while failover is on:
+    its own explicit Distance (set in the WAN uplinks editor) if chosen,
+    else its position + 1 (1, 2, 3... in priority order) — failover's
+    managed routes need some strictly-ordered value to prioritize among
+    themselves, regardless of what's chosen. This is unrelated to what the
+    underlying client's own default-route-distance gets restored to when
+    failover is turned off — see the disabled branch below, which uses the
+    explicit Distance ONLY (nothing computed) and otherwise leaves that
+    field untouched entirely."""
     explicit = getattr(link, "distance", None)
     return str(explicit) if explicit else str(idx + 1)
 
@@ -482,18 +485,26 @@ def _apply_failover(ops, flat, pusher, cfg):
         # Restore each WAN client to plain, working routing — equivalent to
         # running, per link:
         #   /ip dhcp-client set [find name="..."] add-default-route=yes \
-        #       default-route-distance=<N> disabled=no
+        #       [default-route-distance=<N>] disabled=no
+        # default-route-distance is only touched when the link has an
+        # explicit Distance chosen in the WAN uplinks editor — that exact
+        # value, nothing computed. If no Distance is chosen, this field is
+        # left alone entirely: while failover is on, it's never written to
+        # (only add-default-route is), so it stays frozen at whatever it
+        # was before failover was ever turned on — that IS the restore, we
+        # simply don't overwrite it with a guess.
         # disabled=no in case an earlier troubleshooting step left the
         # client itself switched off. A reconnect is forced whenever
         # add-default-route or the distance is actually changing on an
         # already-connected line — see _force_client_reconnect.
         pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
         dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
-        for idx, link in enumerate(links):
+        for link in links:
             iface = getattr(link, "interface", "") or ""
             if not iface:
                 continue
-            want_dist = _fo_distance(idx, link)
+            explicit_dist = getattr(link, "distance", None)
+            want_dist = str(explicit_dist) if explicit_dist else None
             for c in pppoe_clients:
                 if c.get("name") == iface:
                     changed = False
@@ -501,7 +512,8 @@ def _apply_failover(ops, flat, pusher, cfg):
                         ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route",
                                               "yes", f"PPPoE {iface}"))
                         changed = True
-                    if _norm(str(c.get("default-route-distance", "") or "")) != want_dist:
+                    if (want_dist is not None
+                            and _norm(str(c.get("default-route-distance", "") or "")) != want_dist):
                         ops.append(_set_field(_PPPOE_CLIENT, c,
                                               "default-route-distance", want_dist,
                                               f"PPPoE {iface}"))
@@ -520,7 +532,8 @@ def _apply_failover(ops, flat, pusher, cfg):
                         ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route",
                                               "yes", f"DHCP {iface}"))
                         changed = True
-                    if _norm(str(c.get("default-route-distance", "") or "")) != want_dist:
+                    if (want_dist is not None
+                            and _norm(str(c.get("default-route-distance", "") or "")) != want_dist):
                         ops.append(_set_field(_DHCP_CLIENT, c,
                                               "default-route-distance", want_dist,
                                               f"DHCP {iface}"))

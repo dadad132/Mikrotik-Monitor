@@ -1221,8 +1221,10 @@ check("re-applying the same enabled config is a no-op (no churn/flapping)",
 
 # Now disable failover: must remove ALL managed routes/netwatch (6 routes,
 # 3 netwatch — one set per configured link) AND restore every configured
-# link's own routing to the SAME distance it had while failover was on
-# (position + 1, since none of these links has an explicit Distance set).
+# link's own routing — add-default-route=yes and disabled=no always, but
+# default-route-distance ONLY if the link has an explicit Distance chosen
+# (none of these 3 do), since that field is never touched while failover
+# is on and so already holds whatever it was before failover started.
 disable_plan = F.routes_plan(fo_pusher, fo_cfg, {"fo_enabled": ""}, {})
 removed_routes = {o.params[".id"] for o in disable_plan.ops
                   if o.path == ("ip", "route") and o.action == "remove"}
@@ -1238,10 +1240,9 @@ check("ALL 3 configured links get restored",
 check("restored clients get add-default-route=yes",
       any(o.params.get("add-default-route") == "yes"
           and o.params[".id"] == "*1" for o in dhcp_restores))
-check("restored clients get the SAME distance they had while failover was "
-      "on (1, 2, 3 — position order), not an unrelated auto value",
-      {o.params.get("default-route-distance") for o in dhcp_restores
-       if "default-route-distance" in o.params} == {"1", "2", "3"})
+check("none of these links has an explicit Distance, so default-route-"
+      "distance is left untouched entirely (not overwritten with a guess)",
+      not any("default-route-distance" in o.params for o in dhcp_restores))
 check("restored clients get disabled=no",
       any(o.params.get("disabled") == "no" and o.params[".id"] == "*3"
           for o in dhcp_restores))
@@ -1322,10 +1323,10 @@ check("changing the distance on an already-connected line forces a "
       == ["5", "yes", "no"] or
       [o.params.get("disabled") for o in dist_plan.ops
        if o.params.get(".id") == "*2" and "disabled" in o.params] == ["yes", "no"])
-check("a link with no explicit distance still gets restored by the normal "
-      "failover-off logic (auto distance), not silently skipped",
-      any(o.params[".id"] == "*3" and "default-route-distance" in o.params
-          for o in dist_plan.ops))
+check("a link with no explicit distance never gets its default-route-"
+      "distance touched (left exactly as it was before failover started)",
+      not any(o.params.get(".id") == "*3" and "default-route-distance" in o.params
+             for o in dist_plan.ops))
 check("re-applying the same chosen distances is a no-op (idempotent, no "
       "repeated reconnects)",
       not any("default-route-distance" in o.params or "disabled" in o.params
@@ -1377,6 +1378,53 @@ check("the 3rd link's own DHCP client is not separately touched for "
       "distance while failover manages it via a static route",
       not any(o.params.get(".id") == "*3" and "default-route-distance" in o.params
              for o in fo_dist_plan.ops))
+
+# Explicit "snapshot" scenario: a link with no chosen Distance keeps
+# WHATEVER default-route-distance is already on the router (42 — set there
+# by something outside mikromon before failover was ever touched), while a
+# link WITH an explicit Distance is forced to exactly that value and
+# nothing else, regardless of what's currently on the router.
+snap_link_a = WanEndpoint(interface="ether1", name="A", distance=7)
+snap_link_b = WanEndpoint(interface="ether5", name="B")  # no explicit distance
+snap_cfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[snap_link_a, snap_link_b]))
+snap_api = FakeApi({
+    ("ip", "route"): [
+        {".id": "*10", "comment": "mikromon:failover:primary",
+         "dst-address": "0.0.0.0/0", "gateway": "10.0.0.1", "distance": "7"},
+        {".id": "*11", "comment": "mikromon:failover:check:primary",
+         "dst-address": "1.1.1.1/32", "gateway": "10.0.0.1", "distance": "1"},
+        {".id": "*12", "comment": "mikromon:failover:secondary",
+         "dst-address": "0.0.0.0/0", "gateway": "10.0.1.1", "distance": "2"},
+        {".id": "*13", "comment": "mikromon:failover:check:secondary",
+         "dst-address": "8.8.8.8/32", "gateway": "10.0.1.1", "distance": "1"},
+    ],
+    ("tool", "netwatch"): [
+        {".id": "*20", "comment": "mikromon:failover:watch:primary", "host": "1.1.1.1"},
+        {".id": "*21", "comment": "mikromon:failover:watch:secondary", "host": "8.8.8.8"},
+    ],
+    ("interface", "pppoe-client"): [],
+    ("ip", "dhcp-client"): [
+        {".id": "*1", "interface": "ether1", "gateway": "10.0.0.1",
+         "add-default-route": "no", "default-route-distance": "99", "disabled": "false"},
+        {".id": "*2", "interface": "ether5", "gateway": "10.0.1.1",
+         "add-default-route": "no", "default-route-distance": "42", "disabled": "false"},
+    ],
+    ("interface", "l2tp-client"): [], ("ppp", "active"): [], ("ip", "address"): [],
+})
+snap_pusher = Pusher(snap_cfg, snap_api, dry_run=False)
+snap_plan = F.routes_plan(snap_pusher, snap_cfg, {"fo_enabled": ""}, {})
+check("a link WITH an explicit Distance is forced to exactly that value "
+      "(7), ignoring whatever is currently on the router (99)",
+      any(o.params.get(".id") == "*1" and o.params.get("default-route-distance") == "7"
+          for o in snap_plan.ops))
+check("a link with NO explicit Distance keeps its untouched pre-failover "
+      "value (42) — nothing computed, nothing overwritten",
+      not any(o.params.get(".id") == "*2" and "default-route-distance" in o.params
+             for o in snap_plan.ops))
+check("both links still get add-default-route=yes and a forced reconnect "
+      "regardless of whether their distance changed",
+      all(any(o.params.get(".id") == cid and o.params.get("add-default-route") == "yes"
+             for o in snap_plan.ops) for cid in ("*1", "*2")))
 
 
 print()
