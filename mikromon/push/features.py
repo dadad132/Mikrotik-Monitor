@@ -69,18 +69,6 @@ _IP_ADDRESS = ("ip", "address")
 _FAILOVER_TAG = "mikromon:failover:"
 
 
-def _default_routes(api):
-    return [r for r in api.fetch(_ROUTE)
-            if str(r.get("dst-address", "")).startswith("0.0.0.0/0")]
-
-
-def _route_matches(route, link):
-    gw = str(route.get("gateway", ""))
-    if link.interface and (gw == link.interface or link.interface in gw):
-        return True
-    return bool(link.gateway) and gw == link.gateway
-
-
 def _safe_fetch(api, path):
     try:
         return api.fetch(path)
@@ -709,13 +697,18 @@ def sdwan_form(current, cfg):
         {"type": "select", "name": "mode",
          "label": "Auto-set distances for configured WAN uplinks",
          "options": [
-             ("manual", "Manual — no automatic distance changes"),
+             ("manual", "Manual — use each uplink's own Distance below"),
              ("failover", "Failover — strict priority (1, 2, 3 … in link order)"),
              ("loadbalance", "Load balance — all equal (distance 1)"),
          ],
          "value": "manual",
-         "hint": "Failover/load-balance auto-assigns distances to the static WAN "
-                 "uplinks below. Use the Routes tab to change which line is primary."},
+         "hint": "Manual pushes each configured uplink's own Distance (set on "
+                 "the WAN uplinks tab) straight to its DHCP/PPPoE client — "
+                 "leave a link's Distance blank there to leave it untouched "
+                 "here. Failover/load-balance instead auto-assign every "
+                 "uplink's distance by its position in the list. For the "
+                 "full Gateway Failover feature (Netwatch health checks, "
+                 "automatic switchover) use the Routes tab."},
         {"type": "static", "label": "Configured WAN uplinks (priority order)",
          "value": links,
          "hint": "Edit them on the Devices page → WAN uplinks section."},
@@ -730,17 +723,40 @@ def sdwan_form(current, cfg):
 
 
 def sdwan_plan(pusher, cfg, flat, multi):
+    """"manual" mode pushes each link's own explicit Distance (WAN uplinks
+    editor) to its DHCP/PPPoE client; "failover"/"loadbalance" auto-assign
+    instead. All three target the CLIENT's own default-route-distance, not
+    the route itself — RouterOS default routes created by a DHCP/PPPoE
+    client are dynamic and read-only in /ip/route (a direct "set" on them
+    fails with "no such item"); the client-level field is the only one
+    that's actually settable, and takes effect on that line's next
+    reconnect."""
     mode = flat.get("mode", "manual")
     ops = []
-    if mode != "manual":
-        routes = [r for r in _default_routes(pusher.api)
-                  if not str(r.get("comment", "")).startswith("mikromon:sdwan")]
-        for i, link in enumerate(cfg.wan.links):
+    pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
+    dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
+    for i, link in enumerate(cfg.wan.links):
+        iface = getattr(link, "interface", "") or ""
+        if not iface:
+            continue
+        if mode == "manual":
+            explicit = getattr(link, "distance", None)
+            if not explicit:
+                continue  # nothing chosen for this link — leave it alone
+            want = str(explicit)
+        else:
             want = "1" if mode == "loadbalance" else str(i + 1)
-            for r in routes:
-                if _route_matches(r, link) and _norm(r.get("distance", "")) != want:
-                    ops.append(_set_field(_ROUTE, r, "distance", want,
-                                          f"route via {link.label(i)}"))
+        label = link.label(i)
+        for c in pppoe_clients:
+            if (c.get("name") == iface
+                    and _norm(str(c.get("default-route-distance", "") or "")) != want):
+                ops.append(_set_field(_PPPOE_CLIENT, c, "default-route-distance",
+                                      want, f"PPPoE {label}"))
+        for c in dhcp_clients:
+            if (c.get("interface") == iface
+                    and _norm(str(c.get("default-route-distance", "") or "")) != want):
+                ops.append(_set_field(_DHCP_CLIENT, c, "default-route-distance",
+                                      want, f"DHCP {label}"))
     mangle_desired, route_desired = [], []
     for r in _rows(multi, "pol", ("subnet", "via")):
         subnet, via = r["subnet"], r["via"]
