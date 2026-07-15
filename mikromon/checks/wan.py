@@ -77,11 +77,9 @@ def _matches_endpoint(route: dict, ep, dhcp_by_iface: dict | None = None) -> boo
 
 
 def _fo_role(idx: int) -> str:
-    """Old role-naming scheme push/features.py's gateway-failover route
-    builder used to tag comments with ("mikromon:failover:primary"/
-    "secondary") before it switched to using each uplink's own configured
-    name. Kept only for _fo_route_idx's back-compat matching, for routers
-    not yet re-pushed after that switch."""
+    """Role name push/features.py's gateway-failover route builder tags
+    comments with — mikromon:failover:primary/secondary/link3/link4/... —
+    for every configured uplink, not just the first two."""
     return "primary" if idx == 0 else "secondary" if idx == 1 else f"link{idx + 1}"
 
 
@@ -89,14 +87,13 @@ def _fo_route_idx(comment: str, links) -> int | None:
     """Which configured link (if any) a mikromon-managed failover route
     belongs to, judged purely by its comment — needed when gateway/interface
     matching can't tell, e.g. a PPP remote-address gateway that doesn't match
-    the uplink's interface name via gateway-status. Recognizes both the
-    current scheme (the uplink's own configured name) and the older internal
-    tag scheme (for routers not yet re-pushed after the switch)."""
-    for i, ep in enumerate(links[:2]):
+    the uplink's interface name via gateway-status. Checks every configured
+    link, not just the first two, since failover now manages all of them."""
+    for i, ep in enumerate(links):
         if comment == ep.label(i):
             return i
     if comment.startswith("mikromon:failover:"):
-        for i in range(min(len(links), 2)):
+        for i in range(len(links)):
             if comment == f"mikromon:failover:{_fo_role(i)}":
                 return i
     return None

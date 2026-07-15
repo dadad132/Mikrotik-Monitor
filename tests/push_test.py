@@ -1171,20 +1171,29 @@ enable_plan = F.routes_plan(fo_pusher, fo_cfg,
 route_adds = [o for o in enable_plan.ops if o.path == ("ip", "route") and o.action == "add"]
 watch_adds = [o for o in enable_plan.ops if o.path == ("tool", "netwatch") and o.action == "add"]
 
-check("only the top 2 configured links get failover routes (not Wireless)",
+check("ALL 3 configured links get a failover route (not just primary/"
+      "secondary) — link3 gets its own route + check-route too",
       {o.params["comment"] for o in route_adds} ==
       {f"{_FO_TAG}primary", f"{_FO_TAG}check:primary",
-       f"{_FO_TAG}secondary", f"{_FO_TAG}check:secondary"})
+       f"{_FO_TAG}secondary", f"{_FO_TAG}check:secondary",
+       f"{_FO_TAG}link3", f"{_FO_TAG}check:link3"})
 check("route comments use the internal mikromon:failover: tag",
       any(o.params["comment"] == f"{_FO_TAG}primary" for o in route_adds))
 check("check-route comment is 'check:<role>'",
       any(o.params["comment"] == f"{_FO_TAG}check:primary"
           and o.params["dst-address"] == "1.1.1.1/32" for o in route_adds))
+check("link3's own route distance is 3 (position + 1, no explicit Distance set)",
+      any(o.params["comment"] == f"{_FO_TAG}link3" and o.params["distance"] == "3"
+          for o in route_adds))
 check("primary always checks 1.1.1.1",
       any(w.params["comment"] == f"{_FO_TAG}watch:primary" and w.params["host"] == "1.1.1.1"
           for w in watch_adds))
 check("secondary always checks 8.8.8.8",
       any(w.params["comment"] == f"{_FO_TAG}watch:secondary" and w.params["host"] == "8.8.8.8"
+          for w in watch_adds))
+check("link3 (3rd position, even index) shares the primary check IP "
+      "instead of needing a dedicated field",
+      any(w.params["comment"] == f"{_FO_TAG}watch:link3" and w.params["host"] == "1.1.1.1"
           for w in watch_adds))
 check("netwatch interval defaults to 30s (no fo_interval field in the form)",
       all(w.params["interval"] == "30s" for w in watch_adds))
@@ -1197,9 +1206,7 @@ check("up-script enables the route by its tag",
 check("no RouterOS scripts use invalid $(var) shell-style syntax",
       not any("$(" in str(v) for o in enable_plan.ops
              for v in o.params.values() if isinstance(v, str)))
-check("ALL configured WAN clients get add-default-route=no when enabling "
-      "(matches the original June-30 behavior being restored — not scoped to "
-      "just the 2 failover-managed links)",
+check("ALL configured WAN clients get add-default-route=no when enabling",
       sum(1 for o in enable_plan.ops if o.action == "set"
           and o.params.get("add-default-route") == "no") == 3)
 
@@ -1212,29 +1219,36 @@ replan = F.routes_plan(fo_pusher, fo_cfg,
 check("re-applying the same enabled config is a no-op (no churn/flapping)",
       not any(o.path in (("ip", "route"), ("tool", "netwatch")) for o in replan.ops))
 
-# Now disable failover: must remove the managed routes/netwatch AND restore
-# every configured link's own routing — not just the 2 that failover managed.
+# Now disable failover: must remove ALL managed routes/netwatch (6 routes,
+# 3 netwatch — one set per configured link) AND restore every configured
+# link's own routing to the SAME distance it had while failover was on
+# (position + 1, since none of these links has an explicit Distance set).
 disable_plan = F.routes_plan(fo_pusher, fo_cfg, {"fo_enabled": ""}, {})
 removed_routes = {o.params[".id"] for o in disable_plan.ops
                   if o.path == ("ip", "route") and o.action == "remove"}
 removed_watch = {o.params[".id"] for o in disable_plan.ops
                  if o.path == ("tool", "netwatch") and o.action == "remove"}
-check("disabling removes all 4 managed failover routes",
-      len(removed_routes) == 4)
-check("disabling removes both managed netwatch entries",
-      len(removed_watch) == 2)
+check("disabling removes all 6 managed failover routes (3 links x 2 each)",
+      len(removed_routes) == 6)
+check("disabling removes all 3 managed netwatch entries",
+      len(removed_watch) == 3)
 dhcp_restores = [o for o in disable_plan.ops if o.path == ("ip", "dhcp-client")]
-check("ALL 3 configured links get restored, not just the 2 failover managed",
+check("ALL 3 configured links get restored",
       {o.params[".id"] for o in dhcp_restores} == {"*1", "*2", "*3"})
 check("restored clients get add-default-route=yes",
       any(o.params.get("add-default-route") == "yes"
           and o.params[".id"] == "*1" for o in dhcp_restores))
-check("restored clients get distinct per-link distances (10, 11, 12)",
+check("restored clients get the SAME distance they had while failover was "
+      "on (1, 2, 3 — position order), not an unrelated auto value",
       {o.params.get("default-route-distance") for o in dhcp_restores
-       if "default-route-distance" in o.params} == {"10", "11", "12"})
+       if "default-route-distance" in o.params} == {"1", "2", "3"})
 check("restored clients get disabled=no",
       any(o.params.get("disabled") == "no" and o.params[".id"] == "*3"
           for o in dhcp_restores))
+check("an already-connected client whose distance is changing gets a "
+      "forced reconnect (disable then enable)",
+      [o.params.get("disabled") for o in disable_plan.ops
+       if o.params.get(".id") == "*1" and "disabled" in o.params] == ["yes", "no"])
 
 # Pre-existing tag-based failover routes/netwatch (from an earlier apply)
 # must be recognized as ours and cleaned up when disabling.
@@ -1326,34 +1340,43 @@ check("re-applying the same chosen distances is a no-op (idempotent, no "
                           "add-default-route": "yes", "default-route-distance": "5",
                           "disabled": "false"},
                          {".id": "*3", "interface": "ether3-voip",
-                          "add-default-route": "yes", "default-route-distance": "12",
+                          "add-default-route": "yes", "default-route-distance": "3",
                           "disabled": "false"}],
                      ("interface", "l2tp-client"): [], ("ppp", "active"): [],
                      ("ip", "address"): [],
                  }), dry_run=False),
                  dist_cfg, {"fo_enabled": ""}, {}).ops))
 
-# With failover ON, the explicit distance still applies to a link failover
-# doesn't manage (the 3rd, VoIP, link) via _apply_wan_distances — but must
-# NOT double-touch the 2 failover-managed links (that would double-reconnect
-# them for no reason, since _apply_failover already forces add-default-route
-# off on those regardless of distance).
+# With failover ON, a 3rd link's explicit Distance becomes the distance of
+# ITS OWN static failover route (failover now manages every configured
+# link, not just primary/secondary) — the client's own default-route-
+# distance field is irrelevant at that point since add-default-route=no.
 dist_wiki2 = WanEndpoint(interface="Wikiworx", name="Wikiworx", distance=1)
 dist_backup2 = WanEndpoint(interface="ether2-backup", name="Backup", distance=2)
 dist_voip2 = WanEndpoint(interface="ether3-voip", name="VoIP", distance=9)
 fo_dist_cfg = _t.SimpleNamespace(
     name="R1", wan=_t.SimpleNamespace(links=[dist_wiki2, dist_backup2, dist_voip2]))
-fo_dist_api = FakeApi(dict(dist_state))
+fo_dist_state = dict(dist_state)
+fo_dist_state[("ip", "dhcp-client")] = [
+    {".id": "*2", "interface": "ether2-backup", "gateway": "10.0.1.1",
+     "add-default-route": "yes", "default-route-distance": "1", "disabled": "false"},
+    {".id": "*3", "interface": "ether3-voip", "gateway": "10.0.3.1",
+     "add-default-route": "yes", "default-route-distance": "1", "disabled": "false"},
+]
+fo_dist_api = FakeApi(fo_dist_state)
 fo_dist_pusher = Pusher(fo_dist_cfg, fo_dist_api, dry_run=False)
 fo_dist_plan = F.routes_plan(fo_dist_pusher, fo_dist_cfg,
                              {"fo_enabled": "1", "fo_primary_check": "1.1.1.1",
                               "fo_secondary_check": "8.8.8.8"}, {})
-voip_dist_sets = [o for o in fo_dist_plan.ops if o.action == "set"
-                 and o.params.get(".id") == "*3"
-                 and "default-route-distance" in o.params]
-check("with failover ON, a link failover doesn't manage still gets its "
-      "explicit distance applied",
-      any(o.params["default-route-distance"] == "9" for o in voip_dist_sets))
+voip_route_adds = [o for o in fo_dist_plan.ops if o.path == ("ip", "route")
+                   and o.action == "add" and o.params["comment"] == "mikromon:failover:link3"]
+check("a 3rd managed link's static failover route uses its own explicit "
+      "Distance (9), not the auto position value (3)",
+      any(o.params["distance"] == "9" for o in voip_route_adds))
+check("the 3rd link's own DHCP client is not separately touched for "
+      "distance while failover manages it via a static route",
+      not any(o.params.get(".id") == "*3" and "default-route-distance" in o.params
+             for o in fo_dist_plan.ops))
 
 
 print()
