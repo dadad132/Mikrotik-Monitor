@@ -427,6 +427,37 @@ def _fo_distance(idx, link):
     return str(explicit) if explicit else str(idx + 1)
 
 
+# Well-known public resolvers used as fallback check IPs for a 3rd+ uplink,
+# so it never has to share one with primary/secondary.
+_FO_EXTRA_CHECK_IPS = ["9.9.9.9", "208.67.222.222", "1.0.0.1", "8.8.4.4",
+                      "149.112.112.112", "208.67.220.220"]
+
+
+def _fo_check_hosts(n, primary_check, secondary_check):
+    """n unique check IPs, one per configured link, in priority order.
+
+    The first two are the user's own configured primary/secondary check
+    IPs (from the form); a 3rd+ link pulls from a small pool of well-known
+    public resolvers instead of reusing primary's or secondary's — sharing
+    one is unsafe, since RouterOS only ever has a single active route to a
+    given destination. Two links pinging the same check IP would mean only
+    ONE of them is ever actually routed through its own gateway; the
+    other's Netwatch check would silently ride along whichever route won,
+    making it meaningless rather than an independent health check."""
+    hosts = [primary_check.split("/")[0]]
+    if n > 1:
+        hosts.append(secondary_check.split("/")[0])
+    pool = [ip for ip in _FO_EXTRA_CHECK_IPS if ip not in hosts]
+    i = 0
+    while len(hosts) < n:
+        if pool:
+            hosts.append(pool[i % len(pool)])
+        else:
+            hosts.append(hosts[0])  # pool exhausted (8+ uplinks) — degrade, don't crash
+        i += 1
+    return hosts
+
+
 def _apply_failover(ops, flat, pusher, cfg):
     """Reconcile static failover routes and Netwatch entries for EVERY
     configured WAN uplink, not just a primary/secondary pair — a 3rd, 4th...
@@ -541,8 +572,7 @@ def _apply_failover(ops, flat, pusher, cfg):
     def _net(ip):
         return ip if "/" in ip else f"{ip}/32"
 
-    def _check_host(idx):
-        return (primary_check if idx % 2 == 0 else secondary_check).split("/")[0]
+    check_hosts = _fo_check_hosts(len(gateways), primary_check, secondary_check)
 
     # Matches the standard MikroTik recursive-check failover pattern, for
     # every configured link.
@@ -550,7 +580,12 @@ def _apply_failover(ops, flat, pusher, cfg):
     # The check routes are the critical piece: each forces its Netwatch
     # ping through its OWN ISP gateway, so a link's Netwatch keeps reaching
     # its check IP even when another link's default route is disabled —
-    # making every Netwatch entry safe to run simultaneously.
+    # making every Netwatch entry safe to run simultaneously. This ONLY
+    # works if every link's check IP is unique (see _fo_check_hosts) —
+    # RouterOS has a single active route per destination, so two links
+    # sharing one check IP would mean only ONE of them ever actually gets
+    # pinged through its own gateway; the other's check would silently
+    # ride along whichever route won, making its Netwatch meaningless.
     #
     # scope=30 / target-scope=10 on all routes matches the pattern; the
     # default routes resolve their gateway via ARP (directly-connected,
@@ -563,7 +598,7 @@ def _apply_failover(ops, flat, pusher, cfg):
         if not gw:
             continue
         role = _fo_role(idx)
-        host = _check_host(idx)
+        host = check_hosts[idx]
         distance = _fo_distance(idx, links[idx])
         desired_routes.append({
             "comment": f"{_FAILOVER_TAG}{role}",

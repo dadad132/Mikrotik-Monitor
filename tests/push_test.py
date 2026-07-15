@@ -1199,9 +1199,11 @@ check("primary always checks 1.1.1.1",
 check("secondary always checks 8.8.8.8",
       any(w.params["comment"] == f"{_FO_TAG}watch:secondary" and w.params["host"] == "8.8.8.8"
           for w in watch_adds))
-check("link3 (3rd position, even index) shares the primary check IP "
-      "instead of needing a dedicated field",
-      any(w.params["comment"] == f"{_FO_TAG}watch:link3" and w.params["host"] == "1.1.1.1"
+check("link3 gets its own unique check IP from the fallback pool — never "
+      "shares one with primary/secondary, which would make one of them a "
+      "meaningless check (RouterOS only has one active route per host)",
+      any(w.params["comment"] == f"{_FO_TAG}watch:link3"
+          and w.params["host"] not in ("1.1.1.1", "8.8.8.8")
           for w in watch_adds))
 check("netwatch interval defaults to 30s (no fo_interval field in the form)",
       all(w.params["interval"] == "30s" for w in watch_adds))
@@ -1308,6 +1310,41 @@ check("a client already off (\"false\") is not redundantly re-set to no "
       "when enabling failover",
       not any(o.path == ("interface", "pppoe-client") and o.action == "set"
              and "add-default-route" in o.params for o in tf_plan_on.ops))
+
+# 4 uplinks: every link's check IP must be globally unique. RouterOS only
+# ever has ONE active route to a given host — if two links' check-routes
+# both pointed at the same IP, only one link would actually get pinged
+# through its own gateway; the other's Netwatch would silently ride along
+# whichever route won, making that link's health check meaningless.
+uniq_a = WanEndpoint(interface="Wikiworx", name="Wikiworx", distance=1)
+uniq_b = WanEndpoint(interface="ether5", name="Backup", distance=11)
+uniq_c = WanEndpoint(interface="ether3", name="Third", distance=12)
+uniq_d = WanEndpoint(interface="ether4", name="Fourth")
+uniq_cfg = _t.SimpleNamespace(
+    name="R1", wan=_t.SimpleNamespace(links=[uniq_a, uniq_b, uniq_c, uniq_d]))
+uniq_api = FakeApi({
+    ("ip", "route"): [], ("tool", "netwatch"): [],
+    ("interface", "pppoe-client"): [
+        {".id": "*1", "name": "Wikiworx", "add-default-route": "yes", "disabled": "false"}],
+    ("ip", "dhcp-client"): [
+        {".id": "*2", "interface": "ether5", "gateway": "10.0.1.1",
+         "add-default-route": "yes", "disabled": "false"},
+        {".id": "*3", "interface": "ether3", "gateway": "10.0.2.1",
+         "add-default-route": "yes", "disabled": "false"},
+        {".id": "*4", "interface": "ether4", "gateway": "10.0.3.1",
+         "add-default-route": "yes", "disabled": "false"},
+    ],
+    ("interface", "l2tp-client"): [],
+    ("ppp", "active"): [{"name": "Wikiworx", "remote-address": "10.0.0.1"}],
+    ("ip", "address"): [],
+})
+uniq_plan = F.routes_plan(Pusher(uniq_cfg, uniq_api, dry_run=False), uniq_cfg,
+                          {"fo_enabled": "1", "fo_primary_check": "1.1.1.1",
+                           "fo_secondary_check": "8.8.8.8"}, {})
+check_dsts = [o.params["dst-address"] for o in uniq_plan.ops
+             if o.path == ("ip", "route") and "check:" in str(o.params.get("comment", ""))]
+check("every one of 4 links' check-route destinations is globally unique",
+      len(check_dsts) == 4 and len(set(check_dsts)) == 4)
 
 # Pre-existing tag-based failover routes/netwatch (from an earlier apply)
 # must be recognized as ours and cleaned up when disabling.
