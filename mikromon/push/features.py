@@ -480,7 +480,7 @@ def _apply_failover(ops, flat, pusher, cfg):
             want_dist = str(explicit_dist) if explicit_dist else None
             for c in pppoe_clients:
                 if c.get("name") == iface:
-                    if c.get("add-default-route", "yes") == "no":
+                    if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
                         ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route",
                                               "yes", f"PPPoE {iface}"))
                     if (want_dist is not None
@@ -493,7 +493,7 @@ def _apply_failover(ops, flat, pusher, cfg):
                                               f"PPPoE {iface}"))
             for c in dhcp_clients:
                 if c.get("interface") == iface:
-                    if c.get("add-default-route", "yes") == "no":
+                    if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
                         ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route",
                                               "yes", f"DHCP {iface}"))
                     if (want_dist is not None
@@ -600,11 +600,13 @@ def _apply_failover(ops, flat, pusher, cfg):
         if not iface:
             continue
         for c in pppoe_clients:
-            if c.get("name") == iface and c.get("add-default-route", "yes") != "no":
+            if (c.get("name") == iface
+                    and str(c.get("add-default-route", "yes")).lower() not in ("no", "false")):
                 ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route", "no",
                                       f"PPPoE {iface}"))
         for c in dhcp_clients:
-            if c.get("interface") == iface and c.get("add-default-route", "yes") != "no":
+            if (c.get("interface") == iface
+                    and str(c.get("add-default-route", "yes")).lower() not in ("no", "false")):
                 ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route", "no",
                                       f"DHCP {iface}"))
 

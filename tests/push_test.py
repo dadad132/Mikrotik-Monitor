@@ -1260,6 +1260,55 @@ check("no interface is ever bounced (disable/enable) to force a change "
       not any(o.params.get(".id") == "*1" and "disabled" in o.params
              for o in disable_plan.ops))
 
+# Confirmed live: some RouterOS versions/menus report add-default-route as
+# "false" instead of "no" over the API — a strict == "no" comparison would
+# never detect that it needs restoring, silently leaving the checkbox
+# unticked forever after turning failover off. Every add-default-route
+# check must tolerate both spellings, same as the existing "disabled" checks.
+tf_link = WanEndpoint(interface="Wikiworx", name="Wikiworx")
+tf_cfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[tf_link]))
+tf_api = FakeApi({
+    ("ip", "route"): [
+        {".id": "*10", "comment": "mikromon:failover:primary",
+         "dst-address": "0.0.0.0/0", "gateway": "10.0.0.1", "distance": "1"},
+        {".id": "*11", "comment": "mikromon:failover:check:primary",
+         "dst-address": "1.1.1.1/32", "gateway": "10.0.0.1", "distance": "1"},
+    ],
+    ("tool", "netwatch"): [
+        {".id": "*20", "comment": "mikromon:failover:watch:primary", "host": "1.1.1.1"},
+    ],
+    ("interface", "pppoe-client"): [
+        {".id": "*1", "name": "Wikiworx", "add-default-route": "false", "disabled": "false"},
+    ],
+    ("ip", "dhcp-client"): [],
+    ("interface", "l2tp-client"): [], ("ppp", "active"): [], ("ip", "address"): [],
+})
+tf_pusher = Pusher(tf_cfg, tf_api, dry_run=False)
+tf_plan = F.routes_plan(tf_pusher, tf_cfg, {"fo_enabled": ""}, {})
+check("add-default-route reported as \"false\" (not \"no\") is still "
+      "correctly detected as off and restored to yes when failover turns off",
+      any(o.path == ("interface", "pppoe-client") and o.action == "set"
+          and o.params.get("add-default-route") == "yes" for o in tf_plan.ops))
+
+# Same tolerance needed in the other direction: enabling failover must
+# still recognize an already-off "false" client and NOT redundantly try
+# to set it to "no" again (idempotent either way it's spelled).
+tf_api_on = FakeApi({
+    ("ip", "route"): [],
+    ("tool", "netwatch"): [],
+    ("interface", "pppoe-client"): [
+        {".id": "*1", "name": "Wikiworx", "add-default-route": "false", "disabled": "false"},
+    ],
+    ("ip", "dhcp-client"): [],
+    ("interface", "l2tp-client"): [], ("ppp", "active"): [], ("ip", "address"): [],
+})
+tf_plan_on = F.routes_plan(Pusher(tf_cfg, tf_api_on, dry_run=False), tf_cfg,
+                          {"fo_enabled": "1", "fo_primary_check": "1.1.1.1"}, {})
+check("a client already off (\"false\") is not redundantly re-set to no "
+      "when enabling failover",
+      not any(o.path == ("interface", "pppoe-client") and o.action == "set"
+             and "add-default-route" in o.params for o in tf_plan_on.ops))
+
 # Pre-existing tag-based failover routes/netwatch (from an earlier apply)
 # must be recognized as ours and cleaned up when disabling.
 tagged_api = FakeApi({
