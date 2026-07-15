@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mikromon import web
 from mikromon.auth import AuthStore
-from mikromon.config import DEFAULT_THRESHOLDS, AppConfig, build_device
+from mikromon.config import DEFAULT_THRESHOLDS, AppConfig, build_device, device_to_dict
 from mikromon.devices_store import DevicesStore
 from mikromon.engine import Engine
 from mikromon.metrics import MetricsStore
@@ -178,6 +178,34 @@ cfgwan = build_device({"name": "R", "host": "1.1.1.1", "wan": {"links": [
 wed = web._wan_uplink_editor("R", cfgwan, "csrf")
 check("SD-WAN WAN editor has up/down reorder controls",
       "pushMoveRow(this,-1)" in wed and "pushMoveRow(this,1)" in wed)
+
+# A chosen per-uplink Distance must survive save -> reload, not silently
+# revert to "auto". Confirmed live: device_to_dict() (used when re-saving
+# an edited device) built the wan.links dicts without a "distance" key at
+# all, so a chosen value round-tripped fine in memory but was dropped the
+# moment it got serialized back to storage — the next page load then saw
+# no distance in the DB and showed "auto" again.
+cfgdist = build_device({"name": "R", "host": "1.1.1.1", "wan": {"links": [
+    {"name": "Fibre", "interface": "ether1", "distance": 10},
+    {"name": "Backup", "interface": "ether5", "distance": 11},
+    {"name": "VoIP", "interface": "ether3"}]}}, DEF)
+check("build_device parses an explicit per-uplink Distance",
+      [ep.distance for ep in cfgdist.wan.links] == [10, 11, None])
+resaved = device_to_dict(cfgdist)
+check("device_to_dict includes distance when serializing back for storage "
+      "(this is the exact field that was silently dropped)",
+      [lk.get("distance") for lk in resaved["wan"]["links"]] == [10, 11, None])
+cfgdist2 = build_device(resaved, DEF)
+check("a second save/load round-trip still has the same chosen distances",
+      [ep.distance for ep in cfgdist2.wan.links] == [10, 11, None])
+wed_dist = web._wan_uplink_editor("R", cfgdist, "csrf")
+check("the WAN uplinks editor actually displays the saved Distance value "
+      "(10) in that row's input, not blank/auto",
+      'name="link_distance" type="number" min="1" max="253" placeholder="auto" '
+      'value="10"' in wed_dist)
+check("a link with no chosen Distance shows the blank/auto placeholder, "
+      "not a stray 'None'",
+      'value="None"' not in wed_dist)
 
 # Detecting which port actually has the ISP plugged in (varies per install —
 # some start on ether1, others ether5) so it doesn't have to be guessed.

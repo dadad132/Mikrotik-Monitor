@@ -320,7 +320,8 @@ def device_to_dict(cfg: DeviceConfig) -> dict:
         "timeout": cfg.timeout, "lan_subnets": list(cfg.lan_subnets),
         "wan": {
             "links": [{"name": ep.name, "interface": ep.interface,
-                       "gateway": ep.gateway} for ep in cfg.wan.links],
+                       "gateway": ep.gateway, "distance": ep.distance}
+                      for ep in cfg.wan.links],
             "ping_targets": list(cfg.wan.ping_targets),
         },
         "monitor_interfaces": list(cfg.monitor_interfaces),
