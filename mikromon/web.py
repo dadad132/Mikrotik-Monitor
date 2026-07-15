@@ -2258,10 +2258,13 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None) -> str:
         return f'<select name="link_iface" style="width:100%">{opts}</select>'
 
     def row(link):
+        dist = link.distance if (link and link.distance) else ""
         return (f'<tr>'
                 f'<td><input name="link_name" placeholder="ISP name (Vodacom)" '
                 f'value="{esc(link.name if link else "")}" style="width:100%"></td>'
                 f'<td>{_iface_field(link.interface if link else "")}</td>'
+                f'<td><input name="link_distance" type="number" min="1" max="253" '
+                f'placeholder="auto" value="{esc(str(dist))}" style="width:70px"></td>'
                 f'<td style="white-space:nowrap">'
                 f'<span class="draghandle" draggable="true" title="drag to '
                 f'reorder priority" style="cursor:grab;padding:0 6px">&#9776;</span>'
@@ -2282,13 +2285,19 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None) -> str:
             f'<p class="muted">List your internet links in <b>priority order</b> — '
             f'<b>top = primary</b>, 2nd = first backup, and so on. <b>Drag the '
             f'&#9776; handle</b> (or use the &uarr;/&darr; buttons) to reorder; '
-            f'failover/load-balancing below uses this order. Saved on the device '
-            f'— no router change.</p>{detect_note}'
+            f'failover/load-balancing below uses this order. <b>Distance</b> is '
+            f'optional — leave it on "auto" to just use position order, or set an '
+            f'exact RouterOS route distance per line. Whatever you set here is '
+            f'pushed to the router (with a brief reconnect on that line so it '
+            f'takes effect immediately, since RouterOS otherwise only applies a '
+            f'changed distance on the next connection) from the Routes tab, and is '
+            f'also what each line reverts to when gateway failover is turned '
+            f'off.</p>{detect_note}'
             f'<form method="POST" action="/device/wan">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="device" value="{esc(name)}">'
             f'<table class="rowtbl" id="rows-wl"><thead><tr><th>Name</th>'
-            f'<th>Interface</th><th>Order</th></tr></thead>'
+            f'<th>Interface</th><th>Distance</th><th>Order</th></tr></thead>'
             f'<tbody>{body}</tbody></table>'
             f'<button type="button" class="btn ghost" onclick="pushAddRow(\'wl\')" '
             f'style="margin-top:6px">+ Add uplink</button>'
@@ -2737,11 +2746,16 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
 
 def _wan_link_row(idx, ep=None) -> str:
     ep = ep or {}
+    dist = ep.get("distance") or ""
     return (f'<div class="wanrow"><span class="prio">{idx + 1}</span>'
             f'<input name="link_name" placeholder="ISP name (e.g. Vodacom)" '
             f'value="{esc(ep.get("name", ""))}">'
             f'<input name="link_iface" placeholder="interface (ether1, lte1…)" '
             f'value="{esc(ep.get("interface", ""))}">'
+            f'<input name="link_distance" type="number" min="1" max="253" '
+            f'placeholder="auto" title="Route distance (optional — leave blank for '
+            f'auto). Set here or on the WAN uplinks tab." style="width:70px" '
+            f'value="{esc(str(dist))}">'
             f'<button type="button" class="btn ghost wandel" '
             f'onclick="this.parentNode.remove();wanReindex()">&times;</button></div>')
 
@@ -3962,11 +3976,20 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 store.close()
                 return self._send(404, "no such device")
             links = []
-            for nm, ifc in zip(multi.get("link_name", []),
-                                multi.get("link_iface", [])):
+            names = multi.get("link_name", [])
+            ifaces = multi.get("link_iface", [])
+            dists = multi.get("link_distance", [])
+            for i, (nm, ifc) in enumerate(zip(names, ifaces)):
                 nm, ifc = nm.strip(), ifc.strip()
                 if nm or ifc:
-                    links.append({"name": nm, "interface": ifc, "gateway": ""})
+                    entry = {"name": nm, "interface": ifc, "gateway": ""}
+                    dist = dists[i].strip() if i < len(dists) else ""
+                    if dist:
+                        try:
+                            entry["distance"] = int(dist)
+                        except ValueError:
+                            pass
+                    links.append(entry)
             raw["wan"] = {"links": links,
                           "ping_targets": (raw.get("wan") or {}).get("ping_targets", [])}
             try:
@@ -4463,11 +4486,19 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # in priority order (top row = highest priority).
             names = multi.get("link_name", [])
             ifaces = multi.get("link_iface", [])
+            dists = multi.get("link_distance", [])
             links = []
-            for nm, ifc in zip(names, ifaces):
+            for i, (nm, ifc) in enumerate(zip(names, ifaces)):
                 nm, ifc = nm.strip(), ifc.strip()
                 if nm or ifc:
-                    links.append({"name": nm, "interface": ifc, "gateway": ""})
+                    entry = {"name": nm, "interface": ifc, "gateway": ""}
+                    dist = dists[i].strip() if i < len(dists) else ""
+                    if dist:
+                        try:
+                            entry["distance"] = int(dist)
+                        except ValueError:
+                            pass
+                    links.append(entry)
             # API port is required to connect, but you can leave it blank: it
             # defaults to 8729 when API-SSL is ticked, else 8728.
             api_port = (flat.get("api_port") or "").strip()

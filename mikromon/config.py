@@ -76,6 +76,7 @@ class WanEndpoint:
     interface: str = ""
     gateway: str = ""
     name: str = ""  # friendly ISP label, e.g. "Vodacom"
+    distance: int | None = None  # explicit route priority; None = auto (position + 1)
 
     @property
     def configured(self) -> bool:
@@ -179,9 +180,15 @@ def _require(d: dict, key: str, where: str):
 
 def _endpoint(d) -> WanEndpoint:
     d = d or {}
+    dist_raw = d.get("distance")
+    try:
+        distance = int(dist_raw) if dist_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        distance = None
     return WanEndpoint(interface=str(d.get("interface", "")),
                        gateway=str(d.get("gateway", "")),
-                       name=str(d.get("name", "")))
+                       name=str(d.get("name", "")),
+                       distance=distance)
 
 
 def _wan_links(wan_raw: dict) -> list:

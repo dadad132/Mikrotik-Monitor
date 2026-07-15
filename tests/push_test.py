@@ -1266,6 +1266,95 @@ check("tag-based netwatch entry is recognized as ours and removed",
       {o.params[".id"] for o in tagged_disable.ops
        if o.path == ("tool", "netwatch") and o.action == "remove"} == {"*11"})
 
+# ---- 16. explicit per-uplink Distance (WAN uplinks editor) -----------------
+print("explicit WAN uplink distance (auto-detects the router client, forces "
+      "a reconnect so a changed distance actually takes effect immediately):")
+dist_wiki = WanEndpoint(interface="Wikiworx", name="Wikiworx", distance=1)
+dist_backup = WanEndpoint(interface="ether2-backup", name="Backup", distance=5)
+dist_voip = WanEndpoint(interface="ether3-voip", name="VoIP")  # no explicit distance
+dist_cfg = _t.SimpleNamespace(
+    name="R1", wan=_t.SimpleNamespace(links=[dist_wiki, dist_backup, dist_voip]))
+dist_state = {
+    ("ip", "route"): [],
+    ("tool", "netwatch"): [],
+    ("interface", "pppoe-client"): [
+        {".id": "*1", "name": "Wikiworx", "add-default-route": "yes",
+         "default-route-distance": "1", "disabled": "false"},
+    ],
+    ("ip", "dhcp-client"): [
+        {".id": "*2", "interface": "ether2-backup", "add-default-route": "yes",
+         "default-route-distance": "1", "disabled": "false"},
+        {".id": "*3", "interface": "ether3-voip", "add-default-route": "yes",
+         "default-route-distance": "1", "disabled": "false"},
+    ],
+    ("interface", "l2tp-client"): [],
+    ("ppp", "active"): [],
+    ("ip", "address"): [],
+}
+dist_api = FakeApi(dict(dist_state))
+dist_pusher = Pusher(dist_cfg, dist_api, dry_run=False)
+dist_plan = F.routes_plan(dist_pusher, dist_cfg, {"fo_enabled": ""}, {})
+dist_sets = [o for o in dist_plan.ops if o.action == "set"
+            and "default-route-distance" in o.params]
+check("Wikiworx is already at its chosen distance (1) — no churn for it",
+      "*1" not in {o.params.get(".id") for o in dist_sets}
+      and not any(o.params.get(".id") == "*1" for o in dist_plan.ops))
+check("the changed link's distance is set to the chosen value (5)",
+      any(o.params[".id"] == "*2" and o.params["default-route-distance"] == "5"
+          for o in dist_sets))
+check("changing the distance on an already-connected line forces a "
+      "reconnect (disable then enable) so it takes effect immediately",
+      [o.params.get("disabled") for o in dist_plan.ops if o.params.get(".id") == "*2"]
+      == ["5", "yes", "no"] or
+      [o.params.get("disabled") for o in dist_plan.ops
+       if o.params.get(".id") == "*2" and "disabled" in o.params] == ["yes", "no"])
+check("a link with no explicit distance still gets restored by the normal "
+      "failover-off logic (auto distance), not silently skipped",
+      any(o.params[".id"] == "*3" and "default-route-distance" in o.params
+          for o in dist_plan.ops))
+check("re-applying the same chosen distances is a no-op (idempotent, no "
+      "repeated reconnects)",
+      not any("default-route-distance" in o.params or "disabled" in o.params
+             for o in F.routes_plan(
+                 Pusher(dist_cfg, FakeApi({
+                     ("ip", "route"): [], ("tool", "netwatch"): [],
+                     ("interface", "pppoe-client"): [
+                         {".id": "*1", "name": "Wikiworx", "add-default-route": "yes",
+                          "default-route-distance": "1", "disabled": "false"}],
+                     ("ip", "dhcp-client"): [
+                         {".id": "*2", "interface": "ether2-backup",
+                          "add-default-route": "yes", "default-route-distance": "5",
+                          "disabled": "false"},
+                         {".id": "*3", "interface": "ether3-voip",
+                          "add-default-route": "yes", "default-route-distance": "12",
+                          "disabled": "false"}],
+                     ("interface", "l2tp-client"): [], ("ppp", "active"): [],
+                     ("ip", "address"): [],
+                 }), dry_run=False),
+                 dist_cfg, {"fo_enabled": ""}, {}).ops))
+
+# With failover ON, the explicit distance still applies to a link failover
+# doesn't manage (the 3rd, VoIP, link) via _apply_wan_distances — but must
+# NOT double-touch the 2 failover-managed links (that would double-reconnect
+# them for no reason, since _apply_failover already forces add-default-route
+# off on those regardless of distance).
+dist_wiki2 = WanEndpoint(interface="Wikiworx", name="Wikiworx", distance=1)
+dist_backup2 = WanEndpoint(interface="ether2-backup", name="Backup", distance=2)
+dist_voip2 = WanEndpoint(interface="ether3-voip", name="VoIP", distance=9)
+fo_dist_cfg = _t.SimpleNamespace(
+    name="R1", wan=_t.SimpleNamespace(links=[dist_wiki2, dist_backup2, dist_voip2]))
+fo_dist_api = FakeApi(dict(dist_state))
+fo_dist_pusher = Pusher(fo_dist_cfg, fo_dist_api, dry_run=False)
+fo_dist_plan = F.routes_plan(fo_dist_pusher, fo_dist_cfg,
+                             {"fo_enabled": "1", "fo_primary_check": "1.1.1.1",
+                              "fo_secondary_check": "8.8.8.8"}, {})
+voip_dist_sets = [o for o in fo_dist_plan.ops if o.action == "set"
+                 and o.params.get(".id") == "*3"
+                 and "default-route-distance" in o.params]
+check("with failover ON, a link failover doesn't manage still gets its "
+      "explicit distance applied",
+      any(o.params["default-route-distance"] == "9" for o in voip_dist_sets))
+
 
 print()
 if FAILS:

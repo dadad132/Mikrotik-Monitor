@@ -331,13 +331,39 @@ def routes_form(current, cfg):
     return fields
 
 
+def _force_client_reconnect(ops, path, client, label):
+    """A DHCP or PPPoE client only applies a changed default-route-distance
+    (or add-default-route) to its NEXT connection — an already-established
+    session (or active DHCP lease) keeps routing exactly as it did when it
+    came up, no matter what the config now says. (Confirmed live: a new
+    distance showed up in the dry-run preview and even in the client's own
+    saved config on the router, but the actual live default route never
+    changed.) Toggling disabled off/on forces an immediate reconnect (a
+    fresh DHCP lease request, or a fresh PPP session) so the new setting
+    actually takes effect now, at the cost of a brief (few-second) drop on
+    that WAN link."""
+    rid = client[".id"]
+    ops.append(Operation(
+        "set", path, {".id": rid, "disabled": "yes"},
+        desc=f"reconnect {label} (apply new route settings)",
+        inverse=Operation("set", path, {".id": rid, "disabled": "no"},
+                          desc=f"revert {label} reconnect")))
+    ops.append(Operation(
+        "set", path, {".id": rid, "disabled": "no"},
+        desc=f"bring {label} back up",
+        inverse=Operation("set", path, {".id": rid, "disabled": "yes"},
+                          desc=f"revert {label} reconnect")))
+
+
 def _apply_wan_order(ops, order, pusher):
     """Build distance-change ops from a wan_order list.
 
     RouterOS dynamic routes (DHCP / PPPoE / L2TP) are read-only in /ip/route —
     attempting to set their distance returns 'no such item'. The only supported
-    path is setting default-route-distance on the client itself, which takes
-    effect on the next connection or DHCP renewal."""
+    path is setting default-route-distance on the client itself — which, on an
+    already-connected line, only takes effect after a reconnect (see
+    _force_client_reconnect); L2TP isn't force-reconnected here since this
+    codebase doesn't otherwise manage L2TP client connections."""
     if not order:
         return
     dhcp_clients = _safe_fetch(pusher.api, _DHCP_CLIENT)
@@ -360,6 +386,9 @@ def _apply_wan_order(ops, order, pusher):
         cpath, c, clabel = client_map[item_id]
         if _norm(str(c.get("default-route-distance", "1"))) != want:
             ops.append(_set_field(cpath, c, "default-route-distance", want, clabel))
+            if (cpath in (_PPPOE_CLIENT, _DHCP_CLIENT)
+                    and c.get("disabled", "false") in ("false", "no", False)):
+                _force_client_reconnect(ops, cpath, c, clabel)
 
 
 def _gateway_for_link(link, pppoe_names, dhcp_by_iface,
@@ -405,6 +434,43 @@ def _gateway_for_link(link, pppoe_names, dhcp_by_iface,
     return ""
 
 
+def _apply_wan_distances(ops, cfg, pusher):
+    """Push each configured WAN uplink's explicit Distance (set in the WAN
+    uplinks editor, WanEndpoint.distance) straight to its DHCP/PPPoE client,
+    forcing a reconnect if it's actually changing on an already-connected
+    line so it takes effect immediately instead of silently waiting for the
+    next natural reconnect. Runs whenever the Routes tab is applied,
+    independently of whether gateway failover is on or off — an explicit
+    Distance always wins over the drag-and-drop order list."""
+    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
+    if not any(getattr(link, "distance", None) for link in links):
+        return
+    pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
+    dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
+    for link in links:
+        distance = getattr(link, "distance", None)
+        iface = getattr(link, "interface", "") or ""
+        if not distance or not iface:
+            continue
+        want = str(distance)
+        for c in pppoe_clients:
+            if c.get("name") == iface:
+                clabel = f"PPPoE {iface}"
+                if _norm(str(c.get("default-route-distance", "") or "")) != want:
+                    ops.append(_set_field(_PPPOE_CLIENT, c, "default-route-distance",
+                                          want, clabel))
+                    if c.get("disabled", "false") in ("false", "no", False):
+                        _force_client_reconnect(ops, _PPPOE_CLIENT, c, clabel)
+        for c in dhcp_clients:
+            if c.get("interface") == iface:
+                clabel = f"DHCP {iface}"
+                if _norm(str(c.get("default-route-distance", "") or "")) != want:
+                    ops.append(_set_field(_DHCP_CLIENT, c, "default-route-distance",
+                                          want, clabel))
+                    if c.get("disabled", "false") in ("false", "no", False):
+                        _force_client_reconnect(ops, _DHCP_CLIENT, c, clabel)
+
+
 def _apply_failover(ops, flat, pusher, cfg):
     """Reconcile static failover routes and Netwatch entries.
 
@@ -424,10 +490,14 @@ def _apply_failover(ops, flat, pusher, cfg):
         # running, per link:
         #   /ip dhcp-client set [find name="..."] add-default-route=yes \
         #       default-route-distance=<N> disabled=no
-        # default-route-distance gets a distinct value per link (10, 11,
-        # 12... in priority order) so multiple uplinks can't collide at
-        # RouterOS's implicit default of 1; disabled=no in case an earlier
-        # troubleshooting step left the client itself switched off.
+        # default-route-distance uses the link's own explicit Distance (set
+        # in the WAN uplinks editor) when chosen, else falls back to a
+        # distinct auto value per link (10, 11, 12... in priority order) so
+        # multiple uplinks can't collide at RouterOS's implicit default of
+        # 1; disabled=no in case an earlier troubleshooting step left the
+        # client itself switched off. A reconnect is forced whenever
+        # add-default-route or the distance is actually changing on an
+        # already-connected line — see _force_client_reconnect.
         pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
         dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
         links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
@@ -435,31 +505,44 @@ def _apply_failover(ops, flat, pusher, cfg):
             iface = getattr(link, "interface", "") or ""
             if not iface:
                 continue
-            want_dist = str(10 + idx)
+            explicit_dist = getattr(link, "distance", None)
+            want_dist = str(explicit_dist) if explicit_dist else str(10 + idx)
             for c in pppoe_clients:
                 if c.get("name") == iface:
+                    changed = False
                     if c.get("add-default-route", "yes") == "no":
                         ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route",
                                               "yes", f"PPPoE {iface}"))
+                        changed = True
                     if _norm(str(c.get("default-route-distance", "") or "")) != want_dist:
                         ops.append(_set_field(_PPPOE_CLIENT, c,
                                               "default-route-distance", want_dist,
                                               f"PPPoE {iface}"))
+                        changed = True
                     if c.get("disabled", "false") not in ("false", "no", False):
+                        # Already off — enabling it is itself a fresh
+                        # connect, no separate reconnect needed.
                         ops.append(_set_field(_PPPOE_CLIENT, c, "disabled", "no",
                                               f"PPPoE {iface}"))
+                    elif changed:
+                        _force_client_reconnect(ops, _PPPOE_CLIENT, c, f"PPPoE {iface}")
             for c in dhcp_clients:
                 if c.get("interface") == iface:
+                    changed = False
                     if c.get("add-default-route", "yes") == "no":
                         ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route",
                                               "yes", f"DHCP {iface}"))
+                        changed = True
                     if _norm(str(c.get("default-route-distance", "") or "")) != want_dist:
                         ops.append(_set_field(_DHCP_CLIENT, c,
                                               "default-route-distance", want_dist,
                                               f"DHCP {iface}"))
+                        changed = True
                     if c.get("disabled", "false") not in ("false", "no", False):
                         ops.append(_set_field(_DHCP_CLIENT, c, "disabled", "no",
                                               f"DHCP {iface}"))
+                    elif changed:
+                        _force_client_reconnect(ops, _DHCP_CLIENT, c, f"DHCP {iface}")
         return
 
     # Detect gateways live from the router at apply time
@@ -571,6 +654,11 @@ def _apply_failover(ops, flat, pusher, cfg):
 def routes_plan(pusher, cfg, flat, multi):
     ops: list[Operation] = []
     _apply_wan_order(ops, multi.get("wan_order", []), pusher)
+    # When failover is off, _apply_failover's own restore logic already sets
+    # every link's distance (from link.distance, same as here) — running
+    # this too would duplicate those ops and reconnect each line twice.
+    if flat.get("fo_enabled"):
+        _apply_wan_distances(ops, cfg, pusher)
     _apply_failover(ops, flat, pusher, cfg)
     return Plan(cfg.name, ops, summary="routes / failover")
 
