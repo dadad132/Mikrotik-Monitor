@@ -251,6 +251,49 @@ row2 = wan_page[wan_page.index("VOIP</span>"):]
 check("a backup with NO problem of its own still shows Online (Inactive) "
       "as before", "[Online]" in row2 and "Inactive" in row2)
 
+# Network Throughput box: metrics.latest() returns the all-time latest value
+# per label, with no time filter — so a WAN interface that was later renamed
+# or removed in the WAN uplinks editor would otherwise keep showing its
+# frozen last-ever reading forever, right next to a peak of 0 (nothing in the
+# last-hour window), which looks like broken/inconsistent data. Confirmed
+# live: a stale "ether1-wikiwrox" entry kept showing alongside the correctly
+# working "Wikiworx" one. facts["wan_traffic_interfaces"], cached fresh every
+# poll, is the current allow-list.
+tp_mdb = os.path.join(tmp, "tp-metrics.db")
+tp_store = MetricsStore(tp_mdb)
+now = time.time()
+tp_store.record([
+    (now - 1800, "R2", "rx_bps", "Wikiworx", 5_300_000),
+    (now - 1800, "R2", "tx_bps", "Wikiworx", 393_500),
+    (now - 7200, "R2", "rx_bps", "ether1-wikiwrox", 852_700),  # stale: 2h old
+    (now - 7200, "R2", "tx_bps", "ether1-wikiwrox", 184_200),
+])
+tp_state = {"devices": {"R2": {
+    "facts": {"wan_traffic_interfaces": ["Wikiworx"]},
+    "conditions": {"reachability": {"status": "ok"}},
+}}}
+tp_page = web._render_device(tp_store, tp_state, "R2",
+                             {"role": "owner", "email": "test@test.com"})
+tp_store.close()
+check("the currently-configured WAN interface's throughput card shows",
+      "Wikiworx</b>" in tp_page)
+check("a stale/renamed interface's frozen old reading is not shown",
+      "ether1-wikiwrox" not in tp_page)
+
+# Devices whose engine hasn't re-polled since this fact was added yet (key
+# entirely absent) must keep showing everything, not go blank.
+tp_mdb2 = os.path.join(tmp, "tp-metrics2.db")
+tp_store2 = MetricsStore(tp_mdb2)
+tp_store2.record([(now - 60, "R3", "rx_bps", "ether1", 1_000_000),
+                  (now - 60, "R3", "tx_bps", "ether1", 200_000)])
+tp_state2 = {"devices": {"R3": {"facts": {},
+             "conditions": {"reachability": {"status": "ok"}}}}}
+tp_page2 = web._render_device(tp_store2, tp_state2, "R3",
+                              {"role": "owner", "email": "test@test.com"})
+tp_store2.close()
+check("no wan_traffic_interfaces fact yet -> falls back to showing everything",
+      "ether1</b>" in tp_page2)
+
 check("reorder JS is defined on feature tabs", "function pushMoveRow" in web._FEATURE_JS)
 check("toggles render as on/off sliders",
       'class="switch"' in web._field_html(

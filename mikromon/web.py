@@ -897,9 +897,23 @@ def _render_device(store, state, name, user, csrf="",
             f'to see live status here.</p></div>')
 
     # ── center: throughput sparklines ──────────────────────────────────────────
+    # d["throughput"] holds the ALL-TIME latest sample per label ever recorded
+    # for this device (metrics.latest() has no time filter) — so a WAN link
+    # that was renamed or removed from the WAN uplinks editor would otherwise
+    # keep showing its last-ever reading here forever, with a peak computed
+    # from an empty last-hour window (0 or near-0) sitting right next to a
+    # frozen, much larger "current" number. Restrict to interfaces
+    # WanTrafficCheck is CURRENTLY sampling under (cached in facts each poll)
+    # so stale/renamed links disappear instead of showing stale, inconsistent
+    # numbers. Missing fact (engine hasn't re-polled since this was added
+    # yet) falls back to showing everything rather than hiding data.
+    live_wan_ifaces = f.get("wan_traffic_interfaces")
+    throughput_items = (
+        d["throughput"] if live_wan_ifaces is None else
+        {k: v for k, v in d["throughput"].items() if k in live_wan_ifaces})
     spark_rows = ""
     _since = time.time() - 3600
-    for iface, t in sorted(d["throughput"].items()):
+    for iface, t in sorted(throughput_items.items()):
         rx_pts = store.series(name, "rx_bps", label=iface, since=_since)
         tx_pts = store.series(name, "tx_bps", label=iface, since=_since)
         sp = _throughput_chart(rx_pts, tx_pts)

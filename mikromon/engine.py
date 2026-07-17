@@ -8,6 +8,7 @@ import time
 
 from .alert import Severity
 from .checks import enabled_checks, required_datasets
+from .checks.wan_traffic import _wan_interfaces
 from .context import CheckContext
 from .device import Device, DeviceError
 from .metrics import MetricsStore
@@ -123,6 +124,12 @@ class Engine:
             "host": cfg.host,
             "wan_links": [ep.label(i) for i, ep in enumerate(cfg.wan.links)],
             "interfaces": [n for n in iface_names if n],
+            # The exact interface names WanTrafficCheck is currently sampling
+            # under (same precedence: traffic_interfaces > wan.links >
+            # monitor_interfaces > auto-detect) — lets the dashboard drop
+            # throughput cards for interfaces that were removed or renamed,
+            # instead of showing their last-ever value forever.
+            "wan_traffic_interfaces": _wan_interfaces(snap, cfg),
         }
         for key, val in wanted.items():
             if val not in (None, "", []):
