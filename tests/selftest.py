@@ -445,6 +445,24 @@ a = drive(WanTrafficCheck(), wt_dev, StateStore("wt"), [ifrow(v) for v in rxs])
 check("throughput spike -> alert",
       any(k.startswith("wan_traffic:ether1:rx") for k in keys(a)))
 
+# The WAN uplinks editor's typed Interface text ("Wikiworx") can differ in
+# case from the router's actual interface name ("wikiworx") for the same
+# link — this must not silently drop that link's throughput samples.
+def ifrow_case(rx):
+    return {"interface": [{"name": "wikiworx", "type": "ether", "running": "true",
+            "disabled": "false", "rx-byte": str(int(rx)), "tx-byte": "0"}]}
+wt_dev2 = mkdev("wt2", traffic_interfaces=["Wikiworx"],
+                thresholds={"baseline_warmup": 3, "baseline_buckets": "global",
+                            "baseline_z": 2, "traffic_floor_mbit": 1,
+                            "traffic_ratio": 1.5})
+wt2_store = StateStore("wt2")
+WanTrafficCheck().run(snap(**ifrow_case(0)), wt_dev2,
+                      CheckContext(wt_dev2.name, wt2_store, now=1_000_000.0))
+ctx3 = CheckContext(wt_dev2.name, wt2_store, now=1_000_010.0)
+WanTrafficCheck().run(snap(**ifrow_case(1.25e6)), wt_dev2, ctx3)
+check("case-mismatched interface (Wikiworx vs wikiworx) records a sample",
+      any(m == "rx_bps" and lab == "Wikiworx" for m, _, lab in ctx3.samples))
+
 print("Per-client top-talker:")
 def queue(total):
     return {"queue_simple": [{"name": "pc1", "target": "192.168.88.10",

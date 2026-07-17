@@ -17,6 +17,15 @@ _WAN_AUTO_TYPES = ("ether", "lte", "sfp", "vdsl", "pppoe-out", "ppp-out", "gpon"
 _DIR_LABEL = {"rx": "inbound (download)", "tx": "outbound (upload)"}
 
 
+def _norm_iface(s) -> str:
+    """Case/whitespace-insensitive interface name — matches the helper of the
+    same name in push/features.py and checks/wan.py. The WAN uplinks editor's
+    typed Interface text can differ in case from the router's own interface
+    name for the same link; an exact == match silently (no error) drops that
+    link's throughput samples every poll, leaving its graph blank."""
+    return str(s or "").strip().lower()
+
+
 def _wan_interfaces(snap, dev) -> list:
     if dev.traffic_interfaces:
         return list(dev.traffic_interfaces)
@@ -46,9 +55,9 @@ class WanTrafficCheck(Check):
         ratio = dev.th("traffic_ratio")
         zth = dev.th("baseline_z")
 
-        by_name = {str(i.get("name", "")): i for i in snap.rows("interface")}
+        by_name = {_norm_iface(i.get("name", "")): i for i in snap.rows("interface")}
         for name in targets:
-            iface = by_name.get(name)
+            iface = by_name.get(_norm_iface(name))
             if iface is None:
                 continue
             rx, tx = as_int(iface.get("rx-byte")), as_int(iface.get("tx-byte"))
