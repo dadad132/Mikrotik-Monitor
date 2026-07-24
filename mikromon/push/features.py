@@ -183,8 +183,10 @@ def routes_summary(current, cfg):
         if r:
             active = str(r.get("active", "true")).lower() not in ("false", "no")
             disabled = str(r.get("disabled", "false")).lower() in ("true", "yes")
-            state = "disabled by netwatch" if disabled else ("route active" if active else "route inactive")
-            watch_info = f"watch {w['host']} every {w.get('interval','?')}" if w else "no netwatch"
+            state = "disabled by health check" if disabled else ("route active" if active else "route inactive")
+            watch_info = (f"watching {w['host']} every {w.get('interval','?')} "
+                          f"({_FO_RETRIES} tries, {_FO_RETRY_GAP} apart)"
+                          if w else "no health check")
             lines.append(f"Failover {role} {r.get('gateway','?')} · {state} · {watch_info}")
     return lines or ["No internet lines found on this router."]
 
@@ -354,10 +356,14 @@ def routes_form(current, cfg):
                  "on the WAN tab. That's what Gateway Failover below actually "
                  "applies; this just reports what's currently live on the router."},
         {"type": "heading", "label": "Gateway Failover",
-         "hint": "Static routes with check-gateway=ping + Netwatch, one per "
-                 "configured uplink (not just the first two) — gateways are "
-                 "detected automatically. A 3rd+ line alternates between the "
-                 "two check IPs below by position instead of needing its own."},
+         "hint": "Static routes with Netwatch, one per configured uplink "
+                 "(not just the first two) — gateways are detected "
+                 "automatically. A 3rd+ line alternates between the two "
+                 "check IPs below by position instead of needing its own. "
+                 "A line only fails over after 3 failed checks in a row "
+                 "(the first, then 2 more 5s apart) — a single missed "
+                 "check no longer flips it. Coming back only takes 1 "
+                 "successful check."},
         {"type": "toggle", "name": "fo_enabled", "value": "1",
          "on": fo_enabled, "label": "Enable gateway failover"},
         {"type": "text", "name": "fo_primary_check",
@@ -471,11 +477,42 @@ def _fo_check_hosts(n, primary_check, secondary_check):
     return hosts
 
 
+_FO_RETRY_GAP = "5s"     # gap between Netwatch's first failed ping and each confirmation retry
+_FO_RETRIES = 3          # total attempts (Netwatch's own + this many - 1 confirmations) before failing over
+
+
+def _fo_down_script(role: str, check_ip: str) -> str:
+    """Netwatch down-script: fires the moment Netwatch's own ping to
+    check_ip first fails. A single missed ping used to fail the line over
+    immediately — confirmed live as unwanted flapping on brief blips.
+    Before actually disabling the route, this confirms the outage with
+    _FO_RETRIES - 1 more pings, _FO_RETRY_GAP apart (so 3 total attempts:
+    Netwatch's own + 2 here) — only disabling the route if every one of
+    them also fails. If any confirms the line is back, this does nothing,
+    leaving the route enabled/untouched.
+
+    Recovery is deliberately NOT handled here: Netwatch's own up-script
+    (see the entry's up-script) fires on the very next successful poll and
+    just re-enables the route — a real line coming back is not something
+    worth being cautious about, unlike a brief blip on the way down."""
+    comment = f"{_FAILOVER_TAG}{role}"
+    lines = [':local ok false']
+    for _ in range(_FO_RETRIES - 1):
+        lines.append(f':delay {_FO_RETRY_GAP}')
+        lines.append(f':if ([/ping {check_ip} count=1] > 0) do={{ :set ok true }}')
+    lines.append(f':if (!$ok) do={{ /ip route disable [find comment="{comment}"] }}')
+    return "\n".join(lines)
+
+
 def _apply_failover(ops, flat, pusher, cfg):
     """Reconcile static failover routes and Netwatch entries for EVERY
     configured WAN uplink, not just a primary/secondary pair — a 3rd, 4th...
     link gets its own managed route + Netwatch check too, at its own
     distance (see _fo_distance).
+
+    Each link's Netwatch down-script confirms an outage with a couple of
+    extra retries before actually failing over (see _fo_down_script) — a
+    single missed ping no longer flips the route.
 
     Gateways are derived from cfg.wan.links (the WAN uplinks the user
     configured) matched against live PPPoE/DHCP data on the router. Only
@@ -682,6 +719,14 @@ def _apply_failover(ops, flat, pusher, cfg):
     # scope=0 ≤ target-scope=10). The check routes are not used for
     # recursive next-hop resolution — they exist solely to give Netwatch
     # a dedicated, interface-specific path to its check IP.
+    #
+    # check-gateway is deliberately NOT set on the static route: RouterOS's
+    # own gateway-check has no retry count either, so leaving it active
+    # alongside Netwatch's own (now retry-confirmed) down-script would give
+    # two independent mechanisms the power to disable the same route on a
+    # single missed check — reintroducing the exact flapping this down-
+    # script exists to remove. Netwatch is the single source of truth for
+    # whether a link's route is enabled.
     handled_routes = set()
     handled_watch = set()
     for idx, gw in enumerate(gateways):
@@ -699,14 +744,13 @@ def _apply_failover(ops, flat, pusher, cfg):
 
         link_routes = [
             {"comment": main_comment, "dst-address": "0.0.0.0/0", "gateway": gw,
-             "distance": distance, "check-gateway": "ping",
-             "scope": "30", "target-scope": "10"},
+             "distance": distance, "scope": "30", "target-scope": "10"},
             {"comment": check_comment, "dst-address": _net(host), "gateway": gw,
              "distance": "1", "scope": "30", "target-scope": "10"},
         ]
         link_watch = [
             {"comment": watch_comment, "host": host, "interval": interval,
-             "down-script": f'/ip route disable [find comment="{main_comment}"]',
+             "down-script": _fo_down_script(role, host),
              "up-script":   f'/ip route enable  [find comment="{main_comment}"]'},
         ]
         # 1. THIS link's static route + check-route + netwatch, first.

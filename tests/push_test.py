@@ -1207,12 +1207,26 @@ check("link3 gets its own unique check IP from the fallback pool — never "
           for w in watch_adds))
 check("netwatch interval defaults to 30s (no fo_interval field in the form)",
       all(w.params["interval"] == "30s" for w in watch_adds))
-check("down-script disables the route by its tag",
-      any(w.params["down-script"] == f'/ip route disable [find comment="{_FO_TAG}primary"]'
-          for w in watch_adds))
-check("up-script enables the route by its tag",
+primary_down = next(w.params["down-script"] for w in watch_adds
+                    if w.params["comment"] == f"{_FO_TAG}watch:primary")
+check("down-script only disables the route after confirming the outage "
+      "(a single missed Netwatch ping no longer flips it) — reported live "
+      "as unwanted flapping on brief blips",
+      f'/ip route disable [find comment="{_FO_TAG}primary"]' in primary_down
+      and ":delay 5s" in primary_down and "/ping 1.1.1.1" in primary_down)
+check("down-script confirms with 2 extra retries (3 attempts total: "
+      "Netwatch's own + 2 here)",
+      primary_down.count(":delay 5s") == 2
+      and primary_down.count("/ping 1.1.1.1") == 2)
+check("up-script enables the route immediately by its tag — recovery "
+      "needs only the next successful Netwatch check, no confirmation",
       any(w.params["up-script"].strip() == f'/ip route enable  [find comment="{_FO_TAG}primary"]'.strip()
           for w in watch_adds))
+check("static routes no longer set check-gateway — Netwatch's own "
+      "(now retry-confirmed) down-script is the single source of truth "
+      "for whether a link's route is enabled, avoiding two independent "
+      "mechanisms fighting over the same route",
+      not any("check-gateway" in o.params for o in route_adds))
 check("no RouterOS scripts use invalid $(var) shell-style syntax",
       not any("$(" in str(v) for o in enable_plan.ops
              for v in o.params.values() if isinstance(v, str)))
