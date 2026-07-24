@@ -137,6 +137,10 @@ def routes_read(pusher, cfg):
 def routes_summary(current, cfg):
     lines = []
     routes = current.get("routes", [])
+    ppp_active_by_name = {_norm_iface(s.get("name", "")): s
+                          for s in current.get("ppp_active", []) if s.get("name")}
+    ip_addr_by_iface = {_norm_iface(a.get("interface", "")): a
+                        for a in current.get("ip_addrs", []) if a.get("interface")}
     for c in current.get("dhcp", []):
         iface = c.get("interface", "?")
         status = c.get("status", "unknown")
@@ -156,7 +160,8 @@ def routes_summary(current, cfg):
             lines.append(f"{ctype} {name} · no default route")
         else:
             state = "connected" if running else "disconnected"
-            rs = _route_status_for(routes, c, c.get("_type", "ppp"))
+            rs = _route_status_for(routes, c, c.get("_type", "ppp"),
+                                   ppp_active_by_name, ip_addr_by_iface)
             rs_str = f" · route {rs}" if rs else ""
             lines.append(f"{ctype} {name} · {state}{rs_str} · distance {dist}")
     for r in current.get("routes", []):
@@ -184,17 +189,42 @@ def routes_summary(current, cfg):
     return lines or ["No internet lines found on this router."]
 
 
-def _route_status_for(routes, client, ctype):
+def _ppp_client_gateway(client, ppp_active_by_name, ip_addr_by_iface):
+    """Best-effort gateway (IP) for a PPP-type (PPPoE/L2TP) client, mirroring
+    _gateway_for_link's own precedence — so a route-table lookup by gateway
+    can actually find the route this client's traffic uses. A managed
+    failover route's own 'gateway' field is normally an IP (the PPP remote
+    address or the /ip/address 'network'), not the client's name, so
+    comparing straight against client.get("name") (the old behaviour) almost
+    never matched and silently fell through to whatever default the caller
+    used — e.g. always showing distance 1 for a PPPoE line regardless of
+    what was actually pushed."""
+    name_key = _norm_iface(client.get("name", ""))
+    if ppp_active_by_name:
+        remote = ppp_active_by_name.get(name_key, {}).get("remote-address", "")
+        if remote:
+            return remote
+    if ip_addr_by_iface:
+        network = ip_addr_by_iface.get(name_key, {}).get("network", "")
+        if network and network not in ("0.0.0.0", ""):
+            return network
+    return str(client.get("name", ""))
+
+
+def _route_status_for(routes, client, ctype,
+                      ppp_active_by_name=None, ip_addr_by_iface=None):
     """Return 'active', 'inactive', or '' (no matching default route found).
 
-    DHCP routes are matched by gateway IP; PPPoE/L2TP routes are matched by the
-    interface/client name.  The RouterOS 'active' flag is True when the route is
-    in the forwarding table — reliable for interface-down detection but only
-    reflects internet reachability if check-gateway is also configured."""
+    DHCP routes are matched by gateway IP; PPPoE/L2TP routes are matched the
+    same way the failover route builder computed their gateway (PPP
+    remote-address / /ip/address network, falling back to the client name).
+    The RouterOS 'active' flag is True when the route is in the forwarding
+    table — reliable for interface-down detection but only reflects internet
+    reachability if check-gateway is also configured."""
     if ctype == "dhcp":
         gw = str(client.get("gateway", ""))
     else:
-        gw = str(client.get("name", ""))
+        gw = _ppp_client_gateway(client, ppp_active_by_name, ip_addr_by_iface)
     if not gw:
         return ""
     for r in routes:
@@ -204,13 +234,15 @@ def _route_status_for(routes, client, ctype):
     return ""
 
 
-def _dist_from_routes(routes, client, ctype):
+def _dist_from_routes(routes, client, ctype,
+                      ppp_active_by_name=None, ip_addr_by_iface=None):
     """Find the distance of the matching 0.0.0.0/0 route for this client.
 
     RouterOS omits default-route-distance from the API response when
     add-default-route=no, so we fall back to reading the distance from the
     actual route table (which includes our managed static failover routes)."""
-    gw = str(client.get("gateway", "")) if ctype == "dhcp" else str(client.get("name", ""))
+    gw = (str(client.get("gateway", "")) if ctype == "dhcp"
+          else _ppp_client_gateway(client, ppp_active_by_name, ip_addr_by_iface))
     if not gw:
         return ""
     for r in routes:
@@ -221,6 +253,10 @@ def _dist_from_routes(routes, client, ctype):
 
 def _wan_sortable_items(current):
     routes = current.get("routes", [])
+    ppp_active_by_name = {_norm_iface(s.get("name", "")): s
+                          for s in current.get("ppp_active", []) if s.get("name")}
+    ip_addr_by_iface = {_norm_iface(a.get("interface", "")): a
+                        for a in current.get("ip_addrs", []) if a.get("interface")}
     items = []
     for c in current.get("dhcp", []):
         iface = c.get("interface", "?")
@@ -241,13 +277,17 @@ def _wan_sortable_items(current):
         ctype = c.get("_type", "ppp").upper()
         name = c.get("name", "?")
         running = str(c.get("running", "false")).lower() in ("true", "yes")
-        dist = c.get("default-route-distance", "") or _dist_from_routes(routes, c, c.get("_type", "ppp")) or "1"
+        dist = (c.get("default-route-distance", "")
+                or _dist_from_routes(routes, c, c.get("_type", "ppp"),
+                                     ppp_active_by_name, ip_addr_by_iface)
+                or "1")
         rid = c.get(".id", "").lstrip("*")
         state = "connected" if running else "disconnected"
         if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
             conn_info = f"{state} · no default route"
         else:
-            rs = _route_status_for(routes, c, c.get("_type", "ppp"))
+            rs = _route_status_for(routes, c, c.get("_type", "ppp"),
+                                   ppp_active_by_name, ip_addr_by_iface)
             conn_info = f"{state}" + (f" · route {rs}" if rs else "")
         items.append({
             "id": f"{c.get('_type', 'ppp')}:{rid}",

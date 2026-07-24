@@ -1580,6 +1580,84 @@ check("neither link is bounced (disabled/enabled) to force anything live",
       not any("disabled" in o.params for o in snap_plan.ops))
 
 
+# ---- 16. Routes tab display: PPPoE distance/status must not always read as
+#          "1"/unknown just because add-default-route=no hides the field ----
+print("routes tab display (PPPoE distance shown correctly, not stuck at 1):")
+# Confirmed live: with gateway failover on, add-default-route=no on every
+# client makes RouterOS omit default-route-distance from the API response,
+# so the Routes tab falls back to reading the distance off the matching
+# 0.0.0.0/0 route instead. For a PPPoE/L2TP client that fallback compared
+# the route's gateway (an IP — the PPP remote-address) against the client's
+# own NAME ("Wikiworx") — never equal — so it always fell through to the
+# hardcoded "1" default, even though the failover route actually holds the
+# real chosen distance (10).
+disp_cfg = _t.SimpleNamespace(
+    name="R1", wan=_t.SimpleNamespace(links=[
+        WanEndpoint(interface="Wikiworx", name="Wikiworx", distance=10),
+        WanEndpoint(interface="ether2", name="Backup", distance=11)]))
+disp_state = {
+    ("ip", "route"): [
+        # The failover static route for the PPPoE link: gateway is the PPP
+        # remote address (what _gateway_for_link actually uses), not "Wikiworx".
+        {".id": "*1", "comment": "mikromon:failover:primary",
+         "dst-address": "0.0.0.0/0", "gateway": "41.2.3.4", "distance": "10",
+         "active": "true"},
+        {".id": "*2", "comment": "mikromon:failover:secondary",
+         "dst-address": "0.0.0.0/0", "gateway": "10.0.1.1", "distance": "11",
+         "active": "false"},
+    ],
+    ("tool", "netwatch"): [],
+    ("interface", "pppoe-client"): [
+        {".id": "*3", "name": "wikiworx", "running": "true",
+         "add-default-route": "no"},  # field hidden while add-default-route=no
+    ],
+    ("ip", "dhcp-client"): [
+        {".id": "*4", "interface": "ether2", "gateway": "10.0.1.1",
+         "status": "bound", "add-default-route": "no"},
+    ],
+    ("interface", "l2tp-client"): [],
+    ("ppp", "active"): [
+        {"name": "wikiworx", "remote-address": "41.2.3.4"},
+    ],
+    ("ip", "address"): [],
+}
+disp_current = F.routes_read(Pusher(disp_cfg, FakeApi(dict(disp_state)), dry_run=True), disp_cfg)
+
+# This is exactly the screenshot's condition: failover on, so add-default-
+# route=no on every client, and RouterOS omits default-route-distance from
+# the API entirely — _wan_sortable_items (the Routes tab's drag-order list)
+# computes distance unconditionally regardless of that, so it's the one
+# that must show the real value here.
+items = F._wan_sortable_items(disp_current)
+ppp_item = next((it for it in items if it["id"].startswith("pppoe:")), None)
+check("the Routes tab's drag-order list shows the PPPoE primary's real "
+      "distance (10), not the old always-1 fallback",
+      ppp_item is not None and ppp_item["_dist"] == "10")
+dhcp_item = next((it for it in items if it["id"].startswith("dhcp:")), None)
+check("the DHCP backup's distance in the drag-order list still reads "
+      "correctly (unaffected by this fix)",
+      dhcp_item is not None and dhcp_item["_dist"] == "11")
+
+# routes_summary's own route-status text ("route active"/"route inactive")
+# only appears on the add-default-route=yes branch (a plain, non-failover
+# line) and goes through the same _route_status_for fix — it reads distance
+# straight off the client's own field (unaffected by this bug), but the
+# status lookup had the identical route.gateway-vs-client.name mismatch.
+disp_state_plain = {**disp_state,
+    ("interface", "pppoe-client"): [
+        {".id": "*3", "name": "wikiworx", "running": "true",
+         "add-default-route": "yes", "default-route-distance": "10"},
+    ],
+}
+disp_current_plain = F.routes_read(
+    Pusher(disp_cfg, FakeApi(dict(disp_state_plain)), dry_run=True), disp_cfg)
+disp_lines = F.routes_summary(disp_current_plain, disp_cfg)
+ppp_line = next((ln for ln in disp_lines if ln.startswith("PPPOE")), "")
+check("routes_summary's PPPoE line resolves route status (matched via "
+      "ppp/active remote-address, not the client's name), not blank",
+      "route active" in ppp_line)
+
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")
