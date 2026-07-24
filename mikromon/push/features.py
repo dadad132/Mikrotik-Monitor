@@ -489,14 +489,25 @@ def _apply_failover(ops, flat, pusher, cfg):
     links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
 
     if not flat.get("fo_enabled"):
-        ops.extend(reconcile_list(_ROUTE, "comment", [], all_routes,
-                                  owns=fo_owns, label="failover route"))
-        ops.extend(reconcile_list(_NETWATCH, "comment", [], netwatch,
-                                  owns=fo_owns, label="netwatch"))
-        # Restore each WAN client to plain, working routing — equivalent to
-        # running, per link:
-        #   /ip dhcp-client set [find name="..."] add-default-route=yes \
-        #       [default-route-distance=<N>] disabled=no
+        # Restore + remove ONE LINK AT A TIME — never every managed route
+        # removed in a single batch before any client is restored. Reported
+        # live: turning failover off removed all managed routes for every
+        # link up front, then restored clients afterward — the router's own
+        # connection to mikromon typically rides over one of these very WAN
+        # links, so that gap (nothing routing at all, for every link at
+        # once) could drop the API connection mid-apply, before the restore
+        # ops it needed were ever reached, leaving the router with no
+        # default route until someone fixes it by hand.
+        #
+        # Restoring THIS link's client BEFORE removing THIS link's static
+        # route means there's always at least one route covering it —
+        # RouterOS is fine with two default routes to the same destination
+        # existing briefly (lowest distance wins); it is never fine with
+        # zero. Doing this link-by-link (not client-restore-for-everyone,
+        # then route-removal-for-everyone) also means a push that gets
+        # interrupted partway leaves already-handled links in a working
+        # state instead of every link mid-transition simultaneously.
+        #
         # default-route-distance is only touched when the link has an
         # explicit Distance chosen in the WAN uplinks editor — that exact
         # value, nothing computed. If no Distance is chosen, this field is
@@ -507,48 +518,93 @@ def _apply_failover(ops, flat, pusher, cfg):
         # disabled=no in case an earlier troubleshooting step left the
         # client itself switched off.
         #
-        # None of this is forced live via a disable/enable bounce — see
-        # _apply_wan_order's docstring for why: the interface being changed
-        # is very often the one carrying mikromon's own WireGuard tunnel
-        # back to the hub, so bouncing it automatically risks cutting off
-        # our own remote access mid-apply with no way to fix it back. A
-        # pending add-default-route/distance change takes effect on that
-        # line's next natural reconnect.
+        # None of this is forced live via a disable/enable bounce: the
+        # interface being changed is very often the one carrying mikromon's
+        # own WireGuard tunnel back to the hub, so bouncing it automatically
+        # risks cutting off our own remote access mid-apply with no way to
+        # fix it back. A pending add-default-route/distance change takes
+        # effect on that line's next natural reconnect.
         pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
         dhcp_clients  = _safe_fetch(pusher.api, _DHCP_CLIENT)
-        for link in links:
+        fo_by_comment = {r.get("comment", ""): r for r in all_routes if fo_owns(r)}
+        watch_by_comment = {w.get("comment", ""): w for w in netwatch if fo_owns(w)}
+        handled_routes: set[str] = set()
+        handled_watch: set[str] = set()
+        for idx, link in enumerate(links):
+            role = _fo_role(idx)
             iface = getattr(link, "interface", "") or ""
-            if not iface:
-                continue
-            explicit_dist = getattr(link, "distance", None)
-            want_dist = str(explicit_dist) if explicit_dist else None
-            iface_key = _norm_iface(iface)
-            for c in pppoe_clients:
-                if _norm_iface(c.get("name")) == iface_key:
-                    if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
-                        ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route",
-                                              "yes", f"PPPoE {iface}"))
-                    if (want_dist is not None
-                            and _norm(str(c.get("default-route-distance", "") or "")) != want_dist):
-                        ops.append(_set_field(_PPPOE_CLIENT, c,
-                                              "default-route-distance", want_dist,
-                                              f"PPPoE {iface}"))
-                    if c.get("disabled", "false") not in ("false", "no", False):
-                        ops.append(_set_field(_PPPOE_CLIENT, c, "disabled", "no",
-                                              f"PPPoE {iface}"))
-            for c in dhcp_clients:
-                if _norm_iface(c.get("interface")) == iface_key:
-                    if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
-                        ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route",
-                                              "yes", f"DHCP {iface}"))
-                    if (want_dist is not None
-                            and _norm(str(c.get("default-route-distance", "") or "")) != want_dist):
-                        ops.append(_set_field(_DHCP_CLIENT, c,
-                                              "default-route-distance", want_dist,
-                                              f"DHCP {iface}"))
-                    if c.get("disabled", "false") not in ("false", "no", False):
-                        ops.append(_set_field(_DHCP_CLIENT, c, "disabled", "no",
-                                              f"DHCP {iface}"))
+            if iface:
+                explicit_dist = getattr(link, "distance", None)
+                want_dist = str(explicit_dist) if explicit_dist else None
+                iface_key = _norm_iface(iface)
+                for c in pppoe_clients:
+                    if _norm_iface(c.get("name")) == iface_key:
+                        if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
+                            ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route",
+                                                  "yes", f"PPPoE {iface}"))
+                        if (want_dist is not None
+                                and _norm(str(c.get("default-route-distance", "") or "")) != want_dist):
+                            ops.append(_set_field(_PPPOE_CLIENT, c,
+                                                  "default-route-distance", want_dist,
+                                                  f"PPPoE {iface}"))
+                        if c.get("disabled", "false") not in ("false", "no", False):
+                            ops.append(_set_field(_PPPOE_CLIENT, c, "disabled", "no",
+                                                  f"PPPoE {iface}"))
+                for c in dhcp_clients:
+                    if _norm_iface(c.get("interface")) == iface_key:
+                        if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
+                            ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route",
+                                                  "yes", f"DHCP {iface}"))
+                        if (want_dist is not None
+                                and _norm(str(c.get("default-route-distance", "") or "")) != want_dist):
+                            ops.append(_set_field(_DHCP_CLIENT, c,
+                                                  "default-route-distance", want_dist,
+                                                  f"DHCP {iface}"))
+                        if c.get("disabled", "false") not in ("false", "no", False):
+                            ops.append(_set_field(_DHCP_CLIENT, c, "disabled", "no",
+                                                  f"DHCP {iface}"))
+            # THEN remove this link's own static route(s) + netwatch entry —
+            # only after its client is already restored above.
+            for comment in (f"{_FAILOVER_TAG}{role}", f"{_FAILOVER_TAG}check:{role}"):
+                handled_routes.add(comment)
+                r = fo_by_comment.get(comment)
+                if r:
+                    ops.append(Operation(
+                        "remove", _ROUTE, {".id": r[".id"]},
+                        desc=f"remove failover route comment={comment}",
+                        inverse=Operation(
+                            "add", _ROUTE, {f: v for f, v in r.items() if f != ".id"},
+                            desc=f"restore failover route comment={comment}")))
+            watch_comment = f"{_FAILOVER_TAG}watch:{role}"
+            handled_watch.add(watch_comment)
+            w = watch_by_comment.get(watch_comment)
+            if w:
+                ops.append(Operation(
+                    "remove", _NETWATCH, {".id": w[".id"]},
+                    desc=f"remove netwatch comment={watch_comment}",
+                    inverse=Operation(
+                        "add", _NETWATCH, {f: v for f, v in w.items() if f != ".id"},
+                        desc=f"restore netwatch comment={watch_comment}")))
+        # Cleanup: any failover-owned routes/netwatch left over that don't
+        # belong to any currently configured link (e.g. an uplink removed
+        # from the WAN editor while failover was on) — no client depends on
+        # these, so a plain batch remove is fine.
+        for comment, r in fo_by_comment.items():
+            if comment not in handled_routes:
+                ops.append(Operation(
+                    "remove", _ROUTE, {".id": r[".id"]},
+                    desc=f"remove stale failover route comment={comment}",
+                    inverse=Operation(
+                        "add", _ROUTE, {f: v for f, v in r.items() if f != ".id"},
+                        desc=f"restore stale failover route comment={comment}")))
+        for comment, w in watch_by_comment.items():
+            if comment not in handled_watch:
+                ops.append(Operation(
+                    "remove", _NETWATCH, {".id": w[".id"]},
+                    desc=f"remove stale netwatch comment={comment}",
+                    inverse=Operation(
+                        "add", _NETWATCH, {f: v for f, v in w.items() if f != ".id"},
+                        desc=f"restore stale netwatch comment={comment}")))
         return
 
     if not links:
@@ -596,7 +652,20 @@ def _apply_failover(ops, flat, pusher, cfg):
     check_hosts = _fo_check_hosts(len(gateways), primary_check, secondary_check)
 
     # Matches the standard MikroTik recursive-check failover pattern, for
-    # every configured link.
+    # every configured link — but built and reconciled ONE LINK AT A TIME,
+    # not as one big batch covering every link at once. Reported live:
+    # turning failover on/off could leave the router briefly with no
+    # working default route at all, because every link's static route
+    # (or every client restore) was queued as a single group, so a router
+    # whose mikromon connection rides over one of these WAN links could
+    # drop mid-apply before reaching the op that would have fixed it.
+    #
+    # For each link here: ensure its own static route + check-route +
+    # netwatch entry exist/are updated FIRST (add/update only — reconcile_list
+    # scoped to just this link's own comments never removes another link's
+    # entries), and only THEN stop that link's client creating a competing
+    # dynamic route. By the time any client is told to stop routing on its
+    # own, that same link's static replacement is already in place.
     #
     # The check routes are the critical piece: each forces its Netwatch
     # ping through its OWN ISP gateway, so a link's Netwatch keeps reaching
@@ -613,59 +682,88 @@ def _apply_failover(ops, flat, pusher, cfg):
     # scope=0 ≤ target-scope=10). The check routes are not used for
     # recursive next-hop resolution — they exist solely to give Netwatch
     # a dedicated, interface-specific path to its check IP.
-    desired_routes = []
-    desired_watch = []
+    handled_routes = set()
+    handled_watch = set()
     for idx, gw in enumerate(gateways):
         if not gw:
             continue
         role = _fo_role(idx)
         host = check_hosts[idx]
         distance = _fo_distance(idx, links[idx])
-        desired_routes.append({
-            "comment": f"{_FAILOVER_TAG}{role}",
-            "dst-address": "0.0.0.0/0", "gateway": gw,
-            "distance": distance, "check-gateway": "ping",
-            "scope": "30", "target-scope": "10",
-        })
-        desired_routes.append({
-            "comment": f"{_FAILOVER_TAG}check:{role}",
-            "dst-address": _net(host), "gateway": gw,
-            "distance": "1", "scope": "30", "target-scope": "10",
-        })
-        desired_watch.append({
-            "comment": f"{_FAILOVER_TAG}watch:{role}",
-            "host": host, "interval": interval,
-            "down-script": f'/ip route disable [find comment="{_FAILOVER_TAG}{role}"]',
-            "up-script":   f'/ip route enable  [find comment="{_FAILOVER_TAG}{role}"]',
-        })
+        main_comment = f"{_FAILOVER_TAG}{role}"
+        check_comment = f"{_FAILOVER_TAG}check:{role}"
+        watch_comment = f"{_FAILOVER_TAG}watch:{role}"
+        handled_routes.add(main_comment)
+        handled_routes.add(check_comment)
+        handled_watch.add(watch_comment)
 
-    ops.extend(reconcile_list(_ROUTE, "comment", desired_routes, all_routes,
-                              owns=fo_owns, label="failover route"))
-    ops.extend(reconcile_list(_NETWATCH, "comment", desired_watch, netwatch,
-                              owns=fo_owns, label="netwatch"))
+        link_routes = [
+            {"comment": main_comment, "dst-address": "0.0.0.0/0", "gateway": gw,
+             "distance": distance, "check-gateway": "ping",
+             "scope": "30", "target-scope": "10"},
+            {"comment": check_comment, "dst-address": _net(host), "gateway": gw,
+             "distance": "1", "scope": "30", "target-scope": "10"},
+        ]
+        link_watch = [
+            {"comment": watch_comment, "host": host, "interval": interval,
+             "down-script": f'/ip route disable [find comment="{main_comment}"]',
+             "up-script":   f'/ip route enable  [find comment="{main_comment}"]'},
+        ]
+        # 1. THIS link's static route + check-route + netwatch, first.
+        ops.extend(reconcile_list(
+            _ROUTE, "comment", link_routes, all_routes,
+            owns=lambda r, mc=main_comment, cc=check_comment:
+                str(r.get("comment", "")) in (mc, cc),
+            label="failover route"))
+        ops.extend(reconcile_list(
+            _NETWATCH, "comment", link_watch, netwatch,
+            owns=lambda w, wc=watch_comment: str(w.get("comment", "")) == wc,
+            label="netwatch"))
 
-    # Stop WAN clients creating their own dynamic default routes — they compete
-    # with our static routes and prevent failover from working.  When a client
-    # has add-default-route=yes, it creates a dynamic route that stays active
-    # even when Netwatch disables our static route for that same link, so a
-    # lower-priority static route never gets a chance to win.
-    # Setting add-default-route=no removes the dynamic route immediately on
-    # active connections and leaves only our managed static routes in control.
-    for link in links:
-        iface = getattr(link, "interface", "") or ""
-        if not iface:
-            continue
-        iface_key = _norm_iface(iface)
-        for c in pppoe_clients:
-            if (_norm_iface(c.get("name")) == iface_key
-                    and str(c.get("add-default-route", "yes")).lower() not in ("no", "false")):
-                ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route", "no",
-                                      f"PPPoE {iface}"))
-        for c in dhcp_clients:
-            if (_norm_iface(c.get("interface")) == iface_key
-                    and str(c.get("add-default-route", "yes")).lower() not in ("no", "false")):
-                ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route", "no",
-                                      f"DHCP {iface}"))
+        # 2. THEN stop this link's client creating its own competing dynamic
+        # route. A client with add-default-route=yes creates a dynamic
+        # route that stays active even when Netwatch disables our static
+        # route for that same link, so a lower-priority static route never
+        # gets a chance to win. Setting add-default-route=no removes the
+        # dynamic route immediately on active connections and leaves only
+        # our managed static route in control — safe to do now since that
+        # static route was just confirmed present above.
+        iface = getattr(links[idx], "interface", "") or ""
+        if iface:
+            iface_key = _norm_iface(iface)
+            for c in pppoe_clients:
+                if (_norm_iface(c.get("name")) == iface_key
+                        and str(c.get("add-default-route", "yes")).lower() not in ("no", "false")):
+                    ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route", "no",
+                                          f"PPPoE {iface}"))
+            for c in dhcp_clients:
+                if (_norm_iface(c.get("interface")) == iface_key
+                        and str(c.get("add-default-route", "yes")).lower() not in ("no", "false")):
+                    ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route", "no",
+                                          f"DHCP {iface}"))
+
+    # Cleanup: any failover-owned routes/netwatch left over that don't
+    # belong to any currently configured link (e.g. an uplink removed from
+    # the WAN editor, or a gateway that couldn't be detected this apply) —
+    # no live client depends on these, so a plain batch remove is fine.
+    for r in all_routes:
+        c = str(r.get("comment", ""))
+        if fo_owns(r) and c not in handled_routes:
+            ops.append(Operation(
+                "remove", _ROUTE, {".id": r[".id"]},
+                desc=f"remove stale failover route comment={c}",
+                inverse=Operation(
+                    "add", _ROUTE, {f: v for f, v in r.items() if f != ".id"},
+                    desc=f"restore stale failover route comment={c}")))
+    for w in netwatch:
+        c = str(w.get("comment", ""))
+        if fo_owns(w) and c not in handled_watch:
+            ops.append(Operation(
+                "remove", _NETWATCH, {".id": w[".id"]},
+                desc=f"remove stale netwatch comment={c}",
+                inverse=Operation(
+                    "add", _NETWATCH, {f: v for f, v in w.items() if f != ".id"},
+                    desc=f"restore stale netwatch comment={c}")))
 
 
 def routes_plan(pusher, cfg, flat, multi):

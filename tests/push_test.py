@@ -1262,6 +1262,44 @@ check("no interface is ever bounced (disable/enable) to force a change "
       not any(o.params.get(".id") == "*1" and "disabled" in o.params
              for o in disable_plan.ops))
 
+# Safe ordering, per link — the actual regression reported live: turning
+# failover off/on removed or disabled every link's routing all at once
+# before any of it was restored, and since mikromon's own connection to
+# the router typically rides over one of these WAN links, that left the
+# router with no default route at all for the whole gap, sometimes
+# dropping the push mid-apply before it ever reached the fix for that
+# link. Ops for a given link must never leave a window with nothing
+# covering it: the replacement must exist before the original is torn
+# down, link by link, not route-removal-for-everyone then restore-for-
+# everyone (or route-add-for-everyone then disable-for-everyone).
+def _idx(ops, pred):
+    return next((i for i, o in enumerate(ops) if pred(o)), None)
+
+
+for role, cid in (("primary", "*1"), ("secondary", "*2"), ("link3", "*3")):
+    add_idx = _idx(enable_plan.ops, lambda o, r=role: o.path == ("ip", "route")
+                   and o.action == "add" and o.params.get("comment") == f"{_FO_TAG}{r}")
+    disable_client_idx = _idx(
+        enable_plan.ops, lambda o, c=cid: o.path == ("ip", "dhcp-client")
+        and o.params.get(".id") == c and o.params.get("add-default-route") == "no")
+    check(f"enabling: {role}'s static route is added before its own client "
+          f"is told to stop routing (never every route first, then every "
+          f"client after)",
+          add_idx is not None and disable_client_idx is not None
+          and add_idx < disable_client_idx)
+
+    restore_idx = _idx(
+        disable_plan.ops, lambda o, c=cid: o.path == ("ip", "dhcp-client")
+        and o.params.get(".id") == c and o.params.get("add-default-route") == "yes")
+    remove_idx = _idx(
+        disable_plan.ops, lambda o, r=role: o.action == "remove"
+        and o.desc == f"remove failover route comment={_FO_TAG}{r}")
+    check(f"disabling: {role}'s client is restored (add-default-route=yes) "
+          f"before its own static route is removed (never every route "
+          f"removed first, then every client restored after)",
+          restore_idx is not None and remove_idx is not None
+          and restore_idx < remove_idx)
+
 # Confirmed live: some RouterOS versions/menus report add-default-route as
 # "false" instead of "no" over the API — a strict == "no" comparison would
 # never detect that it needs restoring, silently leaving the checkbox
