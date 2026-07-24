@@ -1657,6 +1657,28 @@ check("routes_summary's PPPoE line resolves route status (matched via "
       "ppp/active remote-address, not the client's name), not blank",
       "route active" in ppp_line)
 
+# routes_plan (what the Routes tab's Apply button actually runs) must not
+# push default-route-distance to any client directly. It used to run a
+# second pass (_apply_wan_order) driven by the Routes tab's own drag-order
+# list, which submits back on EVERY apply regardless of whether the user
+# touched it — silently overwriting each client's default-route-distance
+# with a sequential rank (1, 2, 3...) instead of the explicit Distance
+# chosen on the WAN tab (10, 11, 12). Confirmed live: a router already
+# correctly at distance 10/11/12 got its DHCP backups reset to 2/3 on the
+# very next Routes-tab apply, even with the drag list left untouched.
+order_plan = F.routes_plan(
+    Pusher(disp_cfg, FakeApi(dict(disp_state)), dry_run=True), disp_cfg,
+    {"fo_enabled": "1", "fo_primary_check": "1.1.1.1",
+     "fo_secondary_check": "8.8.8.8"},
+    {"wan_order": ["pppoe:3", "dhcp:4"]})
+check("applying the Routes tab never sets default-route-distance on a "
+      "client directly — distance now has exactly one source of truth "
+      "(link.distance, applied by Gateway Failover)",
+      not any(o.path in (("interface", "pppoe-client"), ("ip", "dhcp-client"),
+                        ("interface", "l2tp-client"))
+             and "default-route-distance" in o.params
+             for o in order_plan.ops))
+
 
 print()
 if FAILS:

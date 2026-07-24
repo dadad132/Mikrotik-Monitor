@@ -1816,6 +1816,19 @@ def _field_html(desc) -> str:
         return (f'<div class="f full"><label class="f">{esc(label)}</label>'
                 f'<table class="rowtbl" id="sortable-{esc(name)}">'
                 f'<tbody>{body}{empty}</tbody></table>{hint}</div>')
+    if t == "list":
+        # Read-only status rows — same look as "sortable" minus the drag
+        # handle/move buttons/hidden inputs, since nothing here is a form
+        # control that gets submitted. Priority/distance is set on the WAN
+        # tab; this just reports what's currently live on the router.
+        items = desc.get("items", [])
+        body = "".join(
+            f'<tr><td style="padding:5px 8px">{esc(item["label"])}</td></tr>'
+            for item in items)
+        empty = ('<tr><td class="muted" style="padding:8px">'
+                 'No WAN clients found on this router.</td></tr>') if not items else ""
+        return (f'<div class="f full"><label class="f">{esc(label)}</label>'
+                f'<table class="rowtbl"><tbody>{body}{empty}</tbody></table>{hint}</div>')
     return ""
 
 

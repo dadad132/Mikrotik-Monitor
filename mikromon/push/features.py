@@ -347,14 +347,12 @@ def routes_form(current, cfg):
     links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
 
     fields = [
-        {"type": "sortable", "name": "wan_order",
-         "label": "Internet line priority — drag or use ↑/↓ to set primary (top = primary)",
+        {"type": "list", "name": "wan_priority_info",
+         "label": "Internet line priority (top = primary)",
          "items": items,
-         "hint": "Top line becomes distance 1 (primary). RouterOS does not allow "
-                 "editing distances on dynamic DHCP/PPPoE routes directly — the "
-                 "change is saved on the client config and takes effect the next time "
-                 "that line reconnects or renews its DHCP lease. To apply immediately: "
-                 "disconnect and reconnect the line from RouterOS after applying."},
+         "hint": "Read-only — set the priority order and each line's Distance "
+                 "on the WAN tab. That's what Gateway Failover below actually "
+                 "applies; this just reports what's currently live on the router."},
         {"type": "heading", "label": "Gateway Failover",
          "hint": "Static routes with check-gateway=ping + Netwatch, one per "
                  "configured uplink (not just the first two) — gateways are "
@@ -373,45 +371,6 @@ def routes_form(current, cfg):
                        "placeholder": "8.8.8.8",
                        "hint": "Netwatch pings this IP to confirm the backup line has internet."})
     return fields
-
-
-def _apply_wan_order(ops, order, pusher):
-    """Build distance-change ops from a wan_order list.
-
-    RouterOS dynamic routes (DHCP / PPPoE / L2TP) are read-only in /ip/route —
-    attempting to set their distance returns 'no such item'. The only supported
-    path is setting default-route-distance on the client itself, which takes
-    effect on the next connection or DHCP renewal.
-
-    Deliberately NOT forced live via a disable/enable bounce: the interface
-    being changed is very often the one carrying mikromon's own WireGuard
-    tunnel back to the hub. Disabling it can cut that tunnel mid-apply, and
-    if the follow-up "re-enable" command can no longer reach the router
-    (because the very link it needed just went down), the interface is left
-    stuck disabled with no remaining path to fix it remotely. A change here
-    is safe to leave pending until the line's next natural reconnect."""
-    if not order:
-        return
-    dhcp_clients = _safe_fetch(pusher.api, _DHCP_CLIENT)
-    pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
-    l2tp_clients = _safe_fetch(pusher.api, _L2TP_CLIENT)
-    client_map = {}
-    for c in dhcp_clients:
-        rid = c.get(".id", "").lstrip("*")
-        client_map[f"dhcp:{rid}"] = (_DHCP_CLIENT, c, f"DHCP {c.get('interface','?')}")
-    for c in pppoe_clients:
-        rid = c.get(".id", "").lstrip("*")
-        client_map[f"pppoe:{rid}"] = (_PPPOE_CLIENT, c, f"PPPOE {c.get('name','?')}")
-    for c in l2tp_clients:
-        rid = c.get(".id", "").lstrip("*")
-        client_map[f"l2tp:{rid}"] = (_L2TP_CLIENT, c, f"L2TP {c.get('name','?')}")
-    for rank, item_id in enumerate(order, start=1):
-        want = str(rank)
-        if item_id not in client_map:
-            continue
-        cpath, c, clabel = client_map[item_id]
-        if _norm(str(c.get("default-route-distance", "1"))) != want:
-            ops.append(_set_field(cpath, c, "default-route-distance", want, clabel))
 
 
 def _gateway_for_link(link, pppoe_names, dhcp_by_iface,
@@ -711,10 +670,15 @@ def _apply_failover(ops, flat, pusher, cfg):
 
 def routes_plan(pusher, cfg, flat, multi):
     ops: list[Operation] = []
-    _apply_wan_order(ops, multi.get("wan_order", []), pusher)
-    # _apply_failover now sets every configured link's distance itself
-    # (whether failover is on or off, from link.distance) — no separate
-    # distance-pushing pass needed.
+    # _apply_failover sets every configured link's distance itself (whether
+    # failover is on or off, from link.distance) — it used to be preceded by
+    # a second pass driven by the Routes tab's drag-order list, which pushed
+    # sequential ranks (1, 2, 3...) onto each client's own
+    # default-route-distance regardless of what Distance was actually chosen
+    # on the WAN tab. That ran on EVERY apply, including ones that never
+    # touched the drag list, silently overwriting explicit Distance choices
+    # right back to 1/2/3 — removed; distance now has exactly one source of
+    # truth (link.distance).
     _apply_failover(ops, flat, pusher, cfg)
     return Plan(cfg.name, ops, summary="routes / failover")
 
