@@ -647,8 +647,20 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
         f'</div>'
     )
 
+    diagnostics_box = (
+        '<div class="box"><h2>Diagnostics report</h2>'
+        '<p class="muted">A plain-text dump of every device\'s live '
+        'monitoring state across every company — enabled checks, cached '
+        'facts, the latest reachability sample, and the full conditions '
+        'list. Download this and share it when troubleshooting an alert '
+        'that isn\'t showing up, without needing to SSH into the server.</p>'
+        '<a class="btn" href="/superadmin/diagnostics/download">'
+        'Download diagnostics report</a>'
+        '</div>'
+    )
+
     inner = (f'<div class="wrap"><h1>Platform admin</h1>{note}{tiles}{table}'
-             f'{_smtp_settings_box(smtp, csrf)}{backup_box}</div>')
+             f'{_smtp_settings_box(smtp, csrf)}{diagnostics_box}{backup_box}</div>')
     return _page("Platform Admin", _header(user, "/superadmin") + inner)
 
 

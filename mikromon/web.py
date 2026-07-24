@@ -140,6 +140,131 @@ def _all_devices(store, state, allowed=None) -> list:
     return [_device_view(store, state, n) for n in names]
 
 
+def _build_diagnostics_report(auth, devices_db, state_file, metrics_db,
+                              defaults) -> str:
+    """Plain-text dump of every device's live monitoring state, across every
+    company — see _serve_superadmin_diagnostics_download's docstring for why
+    this exists. Reads state.json/metrics.db directly rather than through
+    _device_view so it can show the RAW condition fields (pending/pending_n/
+    severity/since) that matter for debugging, not just the filtered
+    "problems" list a dashboard would show."""
+    lines = [f"mikromon diagnostics — {time.strftime('%Y-%m-%d %H:%M:%S %Z')}",
+             "=" * 70, ""]
+    state = _load_state(state_file)
+    devices_state = state.get("devices", {})
+
+    mstore = None
+    if metrics_db:
+        try:
+            mstore = MetricsStore(metrics_db)
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"(could not open metrics.db: {exc})")
+
+    ds = None
+    if devices_db:
+        try:
+            from .devices_store import DevicesStore
+            ds = DevicesStore(devices_db)
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"(could not open devices.db: {exc})")
+
+    orgs = auth.list_orgs_summary() if auth else []
+    seen: set = set()
+
+    def _dump_device(name: str, org_label: str) -> None:
+        seen.add(name)
+        lines.append(f"=== {name} ({org_label}) ===")
+        cfg = None
+        if ds is not None:
+            try:
+                raw = ds.raw(name)
+                if raw is not None:
+                    from .config import build_device
+                    cfg = build_device(raw, defaults)
+            except Exception as exc:  # noqa: BLE001
+                lines.append(f"  (could not load config: {exc})")
+        if cfg is not None:
+            lines.append(f"  host: {cfg.host}")
+            enabled = [k for k in DEFAULT_CHECKS if cfg.check_enabled(k)]
+            disabled = [k for k in DEFAULT_CHECKS if not cfg.check_enabled(k)]
+            lines.append(f"  checks enabled : {', '.join(enabled) or '(none)'}")
+            lines.append(f"  checks disabled: {', '.join(disabled) or '(none)'}")
+
+        dnode = devices_state.get(name)
+        if dnode is None:
+            lines.append("  NO STATE ENTRY — this device has never been "
+                         "successfully polled by the engine (or its name "
+                         "doesn't match what the engine writes).")
+            lines.append("")
+            return
+
+        facts = dnode.get("facts", {})
+        updated = facts.get("updated")
+        age = f"{time.time() - updated:.0f}s ago" if updated else "never"
+        lines.append(f"  facts.updated: "
+                     f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(updated)) if updated else '?'} "
+                     f"({age})")
+        lines.append(f"  model: {facts.get('model', '?')}  "
+                     f"RouterOS: {facts.get('version', '?')}")
+
+        if mstore is not None:
+            try:
+                latest = mstore.latest(name)
+                up = latest.get(("up", ""))
+                if up:
+                    up_ts = time.strftime('%Y-%m-%d %H:%M:%S',
+                                          time.localtime(up["ts"]))
+                    lines.append(f"  latest 'up' sample: {up['value']} "
+                                f"at {up_ts} ({time.time() - up['ts']:.0f}s ago)")
+                else:
+                    lines.append("  latest 'up' sample: none recorded")
+            except Exception as exc:  # noqa: BLE001
+                lines.append(f"  (could not read metrics: {exc})")
+
+        conditions = dnode.get("conditions", {})
+        if not conditions:
+            lines.append("  conditions: (empty — nothing has ever been "
+                         "tracked for this device)")
+        else:
+            lines.append("  conditions:")
+            for key in sorted(conditions):
+                cond = conditions[key]
+                since = cond.get("since")
+                since_str = (time.strftime('%Y-%m-%d %H:%M:%S',
+                                           time.localtime(since))
+                            if since else "?")
+                lines.append(
+                    f"    {key}: status={cond.get('status', '?')} "
+                    f"level={cond.get('level', '-')} "
+                    f"pending={cond.get('pending', '-')}"
+                    f"({cond.get('pending_n', 0)}) "
+                    f"since={since_str} "
+                    f"title={cond.get('title', '') !r}")
+        lines.append("")
+
+    try:
+        if orgs and ds is not None:
+            for org in orgs:
+                for name in ds.names_for_org(org["id"]):
+                    _dump_device(name, org["name"])
+            # Anything with state but no matching devices-db row/org
+            # (orphaned or YAML-mode) — still worth showing, not silently
+            # dropped from the report.
+            for name in sorted(devices_state):
+                if name not in seen:
+                    _dump_device(name, "no matching org/device record")
+        else:
+            for name in sorted(devices_state):
+                _dump_device(name, "YAML mode — no per-org devices DB")
+    finally:
+        if ds is not None:
+            ds.close()
+        if mstore is not None:
+            mstore.close()
+
+    return "\n".join(lines)
+
+
 # ============================ rendering ====================================
 def _throughput_chart(rx_pts, tx_pts, width=284) -> str:
     """SVG throughput chart: RX (blue) + TX (orange) lines, time axis, peak marker,
@@ -3053,6 +3178,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if path == "/superadmin/backup/download":
                 name = parse_qs(url.query).get("name", [""])[0]
                 return self._serve_superadmin_backup_download(user, name)
+            if path == "/superadmin/diagnostics/download":
+                return self._serve_superadmin_diagnostics_download(user)
             if path == "/account":
                 q = parse_qs(url.query)
                 org_data = auth.org(user["org_id"]) if auth else None
@@ -3298,6 +3425,23 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._send_file(200, path, "application/gzip",
                                    headers={"Content-Disposition":
                                             f'attachment; filename="{name}"'})
+
+        def _serve_superadmin_diagnostics_download(self, user):
+            """Superadmin-only: a plain-text dump of every device's live
+            monitoring state (which checks are enabled, cached facts, the
+            latest 'up' sample, and the full conditions dict) across every
+            company on this server. Meant to be downloaded and handed to
+            support/an assistant when the person running the server can't
+            SSH in themselves — a substitute for asking them to type
+            diagnostic commands into a web terminal."""
+            if not user or not user.get("is_superadmin"):
+                return self._send(403, "forbidden")
+            report = _build_diagnostics_report(
+                auth, devices_db, state_file, metrics_db, defaults)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            return self._send(200, report, "text/plain; charset=utf-8",
+                              headers={"Content-Disposition":
+                                       f'attachment; filename="mikromon-diagnostics-{stamp}.txt"'})
 
         def _post_superadmin_billing(self, user):
             """Superadmin-only: manually assign a company's plan (device cap) —

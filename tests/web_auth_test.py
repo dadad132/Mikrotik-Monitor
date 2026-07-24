@@ -258,6 +258,31 @@ try:
         check("archive contains this server's config + auth db",
               "config.yaml" in tar.getnames() and "auth.db" in tar.getnames())
 
+    print("  diagnostics report:")
+    st, sa_body = req(op_founder, "/superadmin", base=B0)
+    check("superadmin page shows the diagnostics download button",
+          "/superadmin/diagnostics/download" in sa_body
+          and "Download diagnostics report" in sa_body)
+    r = op_founder.open(urllib.request.Request(
+        B0 + "/superadmin/diagnostics/download"))
+    diag_ctype = r.headers.get("Content-Type", "")
+    diag_disposition = r.headers.get("Content-Disposition", "")
+    diag_body = r.read().decode()
+    check("diagnostics download has a text/plain content-type",
+          diag_ctype.startswith("text/plain"))
+    check("diagnostics download is offered as an attachment (downloadable, "
+          "not rendered inline) with a timestamped filename",
+          "attachment" in diag_disposition
+          and "mikromon-diagnostics-" in diag_disposition)
+    check("report body is non-empty and has the expected header line",
+          diag_body.startswith("mikromon diagnostics"))
+    try:
+        op_helper.open(urllib.request.Request(
+            B0 + "/superadmin/diagnostics/download"))
+        check("member blocked from diagnostics download (403)", False)
+    except urllib.error.HTTPError as e:
+        check("member blocked from diagnostics download (403)", e.code == 403)
+
     print("  path-traversal protection:")
     for bad_name in ("../../etc/passwd", "/etc/passwd", "sub/dir.tar.gz"):
         try:
