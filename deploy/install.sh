@@ -42,6 +42,29 @@ log "Source : ${SRC_DIR}"
 log "Install: ${APP_DIR}"
 
 # ---------------------------------------------------------------------------
+# Timezone — every timestamp mikromon shows (scheduled reports, alert
+# emails, the activity log, backup dates) is rendered using the server's OS
+# timezone (Python's datetime.fromtimestamp()), so if that doesn't match
+# reality every one of them is off by the same fixed amount. Defaults to
+# Africa/Johannesburg (SAST); override with:
+#   TZ_NAME=Some/Other sudo -E bash deploy/install.sh
+# Idempotent — only changes anything if the current zone actually differs.
+# ---------------------------------------------------------------------------
+step "Setting system timezone"
+TZ_NAME="${TZ_NAME:-Africa/Johannesburg}"
+if command -v timedatectl &>/dev/null; then
+    CURRENT_TZ="$(timedatectl show --property=Timezone --value 2>/dev/null || true)"
+    if [[ "${CURRENT_TZ}" != "${TZ_NAME}" ]]; then
+        timedatectl set-timezone "${TZ_NAME}"
+        log "Timezone set to ${TZ_NAME} (was ${CURRENT_TZ:-unknown})"
+    else
+        log "Timezone already ${TZ_NAME} — no change"
+    fi
+else
+    log "WARN: timedatectl not found — set the system timezone manually"
+fi
+
+# ---------------------------------------------------------------------------
 # 2. System packages  (apt is idempotent by design)
 # ---------------------------------------------------------------------------
 step "Installing system packages (apt)"
@@ -322,40 +345,6 @@ if not data.get("alert_log_db"):
 else:
     print("alert_log_db already configured — left as-is")
 PY
-
-# ---------------------------------------------------------------------------
-# TEMPORARY — one-off diagnostic dump for the Mobilis Boksburg WAN-status
-# investigation. Remove this block on the next push. Writes every device's
-# stored condition state to a plain text file so it can be opened and
-# screenshotted directly, instead of typing a diagnostic command by hand.
-# Best-effort: never fails the install if state.json doesn't exist yet.
-# ---------------------------------------------------------------------------
-step "Writing a diagnostic state dump for support"
-sudo -u "${SERVICE_USER}" "${APP_DIR}/.venv/bin/python" -c "
-import json
-path = '${APP_DIR}/state.json'
-out = '${APP_DIR}/diagnostic-state-dump.txt'
-try:
-    with open(path) as f:
-        data = json.load(f)
-except Exception as exc:
-    with open(out, 'w') as f:
-        f.write(f'Could not read {path}: {exc}\n')
-else:
-    lines = []
-    for name, dnode in sorted(data.get('devices', {}).items()):
-        lines.append(f'=== {name} ===')
-        conds = dnode.get('conditions', {})
-        if not conds:
-            lines.append('  (no conditions recorded)')
-        for key, cond in sorted(conds.items()):
-            lines.append(f'  {key}: {cond}')
-        lines.append('')
-    with open(out, 'w') as f:
-        f.write('\n'.join(lines) if lines else 'No devices in state.json yet.\n')
-    print(f'Wrote {out}')
-" && log "Diagnostic dump written to ${APP_DIR}/diagnostic-state-dump.txt — open it and screenshot" \
-    || log "WARN: could not write diagnostic state dump"
 
 # ---------------------------------------------------------------------------
 # 8. Firewall — open the dashboard port  (ufw is idempotent)
