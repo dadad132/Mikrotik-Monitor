@@ -150,6 +150,30 @@ class WanCheck(Check):
                         recovery_title="No backup uplink is configured anymore — "
                                       "clearing this stale alert",
                         confirm=1)
+        else:
+            # wan_link:0 (the primary) is never written by the loop below —
+            # it's covered by the wan_failover alert instead — and any index
+            # >= the current number of configured links is left over from
+            # before a backup uplink was removed. Confirmed live: a
+            # "wan_link:0" condition from older code (before the primary was
+            # excluded here) stayed frozen at "problem" for over two weeks
+            # with an empty title, since nothing ever transitions it again.
+            for key in list(existing):
+                if not key.startswith("wan_link:"):
+                    continue
+                try:
+                    idx = int(key[len("wan_link:"):])
+                except ValueError:
+                    continue
+                if idx == 0 or idx >= len(links):
+                    ctx.transition(
+                        key, healthy=True, severity=Severity.WARNING, title="",
+                        recovery_title="This uplink index is no longer "
+                                      "tracked (removed, or the primary, "
+                                      "which is covered by the WAN failover "
+                                      "alert instead) — clearing this stale "
+                                      "alert",
+                        confirm=1)
 
         # ---- per-uplink status for BACKUP links only (one alert each) -----
         # Three mutually-exclusive tiers, each with its own single email:

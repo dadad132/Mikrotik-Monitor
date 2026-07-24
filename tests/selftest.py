@@ -347,6 +347,47 @@ cleared5 = {al.key for al in a if al.recovery}
 check("only 1 link configured now: stale wan_link:N entries clear",
       "wan_link:1" in cleared5 and "wan_link:2" in cleared5)
 
+# Confirmed live via the superadmin diagnostics report: with failover ON
+# and multiple links configured (the normal, common case — not either of
+# the two scenarios above), a "wan_link:0" condition from before the
+# primary was excluded from this loop stayed frozen at "problem" for over
+# two weeks on three separate real devices, with an empty title, because
+# nothing in either branch above ever re-evaluates it in this state.
+# Same for any index beyond the current link count (a backup uplink that
+# was since removed).
+dev9 = mkdev("TestRouter9", wan=WanConfig(links=[
+    WanEndpoint(interface="ether1", gateway="1.1.1.1", name="Main"),
+    WanEndpoint(interface="lte1", gateway="10.0.0.1", name="Backup"),
+    WanEndpoint(interface="lte2", gateway="10.0.0.2", name="Link3"),
+]), checks={**DEFAULT_CHECKS, "wan_failover": True})
+for key in ("wan_link:0", "wan_link:5"):
+    store.condition("TestRouter9", key).update(
+        {"status": "problem", "since": 1_000_000.0})
+store.condition("TestRouter9", "wan_link:1").update(
+    {"status": "problem", "since": 1_000_000.0})
+three_link_routes = {"route": [
+    {"dst-address": "0.0.0.0/0", "gateway": "1.1.1.1", "distance": "1",
+     "active": "true", "gateway-status": "1.1.1.1 reachable via ether1"},
+    {"dst-address": "0.0.0.0/0", "gateway": "10.0.0.1", "distance": "2",
+     "active": "false", "gateway-status": "10.0.0.1 unreachable via lte1"},
+    {"dst-address": "0.0.0.0/0", "gateway": "10.0.0.2", "distance": "3",
+     "active": "true", "gateway-status": "10.0.0.2 reachable via lte2"},
+]}
+a = run(WanCheck(), three_link_routes, dev9, store)
+cleared9 = {al.key for al in a if al.recovery}
+check("wan_link:0 (never written while failover manages 2+ links — the "
+      "primary is covered by wan_failover instead) clears even though "
+      "failover is ON and there's more than one link",
+      "wan_link:0" in cleared9)
+check("wan_link:5 (beyond the 3 currently configured links — a removed "
+      "backup uplink) clears too",
+      "wan_link:5" in cleared9)
+check("a genuinely in-range, still-relevant wan_link:1 is NOT swept up by "
+      "this clearing — it gets re-evaluated normally instead (still down "
+      "here, so it stays a problem, not incorrectly cleared)",
+      "wan_link:1" not in cleared9
+      and store.condition("TestRouter9", "wan_link:1").get("status") == "problem")
+
 print("Resources (reboot / CPU):")
 run(ResourceCheck(), {"resource": [{"uptime": "1h", "cpu-load": "5",
     "version": "7.14", "total-memory": "1000", "free-memory": "800"}],
