@@ -419,11 +419,14 @@ are built on. Its design is safety-first:
   partway through, the completed operations are undone in reverse.
 
 **In the dashboard:** open a device and every tab is wired to the engine —
-**SD-WAN** (failover/load-balance by route distance), **Security** (tagged
-firewall drops), **NextDNS** (DNS servers + bypass list), **QoS** (simple
-queues), **Port forwarding** (dst-nat), **Interfaces** (read-only), **Remote
-access** (temporary allow rule) and **Backups**. Each write tab is admin-only,
-shows the current state, previews the **dry-run diff**, and applies on confirm.
+**Routes** (Gateway Failover — Netwatch health checks + automatic switchover
+— **or** PCC Load Balancing across every configured WAN uplink; mutually
+exclusive, each toggle disables the other one's until you switch it off),
+**SD-WAN** (per-subnet policy routing), **Security** (tagged firewall drops),
+**NextDNS** (DNS servers + bypass list), **QoS** (simple queues), **Port
+forwarding** (dst-nat), **Interfaces** (read-only), **Remote access**
+(temporary allow rule) and **Backups**. Each write tab is admin-only, shows
+the current state, previews the **dry-run diff**, and applies on confirm.
 Add the device's **read-write push user** on the Devices page — no YAML editing.
 
 **Adopt existing config:** each managed tab shows an **“Existing on the router

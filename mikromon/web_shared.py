@@ -135,6 +135,7 @@ _PAGE_CSS = """
  input.switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;
    height:16px;background:#fff;border-radius:50%;transition:.15s}
  input.switch:checked::after{left:20px}
+ input.switch:disabled{opacity:.45;cursor:not-allowed}
  .chk:has(.switch){display:inline-flex;align-items:center;gap:8px}
  .wanrow{display:flex;gap:8px;align-items:center;margin-bottom:7px}
  .wanrow .prio{width:24px;height:24px;border-radius:50%;background:#2563eb;color:#fff;

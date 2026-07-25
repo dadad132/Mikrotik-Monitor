@@ -1488,6 +1488,245 @@ check("tag-based netwatch entry is recognized as ours and removed",
       {o.params[".id"] for o in tagged_disable.ops
        if o.path == ("tool", "netwatch") and o.action == "remove"} == {"*11"})
 
+# ---- 15b. load balancing (PCC) — mutually exclusive with failover ---------
+print("load balancing (PCC — routes tab):")
+_LB_TAG = "mikromon:lb:"
+lb_link_a = WanEndpoint(interface="ether1", name="Fibre")
+lb_link_b = WanEndpoint(interface="ether5", name="Backup")
+lb_cfg = _t.SimpleNamespace(
+    name="R1", wan=_t.SimpleNamespace(links=[lb_link_a, lb_link_b]))
+lb_router_state = {
+    ("ip", "route"): [],
+    ("ip", "firewall", "mangle"): [],
+    ("ip", "firewall", "nat"): [],
+    ("tool", "netwatch"): [],
+    ("interface", "pppoe-client"): [],
+    ("ip", "dhcp-client"): [
+        {".id": "*1", "interface": "ether1", "gateway": "10.0.0.1",
+         "add-default-route": "yes", "disabled": "false"},
+        {".id": "*2", "interface": "ether5", "gateway": "10.0.1.1",
+         "add-default-route": "yes", "disabled": "false"},
+    ],
+    ("interface", "l2tp-client"): [],
+    ("ppp", "active"): [],
+    ("ip", "address"): [],
+}
+lb_api = FakeApi(dict(lb_router_state))
+lb_pusher = Pusher(lb_cfg, lb_api, dry_run=False)
+lb_enable_plan = F.routes_plan(lb_pusher, lb_cfg, {"lb_enabled": "1"}, {})
+
+lb_route_adds = [o for o in lb_enable_plan.ops
+                 if o.path == ("ip", "route") and o.action == "add"]
+lb_mangle_adds = [o for o in lb_enable_plan.ops
+                  if o.path == ("ip", "firewall", "mangle") and o.action == "add"]
+lb_nat_adds = [o for o in lb_enable_plan.ops
+              if o.path == ("ip", "firewall", "nat") and o.action == "add"]
+
+check("both links get a plain default route + a routing-mark policy route",
+      {o.params["comment"] for o in lb_route_adds} ==
+      {f"{_LB_TAG}route:primary", f"{_LB_TAG}policy:primary",
+       f"{_LB_TAG}route:secondary", f"{_LB_TAG}policy:secondary"})
+check("primary's plain route uses distance 1 (position + 1, no explicit Distance)",
+      any(o.params["comment"] == f"{_LB_TAG}route:primary" and o.params["distance"] == "1"
+          for o in lb_route_adds))
+check("secondary's plain route uses distance 2",
+      any(o.params["comment"] == f"{_LB_TAG}route:secondary" and o.params["distance"] == "2"
+          for o in lb_route_adds))
+check("both plain+policy routes set check-gateway=ping",
+      all(o.params.get("check-gateway") == "ping" for o in lb_route_adds))
+check("policy routes carry a routing-mark, one per link",
+      {o.params.get("routing-mark") for o in lb_route_adds
+       if "policy:" in o.params["comment"]} == {"mm_to_primary", "mm_to_secondary"})
+check("mangle marks input traffic from each WAN interface with its own "
+      "connection-mark (for the router's own originated traffic)",
+      any(o.params.get("chain") == "input" and o.params.get("in-interface") == "ether1"
+          and o.params.get("new-connection-mark") == "mm_conn_primary" for o in lb_mangle_adds)
+      and any(o.params.get("chain") == "input" and o.params.get("in-interface") == "ether5"
+              and o.params.get("new-connection-mark") == "mm_conn_secondary"
+              for o in lb_mangle_adds))
+check("mangle marks router-originated output traffic back out its own "
+      "connection's WAN",
+      any(o.params.get("chain") == "output" and o.params.get("connection-mark") == "mm_conn_primary"
+          and o.params.get("new-routing-mark") == "mm_to_primary" for o in lb_mangle_adds))
+check("per-connection-classifier splits new connections 2 ways (2 "
+      "configured links), one bucket per link",
+      {o.params.get("per-connection-classifier") for o in lb_mangle_adds
+       if "per-connection-classifier" in o.params} ==
+      {"both-addresses-and-ports:2/0", "both-addresses-and-ports:2/1"})
+check("a prerouting mark-routing-by-connection-mark rule exists for each link",
+      {o.params.get("new-routing-mark") for o in lb_mangle_adds
+       if o.params.get("chain") == "prerouting" and "connection-mark" in o.params} ==
+      {"mm_to_primary", "mm_to_secondary"})
+check("a masquerade NAT rule is added for each configured WAN interface",
+      {o.params.get("out-interface") for o in lb_nat_adds
+       if o.params.get("action") == "masquerade"} == {"ether1", "ether5"})
+check("ALL configured WAN clients get add-default-route=no when enabling "
+      "load balancing (same discipline as failover)",
+      sum(1 for o in lb_enable_plan.ops if o.action == "set"
+          and o.params.get("add-default-route") == "no") == 2)
+
+# Safe ordering, per link — same discipline as Gateway Failover: the
+# replacement route must exist before the client's own dynamic route is
+# turned off, so a push interrupted mid-apply never leaves a link routeless.
+for role, cid in (("primary", "*1"), ("secondary", "*2")):
+    add_idx = _idx(lb_enable_plan.ops, lambda o, r=role: o.path == ("ip", "route")
+                   and o.action == "add" and o.params.get("comment") == f"{_LB_TAG}route:{r}")
+    disable_client_idx = _idx(
+        lb_enable_plan.ops, lambda o, c=cid: o.path == ("ip", "dhcp-client")
+        and o.params.get(".id") == c and o.params.get("add-default-route") == "no")
+    check(f"load balancing enable: {role}'s route is added before its own "
+          f"client is told to stop routing",
+          add_idx is not None and disable_client_idx is not None
+          and add_idx < disable_client_idx)
+
+# Apply it, then re-plan: should be a no-op (idempotent, no churn).
+for op in lb_enable_plan.ops:
+    lb_api.execute(op)
+lb_replan = F.routes_plan(lb_pusher, lb_cfg, {"lb_enabled": "1"}, {})
+check("re-applying the same enabled load-balance config is a no-op",
+      not any(o.path in (("ip", "route"), ("ip", "firewall", "mangle"),
+                        ("ip", "firewall", "nat")) for o in lb_replan.ops))
+
+# Now disable: must remove every managed route/mangle/nat AND restore both
+# clients' add-default-route — link by link, same ordering discipline.
+lb_disable_plan = F.routes_plan(lb_pusher, lb_cfg, {"lb_enabled": ""}, {})
+lb_removed_routes = {o.params[".id"] for o in lb_disable_plan.ops
+                     if o.path == ("ip", "route") and o.action == "remove"}
+lb_removed_mangle = {o.params[".id"] for o in lb_disable_plan.ops
+                     if o.path == ("ip", "firewall", "mangle") and o.action == "remove"}
+lb_removed_nat = {o.params[".id"] for o in lb_disable_plan.ops
+                 if o.path == ("ip", "firewall", "nat") and o.action == "remove"}
+check("disabling removes all 4 managed routes (2 links x 2 each)",
+      len(lb_removed_routes) == 4)
+check("disabling removes every managed mangle rule",
+      len(lb_removed_mangle) == len(lb_mangle_adds))
+check("disabling removes every managed NAT masquerade rule",
+      len(lb_removed_nat) == len(lb_nat_adds))
+lb_dhcp_restores = [o for o in lb_disable_plan.ops if o.path == ("ip", "dhcp-client")]
+check("both configured links' clients get restored",
+      {o.params[".id"] for o in lb_dhcp_restores
+       if o.params.get("add-default-route") == "yes"} == {"*1", "*2"})
+for role, cid in (("primary", "*1"), ("secondary", "*2")):
+    restore_idx = _idx(
+        lb_disable_plan.ops, lambda o, c=cid: o.path == ("ip", "dhcp-client")
+        and o.params.get(".id") == c and o.params.get("add-default-route") == "yes")
+    remove_idx = _idx(
+        lb_disable_plan.ops, lambda o, r=role: o.action == "remove"
+        and o.desc == f"remove load-balance route comment={_LB_TAG}route:{r}")
+    check(f"load balancing disable: {role}'s client is restored before its "
+          f"own route is removed",
+          restore_idx is not None and remove_idx is not None
+          and restore_idx < remove_idx)
+
+# Mutual exclusion: refuse to compute a plan (rather than silently building
+# one that would fight itself) if both are somehow submitted together — the
+# form disables each toggle while the other is on, but a stale page or a
+# second tab could still submit both.
+try:
+    F.routes_plan(Pusher(lb_cfg, FakeApi(dict(lb_router_state)), dry_run=False),
+                 lb_cfg, {"fo_enabled": "1", "lb_enabled": "1",
+                          "fo_primary_check": "1.1.1.1"}, {})
+    check("routes_plan refuses to enable both Failover and Load Balancing at once", False)
+except PushError:
+    check("routes_plan refuses to enable both Failover and Load Balancing at once", True)
+
+# Cross-feature safety: enabling FAILOVER alone, from a pristine router with
+# neither feature ever applied, must not trigger any of Load Balancing's own
+# ops for the same clients — regression guard: an earlier version gated Load
+# Balancing's own disabled-branch restore on "is Failover NOT currently
+# active" instead of "does Load Balancing itself own a route here", so it
+# would also try to restore a client Failover's own enable was concurrently
+# taking over, in the very same apply. (Uses a fresh state dict, not
+# fo_router_state/fo_api — those were already mutated in place by the
+# earlier `for op in enable_plan.ops: fo_api.execute(op)` above.)
+fresh_fo_cfg = _t.SimpleNamespace(
+    name="R1", wan=_t.SimpleNamespace(links=[link_fibre, link_backup, link_wireless]))
+fresh_fo_state = {
+    ("ip", "route"): [],
+    ("tool", "netwatch"): [],
+    ("interface", "pppoe-client"): [],
+    ("ip", "dhcp-client"): [
+        {".id": "*1", "interface": "ether1", "gateway": "10.0.0.1"},
+        {".id": "*2", "interface": "ether5", "gateway": "10.0.1.1"},
+        {".id": "*3", "interface": "ether10", "gateway": "10.0.2.1", "disabled": "true"},
+    ],
+    ("interface", "l2tp-client"): [],
+    ("ppp", "active"): [],
+    ("ip", "address"): [],
+}
+lb_never_used = F.routes_plan(Pusher(fresh_fo_cfg, FakeApi(fresh_fo_state), dry_run=False),
+                              fresh_fo_cfg, {"fo_enabled": "1", "fo_primary_check": "1.1.1.1",
+                                             "fo_secondary_check": "8.8.8.8"}, {})
+check("enabling Failover alone never triggers any Load Balancing mangle/NAT ops",
+      not any(o.path in (("ip", "firewall", "mangle"), ("ip", "firewall", "nat"))
+              for o in lb_never_used.ops))
+check("enabling Failover alone sets add-default-route=no exactly once per "
+      "link (Load Balancing's own disabled branch must not also touch it)",
+      sum(1 for o in lb_never_used.ops if o.action == "set"
+          and o.params.get("add-default-route") == "no") == 3)
+
+# N-way generalization: the PCC bucket count must match the number of
+# configured links with a detectable gateway, not be hardcoded to 2 — and a
+# configured lan_subnets entry gets a prerouting accept exemption ordered
+# ahead of the classifier rules, so intra-LAN traffic is never balanced.
+lb3_a = WanEndpoint(interface="ether1", name="Fibre")
+lb3_b = WanEndpoint(interface="ether5", name="Backup")
+lb3_c = WanEndpoint(interface="ether10", name="Wireless")
+lb3_cfg = _t.SimpleNamespace(
+    name="R1", wan=_t.SimpleNamespace(links=[lb3_a, lb3_b, lb3_c]),
+    lan_subnets=["192.168.88.0/24"])
+lb3_api = FakeApi({
+    ("ip", "route"): [], ("ip", "firewall", "mangle"): [], ("ip", "firewall", "nat"): [],
+    ("tool", "netwatch"): [],
+    ("interface", "pppoe-client"): [],
+    ("ip", "dhcp-client"): [
+        {".id": "*1", "interface": "ether1", "gateway": "10.0.0.1",
+         "add-default-route": "yes", "disabled": "false"},
+        {".id": "*2", "interface": "ether5", "gateway": "10.0.1.1",
+         "add-default-route": "yes", "disabled": "false"},
+        {".id": "*3", "interface": "ether10", "gateway": "10.0.2.1",
+         "add-default-route": "yes", "disabled": "false"},
+    ],
+    ("interface", "l2tp-client"): [], ("ppp", "active"): [], ("ip", "address"): [],
+})
+lb3_plan = F.routes_plan(Pusher(lb3_cfg, lb3_api, dry_run=False), lb3_cfg,
+                         {"lb_enabled": "1"}, {})
+lb3_mangle = [o for o in lb3_plan.ops
+             if o.path == ("ip", "firewall", "mangle") and o.action == "add"]
+check("3 configured links -> per-connection-classifier splits 3 ways, one "
+      "bucket per link",
+      {o.params.get("per-connection-classifier") for o in lb3_mangle
+       if "per-connection-classifier" in o.params} ==
+      {"both-addresses-and-ports:3/0", "both-addresses-and-ports:3/1",
+       "both-addresses-and-ports:3/2"})
+check("a configured lan_subnets entry gets a prerouting accept rule",
+      any(o.params.get("chain") == "prerouting" and o.params.get("action") == "accept"
+          and o.params.get("dst-address") == "192.168.88.0/24" for o in lb3_mangle))
+lb3_lan_idx = _idx(lb3_mangle, lambda o: o.params.get("dst-address") == "192.168.88.0/24")
+lb3_pcc_idx = _idx(lb3_mangle, lambda o: "per-connection-classifier" in o.params)
+check("the lan_subnets accept rule is ordered before the PCC classifier "
+      "rules (so intra-LAN traffic is exempted, not load-balance-marked)",
+      lb3_lan_idx is not None and lb3_pcc_idx is not None
+      and lb3_lan_idx < lb3_pcc_idx)
+
+# Fewer than 2 links with a detectable gateway -> nothing to balance, no-op.
+single_cfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[lb_link_a]))
+single_api = FakeApi({
+    ("ip", "route"): [], ("ip", "firewall", "mangle"): [], ("ip", "firewall", "nat"): [],
+    ("tool", "netwatch"): [],
+    ("interface", "pppoe-client"): [],
+    ("ip", "dhcp-client"): [
+        {".id": "*1", "interface": "ether1", "gateway": "10.0.0.1",
+         "add-default-route": "yes", "disabled": "false"}],
+    ("interface", "l2tp-client"): [], ("ppp", "active"): [], ("ip", "address"): [],
+})
+single_plan = F.routes_plan(Pusher(single_cfg, single_api, dry_run=False), single_cfg,
+                            {"lb_enabled": "1"}, {})
+check("only 1 configured WAN link -> load balancing is a no-op (nothing to "
+      "balance across)",
+      not any(o.path in (("ip", "route"), ("ip", "firewall", "mangle"),
+                        ("ip", "firewall", "nat")) for o in single_plan.ops))
+
 # ---- 16. explicit per-uplink Distance (WAN uplinks editor) -----------------
 print("explicit WAN uplink distance (auto-detects the router client; saved "
       "immediately but NOT force-reconnected — see the safety note above):")

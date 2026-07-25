@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 
+from .api import PushError
 from .plan import Operation, Plan
 from .reconcile import _norm, reconcile_list
 
@@ -67,6 +68,9 @@ _NETWATCH = ("tool", "netwatch")
 _PPP_ACTIVE = ("ppp", "active")
 _IP_ADDRESS = ("ip", "address")
 _FAILOVER_TAG = "mikromon:failover:"
+_LB_TAG = "mikromon:lb:"
+_MANGLE = ("ip", "firewall", "mangle")
+_NAT = ("ip", "firewall", "nat")
 
 
 def _safe_fetch(api, path):
@@ -129,9 +133,12 @@ def routes_read(pusher, cfg):
     netwatch = _safe_fetch(pusher.api, _NETWATCH)
     failover_watch = [w for w in netwatch
                       if str(w.get("comment", "")).startswith(_FAILOVER_TAG)]
+    lb_routes = [r for r in all_routes
+                if str(r.get("comment", "")).startswith(_LB_TAG)]
     return {"routes": routes, "dhcp": dhcp, "ppp": ppp,
             "ppp_active": ppp_active, "ip_addrs": ip_addrs,
-            "failover_routes": failover_routes, "failover_watch": failover_watch}
+            "failover_routes": failover_routes, "failover_watch": failover_watch,
+            "lb_routes": lb_routes}
 
 
 def routes_summary(current, cfg):
@@ -337,6 +344,13 @@ def routes_form(current, cfg):
 
     # Pre-fill check IPs from the existing failover watch config
     fo_enabled = bool(current.get("failover_routes"))
+    lb_enabled = bool(current.get("lb_routes"))
+    # Each toggle is only disabled while the OTHER is on AND it is itself
+    # still off — so whichever one is currently on can always be switched
+    # off through the UI (never both greyed out at once, even if some
+    # future state somehow had both active at the same time).
+    fo_blocked = lb_enabled and not fo_enabled
+    lb_blocked = fo_enabled and not lb_enabled
     primary_check = "1.1.1.1"
     secondary_check = "8.8.8.8"
     for w in current.get("failover_watch", []):
@@ -366,8 +380,12 @@ def routes_form(current, cfg):
                  "successful check."},
         {"type": "toggle", "name": "fo_enabled", "value": "1",
          "on": fo_enabled, "label": "Enable gateway failover",
-         "desc": "Turning this on or off can take between 2–5 minutes to "
-                 "fully take effect on the router."},
+         "disabled": fo_blocked,
+         "desc": ("Turn off Load Balancing below first, then apply, before "
+                  "enabling Gateway Failover — the two can't run at the same "
+                  "time." if fo_blocked else
+                  "Turning this on or off can take between 2–5 minutes to "
+                  "fully take effect on the router.")},
         {"type": "text", "name": "fo_primary_check",
          "label": "Primary check IP", "value": primary_check,
          "placeholder": "1.1.1.1",
@@ -378,6 +396,26 @@ def routes_form(current, cfg):
                        "label": "Secondary check IP", "value": secondary_check,
                        "placeholder": "8.8.8.8",
                        "hint": "Netwatch pings this IP to confirm the backup line has internet."})
+
+    fields += [
+        {"type": "heading", "label": "Load Balancing",
+         "hint": "Splits new connections roughly evenly across every "
+                 "configured WAN uplink (per-connection classifying, not "
+                 "per-packet — a single connection always keeps using the "
+                 "same uplink) instead of failing over between them. Adds a "
+                 "prioritized plain default route per uplink as a fallback "
+                 "and a masquerade rule per uplink. Needs at least 2 "
+                 "configured WAN links with a detectable gateway to do "
+                 "anything."},
+        {"type": "toggle", "name": "lb_enabled", "value": "1",
+         "on": lb_enabled, "label": "Enable load balancing",
+         "disabled": lb_blocked,
+         "desc": ("Turn off Gateway Failover above first, then apply, before "
+                  "enabling Load Balancing — the two can't run at the same "
+                  "time." if lb_blocked else
+                  "Turning this on or off can take a few minutes to fully "
+                  "take effect on the router.")},
+    ]
     return fields
 
 
@@ -446,6 +484,14 @@ def _fo_distance(idx, link):
     field untouched entirely."""
     explicit = getattr(link, "distance", None)
     return str(explicit) if explicit else str(idx + 1)
+
+
+def _lb_conn_mark(role) -> str:
+    return f"mm_conn_{role}"
+
+
+def _lb_route_mark(role) -> str:
+    return f"mm_to_{role}"
 
 
 # Well-known public resolvers used as fallback check IPs for a 3rd+ uplink,
@@ -572,13 +618,26 @@ def _apply_failover(ops, flat, pusher, cfg):
         for idx, link in enumerate(links):
             role = _fo_role(idx)
             iface = getattr(link, "interface", "") or ""
+            # Only restore add-default-route=yes if FAILOVER ITSELF currently
+            # has a route for this link — not just "is it off", which could
+            # just as easily be Load Balancing actively managing this same
+            # link (or a human's own unrelated config). Gating on ownership
+            # rather than the other feature's absence also avoids fighting a
+            # same-apply Load Balancing enable that hasn't written its route
+            # yet. The explicit-Distance and disabled=no cleanups below are
+            # NOT gated the same way — they're general WAN-uplink upkeep
+            # (see _fo_distance's docstring), unrelated to which feature (if
+            # any) previously managed this link's default route.
+            has_fo_route = (f"{_FAILOVER_TAG}{role}" in fo_by_comment
+                           or f"{_FAILOVER_TAG}check:{role}" in fo_by_comment)
             if iface:
                 explicit_dist = getattr(link, "distance", None)
                 want_dist = str(explicit_dist) if explicit_dist else None
                 iface_key = _norm_iface(iface)
                 for c in pppoe_clients:
                     if _norm_iface(c.get("name")) == iface_key:
-                        if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
+                        if (has_fo_route
+                                and str(c.get("add-default-route", "yes")).lower() in ("no", "false")):
                             ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route",
                                                   "yes", f"PPPoE {iface}"))
                         if (want_dist is not None
@@ -591,7 +650,8 @@ def _apply_failover(ops, flat, pusher, cfg):
                                                   f"PPPoE {iface}"))
                 for c in dhcp_clients:
                     if _norm_iface(c.get("interface")) == iface_key:
-                        if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
+                        if (has_fo_route
+                                and str(c.get("add-default-route", "yes")).lower() in ("no", "false")):
                             ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route",
                                                   "yes", f"DHCP {iface}"))
                         if (want_dist is not None
@@ -812,6 +872,213 @@ def _apply_failover(ops, flat, pusher, cfg):
                     desc=f"restore stale netwatch comment={c}")))
 
 
+def _apply_loadbalance(ops, flat, pusher, cfg):
+    """PCC (per-connection classifier) load balancing across EVERY configured
+    WAN uplink — splits new connections roughly evenly instead of failing
+    over between them. Mutually exclusive with Gateway Failover: routes_plan
+    refuses to enable both at once (see there), and each feature's disabled
+    branch only restores a client's add-default-route if IT ITSELF currently
+    has a managed route for that link (not just "is the other feature off")
+    — so they can never fight over the same client, and a same-apply enable
+    of one never gets undone by the other's disabled branch.
+
+    Mirrors _apply_failover's own safety discipline for the one thing that
+    actually risks a connectivity gap: each link's own replacement default
+    route is added BEFORE that link's client is told to stop creating its own
+    competing dynamic route (enabling), and each link's client is restored
+    BEFORE its replacement route is removed (disabling) — one link at a
+    time, never every link's routing torn down/rebuilt in a single batch.
+
+    The connection-marking (mangle) and masquerade (NAT) rules are pure
+    traffic-shaping — they don't affect whether a default route exists — so
+    those are reconciled in one batch each below, not link-by-link."""
+    lb_owns = _prefix_owner(_LB_TAG)
+    all_routes = _safe_fetch(pusher.api, _ROUTE)
+    mangle = _safe_fetch(pusher.api, _MANGLE)
+    nat = _safe_fetch(pusher.api, _NAT)
+    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
+
+    if not flat.get("lb_enabled"):
+        pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
+        dhcp_clients = _safe_fetch(pusher.api, _DHCP_CLIENT)
+        lb_by_comment = {r.get("comment", ""): r for r in all_routes if lb_owns(r)}
+        handled_routes: set[str] = set()
+        for idx, link in enumerate(links):
+            role = _fo_role(idx)
+            iface = getattr(link, "interface", "") or ""
+            # Only restore a client if LOAD BALANCING ITSELF currently has a
+            # route for it — see the matching comment in _apply_failover's
+            # own disabled branch for why this must be "do I own it", not
+            # "is the other feature off".
+            has_lb_route = (f"{_LB_TAG}route:{role}" in lb_by_comment
+                           or f"{_LB_TAG}policy:{role}" in lb_by_comment)
+            if iface and has_lb_route:
+                for c in pppoe_clients:
+                    if (_norm_iface(c.get("name")) == _norm_iface(iface)
+                            and str(c.get("add-default-route", "yes")).lower()
+                            in ("no", "false")):
+                        ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route",
+                                              "yes", f"PPPoE {iface}"))
+                for c in dhcp_clients:
+                    if (_norm_iface(c.get("interface")) == _norm_iface(iface)
+                            and str(c.get("add-default-route", "yes")).lower()
+                            in ("no", "false")):
+                        ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route",
+                                              "yes", f"DHCP {iface}"))
+            # THEN remove this link's own routes — only after its client is
+            # already restored above.
+            for comment in (f"{_LB_TAG}route:{role}", f"{_LB_TAG}policy:{role}"):
+                handled_routes.add(comment)
+                r = lb_by_comment.get(comment)
+                if r:
+                    ops.append(Operation(
+                        "remove", _ROUTE, {".id": r[".id"]},
+                        desc=f"remove load-balance route comment={comment}",
+                        inverse=Operation(
+                            "add", _ROUTE, {f: v for f, v in r.items() if f != ".id"},
+                            desc=f"restore load-balance route comment={comment}")))
+        # Cleanup: any load-balance routes left over from a since-removed link.
+        for comment, r in lb_by_comment.items():
+            if comment not in handled_routes:
+                ops.append(Operation(
+                    "remove", _ROUTE, {".id": r[".id"]},
+                    desc=f"remove stale load-balance route comment={comment}",
+                    inverse=Operation(
+                        "add", _ROUTE, {f: v for f, v in r.items() if f != ".id"},
+                        desc=f"restore stale load-balance route comment={comment}")))
+        # Mangle/NAT are pure traffic-shaping — batch-remove them too (an
+        # empty desired list reconciles to "remove everything we own").
+        ops.extend(reconcile_list(_MANGLE, "comment", [], mangle,
+                                  owns=lb_owns, label="load-balance mangle rule"))
+        ops.extend(reconcile_list(_NAT, "comment", [], nat,
+                                  owns=lb_owns, label="load-balance NAT rule"))
+        return
+
+    if len(links) < 2:
+        return  # nothing to balance across
+
+    # Detect gateways live from the router at apply time — same precedence
+    # and fallback-to-last-known-gateway as Gateway Failover (see
+    # _gateway_for_link / _apply_failover).
+    pppoe_clients = _safe_fetch(pusher.api, _PPPOE_CLIENT)
+    dhcp_clients = _safe_fetch(pusher.api, _DHCP_CLIENT)
+    pppoe_names = {_norm_iface(c.get("name", "")): c.get("name", "")
+                  for c in pppoe_clients if c.get("name")}
+    dhcp_by_iface = {_norm_iface(c.get("interface", "")): c
+                     for c in dhcp_clients if c.get("interface")}
+    ppp_active_by_name = {_norm_iface(s.get("name", "")): s
+                          for s in _safe_fetch(pusher.api, _PPP_ACTIVE) if s.get("name")}
+    ip_addr_by_iface = {_norm_iface(a.get("interface", "")): a
+                        for a in _safe_fetch(pusher.api, _IP_ADDRESS) if a.get("interface")}
+    lb_by_comment = {r.get("comment", ""): r for r in all_routes if lb_owns(r)}
+
+    resolved = []  # (idx, link, role, iface, gateway)
+    for idx, link in enumerate(links):
+        gw = _gateway_for_link(link, pppoe_names, dhcp_by_iface,
+                               ppp_active_by_name, ip_addr_by_iface)
+        if not gw:
+            existing = lb_by_comment.get(f"{_LB_TAG}route:{_fo_role(idx)}")
+            if existing and existing.get("gateway"):
+                gw = existing["gateway"]
+        if gw:
+            resolved.append((idx, link, _fo_role(idx),
+                            getattr(link, "interface", "") or "", gw))
+    if len(resolved) < 2:
+        return  # fewer than 2 gateways detectable this apply — nothing to balance
+
+    n = len(resolved)
+    handled_routes = set()
+    for bucket, (idx, link, role, iface, gw) in enumerate(resolved):
+        route_comment = f"{_LB_TAG}route:{role}"
+        policy_comment = f"{_LB_TAG}policy:{role}"
+        handled_routes.add(route_comment)
+        handled_routes.add(policy_comment)
+
+        link_routes = [
+            {"comment": route_comment, "dst-address": "0.0.0.0/0", "gateway": gw,
+             "distance": _fo_distance(idx, link), "check-gateway": "ping"},
+            {"comment": policy_comment, "dst-address": "0.0.0.0/0", "gateway": gw,
+             "routing-mark": _lb_route_mark(role), "check-gateway": "ping"},
+        ]
+        # 1. THIS link's own routes, first — same reasoning as Gateway
+        # Failover: the replacement must exist before the client's own
+        # dynamic route is turned off below.
+        ops.extend(reconcile_list(
+            _ROUTE, "comment", link_routes, all_routes,
+            owns=lambda r, rc=route_comment, pc=policy_comment:
+                str(r.get("comment", "")) in (rc, pc),
+            label="load-balance route"))
+
+        # 2. THEN stop this link's client creating its own competing dynamic
+        # default route — safe now that its replacement is confirmed present.
+        iface_key = _norm_iface(iface) if iface else ""
+        if iface_key:
+            for c in pppoe_clients:
+                if (_norm_iface(c.get("name")) == iface_key
+                        and str(c.get("add-default-route", "yes")).lower()
+                        not in ("no", "false")):
+                    ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route", "no",
+                                          f"PPPoE {iface}"))
+            for c in dhcp_clients:
+                if (_norm_iface(c.get("interface")) == iface_key
+                        and str(c.get("add-default-route", "yes")).lower()
+                        not in ("no", "false")):
+                    ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route", "no",
+                                          f"DHCP {iface}"))
+
+    # Cleanup: any load-balance routes left over that don't belong to any
+    # currently-resolved link (e.g. an uplink removed from the WAN editor).
+    for r in all_routes:
+        c = str(r.get("comment", ""))
+        if lb_owns(r) and c not in handled_routes:
+            ops.append(Operation(
+                "remove", _ROUTE, {".id": r[".id"]},
+                desc=f"remove stale load-balance route comment={c}",
+                inverse=Operation(
+                    "add", _ROUTE, {f: v for f, v in r.items() if f != ".id"},
+                    desc=f"restore stale load-balance route comment={c}")))
+
+    # Mangle + NAT — pure traffic-shaping, reconciled as one batch each.
+    # Order matters WITHIN the mangle batch: the LAN-subnet exemptions must
+    # land before the per-connection-classifier rules in the prerouting
+    # chain (reconcile_list adds new rows in the order given here), or the
+    # classifier would try to load-balance intra-LAN traffic too.
+    mangle_desired = []
+    for subnet in (getattr(cfg, "lan_subnets", None) or []):
+        mangle_desired.append({
+            "chain": "prerouting", "dst-address": subnet, "action": "accept",
+            "comment": f"{_LB_TAG}lan:{_slug(subnet)}"})
+    for bucket, (idx, link, role, iface, gw) in enumerate(resolved):
+        conn_mark = _lb_conn_mark(role)
+        route_mark = _lb_route_mark(role)
+        if iface:
+            mangle_desired.append({
+                "chain": "input", "in-interface": iface, "action": "mark-connection",
+                "new-connection-mark": conn_mark, "comment": f"{_LB_TAG}in:{role}"})
+        mangle_desired.append({
+            "chain": "output", "connection-mark": conn_mark, "action": "mark-routing",
+            "new-routing-mark": route_mark, "comment": f"{_LB_TAG}out:{role}"})
+        mangle_desired.append({
+            "chain": "prerouting", "dst-address-type": "!local",
+            "per-connection-classifier": f"both-addresses-and-ports:{n}/{bucket}",
+            "action": "mark-connection", "new-connection-mark": conn_mark,
+            "passthrough": "yes", "comment": f"{_LB_TAG}pcc:{role}"})
+        mangle_desired.append({
+            "chain": "prerouting", "connection-mark": conn_mark,
+            "action": "mark-routing", "new-routing-mark": route_mark,
+            "comment": f"{_LB_TAG}rt:{role}"})
+    ops.extend(reconcile_list(_MANGLE, "comment", mangle_desired, mangle,
+                              owns=lb_owns, label="load-balance mangle rule"))
+
+    nat_desired = [
+        {"chain": "srcnat", "out-interface": iface, "action": "masquerade",
+         "comment": f"{_LB_TAG}masq:{role}"}
+        for idx, link, role, iface, gw in resolved if iface
+    ]
+    ops.extend(reconcile_list(_NAT, "comment", nat_desired, nat,
+                              owns=lb_owns, label="load-balance NAT rule"))
+
+
 def routes_plan(pusher, cfg, flat, multi):
     ops: list[Operation] = []
     # _apply_failover sets every configured link's distance itself (whether
@@ -823,8 +1090,18 @@ def routes_plan(pusher, cfg, flat, multi):
     # touched the drag list, silently overwriting explicit Distance choices
     # right back to 1/2/3 — removed; distance now has exactly one source of
     # truth (link.distance).
+    if flat.get("fo_enabled") and flat.get("lb_enabled"):
+        # Belt-and-suspenders: the form disables each toggle while the other
+        # is on, but a stale page (loaded before the other was turned on) or
+        # a second tab could still submit both — refuse rather than build a
+        # plan that would fight itself over the same clients' default routes.
+        raise PushError(
+            "Gateway Failover and Load Balancing can't both be enabled at "
+            "the same time — turn one off, apply that, then turn the other "
+            "on.")
     _apply_failover(ops, flat, pusher, cfg)
-    return Plan(cfg.name, ops, summary="routes / failover")
+    _apply_loadbalance(ops, flat, pusher, cfg)
+    return Plan(cfg.name, ops, summary="routes / failover / load balancing")
 
 
 # ===========================================================================
