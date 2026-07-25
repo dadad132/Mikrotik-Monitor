@@ -1556,12 +1556,10 @@ check("both links get a plain default route + a marked policy route",
       {o.params["comment"] for o in lb_route_adds} ==
       {f"{_LB_TAG}route:primary", f"{_LB_TAG}policy:primary",
        f"{_LB_TAG}route:secondary", f"{_LB_TAG}policy:secondary"})
-check("primary's plain route uses distance 1 (position + 1, no explicit Distance)",
-      any(o.params["comment"] == f"{_LB_TAG}route:primary" and o.params["distance"] == "1"
-          for o in lb_route_adds))
-check("secondary's plain route uses distance 2",
-      any(o.params["comment"] == f"{_LB_TAG}route:secondary" and o.params["distance"] == "2"
-          for o in lb_route_adds))
+check("every link's plain + policy route shares the SAME distance (1) — "
+      "load balancing needs ECMP, not a Gateway Failover-style priority "
+      "ladder, or every unmarked packet would just pile onto position 0",
+      all(o.params.get("distance") == "1" for o in lb_route_adds))
 check("both plain+policy routes set check-gateway=ping",
       all(o.params.get("check-gateway") == "ping" for o in lb_route_adds))
 check("on RouterOS 7, policy routes use the v7 routing-table field (not "

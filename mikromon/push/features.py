@@ -1038,11 +1038,20 @@ def _apply_loadbalance(ops, flat, pusher, cfg):
         handled_routes.add(route_comment)
         handled_routes.add(policy_comment)
 
+        # Every link's plain route MUST share the same distance ("1", not
+        # _fo_distance's position/priority-based value — that's a Gateway
+        # Failover concept). RouterOS only installs the SINGLE lowest-
+        # distance route to a destination as active; a distance ladder
+        # (1, 2, 3...) makes it prefer position 0 for every packet the PCC
+        # marking doesn't catch, so all "unmarked" traffic (and anything
+        # if the marking silently fails to apply) piles onto one link
+        # instead of actually being shared. Equal distance makes RouterOS
+        # treat them as ECMP instead of a priority order.
         link_routes = [
             {"comment": route_comment, "dst-address": "0.0.0.0/0", "gateway": gw,
-             "distance": _fo_distance(idx, link), "check-gateway": "ping"},
+             "distance": "1", "check-gateway": "ping"},
             {"comment": policy_comment, "dst-address": "0.0.0.0/0", "gateway": gw,
-             mark_field: _lb_route_mark(role), "check-gateway": "ping"},
+             mark_field: _lb_route_mark(role), "distance": "1", "check-gateway": "ping"},
         ]
         # 1. THIS link's own routes, first — same reasoning as Gateway
         # Failover: the replacement must exist before the client's own
