@@ -365,7 +365,9 @@ def routes_form(current, cfg):
                  "check no longer flips it. Coming back only takes 1 "
                  "successful check."},
         {"type": "toggle", "name": "fo_enabled", "value": "1",
-         "on": fo_enabled, "label": "Enable gateway failover"},
+         "on": fo_enabled, "label": "Enable gateway failover",
+         "desc": "Turning this on or off can take between 2–5 minutes to "
+                 "fully take effect on the router."},
         {"type": "text", "name": "fo_primary_check",
          "label": "Primary check IP", "value": primary_check,
          "placeholder": "1.1.1.1",
