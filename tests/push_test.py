@@ -474,18 +474,21 @@ ddoff = F.security_plan(Pusher(devcfg, FakeApi({
 check("turning DDoS detect off removes its filter + raw rules",
       {o.params.get(".id") for o in ddoff.ops if o.action == "remove"} == {"*j", "*r"})
 
-# SSH staged blacklist: 5 input rules on port 22, single src-address-list each
+# SSH staged blacklist: 4 staging rules + a final accept, all on port 22
 sadds = [o for o in _sec(["ssh_blacklist"]).ops
          if o.path == ("ip", "firewall", "filter") and o.action == "add"]
-check("SSH staged blacklist adds a drop + 4 staging rules on port 22",
+check("SSH staged blacklist adds 4 staging rules + a final accept on port 22",
       len(sadds) == 5
       and all(o.params.get("dst-port") == "22" for o in sadds)
-      and any(o.params.get("action") == "drop"
-              and o.params.get("src-address-list") == "bruteforce_blacklist"
+      and any(o.params.get("action") == "accept"
+              and o.params.get("src-address-list") == "!bruteforce_blacklist"
               for o in sadds)
       and any(o.params.get("address-list") == "connection1" for o in sadds))
-check("SSH staged blacklist never uses an invalid two-list matcher",
-      all("," not in (o.params.get("src-address-list") or "") for o in sadds))
+check("SSH staged blacklist's 'third attempt' rule uses the requested "
+      "connection2,!secured matcher (matches the reference exactly, even "
+      "though 'secured' is not a defined address-list)",
+      any(o.params.get("src-address-list") == "connection2,!secured"
+          for o in sadds))
 
 # ddos_detect rules light the ddos_detect toggle (and the old 'ddos' toggle,
 # which shared a comment prefix, has been removed entirely)

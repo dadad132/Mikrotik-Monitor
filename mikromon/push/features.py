@@ -1069,31 +1069,36 @@ def security_plan(pusher, cfg, flat, multi):
         ]
     if "ssh_blacklist" in opts:
         # Staged SSH (port 22) brute-force tarpit: each repeat NEW attempt moves
-        # the source connection1 -> 2 -> 3 -> bruteforce_blacklist, then dropped.
-        # (Dropped the snippet's `,!secured` two-list matcher — not valid RouterOS
-        # syntax and `secured` was never defined — and used a drop instead of the
-        # accept rule so it actually blocks regardless of the input policy.)
+        # the source connection1 -> 2 -> 3 -> bruteforce_blacklist, then a final
+        # accept for everything NOT on bruteforce_blacklist. Matches the
+        # requested reference exactly, including the `,!secured` matcher on the
+        # "third attempt" rule — `secured` isn't a defined address-list, so
+        # RouterOS may reject that one rule outright or treat it as always-false.
+        # Also note: unlike an unconditional drop, this final accept only
+        # actually blocks a blacklisted source if nothing later in the input
+        # chain would otherwise accept it and/or the chain's own default action
+        # is drop — it depends on the rest of the router's ruleset.
         ssh_base = {"chain": "input", "protocol": "tcp", "dst-port": "22",
                     "connection-state": "new"}
         desired += [
-            {"chain": "input", "protocol": "tcp", "dst-port": "22",
-             "src-address-list": "bruteforce_blacklist", "action": "drop",
-             "comment": _SEC_TAG + "ssh_blacklist-1drop"},
             {**ssh_base, "src-address-list": "connection3",
              "action": "add-src-to-address-list",
              "address-list": "bruteforce_blacklist", "address-list-timeout": "1d",
-             "comment": _SEC_TAG + "ssh_blacklist-2block"},
-            {**ssh_base, "src-address-list": "connection2",
+             "comment": _SEC_TAG + "ssh_blacklist-1blacklist"},
+            {**ssh_base, "src-address-list": "connection2,!secured",
              "action": "add-src-to-address-list",
              "address-list": "connection3", "address-list-timeout": "1h",
-             "comment": _SEC_TAG + "ssh_blacklist-3stage3"},
+             "comment": _SEC_TAG + "ssh_blacklist-2third"},
             {**ssh_base, "src-address-list": "connection1",
              "action": "add-src-to-address-list",
              "address-list": "connection2", "address-list-timeout": "15m",
-             "comment": _SEC_TAG + "ssh_blacklist-4stage2"},
+             "comment": _SEC_TAG + "ssh_blacklist-3second"},
             {**ssh_base, "action": "add-src-to-address-list",
              "address-list": "connection1", "address-list-timeout": "5m",
-             "comment": _SEC_TAG + "ssh_blacklist-5stage1"},
+             "comment": _SEC_TAG + "ssh_blacklist-4first"},
+            {"chain": "input", "protocol": "tcp", "dst-port": "22",
+             "src-address-list": "!bruteforce_blacklist", "action": "accept",
+             "comment": _SEC_TAG + "ssh_blacklist-5accept"},
         ]
     fw_plan = pusher.plan_managed_list(_FILTER, "comment", desired,
                                        owns=_prefix_owner(_SEC_TAG),
