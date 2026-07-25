@@ -1860,7 +1860,6 @@ def _field_html(desc) -> str:
         return f'<input type="hidden" name="{desc["name"]}" value="{esc(desc.get("value",""))}">'
     if t == "toggle":
         ck = " checked" if desc.get("on") else ""
-        dis = " disabled" if desc.get("disabled") else ""
         d = (f'<div class="muted">{esc(desc["desc"])}</div>'
              if desc.get("desc") else "")
         # toggles sharing an "exclusive" group act like radios (only one on) — JS
@@ -1869,7 +1868,7 @@ def _field_html(desc) -> str:
                 if desc.get("exclusive") else "")
         return (f'<div class="f"><label class="chk"><input type="checkbox" '
                 f'class="switch" name="{desc["name"]}" '
-                f'value="{esc(desc["value"])}"{ck}{excl}{dis}> '
+                f'value="{esc(desc["value"])}"{ck}{excl}> '
                 f'<b>{esc(label)}</b></label>{d}</div>')
     if t == "text":
         return (f'<div class="f"><label class="f">{esc(label)}</label>'
