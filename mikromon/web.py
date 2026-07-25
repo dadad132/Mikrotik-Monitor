@@ -1994,6 +1994,49 @@ def _recent_log_box(recent, device=None) -> str:
             f'<th>Summary</th></tr>{rows}</table></div>')
 
 
+def _alert_status_badge(severity, recovery) -> str:
+    if recovery:
+        return '<span class="badge ok">recovered</span>'
+    label, cls = {30: ("critical", "crit"), 20: ("warning", "warn"),
+                  10: ("info", "warn")}.get(int(severity or 0), ("warning", "warn"))
+    return f'<span class="badge {cls}">{esc(label)}</span>'
+
+
+def _activity_timeline_box(push_rows, alert_rows, device=None) -> str:
+    """Unified timeline: config-push events (preview/apply/success/failure)
+    interleaved with WAN/reachability alert history (problem + recovery),
+    newest first — everything that happened to a device in one feed."""
+    merged = [("push", r["ts"], r) for r in push_rows]
+    merged += [("alert", r["ts"], r) for r in alert_rows]
+    merged.sort(key=lambda t: t[1], reverse=True)
+    if not merged:
+        return ('<div class="box"><h2>Recent activity</h2>'
+                '<p class="muted">Nothing logged yet.</p></div>')
+    devh = "<th>Device</th>" if device is None else ""
+    rows = ""
+    for kind, ts, r in merged:
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+        dev = f'<td>{esc(r["device"])}</td>' if device is None else ""
+        if kind == "push":
+            rows += (f'<tr><td class="muted">{when}</td>{dev}'
+                     f'<td>Config push</td>'
+                     f'<td>{esc(r["feature"])} &middot; {esc(r["mode"])}</td>'
+                     f'<td>{_log_status_badge(r["status"])}</td>'
+                     f'<td>{esc(r["summary"])}'
+                     f'<details><summary class="muted">detail</summary>'
+                     f'<pre style="white-space:pre-wrap;background:#f8fafc;padding:8px;'
+                     f'border-radius:6px">{esc(r["detail"])}</pre></details></td></tr>')
+        else:
+            rows += (f'<tr><td class="muted">{when}</td>{dev}'
+                     f'<td>WAN / reachability</td>'
+                     f'<td>{esc(r["title"])}</td>'
+                     f'<td>{_alert_status_badge(r["severity"], r["recovery"])}</td>'
+                     f'<td class="muted">{esc(r["key"])}</td></tr>')
+    return (f'<div class="box"><h2>Recent activity</h2><table>'
+            f'<tr><th>When</th>{devh}<th>Type</th><th>Event</th><th>Status</th>'
+            f'<th>Summary</th></tr>{rows}</table></div>')
+
+
 def _adopt_box(name, slug, feature, csrf, unmanaged) -> str:
     """List existing (unmanaged) rows on the router, with Adopt buttons."""
     if not unmanaged:
@@ -2642,11 +2685,13 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                  _header(user, "/") + inner + _FEATURE_JS)
 
 
-def _render_logs(user, rows) -> str:
-    inner = (f'<div class="wrap" style="max-width:1100px"><h1>Push activity log</h1>'
+def _render_logs(user, push_rows, alert_rows) -> str:
+    inner = (f'<div class="wrap" style="max-width:1100px"><h1>Activity log</h1>'
              f'<p class="muted">Every config-push (preview, apply, success and '
-             f'failure) across all devices. Expand a row for the full diff and '
-             f'any error.</p>{_recent_log_box(rows, device=None)}</div>')
+             f'failure) and every WAN/reachability alert (problem and recovery) '
+             f'across all devices, newest first. Expand a push row for the full '
+             f'diff and any error.</p>'
+             f'{_activity_timeline_box(push_rows, alert_rows, device=None)}</div>')
     return _page("Activity log", _header(user, "/logs") + inner)
 
 
@@ -3006,7 +3051,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                  sessions: SessionManager, secure_cookies=False,
                  metrics_token=None, devices_db=None, defaults=None,
                  push_log_db=None, access_cfg=None, billing_cfg=None,
-                 smtp_cfg=None, config_path=None):
+                 smtp_cfg=None, config_path=None, alert_log_db=None):
     defaults = defaults or {}
     access_cfg = access_cfg or {}
     billing_cfg = billing_cfg or {}
@@ -4054,6 +4099,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             from .push import AuditLog
             return AuditLog(push_log_db)
 
+        def _alertlog(self):
+            if not alert_log_db:
+                return None
+            from .alert_log import AlertLog
+            return AlertLog(alert_log_db)
+
         def _feature_tab_page(self, name, user, slug, preview=None,
                               submitted=None, error="", msg="",
                               confirm_action="/device/push", report_html=""):
@@ -4565,9 +4616,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             rows = audit.recent(limit=200) if audit else []
             if audit:
                 audit.close()
-            # Scope to this company's devices — the push log itself has no org
-            # column, so filter by device ownership (superadmin sees all).
-            if rows and devices_db and not user.get("is_superadmin"):
+            alog = self._alertlog()
+            alert_rows = alog.recent(limit=200) if alog else []
+            if alog:
+                alog.close()
+            # Neither log has an org column, so scope both by device ownership
+            # (superadmin sees every device).
+            if (rows or alert_rows) and devices_db and not user.get("is_superadmin"):
                 ds = self._devstore()
                 try:
                     org_names = (set(ds.names_for_org(user.get("org_id")))
@@ -4576,7 +4631,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     if ds:
                         ds.close()
                 rows = [r for r in rows if r.get("device") in org_names]
-            return self._send(200, _render_logs(user, rows),
+                alert_rows = [r for r in alert_rows if r.get("device") in org_names]
+            return self._send(200, _render_logs(user, rows, alert_rows),
                               "text/html; charset=utf-8")
 
         def _devices_post(self, path, flat, multi, user):
@@ -5379,7 +5435,7 @@ def _register_hub_peer(device_name: str, api, flat: dict, devices_db: str) -> No
 def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,
           secure_cookies=False, metrics_token=None, devices_db=None,
           defaults=None, push_log_db=None, access_cfg=None, billing_cfg=None,
-          smtp_cfg=None, config_path=None):
+          smtp_cfg=None, config_path=None, alert_log_db=None):
     if metrics_db and not os.path.exists(metrics_db):
         log.warning("metrics DB %s not found yet — start the monitor first",
                     metrics_db)
@@ -5392,7 +5448,8 @@ def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,
         (host, port), make_handler(metrics_db, state_file, auth, sessions,
                                    secure_cookies, metrics_token, devices_db,
                                    defaults, push_log_db, access_cfg,
-                                   billing_cfg, smtp_cfg, config_path))
+                                   billing_cfg, smtp_cfg, config_path,
+                                   alert_log_db))
     scheme = "auth ON" if auth else "auth OFF (open)"
     billing_note = "  billing ON" if (billing_cfg or {}).get("db") else ""
     log.info("Dashboard at http://%s:%d  [%s]%s  Prometheus: /metrics",

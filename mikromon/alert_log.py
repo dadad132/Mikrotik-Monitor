@@ -78,6 +78,21 @@ class AlertLog:
         finally:
             con.close()
 
+    def recent(self, limit: int = 100, device: str | None = None) -> list:
+        """Most recent alert-log rows (problem + recovery), newest first."""
+        con = self._con()
+        try:
+            q = "SELECT * FROM alert_log"
+            args: list = []
+            if device:
+                q += " WHERE device = ?"
+                args.append(device)
+            q += " ORDER BY id DESC LIMIT ?"
+            args.append(int(limit))
+            return [dict(r) for r in con.execute(q, args).fetchall()]
+        finally:
+            con.close()
+
     def last_open(self, device: str, key: str, before: float):
         """The most recent problem row for device+key before `before` that
         has no matching recovery before it — i.e. a condition already in

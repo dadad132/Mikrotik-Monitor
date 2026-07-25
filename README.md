@@ -433,10 +433,12 @@ that just stamps the `mikromon:…` ownership comment, after which the rule show
 up in the editor and round-trips with no churn. (Firewall-rule adoption is shown
 read-only for now.)
 
-**Activity log:** the **Activity** tab (and the bottom of every device tab)
-shows every push — preview, apply, success and failure — with the full diff and
-any error, so when a real router rejects something you can see exactly what and
-why. (Enable with `push_log_db:` in the config.)
+**Activity log:** the **Activity** tab is a single timeline across all devices —
+every config push (preview, apply, success and failure, with the full diff and
+any error) interleaved with every WAN/reachability alert (problem and
+recovery), newest first. The bottom of every device tab shows that device's
+own push history the same way. (Enable with `push_log_db:` and
+`alert_log_db:` in the config.)
 
 > These config-push tabs are **experimental** until validated on real hardware.
 > They are dry-run-first, only ever touch rows they tagged (`comment` starting
