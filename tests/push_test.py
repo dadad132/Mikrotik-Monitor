@@ -596,7 +596,9 @@ sapi = FakeApi({
     ("interface", "pppoe-client"): [],
     ("ip", "dhcp-client"): [
         {".id": "*1", "interface": "ether1", "default-route-distance": "5"}],
-    ("ip", "firewall", "mangle"): []})
+    ("ip", "firewall", "mangle"): [],
+    ("routing", "table"): [],
+    ("system", "resource"): [{"version": "7.14.3"}]})
 sp = Pusher(scfg, sapi, dry_run=True)
 plan = F.sdwan_plan(sp, scfg, {},
                     {"pol__subnet": ["10.0.0.0/24"], "pol__via": ["ether2"]})
@@ -607,9 +609,35 @@ check("the WAN tab never touches a WAN client's own distance (that's the "
 check("policy adds a mangle mark-routing rule",
       any(o.path == ("ip", "firewall", "mangle")
           and o.params.get("action") == "mark-routing" for o in plan.ops))
-check("policy adds a marked default route",
-      any(o.path == ("ip", "route") and o.params.get("routing-mark")
+check("on RouterOS 7, policy adds a marked default route using the v7 "
+      "routing-table field, not the removed v6 routing-mark",
+      any(o.path == ("ip", "route") and o.params.get("routing-table")
+          and "routing-mark" not in o.params
           and o.params.get("dst-address") == "0.0.0.0/0" for o in plan.ops))
+check("on RouterOS 7, the referenced routing table is declared via "
+      "/routing/table (fib) — required or the route add is rejected "
+      "outright ('unknown parameter routing-mark' if the old field name "
+      "is sent instead)",
+      any(o.path == ("routing", "table") and o.action == "add"
+          and o.params.get("fib") == "yes" for o in plan.ops))
+
+# Same feature on RouterOS 6: the old routing-mark field name, and
+# /routing/table never touched at all — that menu doesn't exist pre-v7,
+# and a routing-mark auto-creates its own virtual table on first use.
+sapi6 = FakeApi({
+    ("ip", "route"): [],
+    ("interface", "pppoe-client"): [],
+    ("ip", "dhcp-client"): [
+        {".id": "*1", "interface": "ether1", "default-route-distance": "5"}],
+    ("ip", "firewall", "mangle"): [],
+    ("system", "resource"): [{"version": "6.49.10"}]})
+plan6 = F.sdwan_plan(Pusher(scfg, sapi6, dry_run=True), scfg, {},
+                     {"pol__subnet": ["10.0.0.0/24"], "pol__via": ["ether2"]})
+check("on RouterOS 6, policy still uses the old routing-mark field and "
+      "never touches /routing/table",
+      any(o.path == ("ip", "route") and o.params.get("routing-mark")
+          and "routing-table" not in o.params for o in plan6.ops)
+      and not any(o.path == ("routing", "table") for o in plan6.ops))
 
 
 # ---- 11b. detect_isp_ifaces: find which port actually has the internet ----
@@ -1499,6 +1527,8 @@ lb_router_state = {
     ("ip", "route"): [],
     ("ip", "firewall", "mangle"): [],
     ("ip", "firewall", "nat"): [],
+    ("routing", "table"): [],
+    ("system", "resource"): [{"version": "7.14.3"}],
     ("tool", "netwatch"): [],
     ("interface", "pppoe-client"): [],
     ("ip", "dhcp-client"): [
@@ -1522,7 +1552,7 @@ lb_mangle_adds = [o for o in lb_enable_plan.ops
 lb_nat_adds = [o for o in lb_enable_plan.ops
               if o.path == ("ip", "firewall", "nat") and o.action == "add"]
 
-check("both links get a plain default route + a routing-mark policy route",
+check("both links get a plain default route + a marked policy route",
       {o.params["comment"] for o in lb_route_adds} ==
       {f"{_LB_TAG}route:primary", f"{_LB_TAG}policy:primary",
        f"{_LB_TAG}route:secondary", f"{_LB_TAG}policy:secondary"})
@@ -1534,9 +1564,25 @@ check("secondary's plain route uses distance 2",
           for o in lb_route_adds))
 check("both plain+policy routes set check-gateway=ping",
       all(o.params.get("check-gateway") == "ping" for o in lb_route_adds))
-check("policy routes carry a routing-mark, one per link",
-      {o.params.get("routing-mark") for o in lb_route_adds
-       if "policy:" in o.params["comment"]} == {"mm_to_primary", "mm_to_secondary"})
+check("on RouterOS 7, policy routes use the v7 routing-table field (not "
+      "the removed v6 routing-mark), one per link",
+      {o.params.get("routing-table") for o in lb_route_adds
+       if "policy:" in o.params["comment"]} == {"mm_to_primary", "mm_to_secondary"}
+      and not any("routing-mark" in o.params for o in lb_route_adds))
+check("on RouterOS 7, each mark's routing table is declared via "
+      "/routing/table (fib) BEFORE any route references it — required or "
+      "the route add is rejected outright ('unknown parameter routing-mark' "
+      "if the old field name is sent, or a missing-table error otherwise)",
+      {o.params.get("name") for o in lb_enable_plan.ops
+       if o.path == ("routing", "table") and o.action == "add"} ==
+      {"mm_to_primary", "mm_to_secondary"}
+      and all(o.params.get("fib") == "yes" for o in lb_enable_plan.ops
+             if o.path == ("routing", "table"))
+      and lb_enable_plan.ops.index(
+          next(o for o in lb_enable_plan.ops if o.path == ("routing", "table")))
+      < lb_enable_plan.ops.index(
+          next(o for o in lb_enable_plan.ops
+               if o.path == ("ip", "route") and o.action == "add")))
 check("mangle marks input traffic from each WAN interface with its own "
       "connection-mark (for the router's own originated traffic)",
       any(o.params.get("chain") == "input" and o.params.get("in-interface") == "ether1"
@@ -1602,6 +1648,11 @@ check("disabling removes every managed mangle rule",
       len(lb_removed_mangle) == len(lb_mangle_adds))
 check("disabling removes every managed NAT masquerade rule",
       len(lb_removed_nat) == len(lb_nat_adds))
+check("disabling also removes the routing tables created for RouterOS 7",
+      {o.desc for o in lb_disable_plan.ops if o.path == ("routing", "table")
+       and o.action == "remove"} ==
+      {"remove routing table name=mm_to_primary",
+       "remove routing table name=mm_to_secondary"})
 lb_dhcp_restores = [o for o in lb_disable_plan.ops if o.path == ("ip", "dhcp-client")]
 check("both configured links' clients get restored",
       {o.params[".id"] for o in lb_dhcp_restores

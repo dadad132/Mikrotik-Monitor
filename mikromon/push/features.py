@@ -71,6 +71,35 @@ _FAILOVER_TAG = "mikromon:failover:"
 _LB_TAG = "mikromon:lb:"
 _MANGLE = ("ip", "firewall", "mangle")
 _NAT = ("ip", "firewall", "nat")
+_ROUTING_TABLE = ("routing", "table")
+
+
+def _routing_mark_field(major) -> str:
+    """RouterOS 7.1+ renamed /ip route's own field from routing-mark to
+    routing-table, and stopped auto-creating a virtual table the first time
+    a mark is used — the table must now be declared first via
+    /routing/table (see _reconcile_routing_tables), or the add is rejected
+    outright ('unknown parameter routing-mark' if the OLD field name is
+    still sent). The mangle mark-routing action's own new-routing-mark field
+    is unchanged on both versions. Unknown version (major 0) assumes v7,
+    matching this codebase's existing bias elsewhere (_wg_supported) toward
+    assuming the newer/current behavior when undetectable."""
+    return "routing-mark" if 0 < major < 7 else "routing-table"
+
+
+def _reconcile_routing_tables(pusher, marks, prefix) -> list:
+    """Ensure each name in `marks` is declared as an FIB routing table via
+    /routing/table — required on RouterOS 7.1+ before any route or mangle
+    rule can reference it as a routing-table. A no-op wherever `marks` is
+    empty (including on RouterOS 6, which never needs this menu at all —
+    _safe_fetch tolerates it not existing there). `prefix` scopes cleanup to
+    just the caller's own mark-naming convention, so this never touches a
+    routing table created by a different feature or by hand."""
+    current = _safe_fetch(pusher.api, _ROUTING_TABLE)
+    desired = [{"name": m, "fib": "yes"} for m in marks]
+    return reconcile_list(_ROUTING_TABLE, "name", desired, current,
+                          owns=lambda r, p=prefix: str(r.get("name", "")).startswith(p),
+                          label="routing table")
 
 
 def _safe_fetch(api, path):
@@ -952,10 +981,16 @@ def _apply_loadbalance(ops, flat, pusher, cfg):
                                   owns=lb_owns, label="load-balance mangle rule"))
         ops.extend(reconcile_list(_NAT, "comment", [], nat,
                                   owns=lb_owns, label="load-balance NAT rule"))
+        # RouterOS 7.1+ routing tables (see _reconcile_routing_tables) — a
+        # no-op on RouterOS 6 (nothing owned by our prefix ever exists there).
+        ops.extend(_reconcile_routing_tables(pusher, [], prefix="mm_to_"))
         return
 
     if len(links) < 2:
         return  # nothing to balance across
+
+    major, _minor, _ver = _ros_version(pusher.api)
+    mark_field = _routing_mark_field(major)
 
     # Detect gateways live from the router at apply time — same precedence
     # and fallback-to-last-known-gateway as Gateway Failover (see
@@ -987,6 +1022,15 @@ def _apply_loadbalance(ops, flat, pusher, cfg):
         return  # fewer than 2 gateways detectable this apply — nothing to balance
 
     n = len(resolved)
+    # RouterOS 7.1+ rejects a route referencing a routing-table that hasn't
+    # been declared yet — ensure every mark's table exists BEFORE any route
+    # below references it (see _reconcile_routing_tables). No-op on
+    # RouterOS 6, which auto-creates a routing-mark's table on first use.
+    if mark_field == "routing-table":
+        ops.extend(_reconcile_routing_tables(
+            pusher, [_lb_route_mark(role) for _idx, _link, role, _iface, _gw in resolved],
+            prefix="mm_to_"))
+
     handled_routes = set()
     for bucket, (idx, link, role, iface, gw) in enumerate(resolved):
         route_comment = f"{_LB_TAG}route:{role}"
@@ -998,7 +1042,7 @@ def _apply_loadbalance(ops, flat, pusher, cfg):
             {"comment": route_comment, "dst-address": "0.0.0.0/0", "gateway": gw,
              "distance": _fo_distance(idx, link), "check-gateway": "ping"},
             {"comment": policy_comment, "dst-address": "0.0.0.0/0", "gateway": gw,
-             "routing-mark": _lb_route_mark(role), "check-gateway": "ping"},
+             mark_field: _lb_route_mark(role), "check-gateway": "ping"},
         ]
         # 1. THIS link's own routes, first — same reasoning as Gateway
         # Failover: the replacement must exist before the client's own
@@ -1199,18 +1243,21 @@ def sdwan_plan(pusher, cfg, flat, multi):
     """Per-subnet policy routing only — WAN uplink Distance (and the full
     Gateway Failover feature) lives entirely on the Routes tab now, so
     there's only ever one place to manage it."""
-    mangle_desired, route_desired = [], []
+    major, _minor, _ver = _ros_version(pusher.api)
+    mark_field = _routing_mark_field(major)
+    mangle_desired, route_desired, marks = [], [], []
     for r in _rows(multi, "pol", ("subnet", "via")):
         subnet, via = r["subnet"], r["via"]
         if not subnet or not via:
             continue
         mark = "mm-" + _slug(via)
+        marks.append(mark)
         enc = f"{subnet}|{via}"
         mangle_desired.append({
             "chain": "prerouting", "src-address": subnet, "action": "mark-routing",
             "new-routing-mark": mark, "passthrough": "yes", "comment": _POL_TAG + enc})
         route_desired.append({
-            "dst-address": "0.0.0.0/0", "gateway": via, "routing-mark": mark,
+            "dst-address": "0.0.0.0/0", "gateway": via, mark_field: mark,
             "comment": _RT_TAG + enc})
     mangle_plan = pusher.plan_managed_list(
         _MANGLE, "comment", mangle_desired,
@@ -1218,7 +1265,13 @@ def sdwan_plan(pusher, cfg, flat, multi):
     route_plan = pusher.plan_managed_list(
         _ROUTE, "comment", route_desired,
         owns=_prefix_owner(_RT_TAG), label="policy route")
-    return Plan(cfg.name, mangle_plan.ops + route_plan.ops,
+    # RouterOS 7.1+ routing tables (see _reconcile_routing_tables) — declared
+    # before the routes above so a referenced table always exists first; a
+    # no-op wherever no policy row is configured, and on RouterOS 6 (whose
+    # /routing/table menu doesn't exist — _safe_fetch tolerates that).
+    table_ops = _reconcile_routing_tables(
+        pusher, marks if mark_field == "routing-table" else [], prefix="mm-")
+    return Plan(cfg.name, table_ops + mangle_plan.ops + route_plan.ops,
                 summary="wan policy routing")
 
 
