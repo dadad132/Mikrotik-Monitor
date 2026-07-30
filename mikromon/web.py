@@ -2672,7 +2672,8 @@ _TAB_INTRO = {
     "portfwd": "Forward an external port to an internal device, or adopt forwards "
                "the router already has.",
     "interfaces": "A read-only view of the router's ports, VLANs and bridges.",
-    "remote": "Grant a temporary firewall opening for Winbox/SSH/WebFig.",
+    "remote": "Create a temporary RouterOS login (auto-expires on its own) "
+             "for Winbox/SSH/WebFig — no firewall opening, no VPN config.",
     "tunnel": ("Manage WireGuard VPN interfaces and peers. "
                "Requires RouterOS 7.1+; shows a compatibility notice on older firmware."),
     "scripts": "Paste any RouterOS script for things the other tabs don't cover. "
@@ -2740,6 +2741,42 @@ _CONFIRM_JS = """
    tick();
  })();
 </script>"""
+
+
+def _render_temp_login_page(name, user, username, password, address, minutes) -> str:
+    """Shown ONCE, right after a temporary login is created (Remote access
+    tab) — the connection details to hand to the person. Never a redirect:
+    the password would end up in the URL, browser history and access logs.
+    RouterOS never lets a password be read back, so if this page is lost the
+    only fix is revoking the login and creating a new one."""
+    q = quote(name)
+    addr_shown = address or "<this router's address>"
+    conn_lines = "\n".join(
+        f"{svc} — {addr_shown}:{port}"
+        for svc, port in (("WinBox", "8291"), ("SSH", "22"), ("WebFig", "80")))
+    addr_warning = ("" if address else
+                   '<p style="color:#dc2626">No tunnel IP or configured host '
+                   'found for this router — look up its address on the '
+                   'Devices page.</p>')
+    inner = (
+        f'<div class="wrap" style="max-width:760px">'
+        f'<div class="box" style="border-left:4px solid #16a34a">'
+        f'<h1 style="margin-top:0">Temporary login created for {esc(name)}</h1>'
+        f'<p><b>Copy these now</b> — RouterOS never lets the password be read '
+        f'back, so this is the only time it\'s shown. It expires automatically '
+        f'in about <b>{minutes} minutes</b>, or revoke it early from this tab.</p>'
+        f'<table style="margin:10px 0">'
+        f'<tr><td class="muted">Username</td><td><code>{esc(username)}</code></td></tr>'
+        f'<tr><td class="muted">Password</td><td><code>{esc(password)}</code></td></tr>'
+        f'<tr><td class="muted">Connect to</td>'
+        f'<td><pre style="{_PRE}">{esc(conn_lines)}</pre></td></tr>'
+        f'</table>{addr_warning}'
+        f'<p class="muted">The person still needs network reachability to '
+        f'this address (already on the hub\'s tunnel network, or the same '
+        f'LAN) — this login alone doesn\'t provide that.</p>'
+        f'<a class="btn" href="/device?name={q}&tab=remote">Done</a>'
+        f'</div></div>')
+    return _page(esc(name) + " · Temporary login", _header(user, "/") + inner)
 
 
 def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
@@ -4464,6 +4501,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     api.connect()
                     if slug == "tunnel":
                         _tunnel_roadwarrior_ips(name, multi, devices_db)
+                    elif slug == "remote" and (flat.get("tempuser") or "").strip():
+                        # Freshly generated every request (preview or confirm)
+                        # — never shown or logged until a real commit actually
+                        # pushes it (see below), so there's nothing to keep
+                        # stable between preview and confirm.
+                        flat["_tempuser_password"] = _gen_password()
                     plan = feature["plan"](pusher, cfg, flat, multi)
                 except (DeviceError, PushError) as exc:
                     if audit:
@@ -4505,6 +4548,25 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # traffic from them, not just the router itself.
                 if slug == "tunnel" and devices_db:
                     _sync_tunnel_roadwarriors_to_hub(devices_db)
+                # Just created a temporary login: show the connection details
+                # ONCE, directly (never a redirect — the password would end
+                # up in the URL/browser history/access logs). RouterOS never
+                # lets a password be read back, so this is the only chance.
+                if slug == "remote":
+                    new_username = (flat.get("tempuser") or "").strip()
+                    created = new_username and any(
+                        op.path == ("user",) and op.action == "add"
+                        and op.params.get("name") == new_username
+                        for op in plan.ops)
+                    if created:
+                        from .push.features import _REMOTE_DEFAULT_MINUTES
+                        address = (_device_tunnel_ip(name, devices_db)
+                                  or getattr(cfg, "host", "") or "")
+                        return self._send(200, _render_temp_login_page(
+                            name, user, new_username,
+                            flat.get("_tempuser_password", ""), address,
+                            _REMOTE_DEFAULT_MINUTES),
+                            "text/html; charset=utf-8")
                 # Safe mode (commit-confirm): arm a local auto-revert so a change
                 # that locks us out heals itself. Best-effort — if arming fails
                 # the change still stands (just without the safety net).

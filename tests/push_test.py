@@ -768,6 +768,76 @@ plan2 = F.harden_plan(Pusher(qcfg, h_api2, dry_run=True), qcfg,
 check("re-restricting an already-locked service is a no-op", plan2.empty)
 
 
+# ---- 13b. Remote access: a temporary RouterOS login, not a firewall rule --
+print("remote access (temporary login):")
+r_cfg = types.SimpleNamespace(name="R1", push_username="", push_password="")
+r_api = FakeApi({("user",): [], ("system", "scheduler"): []})
+r_pusher = Pusher(r_cfg, r_api, dry_run=True)
+
+preview_plan = F.remote_plan(r_pusher, r_cfg,
+                             {"tempuser": "alice", "_tempuser_password": "PREVIEWPW1!"}, {})
+check("creating a temporary login adds a user + an expiry scheduler",
+      len(preview_plan.ops) == 2
+      and any(o.path == ("user",) and o.action == "add"
+              and o.params.get("name") == "alice" for o in preview_plan.ops)
+      and any(o.path == ("system", "scheduler") and o.action == "add"
+              for o in preview_plan.ops))
+check("the generated password never appears in the dry-run diff text (it's "
+      "only ever in Operation.params, which diff_text() never prints) — the "
+      "audit log stores diff_text() as its 'detail' field, so a leaked "
+      "password there would be permanent",
+      "PREVIEWPW1!" not in preview_plan.diff_text())
+user_add = next(o for o in preview_plan.ops if o.path == ("user",))
+check("the temp user gets full access and a comment tag for tracking",
+      user_add.params.get("group") == "full"
+      and user_add.params.get("comment") == "mikromon:remote:alice")
+sched_add = next(o for o in preview_plan.ops if o.path == ("system", "scheduler"))
+check("the scheduler's on-event removes the user AND itself when it fires",
+      '/user remove [find name="alice"]' in sched_add.params.get("on-event", "")
+      and "/system scheduler remove" in sched_add.params.get("on-event", ""))
+check("no password is pushed if the web layer never supplied one (a stray "
+      "call must fail safe, not create a passwordless/blank-password user)",
+      F.remote_plan(r_pusher, r_cfg, {"tempuser": "bob"}, {}).empty)
+
+# Apply for real (a DIFFERENT password than the preview used — previews and
+# confirms are never guaranteed the same one, since it's never shown until
+# a real commit).
+commit_plan = F.remote_plan(Pusher(r_cfg, r_api, dry_run=False), r_cfg,
+                            {"tempuser": "alice", "_tempuser_password": "REALPW2@"}, {})
+for op in commit_plan.ops:
+    r_api.execute(op)
+check("the router actually gets the applied (not the previewed) password",
+      r_api.state[("user",)][0]["password"] == "REALPW2@")
+
+# Submitting the same username again while it's still active is a no-op —
+# never silently resets an active login's password/timer. (Her row is still
+# present in "keep", matching a real form submission that never touched the
+# revoke list — only an explicitly-deleted row means "revoke this one".)
+resubmit_plan = F.remote_plan(Pusher(r_cfg, r_api, dry_run=True), r_cfg,
+                              {"tempuser": "alice", "_tempuser_password": "NEWPW3#"},
+                              {"keep__name": ["alice"]})
+check("re-submitting an already-active username changes nothing",
+      resubmit_plan.empty)
+
+current_state = F.remote_read(Pusher(r_cfg, r_api, dry_run=True), r_cfg)
+check("remote_summary reports the active login and its group",
+      any("alice" in line and "full" in line
+          for line in F.remote_summary(current_state, r_cfg)))
+check("remote_form lists the active login as a revocable row",
+      any(r["name"] == "alice"
+          for f in F.remote_form(current_state, r_cfg) if f.get("name") == "keep"
+          for r in f["rows"]))
+
+# Revoke: submit with alice no longer in the "keep" list -> removes BOTH the
+# user and its scheduler, never leaving an orphaned expiry entry behind.
+revoke_plan = F.remote_plan(Pusher(r_cfg, r_api, dry_run=False), r_cfg, {}, {"keep__name": []})
+for op in revoke_plan.ops:
+    r_api.execute(op)
+check("revoking removes the user", r_api.state[("user",)] == [])
+check("revoking also cancels the now-pointless expiry scheduler",
+      r_api.state[("system", "scheduler")] == [])
+
+
 # ---- 14. NextDNS content blocking grid (DNS sinkhole) ----------------------
 print("nextdns content blocking grid:")
 nd_api = FakeApi({

@@ -1585,51 +1585,100 @@ def interfaces_summary(current, cfg):
 
 
 # ===========================================================================
-# Remote access — a temporary allow rule for Winbox/SSH/WebFig
+# Remote access — a temporary RouterOS login (auto-expires on its own)
 # ===========================================================================
 _REMOTE_TAG = "mikromon:remote:"
-_SERVICES = {"winbox": "8291", "ssh": "22", "webfig": "80"}
+_REMOTE_SCHED_PREFIX = "mikromon-tempaccess-"
+_REMOTE_DEFAULT_MINUTES = 60
+_REMOTE_DEFAULT_GROUP = "full"
 
 
 def remote_read(pusher, cfg):
-    return [r for r in pusher.api.fetch(_FILTER) if _prefix_owner(_REMOTE_TAG)(r)]
+    users = [u for u in pusher.api.fetch(("user",))
+            if str(u.get("comment", "")).startswith(_REMOTE_TAG)]
+    scheds = pusher.api.fetch(("system", "scheduler"))
+    return {"users": users, "scheds": scheds}
 
 
 def remote_summary(current, cfg):
-    return [f"allow {r.get('dst-port')} from {r.get('src-address')}"
-            for r in current] or ["No temporary access rules right now."]
+    users = current.get("users", [])
+    if not users:
+        return ["No temporary logins active right now."]
+    sched_by_name = {s.get("name"): s for s in current.get("scheds", [])}
+    lines = []
+    for u in users:
+        name = u.get("name", "?")
+        sched = sched_by_name.get(_REMOTE_SCHED_PREFIX + name)
+        exp = (f"expires automatically (~{sched.get('interval')} scheduler)"
+              if sched else "no expiry scheduled — revoke it manually below")
+        lines.append(f"{name} ({u.get('group', '?')}) — {exp}")
+    return lines
 
 
 def remote_form(current, cfg):
+    rows = [{"name": u.get("name", "")} for u in current.get("users", [])]
     return [
-        {"type": "select", "name": "service", "label": "Service",
-         "options": [("winbox", "Winbox (8291)"), ("ssh", "SSH (22)"),
-                     ("webfig", "WebFig (80)")], "value": "winbox"},
-        {"type": "text", "name": "src", "label": "Allow from IP",
-         "placeholder": "your public IP, e.g. 41.x.x.x"},
-        {"type": "static", "label": "Note",
-         "value": "Adds an accept rule at the top of the input chain. Auto-expiry "
-                  "needs an on-router scheduler (coming with provisioning) — for "
-                  "now, revoke it here when done."},
+        {"type": "heading", "label": "Create a temporary login",
+         "hint": f"Creates a real RouterOS user (access level: "
+                f"{_REMOTE_DEFAULT_GROUP}) with a generated password, and "
+                f"schedules the router to remove it automatically after "
+                f"{_REMOTE_DEFAULT_MINUTES} minutes — no firewall opening, "
+                f"no VPN config to hand out. The address, username and "
+                f"password to connect with are shown once you confirm — copy "
+                f"them then, RouterOS never lets the password be read back. "
+                f"The person still needs network reachability to this router "
+                f"(already on the hub's tunnel network, or the same LAN) — "
+                f"this only grants the login itself."},
+        {"type": "text", "name": "tempuser", "label": "Username",
+         "placeholder": "alice"},
+        {"type": "rows", "name": "keep", "label": "Active temporary logins",
+         "cols": [("name", "username", "")],
+         "rows": rows,
+         "hint": "Delete a row and apply to revoke that login (and its "
+                 "scheduled expiry) immediately."},
     ]
 
 
 def remote_plan(pusher, cfg, flat, multi):
-    svc = flat.get("service", "winbox")
-    port = _SERVICES.get(svc, "8291")
-    src = flat.get("src", "").strip()
-    # keep existing temp rules, add/refresh the requested one
-    existing = remote_read(pusher, cfg)
-    desired = [{"chain": "input", "action": "accept", "protocol": "tcp",
-                "dst-port": r.get("dst-port"), "src-address": r.get("src-address"),
-                "comment": r.get("comment")} for r in existing]
-    if src:
-        desired.append({"chain": "input", "action": "accept", "protocol": "tcp",
-                        "dst-port": port, "src-address": src,
-                        "comment": _REMOTE_TAG + f"{svc}-{src}"})
-    return pusher.plan_managed_list(_FILTER, "comment", desired,
-                                    owns=_prefix_owner(_REMOTE_TAG),
-                                    label="remote-access rule")
+    ops = []
+    current = remote_read(pusher, cfg)
+    current_users = {u.get("name"): u for u in current["users"]}
+    sched_by_name = {s.get("name"): s for s in current["scheds"]}
+    keep_names = {r.strip() for r in multi.get("keep__name", []) if r.strip()}
+    for uname, u in current_users.items():
+        if uname in keep_names:
+            continue
+        ops.append(Operation("remove", ("user",), {".id": u[".id"]},
+                             desc=f"revoke temporary login '{uname}'"))
+        sched = sched_by_name.get(_REMOTE_SCHED_PREFIX + uname)
+        if sched:
+            ops.append(Operation("remove", ("system", "scheduler"),
+                                 {".id": sched[".id"]},
+                                 desc=f"cancel expiry for '{uname}'"))
+    new_username = (flat.get("tempuser") or "").strip()
+    # A blank generated password means the web layer couldn't supply one (or
+    # this is being computed somewhere that never will, e.g. a stray direct
+    # call) — never push a user with an empty password.
+    password = flat.get("_tempuser_password", "")
+    if new_username and new_username not in current_users and password:
+        minutes = _REMOTE_DEFAULT_MINUTES
+        ops.append(Operation(
+            "add", ("user",),
+            {"name": new_username, "password": password,
+             "group": _REMOTE_DEFAULT_GROUP, "comment": _REMOTE_TAG + new_username},
+            desc=f"create temporary login '{new_username}' "
+                 f"({_REMOTE_DEFAULT_GROUP}, expires in {minutes} min)"))
+        sched_name = _REMOTE_SCHED_PREFIX + new_username
+        event = (f'/user remove [find name="{new_username}"]\n'
+                 f'/system scheduler remove [find name="{sched_name}"]')
+        ops.append(Operation(
+            "add", ("system", "scheduler"),
+            {"name": sched_name, "interval": f"{minutes}m", "on-event": event,
+             "comment": _REMOTE_TAG + "expiry:" + new_username,
+             "policy": "ftp,reboot,read,write,policy,test,password,"
+                      "sensitive,romon"},
+            desc=f"expire '{new_username}' automatically after {minutes} min"))
+    return Plan(cfg.name, ops, summary="temporary access")
 
 
 # ===========================================================================
