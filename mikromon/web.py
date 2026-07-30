@@ -1388,27 +1388,26 @@ def _hub_save(path, data) -> None:
         log.warning("could not save hub settings to %s", path)
 
 
-def _alloc_tunnel_ip(hub, name) -> str:
-    """Random stable per-device tunnel IP across the 10.10.x.y /16 space.
+def _pick_unused_tunnel_ip(hub, used) -> str:
+    """Random IP across the hub's 10.10.x.y /16 space, avoiding every address
+    in `used`. Shared by _alloc_tunnel_ip (devices) and _alloc_roadwarrior_ip
+    (human WireGuard peers riding on a router's own hub connection — see the
+    Tunnel tab) so the two namespaces can never collide with each other.
 
     Third octet (0-254) and fourth octet (2-254) are both chosen randomly so
-    sequential device registration produces no detectable pattern.  The pool
-    has ~64k addresses; if random probing keeps hitting collisions (dense
+    sequential registration produces no detectable pattern. The pool has
+    ~64k addresses; if random probing keeps hitting collisions (dense
     allocation) it falls back to a shuffled exhaustive scan.
     """
     import random
-    leases = hub.setdefault("leases", {})
-    if name in leases:
-        return leases[name]
     subnet = hub.get("subnet", _HUB_SUBNET_DEFAULT)
     base = ".".join(subnet.split("/")[0].split(".")[:2])   # "10.10"
     hub_ip = f"{base}.0.1"
-    used = set(leases.values()) | {hub_ip}
+    used = set(used) | {hub_ip}
     # Fast path: random probing succeeds almost instantly when allocation is sparse
     for _ in range(500):
         ip = f"{base}.{random.randint(0, 254)}.{random.randint(2, 254)}"
         if ip not in used:
-            leases[name] = ip
             return ip
     # Fallback: shuffled exhaustive scan for dense allocations
     thirds = list(range(0, 255))
@@ -1419,9 +1418,41 @@ def _alloc_tunnel_ip(hub, name) -> str:
         for fourth in fourths:
             ip = f"{base}.{third}.{fourth}"
             if ip not in used:
-                leases[name] = ip
                 return ip
     return f"{base}.0.2"
+
+
+def _rw_used_ips(hub) -> set:
+    return {rw.get("ip", "") for rw in (hub.get("roadwarriors") or {}).values()}
+
+
+def _alloc_tunnel_ip(hub, name) -> str:
+    """Random stable per-device tunnel IP across the 10.10.x.y /16 space."""
+    leases = hub.setdefault("leases", {})
+    if name in leases:
+        return leases[name]
+    used = set(leases.values()) | _rw_used_ips(hub)
+    ip = _pick_unused_tunnel_ip(hub, used)
+    leases[name] = ip
+    return ip
+
+
+def _alloc_roadwarrior_ip(hub, key, device, label) -> str:
+    """Allocate (or return the existing) tunnel IP for a human/road-warrior
+    WireGuard peer riding on `device`'s own hub connection (see the Tunnel
+    tab's road-warrior peers section) — drawn from the SAME pool as device
+    leases so it can never collide with a router's own tunnel IP. Keyed by an
+    opaque `key` (not the device name), since several road-warriors can share
+    one router's connection."""
+    rw = hub.setdefault("roadwarriors", {})
+    existing = rw.get(key)
+    if existing and existing.get("ip"):
+        existing["device"], existing["label"] = device, label
+        return existing["ip"]
+    used = set(hub.get("leases", {}).values()) | _rw_used_ips(hub)
+    ip = _pick_unused_tunnel_ip(hub, used)
+    rw[key] = {"device": device, "label": label, "ip": ip}
+    return ip
 
 
 def _wg_keypair():
@@ -1440,19 +1471,96 @@ def _wg_keypair():
 
 def _write_wg_peers(path, leases):
     """Rebuild the hub's WireGuard peers file from every device lease
-    ({name: {ip, pubkey}}). The hub's wg0 includes this file. Returns (ok, err)."""
+    ({name: {ip, pubkey, extra}}). `extra` (optional) is a list of additional
+    tunnel IPs to accept from that same peer — road-warrior human peers
+    riding on that device's own hub connection (see _hub_wg_leases). The
+    hub's wg0 includes this file. Returns (ok, err)."""
     blocks = []
     for nm, lease in sorted(leases.items()):
         pub, ip = lease.get("pubkey"), lease.get("ip")
         if pub and ip:
+            allowed = ", ".join([f"{ip}/32"]
+                                + [f"{e}/32" for e in lease.get("extra") or []])
             blocks.append(f"[Peer]\n# {nm}\nPublicKey = {pub}\n"
-                          f"AllowedIPs = {ip}/32")
+                          f"AllowedIPs = {allowed}")
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n\n".join(blocks) + ("\n" if blocks else ""))
         return True, ""
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
+
+
+def _hub_wg_leases(hub) -> dict:
+    """Build the {name: {ip, pubkey, extra}} shape _write_wg_peers needs,
+    folding in road-warrior peers (see _alloc_roadwarrior_ip) as extra
+    allowed IPs on their host device's own hub peer entry — otherwise the
+    hub would silently drop their traffic even though the router happily
+    forwards it (the hub only accepts a source IP that's in the AllowedIPs
+    of the peer it arrived from)."""
+    leases_meta = hub.get("leases_meta") or {}
+    leases_all = hub.get("leases") or {}
+    extra_by_device: dict = {}
+    for rw in (hub.get("roadwarriors") or {}).values():
+        dev, ip = rw.get("device", ""), rw.get("ip", "")
+        if dev and ip:
+            extra_by_device.setdefault(dev, []).append(ip)
+    return {n: {"ip": m.get("ip") or leases_all.get(n),
+                "pubkey": m.get("pubkey"),
+                "extra": extra_by_device.get(n, [])}
+            for n, m in leases_meta.items()}
+
+
+def _tunnel_roadwarrior_ips(device_name, multi, devices_db) -> None:
+    """Resolve (allocating if needed) a hub tunnel IP for every road-warrior
+    peer row submitted on the Tunnel tab (tunnel_form/tunnel_plan's "wgrw"
+    rows), and inject it back into `multi` as a parallel "wgrw__allowed_ip"
+    column so tunnel_plan can set each peer's allowed-address to it. Also
+    drops this device's road-warrior registrations that are no longer in the
+    submitted rows.
+
+    Runs on both preview and confirm — allocating here is just mikromon's own
+    bookkeeping (hub.json), never a router change, and it must be persisted
+    on preview too or the preview and the eventual apply could show a
+    different peer address. The router itself is never touched until the
+    plan this feeds is actually applied; the hub's live WireGuard config
+    isn't touched until _sync_tunnel_roadwarriors_to_hub runs post-commit."""
+    if not devices_db:
+        return
+    names = multi.get("wgrw__name", [])
+    pubkeys = multi.get("wgrw__pubkey", [])
+    hub_file = _hub_path(devices_db)
+    hub = _hub_load(hub_file)
+    hub.setdefault("subnet", _HUB_SUBNET_DEFAULT)
+    allowed_ips, seen_keys = [], set()
+    for i in range(max(len(names), len(pubkeys))):
+        rw_name = (names[i].strip() if i < len(names) else "")
+        pubkey = (pubkeys[i].strip() if i < len(pubkeys) else "")
+        if not rw_name or not pubkey:
+            allowed_ips.append("")
+            continue
+        key = f"{device_name}\x1f{rw_name}"
+        seen_keys.add(key)
+        allowed_ips.append(_alloc_roadwarrior_ip(hub, key, device_name, rw_name))
+    multi["wgrw__allowed_ip"] = allowed_ips
+    for key, entry in list((hub.get("roadwarriors") or {}).items()):
+        if entry.get("device") == device_name and key not in seen_keys:
+            del hub["roadwarriors"][key]
+    _hub_save(hub_file, hub)
+
+
+def _sync_tunnel_roadwarriors_to_hub(devices_db) -> None:
+    """After a confirmed Tunnel-tab apply, rewrite the hub's wg-peers.conf so
+    it picks up any road-warrior IPs just registered against this device —
+    the mirror of _register_hub_peer's own post-apply hook for the
+    hubtunnel feature. Best-effort: never blocks the response."""
+    try:
+        hub_file = _hub_path(devices_db)
+        hub = _hub_load(hub_file)
+        peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
+        _write_wg_peers(peers_path, _hub_wg_leases(hub))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _hub_peers_status(peers_path: str) -> dict:
@@ -2325,6 +2433,46 @@ def _wg_repair_box(name, csrf) -> str:
             f'<input type="hidden" name="device" value="{q}">'
             f'<div class="actions"><button class="btn" type="submit">'
             f'Diagnose &amp; repair now</button></div></form></div>')
+
+
+def _tunnel_roadwarrior_box(name, current, devices_db) -> str:
+    """Client-config values for this router's cross-device (road-warrior)
+    peers — their assigned tunnel IP plus what to put in their OWN WireGuard
+    client, since mikromon only pushes the router side of that peer."""
+    if not devices_db:
+        return ""
+    hub = _hub_load(_hub_path(devices_db))
+    rws = [rw for rw in (hub.get("roadwarriors") or {}).values()
+          if rw.get("device") == name and rw.get("ip")]
+    if not rws:
+        return ""
+    router_pub = next((i.get("public-key", "") for i in current.get("ifaces", [])
+                       if i.get("public-key")), "(generating…)")
+    listen_port = next((i.get("listen-port", "?") for i in current.get("ifaces", [])), "?")
+    rows = ""
+    for rw in sorted(rws, key=lambda r: r.get("label", "")):
+        client_conf = (
+            f"[Interface]\nPrivateKey = <the person's OWN private key>\n"
+            f"Address = {rw['ip']}/32\n\n"
+            f"[Peer]\nPublicKey = {router_pub}\n"
+            f"Endpoint = <this router's public IP or hostname>:{listen_port}\n"
+            f"AllowedIPs = 10.10.0.0/16\nPersistentKeepalive = 25")
+        rows += (f'<tr><td>{esc(rw.get("label", ""))}</td>'
+                 f'<td><code>{esc(rw["ip"])}</code></td>'
+                 f'<td><details><summary class="muted">client config</summary>'
+                 f'<pre style="{_PRE}">{esc(client_conf)}</pre></details></td></tr>')
+    return (f'<div class="box"><h2>Cross-device peer client config</h2>'
+            f'<p class="muted">Each row below is a peer added under '
+            f'"Cross-device peers" above, once applied. Send the person the '
+            f'expanded config (fill in their own private key and this '
+            f'router\'s real public IP/hostname) — mikromon cannot generate '
+            f'their private key or know your public IP for them. '
+            f'<b>AllowedIPs = 10.10.0.0/16</b> is what makes their client '
+            f'route other company routers through this tunnel, not just this '
+            f'one; narrow it to specific device IPs once you\'ve worked out '
+            f'how you want to restrict that.</p>'
+            f'<table><tr><th>Label</th><th>Tunnel IP</th><th></th></tr>'
+            f'{rows}</table></div>')
 
 
 def _update_box(name, csrf, current):
@@ -3887,10 +4035,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     hub.setdefault("leases_meta", {})[name] = {
                         "ip": tunnel_ip, "pubkey": dev_pub}
                     # rebuild the hub peers file from every device's pubkey+ip
-                    leases = {n: {"ip": hub["leases"].get(n),
-                                  "pubkey": m.get("pubkey")}
-                              for n, m in hub["leases_meta"].items()}
-                    reg_ok, reg_err = _write_wg_peers(peers_path, leases)
+                    reg_ok, reg_err = _write_wg_peers(peers_path, _hub_wg_leases(hub))
             _hub_save(hub_file, hub)
             # one full-access user, used for both polling and config-push
             raw["username"] = uname
@@ -4010,9 +4155,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if tunnel_ip and router_pub:
                 hub.setdefault("leases_meta", {})[name] = {
                     "ip": tunnel_ip, "pubkey": router_pub}
-                leases = {n: {"ip": hub["leases"].get(n), "pubkey": m.get("pubkey")}
-                          for n, m in hub["leases_meta"].items()}
-                reg_ok, reg_err = _write_wg_peers(peers_path, leases)
+                reg_ok, reg_err = _write_wg_peers(peers_path, _hub_wg_leases(hub))
             _hub_save(hub_file, hub)
             # save the new creds; reach the device at the tunnel IP from now on.
             # one full-access user does both polling and config-push.
@@ -4172,6 +4315,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         extra_html = _queue_script_box(name, csrf, facts)
                     elif slug == "hubtunnel":
                         extra_html = _hubtunnel_box(name, current, csrf, devices_db)
+                    elif slug == "tunnel":
+                        extra_html = _tunnel_roadwarrior_box(name, current, devices_db)
                     elif slug == "update":
                         extra_html, extra_actions = _update_box(name, csrf, current)
                     elif slug == "interfaces":
@@ -4317,6 +4462,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # bad host/credential shows up in the activity log too.
                 try:
                     api.connect()
+                    if slug == "tunnel":
+                        _tunnel_roadwarrior_ips(name, multi, devices_db)
                     plan = feature["plan"](pusher, cfg, flat, multi)
                 except (DeviceError, PushError) as exc:
                     if audit:
@@ -4352,6 +4499,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # WireGuard public key as a peer on this server automatically.
                 if slug == "hubtunnel" and devices_db:
                     _register_hub_peer(name, pusher.api, flat, devices_db)
+                # After applying the Tunnel feature, sync any road-warrior
+                # peer IPs just allocated (see _tunnel_roadwarrior_ips above)
+                # into the hub's own wg-peers.conf so it actually accepts
+                # traffic from them, not just the router itself.
+                if slug == "tunnel" and devices_db:
+                    _sync_tunnel_roadwarriors_to_hub(devices_db)
                 # Safe mode (commit-confirm): arm a local auto-revert so a change
                 # that locks us out heals itself. Best-effort — if arming fails
                 # the change still stands (just without the safety net).
@@ -4590,10 +4743,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             hub_file = _hub_path(devices_db)
             hub = _hub_load(hub_file)
             peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
-            leases_meta = hub.get("leases_meta") or {}
-            leases_all = hub.get("leases") or {}
-            leases = {n: {"ip": leases_all.get(n), "pubkey": m.get("pubkey")}
-                      for n, m in leases_meta.items()}
+            leases = _hub_wg_leases(hub)
             ok, err_msg = _write_wg_peers(peers_path, leases)
             count = sum(1 for v in leases.values()
                         if v.get("pubkey") and v.get("ip"))
@@ -5424,9 +5574,7 @@ def _register_hub_peer(device_name: str, api, flat: dict, devices_db: str) -> No
         hub.setdefault("leases", {})[device_name] = tunnel_ip
         hub.setdefault("leases_meta", {})[device_name] = {
             "ip": tunnel_ip, "pubkey": router_pub}
-        leases = {n: {"ip": m.get("ip"), "pubkey": m.get("pubkey")}
-                  for n, m in hub.get("leases_meta", {}).items()}
-        _write_wg_peers(peers_path, leases)
+        _write_wg_peers(peers_path, _hub_wg_leases(hub))
         _hub_save(hub_file, hub)
     except Exception:  # noqa: BLE001
         pass

@@ -1638,6 +1638,7 @@ def remote_plan(pusher, cfg, flat, multi):
 _WG_IFACE = ("interface", "wireguard")
 _WG_PEERS = ("interface", "wireguard", "peers")
 _WG_TAG = "mikromon:wg:"
+_WG_RW_TAG = "mikromon:wg-rw:"
 
 
 def _ros_version(api):
@@ -1735,8 +1736,12 @@ def tunnel_form(current, cfg):
                            f"This router is running {v}. "
                            f"Upgrade to 7.1+ to use the Tunnel tab.")}]
     ifaces = current.get("ifaces", [])
-    managed_peers = [p for p in current.get("peers", [])
-                     if str(p.get("comment", "")).startswith(_WG_TAG)]
+    all_peers = current.get("peers", [])
+    managed_peers = [p for p in all_peers
+                     if str(p.get("comment", "")).startswith(_WG_TAG)
+                     and not str(p.get("comment", "")).startswith(_WG_RW_TAG)]
+    rw_peers = [p for p in all_peers
+               if str(p.get("comment", "")).startswith(_WG_RW_TAG)]
     rows = []
     for p in managed_peers:
         lbl = p.get("comment", "")[len(_WG_TAG):]
@@ -1751,6 +1756,9 @@ def tunnel_form(current, cfg):
             "allowed": p.get("allowed-address", ""),
             "keepalive": str(p.get("persistent-keepalive", "")),
         })
+    rw_rows = [{"name": p.get("comment", "")[len(_WG_RW_TAG):],
+                "pubkey": p.get("public-key", "")}
+               for p in rw_peers]
 
     fields: list[dict] = []
     if not ifaces:
@@ -1792,6 +1800,32 @@ def tunnel_form(current, cfg):
         "rows": rows,
         "hint": ("Public key must match the remote peer's WireGuard public key. "
                  "Leave endpoint blank for dial-in / road-warrior peers."),
+    })
+
+    fields.append({
+        "type": "heading", "label": "Cross-device access (experimental)",
+        "hint": "A road-warrior peer here can also reach every other company "
+                "router already dialled into the hub — not just this one — "
+                "over the same tunnel network the Provision/Hub tunnel tabs "
+                "already set up. mikromon assigns each peer its own address "
+                "from that same pool and registers it on the hub automatically; "
+                "you don't type an allowed-address for these. This still needs "
+                "the person's OWN WireGuard client configured with "
+                "AllowedIPs = 10.10.0.0/16 (or a narrower list) — that part "
+                "isn't pushed by mikromon. Requires THIS router to have a "
+                "public IP:port the person's device can dial directly (a "
+                "router that only dials home to the hub, behind CGNAT, can't "
+                "accept this kind of inbound connection).",
+    })
+    fields.append({
+        "type": "rows", "name": "wgrw", "label": "Cross-device peers",
+        "cols": [
+            ("name",   "name / label",   "alice-laptop"),
+            ("pubkey", "peer public key", "abc123…"),
+        ],
+        "rows": rw_rows,
+        "hint": "Same idea as Peers above, but scoped to reach the whole "
+                "hub network, not just this router.",
     })
     return fields
 
@@ -1853,7 +1887,29 @@ def tunnel_plan(pusher, cfg, flat, multi):
     peer_plan = pusher.plan_managed_list(
         _WG_PEERS, "public-key", desired_peers,
         owns=_prefix_owner(_WG_TAG), label="wg-peer")
-    return Plan(cfg.name, ops + peer_plan.ops, summary="wireguard tunnel")
+
+    # Cross-device (road-warrior) peers — same router-side mechanics as the
+    # peers above, but each one's allowed-address is its OWN hub-assigned
+    # tunnel IP (see _tunnel_roadwarrior_ips in web.py, which injects
+    # "wgrw__allowed_ip" before this runs), not a user-typed CIDR. A row
+    # whose IP hasn't been allocated yet (shouldn't normally happen — the web
+    # layer allocates it before calling here) is skipped rather than pushed
+    # with a blank allowed-address.
+    desired_rw = []
+    for r in _rows(multi, "wgrw", ("name", "pubkey", "allowed_ip")):
+        if not r["name"] or not r["pubkey"] or not r["allowed_ip"]:
+            continue
+        desired_rw.append({
+            "interface": peer_iface,
+            "public-key": r["pubkey"].strip(),
+            "allowed-address": f"{r['allowed_ip']}/32",
+            "comment": _WG_RW_TAG + r["name"],
+        })
+    rw_plan = pusher.plan_managed_list(
+        _WG_PEERS, "public-key", desired_rw,
+        owns=_prefix_owner(_WG_RW_TAG), label="wg cross-device peer")
+    return Plan(cfg.name, ops + peer_plan.ops + rw_plan.ops,
+                summary="wireguard tunnel")
 
 
 # ===========================================================================

@@ -333,6 +333,63 @@ check("WireGuard peers file lists each device as a [Peer]",
 kp = web._wg_keypair()
 check("wg keypair helper returns a tuple (priv/pub or graceful None+err)",
       isinstance(kp, tuple) and len(kp) == 2)
+
+# Cross-device (road-warrior) WireGuard peers — human peers riding on a
+# router's own hub connection so they can also reach other company routers
+# over the hub tunnel (Tunnel tab's "Cross-device peers" rows).
+rw_hub = {}
+rw_ip1 = web._alloc_roadwarrior_ip(rw_hub, "R1\x1falice", "R1", "alice")
+rw_ip2 = web._alloc_roadwarrior_ip(rw_hub, "R1\x1fbob", "R1", "bob")
+check("road-warrior IPs are unique and stable per key",
+      rw_ip1 != rw_ip2
+      and web._alloc_roadwarrior_ip(rw_hub, "R1\x1falice", "R1", "alice") == rw_ip1)
+collide_hub = {"leases": {"R1": rw_ip1}}
+check("road-warrior allocation never collides with an existing device lease",
+      web._alloc_roadwarrior_ip(collide_hub, "R1\x1fcarol", "R1", "carol") != rw_ip1)
+
+leases_hub = {
+    "leases_meta": {"R1": {"ip": "10.10.1.1", "pubkey": "R1KEY="}},
+    "leases": {"R1": "10.10.1.1"},
+    "roadwarriors": {"R1\x1falice": {"device": "R1", "label": "alice",
+                                    "ip": "10.10.9.9"}},
+}
+merged = web._hub_wg_leases(leases_hub)
+check("_hub_wg_leases folds a device's road-warrior peers into its own "
+      "'extra' allowed IPs",
+      merged["R1"]["ip"] == "10.10.1.1" and merged["R1"]["extra"] == ["10.10.9.9"])
+rw_peersp = os.path.join(tmp, "wg-peers-rw.conf")
+web._write_wg_peers(rw_peersp, merged)
+rw_body = open(rw_peersp).read()
+check("the hub's peers file accepts BOTH the router's own IP and its "
+      "road-warrior's IP from the SAME peer entry (or the hub silently "
+      "drops the road-warrior's traffic even though the router forwards it)",
+      "AllowedIPs = 10.10.1.1/32, 10.10.9.9/32" in rw_body)
+
+# _tunnel_roadwarrior_ips: the web-layer glue that reads submitted "wgrw"
+# rows, allocates/persists each one's IP into hub.json, and injects it back
+# as a parallel column for tunnel_plan to use.
+rw_devices_db = os.path.join(tmp, "rwdevices.json")
+with open(rw_devices_db, "w") as f:
+    f.write("{}")
+rw_multi = {"wgrw__name": ["alice"], "wgrw__pubkey": ["ALICEKEY="]}
+web._tunnel_roadwarrior_ips("R2", rw_multi, rw_devices_db)
+check("_tunnel_roadwarrior_ips injects an allocated IP for a new road-warrior row",
+      len(rw_multi["wgrw__allowed_ip"]) == 1 and bool(rw_multi["wgrw__allowed_ip"][0]))
+saved_hub = web._hub_load(web._hub_path(rw_devices_db))
+check("the allocation is persisted to hub.json",
+      any(rw.get("device") == "R2" and rw.get("label") == "alice"
+          for rw in saved_hub.get("roadwarriors", {}).values()))
+first_ip = rw_multi["wgrw__allowed_ip"][0]
+rw_multi2 = {"wgrw__name": ["alice"], "wgrw__pubkey": ["ALICEKEY="]}
+web._tunnel_roadwarrior_ips("R2", rw_multi2, rw_devices_db)
+check("re-submitting the same road-warrior row reuses the same IP (idempotent)",
+      rw_multi2["wgrw__allowed_ip"][0] == first_ip)
+rw_multi_removed = {"wgrw__name": [], "wgrw__pubkey": []}
+web._tunnel_roadwarrior_ips("R2", rw_multi_removed, rw_devices_db)
+saved_hub2 = web._hub_load(web._hub_path(rw_devices_db))
+check("removing a road-warrior row from the form drops its hub.json registration",
+      not any(rw.get("device") == "R2"
+              for rw in saved_hub2.get("roadwarriors", {}).values()))
 # provisioning script: "lock API" binds api/api-ssl to the tunnel subnet + sets
 # up API-SSL, so the API has no public exposure. Only emitted with a tunnel.
 locked = web._provision_script(
