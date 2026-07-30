@@ -820,9 +820,8 @@ check("re-submitting an already-active username changes nothing",
       resubmit_plan.empty)
 
 current_state = F.remote_read(Pusher(r_cfg, r_api, dry_run=True), r_cfg)
-check("remote_summary reports the active login and its group",
-      any("alice" in line and "full" in line
-          for line in F.remote_summary(current_state, r_cfg)))
+check("remote_summary reports the active login in plain language",
+      any("alice" in line for line in F.remote_summary(current_state, r_cfg)))
 check("remote_form lists the active login as a revocable row",
       any(r["name"] == "alice"
           for f in F.remote_form(current_state, r_cfg) if f.get("name") == "keep"

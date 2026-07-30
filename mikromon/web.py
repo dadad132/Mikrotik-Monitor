@@ -2798,7 +2798,36 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
            f'Check the host and the read-write push user on the Devices page.'
            f'</span></div>' if error else "")
 
-    if preview is not None:
+    if preview is not None and slug == "remote":
+        # This tab needs to work for someone who's never seen RouterOS: no
+        # raw diff, no "Safe mode" checkbox (irrelevant — creating/removing a
+        # login has nothing to do with hub reachability). Just plain language.
+        from .push.features import _REMOTE_DEFAULT_MINUTES
+        creating = next((o for o in preview.ops
+                        if o.path == ("user",) and o.action == "add"), None)
+        revoking = [o for o in preview.ops
+                   if o.path == ("user",) and o.action == "remove"]
+        if creating:
+            msg_line = (f'Create temporary access for '
+                       f'<b>{esc(creating.params.get("name", ""))}</b>? It '
+                       f'stops working on its own in '
+                       f'{_REMOTE_DEFAULT_MINUTES} minutes.')
+        elif revoking:
+            who = ", ".join(esc(o.desc.split("'")[1]) for o in revoking
+                            if "'" in o.desc)
+            msg_line = f'Cut off access for <b>{who or "the selected person"}</b> now?'
+        else:
+            msg_line = "Apply this change?"
+        body = (f'<div class="box"><h2>{msg_line}</h2>'
+                f'<form method="POST" action="{confirm_action}">'
+                f'<input type="hidden" name="csrf" value="{csrf}">'
+                f'<input type="hidden" name="apply" value="1">'
+                f'{_hidden_from_multi(submitted or {})}'
+                f'<div class="actions">'
+                f'<button class="btn" type="submit">Yes, do it</button>'
+                f'<a class="btn ghost" href="/device?name={q}&tab={slug}">Cancel'
+                f'</a></div></form></div>')
+    elif preview is not None:
         # Safe mode (commit-confirm): offered for changes that could lock you
         # out. Not for 'update' (its reboot is intentional and would fight the
         # revert).

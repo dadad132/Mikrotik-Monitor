@@ -1603,40 +1603,39 @@ def remote_read(pusher, cfg):
 def remote_summary(current, cfg):
     users = current.get("users", [])
     if not users:
-        return ["No temporary logins active right now."]
+        return ["Nobody currently has temporary access."]
     sched_by_name = {s.get("name"): s for s in current.get("scheds", [])}
     lines = []
     for u in users:
         name = u.get("name", "?")
         sched = sched_by_name.get(_REMOTE_SCHED_PREFIX + name)
-        exp = (f"expires automatically (~{sched.get('interval')} scheduler)"
-              if sched else "no expiry scheduled — revoke it manually below")
-        lines.append(f"{name} ({u.get('group', '?')}) — {exp}")
+        exp = ("expires on its own soon" if sched
+              else "expiry missing — revoke below to be safe")
+        lines.append(f"{name} — {exp}")
     return lines
 
 
 def remote_form(current, cfg):
-    rows = [{"name": u.get("name", "")} for u in current.get("users", [])]
-    return [
-        {"type": "heading", "label": "Create a temporary login",
-         "hint": f"Creates a real RouterOS user (access level: "
-                f"{_REMOTE_DEFAULT_GROUP}) with a generated password, and "
-                f"schedules the router to remove it automatically after "
-                f"{_REMOTE_DEFAULT_MINUTES} minutes — no firewall opening, "
-                f"no VPN config to hand out. The address, username and "
-                f"password to connect with are shown once you confirm — copy "
-                f"them then, RouterOS never lets the password be read back. "
-                f"The person still needs network reachability to this router "
-                f"(already on the hub's tunnel network, or the same LAN) — "
-                f"this only grants the login itself."},
-        {"type": "text", "name": "tempuser", "label": "Username",
-         "placeholder": "alice"},
-        {"type": "rows", "name": "keep", "label": "Active temporary logins",
-         "cols": [("name", "username", "")],
-         "rows": rows,
-         "hint": "Delete a row and apply to revoke that login (and its "
-                 "scheduled expiry) immediately."},
+    users = current.get("users", [])
+    fields: list[dict] = [
+        {"type": "heading", "label": "Grant temporary access",
+         "hint": f"Type who it's for and click Create — the password and "
+                f"address to give them come right after. It stops working "
+                f"on its own in {_REMOTE_DEFAULT_MINUTES} minutes."},
+        {"type": "text", "name": "tempuser", "label": "Who is this for?",
+         "placeholder": "e.g. alice, or the contractor's name"},
     ]
+    # Only shown once someone actually has access — a first-time visitor
+    # just sees the one field above, nothing else.
+    if users:
+        fields.append({
+            "type": "rows", "name": "keep", "label": "Currently has access",
+            "cols": [("name", "name", "")],
+            "rows": [{"name": u.get("name", "")} for u in users],
+            "hint": "Delete a row and apply to cut off that person's access "
+                    "right away.",
+        })
+    return fields
 
 
 def remote_plan(pusher, cfg, flat, multi):
