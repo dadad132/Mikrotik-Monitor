@@ -1081,8 +1081,8 @@ check("provision_apply creates exactly ONE full-access user (no 2nd user)",
       and uadds[0].params.get("group") == "full")
 
 
-# ---- 15a2. Tunnel tab: generic peers + cross-device (road-warrior) peers --
-print("tunnel_plan (Tunnel tab — generic + cross-device peers):")
+# ---- 15a2. VPN tab (formerly Tunnel): emptied out pending a new design -----
+print("tunnel_plan (VPN tab — emptied out, no fields, no-op plan):")
 _TRES = ("system", "resource")
 t_cfg = types.SimpleNamespace(name="R1", push_username="", push_password="")
 t_api = FakeApi({
@@ -1091,55 +1091,14 @@ t_api = FakeApi({
     WGP: [],
 })
 t_pusher = Pusher(t_cfg, t_api, dry_run=True)
-t_plan = F.tunnel_plan(t_pusher, t_cfg,
-                      {"peer_iface": "wg0"},
-                      {"wgp__name": ["site-a"], "wgp__pubkey": ["SITEAKEY="],
-                       "wgp__endpoint": ["203.0.113.1:51820"],
-                       "wgp__allowed": ["10.0.1.0/24"], "wgp__keepalive": ["25"],
-                       "wgrw__name": ["alice"], "wgrw__pubkey": ["ALICEKEY="],
-                       "wgrw__allowed_ip": ["10.10.9.9"]})
-t_adds = [o for o in t_plan.ops if o.path == WGP and o.action == "add"]
-check("both a generic peer and a cross-device peer get added",
-      len(t_adds) == 2)
-generic_add = next(o for o in t_adds if o.params.get("public-key") == "SITEAKEY=")
-rw_add = next(o for o in t_adds if o.params.get("public-key") == "ALICEKEY=")
-check("the generic peer keeps its user-typed allowed-address",
-      generic_add.params.get("allowed-address") == "10.0.1.0/24"
-      and generic_add.params.get("comment") == "mikromon:wg:site-a")
-check("the cross-device peer's allowed-address is its own hub-assigned "
-      "/32, tagged with the distinct mikromon:wg-rw: prefix (never swept "
-      "up by the generic peer reconcile)",
-      rw_add.params.get("allowed-address") == "10.10.9.9/32"
-      and rw_add.params.get("comment") == "mikromon:wg-rw:alice")
-
-# A cross-device row with no allocated IP yet (shouldn't normally happen —
-# the web layer allocates one before calling here — but must fail safe) is
-# skipped rather than pushed with a blank allowed-address.
-t_plan_noip = F.tunnel_plan(t_pusher, t_cfg, {"peer_iface": "wg0"},
-                           {"wgrw__name": ["bob"], "wgrw__pubkey": ["BOBKEY="],
-                            "wgrw__allowed_ip": [""]})
-check("a cross-device row with no allocated IP yet is skipped, not pushed "
-      "with a blank allowed-address",
-      not any(o.path == WGP and o.action == "add" for o in t_plan_noip.ops))
-
-# Removing a cross-device peer (no longer submitted) removes just that
-# peer — never touches a generic peer that shares the same router.
-t_api2 = FakeApi({
-    _TRES: [{"version": "7.14.3"}],
-    WG: [{"name": "wg0", "listen-port": "13231", "public-key": "ROUTERPUB="}],
-    WGP: [
-        {".id": "*1", "public-key": "SITEAKEY=", "allowed-address": "10.0.1.0/24",
-         "comment": "mikromon:wg:site-a", "interface": "wg0"},
-        {".id": "*2", "public-key": "ALICEKEY=", "allowed-address": "10.10.9.9/32",
-         "comment": "mikromon:wg-rw:alice", "interface": "wg0"},
-    ],
-})
-t_plan_rm = F.tunnel_plan(Pusher(t_cfg, t_api2, dry_run=True), t_cfg,
-                         {"peer_iface": "wg0"},
-                         {"wgp__name": ["site-a"], "wgp__pubkey": ["SITEAKEY="],
-                          "wgp__allowed": ["10.0.1.0/24"]})
-check("removing a cross-device peer from the form removes only that peer",
-      {o.params[".id"] for o in t_plan_rm.ops if o.action == "remove"} == {"*2"})
+check("tunnel_form shows just a placeholder — no peer editor fields",
+      [f["type"] for f in F.tunnel_form({"version": "7.14.3"}, t_cfg)] == ["static"])
+check("tunnel_form still shows the RouterOS-version notice on unsupported firmware",
+      any("7.1" in f.get("value", "")
+          for f in F.tunnel_form({"unsupported": True, "version": "6.49"}, t_cfg)))
+check("tunnel_plan is always a no-op regardless of what's submitted",
+      F.tunnel_plan(t_pusher, t_cfg, {"peer_iface": "wg0"},
+                    {"wgp__name": ["site-a"], "wgp__pubkey": ["SITEAKEY="]}).empty)
 
 
 # ---- 15b. WireGuard self-repair: diagnose, auto-fix, report clearly ---------

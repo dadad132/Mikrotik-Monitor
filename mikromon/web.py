@@ -708,7 +708,7 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
 # Flat tabs on the device bar.
 _DEVICE_TABS = ["Overview", "Provision", "Routes", "WAN", "Security",
                 "DNS", "Queues", "Port forwarding",
-                "Tunnel", "Scripts"]
+                "VPN", "Scripts"]
 _MAINT_ITEMS = [("Update", "update"), ("Backups", "backups"),
                 ("Restrict access", "harden"), ("Remote access", "remote"),
                 ("Temp Access", "tempaccess")]
@@ -718,7 +718,7 @@ _LIVE_TABS = {"Overview": "", "Provision": "provision",
               "Security": "security", "Restrict access": "harden",
               "DNS": "nextdns", "Queues": "qos", "QoS": "qos", "Port forwarding": "portfwd",
               "Interfaces": "interfaces", "Remote access": "remote",
-              "Tunnel": "tunnel", "Scripts": "scripts",
+              "VPN": "tunnel", "Scripts": "scripts",
               "Update": "update", "Backups": "backups",
               "Temp Access": "tempaccess"}
 # tabs that WRITE to the router (admins only); Overview is read-only
@@ -2674,8 +2674,7 @@ _TAB_INTRO = {
     "interfaces": "A read-only view of the router's ports, VLANs and bridges.",
     "remote": "Create a temporary RouterOS login (auto-expires on its own) "
              "for Winbox/SSH/WebFig — no firewall opening, no VPN config.",
-    "tunnel": ("Manage WireGuard VPN interfaces and peers. "
-               "Requires RouterOS 7.1+; shows a compatibility notice on older firmware."),
+    "tunnel": "Not set up yet — coming soon.",
     "scripts": "Paste any RouterOS script for things the other tabs don't cover. "
                "Save adds it (tagged), Run executes it, Remove deletes it — all "
                "previewed first and logged.",
@@ -4381,8 +4380,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         extra_html = _queue_script_box(name, csrf, facts)
                     elif slug == "hubtunnel":
                         extra_html = _hubtunnel_box(name, current, csrf, devices_db)
-                    elif slug == "tunnel":
-                        extra_html = _tunnel_roadwarrior_box(name, current, devices_db)
                     elif slug == "update":
                         extra_html, extra_actions = _update_box(name, csrf, current)
                     elif slug == "interfaces":
@@ -4528,9 +4525,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # bad host/credential shows up in the activity log too.
                 try:
                     api.connect()
-                    if slug == "tunnel":
-                        _tunnel_roadwarrior_ips(name, multi, devices_db)
-                    elif slug == "remote" and (flat.get("tempuser") or "").strip():
+                    if slug == "remote" and (flat.get("tempuser") or "").strip():
                         # Freshly generated every request (preview or confirm)
                         # — never shown or logged until a real commit actually
                         # pushes it (see below), so there's nothing to keep
@@ -4571,12 +4566,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # WireGuard public key as a peer on this server automatically.
                 if slug == "hubtunnel" and devices_db:
                     _register_hub_peer(name, pusher.api, flat, devices_db)
-                # After applying the Tunnel feature, sync any road-warrior
-                # peer IPs just allocated (see _tunnel_roadwarrior_ips above)
-                # into the hub's own wg-peers.conf so it actually accepts
-                # traffic from them, not just the router itself.
-                if slug == "tunnel" and devices_db:
-                    _sync_tunnel_roadwarriors_to_hub(devices_db)
                 # Just created a temporary login: show the connection details
                 # ONCE, directly (never a redirect — the password would end
                 # up in the URL/browser history/access logs). RouterOS never
