@@ -532,8 +532,8 @@ check("interfaces table shows type, status and IPs",
       and "192.168.88.1/24" in itab and "disabled" in itab and "up" in itab)
 
 print("Web /devices flow (admin only):")
-mdb, sfile, adb, wdb = (os.path.join(tmp, x) for x in
-                        ("m.db", "s.json", "a.db", "w.db"))
+mdb, sfile, adb, wdb, pldb, aldb = (os.path.join(tmp, x) for x in
+                        ("m.db", "s.json", "a.db", "w.db", "pl.db", "al.db"))
 MetricsStore(mdb).close()
 with open(sfile, "w") as fh:
     json.dump({"devices": {}}, fh)
@@ -546,7 +546,8 @@ a.close()
 DevicesStore(wdb).close()
 
 srv = ThreadingHTTPServer(("127.0.0.1", 8096), web.make_handler(
-    mdb, sfile, AuthStore(adb), web.SessionManager(), devices_db=wdb, defaults=DEF))
+    mdb, sfile, AuthStore(adb), web.SessionManager(), devices_db=wdb, defaults=DEF,
+    push_log_db=pldb, alert_log_db=aldb))
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 B = "http://127.0.0.1:8096"
 
@@ -726,6 +727,42 @@ try:
     check("admin can open the activity log", st == 200 and "activity log" in body.lower())
     st, _ = get(nobody, "/logs")
     check("non-admin blocked from the activity log (403)", st == 403)
+
+    # The Activity tab must be scoped per-company — a user (even a
+    # superadmin, viewing their OWN Activity tab) must never see another
+    # company's push/alert history. admin@acme.test is the very first
+    # signup on this AuthStore db, so it was auto-promoted to superadmin —
+    # exactly the account type that used to bypass this scoping.
+    from mikromon.push import AuditLog
+    from mikromon.alert_log import AlertLog
+    a_orgs = AuthStore(adb)
+    org_b = a_orgs.signup("owner@orgb.test", "orgb123", "OrgB")
+    check("admin@acme.test (first-ever signup) is a superadmin",
+          bool(a_orgs.get_user("admin@acme.test").get("is_superadmin")))
+    a_orgs.close()
+    ds_orgb = DevicesStore(wdb)
+    ds_orgb.upsert({"name": "OrgB-Router", "host": "8.8.4.4"}, DEF, org_id=org_b)
+    ds_orgb.close()
+    AuditLog(pldb).append("WebR1", "admin@acme.test", "security", "apply",
+                          "ok", "Acme push marker", "")
+    AuditLog(pldb).append("OrgB-Router", "owner@orgb.test", "security", "apply",
+                          "ok", "OrgB push marker", "")
+    AlertLog(aldb).append("WebR1", "wan_link:0", "Acme WAN down", 2, False)
+    AlertLog(aldb).append("OrgB-Router", "wan_link:0", "OrgB WAN down", 2, False)
+    st, body = get(admin, "/logs")
+    check("superadmin's own Activity tab shows their own company's push log",
+          st == 200 and "Acme push marker" in body)
+    check("superadmin's own Activity tab shows their own company's alerts",
+          "Acme WAN down" in body)
+    check("superadmin's own Activity tab does NOT show another company's push log",
+          "OrgB push marker" not in body)
+    check("superadmin's own Activity tab does NOT show another company's alerts",
+          "OrgB WAN down" not in body)
+    # Clean up the extra device so later tests (which assume only WebR1
+    # exists in this store) are unaffected.
+    ds_orgb_cleanup = DevicesStore(wdb)
+    ds_orgb_cleanup.delete("OrgB-Router")
+    ds_orgb_cleanup.close()
     st, _ = post(nobody, "/device/push",
                  {"csrf": bcsrf, "device": "WebR1", "feature": "security"})
     check("unallocated member blocked from pushing config (403)", st == 403)

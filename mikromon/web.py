@@ -5006,9 +5006,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             alert_rows = alog.recent(limit=200) if alog else []
             if alog:
                 alog.close()
-            # Neither log has an org column, so scope both by device ownership
-            # (superadmin sees every device).
-            if (rows or alert_rows) and devices_db and not user.get("is_superadmin"):
+            # Neither log has an org column, so scope both by device ownership.
+            # Always scoped to the viewer's own company — even for a
+            # superadmin account, since this is that account's OWN Activity
+            # tab, not a cross-company platform view (there is no such view;
+            # /superadmin is billing/backups, not per-org activity).
+            if (rows or alert_rows) and devices_db:
                 ds = self._devstore()
                 try:
                     org_names = (set(ds.names_for_org(user.get("org_id")))
