@@ -1326,6 +1326,7 @@ def _user_slug(s) -> str:
 # hub already accepts the peer — no manual entry, no mismatch.
 _HUB_SUBNET_DEFAULT = "10.10.0.0/16"
 _WG_PEERS_DEFAULT = "/etc/wireguard/wg-peers.conf"
+_WG_ROUTES_DEFAULT = "/etc/wireguard/wg-routes.conf"
 _WG_PORT_DEFAULT = "51820"
 
 
@@ -1472,15 +1473,19 @@ def _wg_keypair():
 def _write_wg_peers(path, leases):
     """Rebuild the hub's WireGuard peers file from every device lease
     ({name: {ip, pubkey, extra}}). `extra` (optional) is a list of additional
-    tunnel IPs to accept from that same peer — road-warrior human peers
-    riding on that device's own hub connection (see _hub_wg_leases). The
-    hub's wg0 includes this file. Returns (ok, err)."""
+    addresses/subnets to accept from that same peer — road-warrior human
+    peers (bare IPs) and site-to-site LAN subnets (CIDRs) both ride on their
+    host device's own hub connection this way (see _hub_wg_leases). Entries
+    without a "/" are treated as single IPs (suffixed /32); entries that
+    already carry a mask (a shared LAN subnet) are used as-is. The hub's wg0
+    includes this file. Returns (ok, err)."""
     blocks = []
     for nm, lease in sorted(leases.items()):
         pub, ip = lease.get("pubkey"), lease.get("ip")
         if pub and ip:
-            allowed = ", ".join([f"{ip}/32"]
-                                + [f"{e}/32" for e in lease.get("extra") or []])
+            extra_cidrs = [e if "/" in e else f"{e}/32"
+                          for e in lease.get("extra") or []]
+            allowed = ", ".join([f"{ip}/32"] + extra_cidrs)
             blocks.append(f"[Peer]\n# {nm}\nPublicKey = {pub}\n"
                           f"AllowedIPs = {allowed}")
     try:
@@ -1493,11 +1498,12 @@ def _write_wg_peers(path, leases):
 
 def _hub_wg_leases(hub) -> dict:
     """Build the {name: {ip, pubkey, extra}} shape _write_wg_peers needs,
-    folding in road-warrior peers (see _alloc_roadwarrior_ip) as extra
-    allowed IPs on their host device's own hub peer entry — otherwise the
-    hub would silently drop their traffic even though the router happily
-    forwards it (the hub only accepts a source IP that's in the AllowedIPs
-    of the peer it arrived from)."""
+    folding in both road-warrior peers (see _alloc_roadwarrior_ip) and
+    site-to-site LAN subnets (see the VPN tab's "sites" registry) as extra
+    allowed addresses on their host device's own hub peer entry — otherwise
+    the hub would silently drop that traffic even though the router happily
+    forwards it (the hub only accepts a source IP/subnet that's in the
+    AllowedIPs of the peer it arrived from)."""
     leases_meta = hub.get("leases_meta") or {}
     leases_all = hub.get("leases") or {}
     extra_by_device: dict = {}
@@ -1505,10 +1511,140 @@ def _hub_wg_leases(hub) -> dict:
         dev, ip = rw.get("device", ""), rw.get("ip", "")
         if dev and ip:
             extra_by_device.setdefault(dev, []).append(ip)
+    for dev, site in (hub.get("sites") or {}).items():
+        subnet = site.get("subnet", "")
+        if subnet:
+            extra_by_device.setdefault(dev, []).append(subnet)
     return {n: {"ip": m.get("ip") or leases_all.get(n),
                 "pubkey": m.get("pubkey"),
                 "extra": extra_by_device.get(n, [])}
             for n, m in leases_meta.items()}
+
+
+def _subnet_conflict(hub, device_name, subnet) -> str:
+    """Validate a site's proposed LAN subnet against every other subnet
+    already in play — the hub's own tunnel pool, and every other registered
+    site — so two sites (or a site and the tunnel network itself) never end
+    up with overlapping routes. Returns an error message, or "" if clear."""
+    import ipaddress
+    try:
+        net = ipaddress.ip_network(str(subnet).strip(), strict=False)
+    except ValueError:
+        return ("That doesn't look like a valid network (e.g. "
+                "192.168.1.0/24).")
+    hub_subnet = hub.get("subnet", _HUB_SUBNET_DEFAULT)
+    try:
+        hub_net = ipaddress.ip_network(hub_subnet, strict=False)
+        if net.overlaps(hub_net):
+            return (f"That network overlaps with the VPN tunnel network "
+                    f"({hub_subnet}) — pick a different one.")
+    except ValueError:
+        pass
+    for other_name, site in (hub.get("sites") or {}).items():
+        if other_name == device_name:
+            continue
+        other_subnet = site.get("subnet", "")
+        if not other_subnet:
+            continue
+        try:
+            other_net = ipaddress.ip_network(other_subnet, strict=False)
+        except ValueError:
+            continue
+        if net.overlaps(other_net):
+            return (f"That network overlaps with {other_name}'s network "
+                    f"({other_subnet}) — pick a different one.")
+    return ""
+
+
+def _write_wg_routes(path, hub):
+    """Write one line per registered site subnet (see the VPN tab) so the
+    hub's reload service (deploy/install.sh) can add a kernel route for each
+    one, alongside the fixed tunnel-pool route it already maintains.
+    hub.json's "sites" registry is the source of truth. Returns (ok, err)."""
+    subnets = sorted({site.get("subnet", "")
+                      for site in (hub.get("sites") or {}).values()
+                      if site.get("subnet")})
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(subnets) + ("\n" if subnets else ""))
+        return True, ""
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
+def _prep_vpn_mesh(name, flat, devices_db) -> None:
+    """Web-layer glue for the VPN tab: validate and persist this device's
+    site registration in hub.json (bookkeeping only — never a router change
+    here), then inject what tunnel_plan needs to build routes to every other
+    site — since tunnel_plan only sees flat/multi, not devices_db/hub.json.
+    Runs on both preview and confirm so the two stay consistent (same
+    reasoning as _tunnel_roadwarrior_ips: allocating/registering here is
+    local bookkeeping, not a router change, so it must happen before the
+    preview too or the preview could show different routes than the apply)."""
+    flat["_vpn_other_subnets"] = []
+    flat["_vpn_hub_ip"] = ""
+    if not devices_db:
+        return
+    hub_file = _hub_path(devices_db)
+    hub = _hub_load(hub_file)
+    hub.setdefault("subnet", _HUB_SUBNET_DEFAULT)
+    flat["_vpn_hub_ip"] = _hub_tunnel_ip(hub)
+    join = flat.get("vpn_join") == "1"
+    subnet = (flat.get("vpn_subnet") or "").strip()
+    sites = hub.setdefault("sites", {})
+    if join and subnet:
+        err = _subnet_conflict(hub, name, subnet)
+        if err:
+            flat["_vpn_error"] = err
+            sites.pop(name, None)
+        else:
+            sites[name] = {"subnet": subnet}
+    else:
+        sites.pop(name, None)
+    flat["_vpn_other_subnets"] = sorted({
+        site["subnet"] for dn, site in sites.items()
+        if dn != name and site.get("subnet")})
+    _hub_save(hub_file, hub)
+
+
+def _sync_vpn_mesh_to_hub(devices_db) -> None:
+    """After a confirmed VPN-tab apply, rewrite the hub's wg-peers.conf
+    (extended AllowedIPs) and wg-routes.conf (kernel routes) so the reload
+    service picks up the change — the VPN-tab mirror of
+    _sync_tunnel_roadwarriors_to_hub. Best-effort: never blocks the response."""
+    try:
+        hub_file = _hub_path(devices_db)
+        hub = _hub_load(hub_file)
+        peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
+        routes_path = hub.get("wg_routes") or _WG_ROUTES_DEFAULT
+        _write_wg_peers(peers_path, _hub_wg_leases(hub))
+        _write_wg_routes(routes_path, hub)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _vpn_mesh_box(name, devices_db) -> str:
+    """Read-only list of every site currently in the mesh (hub.json's
+    "sites" registry), shown on the VPN tab so joining a second site shows
+    the first one already there, and vice versa."""
+    if not devices_db:
+        return ""
+    hub = _hub_load(_hub_path(devices_db))
+    sites = hub.get("sites") or {}
+    if not sites:
+        return ""
+    rows = ""
+    for dn, site in sorted(sites.items()):
+        badge = ' <span class="badge">this router</span>' if dn == name else ""
+        rows += (f'<tr><td>{esc(dn)}{badge}</td>'
+                f'<td><code>{esc(site.get("subnet", ""))}</code></td></tr>')
+    return (f'<div class="box"><h2>Sites in this VPN mesh</h2>'
+            f'<table><tr><th>Router</th><th>Network</th></tr>{rows}</table>'
+            f'<p class="muted">Every router below can reach every other '
+            f"router's network through the tunnel. Applying this tab only "
+            f'pushes routes on <b>this</b> router — after adding a new '
+            f'site, re-apply the VPN tab on the routers that were already '
+            f'joined so they pick up the new route too.</p></div>')
 
 
 def _tunnel_roadwarrior_ips(device_name, multi, devices_db) -> None:
@@ -2681,7 +2817,9 @@ _TAB_INTRO = {
     "interfaces": "A read-only view of the router's ports, VLANs and bridges.",
     "remote": "Create a temporary RouterOS login (auto-expires on its own) "
              "for Winbox/SSH/WebFig — no firewall opening, no VPN config.",
-    "tunnel": "Not set up yet — coming soon.",
+    "tunnel": "Connect this router's network to other sites' networks through "
+             "the WireGuard tunnel, so devices on either side can reach each "
+             "other directly.",
     "scripts": "Paste any RouterOS script for things the other tabs don't cover. "
                "Save adds it (tagged), Run executes it, Remove deletes it — all "
                "previewed first and logged.",
@@ -4364,6 +4502,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     api.connect()
                     pusher = Pusher(cfg, api)
                     current = feature["read"](pusher, cfg)
+                    if slug == "tunnel" and devices_db:
+                        hub = _hub_load(_hub_path(devices_db))
+                        current["vpn_site"] = (hub.get("sites") or {}).get(name)
                     summary_lines = (feature["summary"](current, cfg)
                                      if "summary" in feature else None)
                     if "form" in feature:
@@ -4387,6 +4528,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         extra_html = _queue_script_box(name, csrf, facts)
                     elif slug == "hubtunnel":
                         extra_html = _hubtunnel_box(name, current, csrf, devices_db)
+                    elif slug == "tunnel":
+                        extra_html = _vpn_mesh_box(name, devices_db)
                     elif slug == "update":
                         extra_html, extra_actions = _update_box(name, csrf, current)
                     elif slug == "interfaces":
@@ -4538,6 +4681,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         # pushes it (see below), so there's nothing to keep
                         # stable between preview and confirm.
                         flat["_tempuser_password"] = _gen_password()
+                    if slug == "tunnel":
+                        _prep_vpn_mesh(name, flat, devices_db)
                     plan = feature["plan"](pusher, cfg, flat, multi)
                 except (DeviceError, PushError) as exc:
                     if audit:
@@ -4573,6 +4718,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # WireGuard public key as a peer on this server automatically.
                 if slug == "hubtunnel" and devices_db:
                     _register_hub_peer(name, pusher.api, flat, devices_db)
+                # Just applied the VPN tab: push the updated AllowedIPs/routes
+                # to the hub so it actually accepts/forwards this site's subnet.
+                if slug == "tunnel" and devices_db:
+                    _sync_vpn_mesh_to_hub(devices_db)
                 # Just created a temporary login: show the connection details
                 # ONCE, directly (never a redirect — the password would end
                 # up in the URL/browser history/access logs). RouterOS never

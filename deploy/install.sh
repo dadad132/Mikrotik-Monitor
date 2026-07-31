@@ -394,6 +394,7 @@ log "Web unit     : ${WEB_UNIT}"
 # ---------------------------------------------------------------------------
 step "Setting up the WireGuard dial-home hub"
 WG_PEERS="/etc/wireguard/wg-peers.conf"
+WG_ROUTES="/etc/wireguard/wg-routes.conf"
 WG_PORT=51820
 WG_SUBNET="10.10.0.0/16"
 WG_LOG="${APP_DIR}/wg-install-error.log"
@@ -435,6 +436,11 @@ set +e
   chgrp "${SERVICE_USER}" /etc/wireguard
   [ -f "${WG_PEERS}" ] || install -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
       -m 640 /dev/null "${WG_PEERS}"
+  # One site-to-site LAN subnet per line (see the VPN tab) — the reload
+  # service below adds a kernel route for each so the hub can forward
+  # traffic to it, same idea as WG_PEERS but for routes instead of peers.
+  [ -f "${WG_ROUTES}" ] || install -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
+      -m 640 /dev/null "${WG_ROUTES}"
 
   # Stop the wg-quick service first so systemd doesn't immediately respawn
   # the interface while we reconfigure (handles re-runs cleanly).
@@ -491,6 +497,9 @@ CONF
   # After syncing peers, also ensure the /16 kernel route exists.  wg syncconf
   # updates the WireGuard peer table but does NOT add kernel IP routes, so
   # devices allocated outside 10.10.0.0/24 would otherwise be unreachable.
+  # Same reasoning for site-to-site LAN subnets registered on the VPN tab
+  # (WG_ROUTES, one CIDR per line) — each needs its own kernel route too, so
+  # the hub knows to forward that traffic into the tunnel instead of dropping it.
   cat > /etc/systemd/system/mikromon-wg-reload.service <<UNIT
 [Unit]
 Description=Apply mikromon WireGuard peers to wg0
@@ -498,15 +507,16 @@ After=wg-quick@wg0.service
 PartOf=wg-quick@wg0.service
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/bash -c 'wg syncconf wg0 <(grep -vE "^[[:space:]]*(Address|DNS|MTU|Table|PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=" /etc/wireguard/wg0.conf; cat ${WG_PEERS} 2>/dev/null || true); ip -4 route replace ${WG_SUBNET} dev wg0 2>/dev/null || true'
+ExecStart=/usr/bin/bash -c 'wg syncconf wg0 <(grep -vE "^[[:space:]]*(Address|DNS|MTU|Table|PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=" /etc/wireguard/wg0.conf; cat ${WG_PEERS} 2>/dev/null || true); ip -4 route replace ${WG_SUBNET} dev wg0 2>/dev/null || true; while read -r r; do [ -n "\$r" ] && ip -4 route replace "\$r" dev wg0 2>/dev/null || true; done < ${WG_ROUTES}'
 [Install]
 WantedBy=multi-user.target
 UNIT
   cat > /etc/systemd/system/mikromon-wg-reload.path <<UNIT
 [Unit]
-Description=Watch the mikromon WireGuard peers file
+Description=Watch the mikromon WireGuard peers/routes files
 [Path]
 PathModified=${WG_PEERS}
+PathModified=${WG_ROUTES}
 Unit=mikromon-wg-reload.service
 [Install]
 WantedBy=multi-user.target
@@ -545,15 +555,15 @@ UNIT
   # publish the hub's public key + IP so the dashboard fills the router script
   HUB_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
   "${APP_DIR}/.venv/bin/python" - "${APP_DIR}/hub.json" "${HUB_PUB}" \
-      "${WG_PORT}" "${WG_PEERS}" "${WG_SUBNET}" "${HUB_IP}" <<'PY'
+      "${WG_PORT}" "${WG_PEERS}" "${WG_SUBNET}" "${HUB_IP}" "${WG_ROUTES}" <<'PY'
 import json, sys
-path, pub, port, peers, subnet, ip = sys.argv[1:7]
+path, pub, port, peers, subnet, ip, routes = sys.argv[1:8]
 try:
     with open(path) as f: data = json.load(f)
 except Exception:
     data = {}
 data.update({"hub_pubkey": pub, "listen_port": port, "wg_peers": peers,
-             "subnet": subnet})
+             "wg_routes": routes, "subnet": subnet})
 data.setdefault("hub_ip", ip)
 with open(path, "w") as f: json.dump(data, f, indent=2)
 PY
@@ -568,6 +578,8 @@ chmod 750 /etc/wireguard
 chgrp "${SERVICE_USER}" /etc/wireguard
 [ -f "${WG_PEERS}" ] || install -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
     -m 640 /dev/null "${WG_PEERS}"
+[ -f "${WG_ROUTES}" ] || install -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
+    -m 640 /dev/null "${WG_ROUTES}"
 if [ "${WG_OK}" -eq 0 ]; then
   log "WireGuard hub up (wg0 on :${WG_PORT}/udp); peers: ${WG_PEERS}"
   log "Hub public key: $(cat /etc/wireguard/wg0.pub 2>/dev/null)"

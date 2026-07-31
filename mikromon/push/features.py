@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 
+from .api import PushError
 from .plan import Operation, Plan
 from .reconcile import _norm, reconcile_list
 
@@ -1688,6 +1689,7 @@ _WG_IFACE = ("interface", "wireguard")
 _WG_PEERS = ("interface", "wireguard", "peers")
 _WG_TAG = "mikromon:wg:"
 _WG_RW_TAG = "mikromon:wg-rw:"
+_VPN_ROUTE_TAG = "mikromon:vpnroute:"
 
 
 def _ros_version(api):
@@ -1716,6 +1718,30 @@ def _wg_supported(major, minor):
     return (major, minor) >= (7, 1)
 
 
+def _detect_lan_subnets(pusher, cfg) -> list:
+    """Candidate LAN subnets for the VPN tab's subnet picker: every IP
+    address configured on this router except ones on a configured WAN
+    uplink (the ISP/internet side — never what you'd want to route other
+    sites into)."""
+    wan_ifaces = {_norm_iface(lk.interface) for lk in cfg.wan.links if lk.interface}
+    out, seen = [], set()
+    for row in _safe_fetch(pusher.api, _IP_ADDRESS):
+        if str(row.get("disabled", "false")).lower() in ("true", "yes"):
+            continue
+        iface = _norm_iface(row.get("interface", ""))
+        if not iface or iface in wan_ifaces:
+            continue
+        addr = str(row.get("address", ""))
+        network = str(row.get("network", ""))
+        if "/" not in addr or not network:
+            continue
+        cidr = f"{network}/{addr.split('/', 1)[1]}"
+        if cidr not in seen:
+            seen.add(cidr)
+            out.append(cidr)
+    return out
+
+
 def tunnel_read(pusher, cfg):
     major, minor, ver_str = _ros_version(pusher.api)
     if not _wg_supported(major, minor):
@@ -1723,7 +1749,9 @@ def tunnel_read(pusher, cfg):
     try:
         ifaces = pusher.api.fetch(_WG_IFACE)
         peers = pusher.api.fetch(_WG_PEERS)
-        return {"version": ver_str, "ifaces": ifaces, "peers": peers}
+        lan_subnets = _detect_lan_subnets(pusher, cfg)
+        return {"version": ver_str, "ifaces": ifaces, "peers": peers,
+                "lan_subnets": lan_subnets}
     except Exception as exc:
         msg = str(exc)
         # API rejects the WireGuard menu on firmware that predates it.
@@ -1734,23 +1762,67 @@ def tunnel_read(pusher, cfg):
 
 
 def tunnel_form(current, cfg):
-    """VPN tab — intentionally empty for now. The previous WireGuard peer
-    editor (and its "cross-device peers" section) has been retired pending
-    a new design; the underlying hub/tunnel-IP infrastructure it used
-    (_alloc_roadwarrior_ip, _hub_wg_leases, etc. in web.py) is left in place,
-    just unwired, so it can be reused once that design is ready."""
+    """VPN tab — site-to-site: share this router's LAN into the mesh so it
+    can reach (and be reached by) every other site's LAN through the
+    existing WireGuard hub. web.py injects current["vpn_site"] (this
+    device's current hub.json registration, if any) before calling this,
+    since that lives in hub.json, not on the router."""
     if current.get("unsupported"):
         v = current.get("version", "unknown")
         return [{"type": "static", "label": "Not supported on this firmware",
                  "value": (f"WireGuard is available on RouterOS 7.1 and later. "
                            f"This router is running {v}. "
                            f"Upgrade to 7.1+ to use the VPN tab.")}]
-    return [{"type": "static", "label": "VPN",
-             "value": "Not set up yet — coming soon."}]
+    site = current.get("vpn_site") or {}
+    joined = bool(site.get("subnet"))
+    detected = current.get("lan_subnets") or []
+    fields = [
+        {"type": "heading", "label": "Site-to-site VPN",
+         "hint": "Connects this router's own network to other routers' "
+                 "networks through the WireGuard tunnel, so devices on "
+                 "either side can reach each other directly — no separate "
+                 "VPN client needed on those devices."},
+    ]
+    if detected:
+        fields.append({"type": "static", "label": "Detected network(s) here",
+                       "value": ", ".join(detected)})
+    fields.append({"type": "toggle", "name": "vpn_join", "value": "1",
+                   "on": joined, "label": "Join the site-to-site VPN",
+                   "desc": "Turning this on or off can take a few minutes "
+                           "to fully take effect."})
+    fields.append({"type": "text", "name": "vpn_subnet",
+                   "label": "This router's network to share",
+                   "value": site.get("subnet") or (detected[0] if detected else ""),
+                   "placeholder": "192.168.1.0/24",
+                   "hint": "The network behind this router that other sites "
+                           "should be able to reach. Must not overlap with "
+                           "another site's network or the VPN tunnel network "
+                           "itself — it's checked automatically when you apply."})
+    return fields
 
 
 def tunnel_plan(pusher, cfg, flat, multi):
-    return Plan(cfg.name, [], summary="vpn (not configured yet)")
+    """Push (or remove) static routes so this router can reach every other
+    site's LAN through the hub. web.py's _prep_vpn_mesh injects
+    flat["_vpn_other_subnets"] (every OTHER site's subnet, from hub.json)
+    and flat["_vpn_hub_ip"] (the gateway to use — the hub's own tunnel
+    address) before calling this; flat["_vpn_error"] is set instead if the
+    submitted subnet conflicts with another site or the tunnel network."""
+    if flat.get("_vpn_error"):
+        raise PushError(flat["_vpn_error"])
+    joined = flat.get("vpn_join") == "1"
+    hub_ip = flat.get("_vpn_hub_ip") or ""
+    other_subnets = flat.get("_vpn_other_subnets") or []
+    current_routes = _safe_fetch(pusher.api, _ROUTE)
+    desired = ([{"dst-address": subnet, "gateway": hub_ip}
+               for subnet in other_subnets] if (joined and hub_ip) else [])
+    ops = reconcile_list(_ROUTE, "dst-address", desired, current_routes,
+                         manage_tag=_VPN_ROUTE_TAG,
+                         owns=_prefix_owner(_VPN_ROUTE_TAG),
+                         label="VPN mesh route")
+    return Plan(cfg.name, ops,
+               summary=f"vpn mesh: {len(other_subnets)} site route(s)"
+                       if joined else "vpn mesh (not joined)")
 
 
 # ===========================================================================

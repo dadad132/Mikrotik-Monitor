@@ -390,6 +390,91 @@ saved_hub2 = web._hub_load(web._hub_path(rw_devices_db))
 check("removing a road-warrior row from the form drops its hub.json registration",
       not any(rw.get("device") == "R2"
               for rw in saved_hub2.get("roadwarriors", {}).values()))
+
+# Site-to-site VPN mesh (VPN tab): each device shares a LAN subnet, and every
+# OTHER site's subnet gets routed through the hub's own tunnel IP.
+conflict_hub = {"subnet": "10.10.0.0/16",
+                "sites": {"HQ": {"subnet": "192.168.1.0/24"}}}
+check("a subnet overlapping the hub's own tunnel pool is rejected",
+      "tunnel network" in web._subnet_conflict(conflict_hub, "Branch", "10.10.5.0/24"))
+check("a subnet overlapping another site's subnet is rejected",
+      "HQ" in web._subnet_conflict(conflict_hub, "Branch", "192.168.1.0/25"))
+check("a clear, non-overlapping subnet passes",
+      web._subnet_conflict(conflict_hub, "Branch", "192.168.2.0/24") == "")
+check("a site re-confirming its OWN already-registered subnet is not a conflict",
+      web._subnet_conflict(conflict_hub, "HQ", "192.168.1.0/24") == "")
+check("garbage input is rejected with a clear message, not a crash",
+      "valid" in web._subnet_conflict(conflict_hub, "Branch", "not-a-subnet"))
+
+sites_hub = {
+    "leases_meta": {"HQ": {"ip": "10.10.1.1", "pubkey": "HQKEY="},
+                    "Branch": {"ip": "10.10.1.2", "pubkey": "BRKEY="}},
+    "leases": {"HQ": "10.10.1.1", "Branch": "10.10.1.2"},
+    "sites": {"HQ": {"subnet": "192.168.1.0/24"},
+             "Branch": {"subnet": "192.168.2.0/24"}},
+}
+sites_merged = web._hub_wg_leases(sites_hub)
+check("_hub_wg_leases folds a site's own LAN subnet into its 'extra' allowed addresses",
+      sites_merged["HQ"]["extra"] == ["192.168.1.0/24"]
+      and sites_merged["Branch"]["extra"] == ["192.168.2.0/24"])
+sites_peersp = os.path.join(tmp, "wg-peers-sites.conf")
+web._write_wg_peers(sites_peersp, sites_merged)
+sites_body = open(sites_peersp).read()
+check("a site's LAN subnet is written with its own mask, not force-suffixed /32",
+      "AllowedIPs = 10.10.1.1/32, 192.168.1.0/24" in sites_body)
+
+routesp = os.path.join(tmp, "wg-routes.conf")
+ok_routes, _ = web._write_wg_routes(routesp, sites_hub)
+routes_body = open(routesp).read()
+check("wg-routes.conf lists one line per registered site subnet",
+      ok_routes and set(routes_body.split()) == {"192.168.1.0/24", "192.168.2.0/24"})
+
+# _prep_vpn_mesh: the web-layer glue that validates + persists a device's own
+# site registration, then injects what tunnel_plan needs (other sites'
+# subnets + the hub's tunnel IP) since tunnel_plan never sees devices_db.
+vpn_devices_db = os.path.join(tmp, "vpndevices.json")
+with open(vpn_devices_db, "w") as f:
+    f.write("{}")
+hq_flat = {"vpn_join": "1", "vpn_subnet": "192.168.1.0/24"}
+web._prep_vpn_mesh("HQ", hq_flat, vpn_devices_db)
+check("_prep_vpn_mesh registers a valid subnet and injects the hub's tunnel IP",
+      hq_flat["_vpn_hub_ip"] == "10.10.0.1" and not hq_flat.get("_vpn_error"))
+check("_prep_vpn_mesh persists the registration to hub.json",
+      web._hub_load(web._hub_path(vpn_devices_db))
+      .get("sites", {}).get("HQ", {}).get("subnet") == "192.168.1.0/24")
+
+branch_flat = {"vpn_join": "1", "vpn_subnet": "192.168.2.0/24"}
+web._prep_vpn_mesh("Branch", branch_flat, vpn_devices_db)
+check("a second site sees the first site's subnet injected as an 'other subnet'",
+      branch_flat["_vpn_other_subnets"] == ["192.168.1.0/24"])
+hq_flat2 = {"vpn_join": "1", "vpn_subnet": "192.168.1.0/24"}
+web._prep_vpn_mesh("HQ", hq_flat2, vpn_devices_db)
+check("HQ, re-submitted, now sees Branch's subnet as its own 'other subnet'",
+      hq_flat2["_vpn_other_subnets"] == ["192.168.2.0/24"])
+
+conflict_flat = {"vpn_join": "1", "vpn_subnet": "192.168.1.0/25"}
+web._prep_vpn_mesh("Third", conflict_flat, vpn_devices_db)
+check("an overlapping subnet sets _vpn_error and is NOT registered",
+      bool(conflict_flat.get("_vpn_error"))
+      and "Third" not in web._hub_load(web._hub_path(vpn_devices_db)).get("sites", {}))
+
+leave_flat_db = {"vpn_join": "", "vpn_subnet": ""}
+web._prep_vpn_mesh("Branch", leave_flat_db, vpn_devices_db)
+check("turning the VPN off for a site removes its hub.json registration",
+      "Branch" not in web._hub_load(web._hub_path(vpn_devices_db)).get("sites", {}))
+
+vpn_peersp = os.path.join(tmp, "wg-peers-sync.conf")
+vpn_routesp = os.path.join(tmp, "wg-routes-sync.conf")
+sync_hub = web._hub_load(web._hub_path(vpn_devices_db))
+sync_hub["wg_peers"], sync_hub["wg_routes"] = vpn_peersp, vpn_routesp
+sync_hub["leases_meta"] = {"HQ": {"ip": "10.10.1.1", "pubkey": "HQKEY="}}
+sync_hub["leases"] = {"HQ": "10.10.1.1"}
+web._hub_save(web._hub_path(vpn_devices_db), sync_hub)
+web._sync_vpn_mesh_to_hub(vpn_devices_db)
+check("_sync_vpn_mesh_to_hub writes both the peers file and the routes file",
+      "192.168.1.0/24" in open(vpn_peersp).read()
+      and "192.168.1.0/24" in open(vpn_routesp).read())
+
 # provisioning script: "lock API" binds api/api-ssl to the tunnel subnet + sets
 # up API-SSL, so the API has no public exposure. Only emitted with a tunnel.
 locked = web._provision_script(

@@ -1081,24 +1081,119 @@ check("provision_apply creates exactly ONE full-access user (no 2nd user)",
       and uadds[0].params.get("group") == "full")
 
 
-# ---- 15a2. VPN tab (formerly Tunnel): emptied out pending a new design -----
-print("tunnel_plan (VPN tab — emptied out, no fields, no-op plan):")
+# ---- 15a2. VPN tab: site-to-site mesh over the existing WireGuard hub ------
+print("tunnel_read/tunnel_form/tunnel_plan (VPN tab — site-to-site mesh):")
+from mikromon.config import WanEndpoint as _VpnWanEndpoint  # noqa: E402
+
 _TRES = ("system", "resource")
-t_cfg = types.SimpleNamespace(name="R1", push_username="", push_password="")
-t_api = FakeApi({
-    _TRES: [{"version": "7.14.3"}],
-    WG: [{"name": "wg0", "listen-port": "13231", "public-key": "ROUTERPUB="}],
-    WGP: [],
-})
-t_pusher = Pusher(t_cfg, t_api, dry_run=True)
-check("tunnel_form shows just a placeholder — no peer editor fields",
-      [f["type"] for f in F.tunnel_form({"version": "7.14.3"}, t_cfg)] == ["static"])
+_VPN_ROUTE_TAG = F._VPN_ROUTE_TAG
+t_wan_cfg = types.SimpleNamespace(
+    name="R1", push_username="", push_password="",
+    wan=types.SimpleNamespace(links=[_VpnWanEndpoint(interface="ether1", name="WAN1")]))
+t_cfg = t_wan_cfg  # kept for any later reuse in this section
+
 check("tunnel_form still shows the RouterOS-version notice on unsupported firmware",
       any("7.1" in f.get("value", "")
           for f in F.tunnel_form({"unsupported": True, "version": "6.49"}, t_cfg)))
-check("tunnel_plan is always a no-op regardless of what's submitted",
-      F.tunnel_plan(t_pusher, t_cfg, {"peer_iface": "wg0"},
-                    {"wgp__name": ["site-a"], "wgp__pubkey": ["SITEAKEY="]}).empty)
+
+# _detect_lan_subnets / tunnel_read: only non-WAN, non-disabled addresses count
+t_read_api = FakeApi({
+    _TRES: [{"version": "7.14.3"}],
+    WG: [{"name": "wg0", "listen-port": "13231", "public-key": "ROUTERPUB="}],
+    WGP: [],
+    IPA: [
+        {"address": "203.0.113.5/30", "network": "203.0.113.4",
+         "interface": "ether1", "disabled": "false"},          # WAN uplink -> excluded
+        {"address": "192.168.1.1/24", "network": "192.168.1.0",
+         "interface": "bridge-lan", "disabled": "false"},      # LAN -> included
+        {"address": "10.5.5.1/29", "network": "10.5.5.0",
+         "interface": "bridge-voip", "disabled": "true"},      # disabled -> excluded
+    ],
+})
+t_read_pusher = Pusher(t_cfg, t_read_api, dry_run=True)
+t_current = F.tunnel_read(t_read_pusher, t_cfg)
+check("tunnel_read detects the LAN subnet and excludes the WAN uplink's own subnet",
+      t_current.get("lan_subnets") == ["192.168.1.0/24"])
+check("tunnel_read excludes a disabled address entirely",
+      "10.5.5.0/29" not in (t_current.get("lan_subnets") or []))
+
+# tunnel_form: not yet joined -> toggle off, subnet field pre-filled from detection
+form_not_joined = F.tunnel_form(t_current, t_cfg)
+check("tunnel_form pre-fills the detected subnet when not yet joined",
+      any(f.get("name") == "vpn_subnet" and f.get("value") == "192.168.1.0/24"
+          for f in form_not_joined))
+check("tunnel_form's join toggle is off when this device has no hub.json registration",
+      any(f.get("name") == "vpn_join" and f.get("on") is False
+          for f in form_not_joined))
+
+# tunnel_form: already joined (web.py injects current["vpn_site"] from hub.json)
+t_current_joined = dict(t_current, vpn_site={"subnet": "192.168.1.0/24"})
+form_joined = F.tunnel_form(t_current_joined, t_cfg)
+check("tunnel_form's join toggle is on once hub.json has this device registered",
+      any(f.get("name") == "vpn_join" and f.get("on") is True
+          for f in form_joined))
+
+# tunnel_plan: joining pushes one route per other site, via the hub's tunnel IP
+t_plan_api = FakeApi({("ip", "route"): []})
+t_plan_pusher = Pusher(t_cfg, t_plan_api, dry_run=True)
+join_flat = {"vpn_join": "1", "vpn_subnet": "192.168.1.0/24",
+            "_vpn_hub_ip": "10.10.0.1",
+            "_vpn_other_subnets": ["192.168.2.0/24", "192.168.3.0/24"]}
+join_plan = F.tunnel_plan(t_plan_pusher, t_cfg, join_flat, {})
+route_adds = [o for o in join_plan.ops
+             if o.path == ("ip", "route") and o.action == "add"]
+check("joining adds exactly one route per other site",
+      len(route_adds) == 2)
+check("each route's gateway is the hub's own tunnel IP",
+      all(o.params.get("gateway") == "10.10.0.1" for o in route_adds))
+check("each route's destination is the other site's subnet",
+      {o.params.get("dst-address") for o in route_adds} ==
+      {"192.168.2.0/24", "192.168.3.0/24"})
+check("routes are tagged so only mikromon's own VPN-mesh routes are ever touched",
+      all(o.params.get("comment") == _VPN_ROUTE_TAG for o in route_adds))
+
+# idempotent: re-applying against a router that already has both routes is a no-op
+t_plan_api2 = FakeApi({("ip", "route"): [
+    {".id": "*1", "dst-address": "192.168.2.0/24", "gateway": "10.10.0.1",
+     "comment": _VPN_ROUTE_TAG},
+    {".id": "*2", "dst-address": "192.168.3.0/24", "gateway": "10.10.0.1",
+     "comment": _VPN_ROUTE_TAG},
+]})
+t_plan_pusher2 = Pusher(t_cfg, t_plan_api2, dry_run=True)
+check("re-applying the same joined state is a no-op",
+      F.tunnel_plan(t_plan_pusher2, t_cfg, join_flat, {}).empty)
+
+# not joined (or toggled off): any previously-owned routes are removed
+leave_flat = {"vpn_join": "", "_vpn_hub_ip": "10.10.0.1", "_vpn_other_subnets": []}
+leave_plan = F.tunnel_plan(t_plan_pusher2, t_cfg, leave_flat, {})
+route_removes = [o for o in leave_plan.ops
+                if o.path == ("ip", "route") and o.action == "remove"]
+check("turning the VPN off removes every route mikromon owns here",
+      len(route_removes) == 2)
+
+# an unrelated hand-made route is never touched
+t_plan_api3 = FakeApi({("ip", "route"): [
+    {".id": "*9", "dst-address": "172.16.0.0/24", "gateway": "192.168.1.254",
+     "comment": "hand-made static route"},
+]})
+t_plan_pusher3 = Pusher(t_cfg, t_plan_api3, dry_run=True)
+untouched_plan = F.tunnel_plan(t_plan_pusher3, t_cfg, leave_flat, {})
+check("a route mikromon doesn't own is never modified or removed",
+      not any(o.params.get("dst-address") == "172.16.0.0/24"
+              for o in untouched_plan.ops))
+
+# web.py sets flat["_vpn_error"] when the submitted subnet conflicts with
+# another site or the tunnel network; tunnel_plan must refuse to apply anything.
+err_flat = {"vpn_join": "1", "vpn_subnet": "10.10.5.0/24",
+           "_vpn_error": "That network overlaps with the VPN tunnel network "
+                         "(10.10.0.0/16) — pick a different one.",
+           "_vpn_hub_ip": "10.10.0.1", "_vpn_other_subnets": []}
+try:
+    F.tunnel_plan(t_plan_pusher, t_cfg, err_flat, {})
+    check("tunnel_plan raises on a subnet conflict instead of silently applying", False)
+except PushError as exc:
+    check("tunnel_plan raises PushError with the conflict message",
+          "overlaps" in str(exc))
 
 
 # ---- 15b. WireGuard self-repair: diagnose, auto-fix, report clearly ---------
