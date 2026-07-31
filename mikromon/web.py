@@ -1999,6 +1999,7 @@ def _field_html(desc) -> str:
     if t == "rows":
         cols = desc["cols"]
         name = desc["name"]
+        can_add = desc.get("can_add", True)
         ths = "".join(f"<th>{esc(lbl)}</th>" for _c, lbl, _ph in cols) + "<th></th>"
 
         def row_html(r):
@@ -2009,14 +2010,20 @@ def _field_html(desc) -> str:
             return (f'<tr>{tds}<td><button type="button" class="btn ghost" '
                     f'title="remove row" onclick="this.closest(\'tr\').remove()">'
                     f'&times;</button></td></tr>')
-        body = "".join(row_html(r) for r in desc.get("rows", [])) + row_html({})
+        # A blank trailing row (typed into directly) is how you add an entry
+        # without the button — only relevant when adding is allowed at all.
+        body = "".join(row_html(r) for r in desc.get("rows", []))
+        if can_add:
+            body += row_html({})
+        add_btn = (f'<button type="button" class="btn ghost" '
+                   f'onclick="pushAddRow(\'{name}\')" style="margin-top:6px">'
+                   f'+ Add row</button>' if can_add else "")
+        template = (f'<template id="tmpl-{name}">{row_html({})}</template>'
+                   if can_add else "")
         return (f'<div class="f full"><label class="f">{esc(label)}</label>'
                 f'<table class="rowtbl" id="rows-{name}"><thead><tr>{ths}</tr>'
                 f'</thead><tbody>{body}</tbody></table>'
-                f'<button type="button" class="btn ghost" '
-                f'onclick="pushAddRow(\'{name}\')" style="margin-top:6px">'
-                f'+ Add row</button>{hint}'
-                f'<template id="tmpl-{name}">{row_html({})}</template></div>')
+                f'{add_btn}{hint}{template}</div>')
     if t == "heading":
         sub = (f'<div class="muted" style="margin-top:4px;font-size:12px">'
                f'{esc(desc["hint"])}</div>') if desc.get("hint") else ""

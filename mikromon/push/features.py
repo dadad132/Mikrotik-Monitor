@@ -1632,6 +1632,7 @@ def remote_form(current, cfg):
             "type": "rows", "name": "keep", "label": "Currently has access",
             "cols": [("name", "name", "")],
             "rows": [{"name": u.get("name", "")} for u in users],
+            "can_add": False,
             "hint": "Delete a row and apply to cut off that person's access "
                     "right away.",
         })
