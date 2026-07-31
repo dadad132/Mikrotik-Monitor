@@ -511,6 +511,7 @@ def _fo_check_hosts(n, primary_check, secondary_check):
 
 _FO_RETRY_GAP = "5s"     # gap between Netwatch's first failed ping and each confirmation retry
 _FO_RETRIES = 3          # total attempts (Netwatch's own + this many - 1 confirmations) before failing over
+_FO_PING_COUNT = 3       # packets per confirmation attempt — any one reply counts as "still up"
 
 
 def _fo_down_script(role: str, check_ip: str) -> str:
@@ -518,10 +519,18 @@ def _fo_down_script(role: str, check_ip: str) -> str:
     check_ip first fails. A single missed ping used to fail the line over
     immediately — confirmed live as unwanted flapping on brief blips.
     Before actually disabling the route, this confirms the outage with
-    _FO_RETRIES - 1 more pings, _FO_RETRY_GAP apart (so 3 total attempts:
+    _FO_RETRIES - 1 more attempts, _FO_RETRY_GAP apart (so 3 total attempts:
     Netwatch's own + 2 here) — only disabling the route if every one of
     them also fails. If any confirms the line is back, this does nothing,
     leaving the route enabled/untouched.
+
+    Each confirmation attempt sends _FO_PING_COUNT packets (not just one) and
+    treats any single reply as "still up" — a lone dropped ICMP packet
+    (common on LTE/backup links, or ISPs that deprioritize ICMP under load)
+    used to look identical to a real outage when each attempt was a single
+    packet; requiring ALL of several packets in EVERY attempt to be lost is
+    a much stronger signal the line is actually down, without changing how
+    many attempts/how much time confirmation takes.
 
     Recovery is deliberately NOT handled here: Netwatch's own up-script
     (see the entry's up-script) fires on the very next successful poll and
@@ -531,7 +540,8 @@ def _fo_down_script(role: str, check_ip: str) -> str:
     lines = [':local ok false']
     for _ in range(_FO_RETRIES - 1):
         lines.append(f':delay {_FO_RETRY_GAP}')
-        lines.append(f':if ([/ping {check_ip} count=1] > 0) do={{ :set ok true }}')
+        lines.append(f':if ([/ping {check_ip} count={_FO_PING_COUNT}] > 0) '
+                     f'do={{ :set ok true }}')
     lines.append(f':if (!$ok) do={{ /ip route disable [find comment="{comment}"] }}')
     return "\n".join(lines)
 

@@ -1433,6 +1433,11 @@ check("down-script confirms with 2 extra retries (3 attempts total: "
       "Netwatch's own + 2 here)",
       primary_down.count(":delay 5s") == 2
       and primary_down.count("/ping 1.1.1.1") == 2)
+check("each confirmation attempt sends multiple packets (not just 1) so a "
+      "single dropped ICMP packet — common on LTE/backup links — no longer "
+      "looks identical to a real outage; any one reply out of the count "
+      "still counts as 'still up'",
+      primary_down.count("count=3") == 2 and "count=1" not in primary_down)
 check("up-script enables the route immediately by its tag — recovery "
       "needs only the next successful Netwatch check, no confirmation",
       any(w.params["up-script"].strip() == f'/ip route enable  [find comment="{_FO_TAG}primary"]'.strip()
