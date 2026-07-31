@@ -1776,7 +1776,7 @@ def tunnel_form(current, cfg):
     site = current.get("vpn_site") or {}
     joined = bool(site.get("subnet"))
     detected = current.get("lan_subnets") or []
-    fields = [
+    fields: list[dict] = [
         {"type": "heading", "label": "Site-to-site VPN",
          "hint": "Connects this router's own network to other routers' "
                  "networks through the WireGuard tunnel, so devices on "
