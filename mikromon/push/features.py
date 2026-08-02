@@ -151,11 +151,34 @@ def routes_read(pusher, cfg):
     ppp_active = _safe_fetch(pusher.api, _PPP_ACTIVE)
     ip_addrs = _safe_fetch(pusher.api, _IP_ADDRESS)
     all_routes = _safe_fetch(pusher.api, _ROUTE)
-    routes = [r for r in all_routes
-              if str(r.get("dst-address", "")).startswith("0.0.0.0/0")
-              and not str(r.get("comment", "")).startswith("mikromon:sdwan")]
+    routes_raw = [r for r in all_routes
+                 if str(r.get("dst-address", "")).startswith("0.0.0.0/0")
+                 and not str(r.get("comment", "")).startswith("mikromon:sdwan")]
     failover_routes = [r for r in all_routes
                        if str(r.get("comment", "")).startswith(_FAILOVER_TAG)]
+    # A managed failover route's own "gateway" field is the check IP, not
+    # the real ISP gateway — it's a recursive route, see _apply_failover.
+    # _dist_from_routes/_route_status_for (below) match a client to its
+    # route by comparing gateways, so left as-is they'd never match a
+    # failover-managed client at all — every line would report the same
+    # fallback "distance 1" regardless of what was actually chosen on the
+    # WAN tab. Substitute the real gateway back in (from this link's own
+    # host-check route) for THIS list only — failover_routes above (used
+    # for the dedicated Failover summary line) keeps the real check-IP
+    # value, since that's the one that's actually useful to show there.
+    check_gw_by_role = {
+        c[len(f"{_FAILOVER_TAG}check:"):]: r.get("gateway", "")
+        for r in all_routes
+        if (c := str(r.get("comment", ""))).startswith(f"{_FAILOVER_TAG}check:")
+    }
+    routes = []
+    for r in routes_raw:
+        c = str(r.get("comment", ""))
+        if c.startswith(_FAILOVER_TAG) and not c.startswith(f"{_FAILOVER_TAG}check:"):
+            real_gw = check_gw_by_role.get(c[len(_FAILOVER_TAG):])
+            if real_gw:
+                r = dict(r, gateway=real_gw)
+        routes.append(r)
     return {"routes": routes, "dhcp": dhcp, "ppp": ppp,
             "ppp_active": ppp_active, "ip_addrs": ip_addrs,
             "failover_routes": failover_routes}

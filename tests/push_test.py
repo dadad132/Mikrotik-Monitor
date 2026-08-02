@@ -1910,6 +1910,54 @@ check("the DHCP backup's distance in the drag-order list still reads "
       "correctly (unaffected by this fix)",
       dhcp_item is not None and dhcp_item["_dist"] == "11")
 
+# Reported live: with the recursive check-gateway=ping routes (current
+# design — see _apply_failover), EVERY line showed "distance 1" regardless
+# of what was actually chosen on the WAN tab. A managed main route's own
+# "gateway" field is the check IP now (not the real ISP gateway, since it's
+# a recursive route), so matching a client to its route by gateway never
+# succeeded, and every line fell through to the hardcoded "1" default.
+rec_cfg = _t.SimpleNamespace(
+    name="R1", wan=_t.SimpleNamespace(links=[
+        WanEndpoint(interface="Wikiworx", name="Wikiworx", distance=10),
+        WanEndpoint(interface="ether2", name="Backup", distance=11)]))
+rec_state = {
+    ("ip", "route"): [
+        {".id": "*1", "comment": "mikromon:failover:primary",
+         "dst-address": "0.0.0.0/0", "gateway": "1.1.1.1",
+         "check-gateway": "ping", "distance": "10", "active": "true"},
+        {".id": "*2", "comment": "mikromon:failover:check:primary",
+         "dst-address": "1.1.1.1/32", "gateway": "41.2.3.4", "scope": "10"},
+        {".id": "*3", "comment": "mikromon:failover:secondary",
+         "dst-address": "0.0.0.0/0", "gateway": "8.8.8.8",
+         "check-gateway": "ping", "distance": "11", "active": "false"},
+        {".id": "*4", "comment": "mikromon:failover:check:secondary",
+         "dst-address": "8.8.8.8/32", "gateway": "10.0.1.1", "scope": "10"},
+    ],
+    ("tool", "netwatch"): [],
+    ("interface", "pppoe-client"): [
+        {".id": "*5", "name": "wikiworx", "running": "true",
+         "add-default-route": "no"},
+    ],
+    ("ip", "dhcp-client"): [
+        {".id": "*6", "interface": "ether2", "gateway": "10.0.1.1",
+         "status": "bound", "add-default-route": "no"},
+    ],
+    ("interface", "l2tp-client"): [],
+    ("ppp", "active"): [{"name": "wikiworx", "remote-address": "41.2.3.4"}],
+    ("ip", "address"): [],
+}
+rec_current = F.routes_read(Pusher(rec_cfg, FakeApi(dict(rec_state)), dry_run=True), rec_cfg)
+rec_items = F._wan_sortable_items(rec_current)
+rec_ppp = next((it for it in rec_items if it["id"].startswith("pppoe:")), None)
+rec_dhcp = next((it for it in rec_items if it["id"].startswith("dhcp:")), None)
+check("with the recursive route design, the PPPoE primary's real distance "
+      "(10) is shown — not '1' from a failed gateway match against the "
+      "recursive route's check-IP gateway",
+      rec_ppp is not None and rec_ppp["_dist"] == "10")
+check("with the recursive route design, the DHCP secondary's real "
+      "distance (11) is shown, distinct from the primary's",
+      rec_dhcp is not None and rec_dhcp["_dist"] == "11")
+
 # routes_summary's own route-status text ("route active"/"route inactive")
 # only appears on the add-default-route=yes branch (a plain, non-failover
 # line) and goes through the same _route_status_for fix — it reads distance
