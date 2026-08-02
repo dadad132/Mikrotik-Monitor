@@ -1523,9 +1523,12 @@ check("add-default-route reported as \"false\" (not \"no\") is still "
       any(o.path == ("interface", "pppoe-client") and o.action == "set"
           and o.params.get("add-default-route") == "yes" for o in tf_plan.ops))
 
-# Same tolerance needed in the other direction: enabling failover must
-# still recognize an already-off "false" client and NOT redundantly try
-# to set it to "no" again (idempotent either way it's spelled).
+# PPP/PPPoE links get NO managed static route at all — every gateway value
+# ever tried for one (interface name, the interface's own address) turned
+# out unreliable on real hardware. RouterOS's own PPP client already routes
+# correctly on its own the moment the session connects, so these links stay
+# at add-default-route=yes (restored here since it was "false") and only
+# get their priority set directly via default-route-distance.
 tf_api_on = FakeApi({
     ("ip", "route"): [],
     ("tool", "netwatch"): [],
@@ -1536,11 +1539,21 @@ tf_api_on = FakeApi({
     ("interface", "l2tp-client"): [], ("ppp", "active"): [], ("ip", "address"): [],
 })
 tf_plan_on = F.routes_plan(Pusher(tf_cfg, tf_api_on, dry_run=False), tf_cfg,
-                          {"fo_enabled": "1", "fo_primary_check": "1.1.1.1"}, {})
-check("a client already off (\"false\") is not redundantly re-set to no "
-      "when enabling failover",
-      not any(o.path == ("interface", "pppoe-client") and o.action == "set"
-             and "add-default-route" in o.params for o in tf_plan_on.ops))
+                          {"fo_enabled": "1"}, {})
+check("a PPP link's client has add-default-route restored to yes when "
+      "enabling failover — tolerating the \"false\" spelling, not just \"no\"",
+      any(o.path == ("interface", "pppoe-client") and o.action == "set"
+          and o.params.get(".id") == "*1"
+          and o.params.get("add-default-route") == "yes" for o in tf_plan_on.ops))
+check("a PPP link never gets a managed static route at all — no gateway "
+      "value ever proved reliably usable for one",
+      not any(o.path == ("ip", "route") and o.action == "add" for o in tf_plan_on.ops))
+check("a PPP link's priority is set directly on the client's own "
+      "default-route-distance instead (position-based: 1, no explicit "
+      "Distance chosen)",
+      any(o.path == ("interface", "pppoe-client") and o.action == "set"
+          and o.params.get(".id") == "*1"
+          and o.params.get("default-route-distance") == "1" for o in tf_plan_on.ops))
 
 # Confirmed live via the router's own system log: mikromon never sent a
 # single "pppoe client changed" command for a link, while its DHCP-based
@@ -1577,9 +1590,10 @@ check("a case mismatch between the WAN uplinks editor's Interface text and "
       any(o.path == ("interface", "pppoe-client") and o.action == "set"
           and o.params.get("add-default-route") == "yes" for o in case_plan.ops))
 
-# Same case-insensitive matching needed when ENABLING failover (the
-# "stop this client creating its own route" step) and for gateway
-# detection — not just the disable/restore path.
+# Same case-insensitive matching needed when ENABLING failover (setting
+# the client's own default-route-distance) — not just the disable/restore
+# path. This is a PPP link, so it gets no managed route at all — only its
+# own default-route-distance field, matched case-insensitively.
 case_api_on = FakeApi({
     ("ip", "route"): [], ("tool", "netwatch"): [],
     ("interface", "pppoe-client"): [
@@ -1591,13 +1605,14 @@ case_api_on = FakeApi({
 })
 case_plan_on = F.routes_plan(Pusher(case_cfg, case_api_on, dry_run=False), case_cfg,
                             {"fo_enabled": "1"}, {})
-check("gateway detection and the add-default-route=no step both still "
-      "match the client despite the case difference when enabling",
-      any(o.path == ("ip", "route") and o.action == "add"
-          and o.params.get("comment") == "mikromon:failover:primary"
-          and o.params.get("gateway") == "10.0.0.1" for o in case_plan_on.ops)
-      and any(o.path == ("interface", "pppoe-client") and o.action == "set"
-             and o.params.get("add-default-route") == "no" for o in case_plan_on.ops))
+check("a PPP link never gets a managed route, even with a case mismatch "
+      "between the WAN editor's text and the router's actual client name",
+      not any(o.path == ("ip", "route") and o.action == "add" for o in case_plan_on.ops))
+check("the case-insensitive match still finds the client to set its "
+      "default-route-distance when enabling",
+      any(o.path == ("interface", "pppoe-client") and o.action == "set"
+          and o.params.get(".id") == "*1"
+          and o.params.get("default-route-distance") == "1" for o in case_plan_on.ops))
 
 # 4 uplinks: each gets its own route with its own real gateway and its own
 # priority distance — no shared/aliased state between links.
@@ -1628,10 +1643,15 @@ uniq_plan = F.routes_plan(Pusher(uniq_cfg, uniq_api, dry_run=False), uniq_cfg,
 uniq_route_adds = [o for o in uniq_plan.ops
                   if o.path == ("ip", "route") and o.action == "add"]
 uniq_gws = {o.params["comment"]: o.params["gateway"] for o in uniq_route_adds}
-check("all 4 links get their own failover route",
-      len(uniq_route_adds) == 4)
-check("each of the 4 links' routes uses its own distinct real gateway",
-      len(set(uniq_gws.values())) == 4)
+check("only the 3 DHCP links get a managed route — the PPP link (Wikiworx) "
+      "never does",
+      len(uniq_route_adds) == 3)
+check("each of the 3 DHCP links' routes uses its own distinct real gateway",
+      len(set(uniq_gws.values())) == 3)
+check("the PPP link (Wikiworx) gets its priority set directly on its own "
+      "client instead of a route",
+      any(o.path == ("interface", "pppoe-client") and o.action == "set"
+          and o.params.get("default-route-distance") == "1" for o in uniq_plan.ops))
 
 # Pre-existing tag-based failover routes/netwatch (from an earlier apply)
 # must be recognized as ours and cleaned up when disabling.
@@ -1987,6 +2007,29 @@ check("falling back to the interface itself (no gateway IP detected) is "
       "called out explicitly, with a hint to re-apply",
       "no gateway IP found" in fallback_line and "re-applying" in fallback_line)
 
+# The current (no-managed-route) design for PPP links: no "Failover primary
+# via ..." route line exists at all since there's no managed route — the
+# summary must still report something useful for that link, reading the
+# client's own connection state and distance directly. This is what a
+# PPP link actually looks like after applying under the current design:
+# add-default-route=yes (restored) with default-route-distance set.
+noroute_state = {**rec_state,
+    ("ip", "route"): [],
+    ("interface", "pppoe-client"): [
+        {".id": "*5", "name": "wikiworx", "running": "true",
+         "add-default-route": "yes", "default-route-distance": "10"},
+    ],
+}
+noroute_current = F.routes_read(
+    Pusher(rec_cfg, FakeApi(dict(noroute_state)), dry_run=True), rec_cfg)
+noroute_summary = F.routes_summary(noroute_current, rec_cfg)
+noroute_line = next((ln for ln in noroute_summary
+                    if ln.startswith("Failover primary")), "")
+check("a PPP link with no managed route (the current design) reports its "
+      "own connection state and distance instead of going silent",
+      "via its own PPP connection" in noroute_line
+      and "connected" in noroute_line and "distance 10" in noroute_line)
+
 # routes_summary's own route-status text ("route active"/"route inactive")
 # only appears on the add-default-route=yes branch (a plain, non-failover
 # line) and goes through the same _route_status_for fix — it reads distance
@@ -2006,27 +2049,35 @@ check("routes_summary's PPPoE line resolves route status (matched via "
       "ppp/active remote-address, not the client's name), not blank",
       "route active" in ppp_line)
 
-# routes_plan (what the Routes tab's Apply button actually runs) must not
-# push default-route-distance to any client directly. It used to run a
-# second pass (_apply_wan_order) driven by the Routes tab's own drag-order
-# list, which submits back on EVERY apply regardless of whether the user
-# touched it — silently overwriting each client's default-route-distance
-# with a sequential rank (1, 2, 3...) instead of the explicit Distance
-# chosen on the WAN tab (10, 11, 12). Confirmed live: a router already
-# correctly at distance 10/11/12 got its DHCP backups reset to 2/3 on the
-# very next Routes-tab apply, even with the drag list left untouched.
+# routes_plan (what the Routes tab's Apply button actually runs) must never
+# be influenced by the Routes tab's own read-only drag-order list
+# ("wan_order" in the submitted form data). It used to run a second pass
+# (_apply_wan_order) driven by that list, which submitted back on EVERY
+# apply regardless of whether the user touched it — silently overwriting
+# each client's default-route-distance with a sequential rank (1, 2, 3...)
+# instead of the explicit Distance chosen on the WAN tab (10, 11, 12).
+# Confirmed live: a router already correctly at distance 10/11/12 got its
+# DHCP backups reset to 2/3 on the very next Routes-tab apply, even with
+# the drag list left untouched. Distance has exactly one source of truth
+# now (link.distance) — a PPP link's client DOES get default-route-distance
+# set directly (that's the current, intentional design, unrelated to this
+# bug), but only ever to that one real value, never a wan_order-derived rank.
 order_plan = F.routes_plan(
     Pusher(disp_cfg, FakeApi(dict(disp_state)), dry_run=True), disp_cfg,
-    {"fo_enabled": "1", "fo_primary_check": "1.1.1.1",
-     "fo_secondary_check": "8.8.8.8"},
+    {"fo_enabled": "1"},
     {"wan_order": ["pppoe:3", "dhcp:4"]})
-check("applying the Routes tab never sets default-route-distance on a "
-      "client directly — distance now has exactly one source of truth "
-      "(link.distance, applied by Gateway Failover)",
-      not any(o.path in (("interface", "pppoe-client"), ("ip", "dhcp-client"),
-                        ("interface", "l2tp-client"))
+ppp_dist_ops = [o for o in order_plan.ops
+               if o.path == ("interface", "pppoe-client")
+               and "default-route-distance" in o.params]
+check("wan_order data is completely ignored by routes_plan",
+      not any(o.path in (("ip", "dhcp-client"), ("interface", "l2tp-client"))
              and "default-route-distance" in o.params
-             for o in order_plan.ops))
+             for o in order_plan.ops)
+      and len(ppp_dist_ops) <= 1)
+check("the PPP client's default-route-distance, when set, is always the "
+      "real explicit Distance from the WAN tab (10) — never a "
+      "wan_order-derived sequential rank (1, 2, 3...)",
+      all(o.params["default-route-distance"] == "10" for o in ppp_dist_ops))
 
 
 print()

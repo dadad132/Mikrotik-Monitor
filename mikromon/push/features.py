@@ -210,11 +210,15 @@ def routes_summary(current, cfg):
         active = str(r.get("active", "true")).lower() not in ("false", "no")
         lines.append(f"route via {gw} · distance {dist}"
                      + ("" if active else " · inactive"))
-    # Failover summary — one line per configured link that has a managed
-    # failover route (covers any number of uplinks, not just primary/secondary).
+    # Failover summary — one line per configured link (covers any number of
+    # uplinks, not just primary/secondary). A DHCP link has a managed route
+    # to report on; a PPP/PPPoE link has none (see _apply_failover — its
+    # priority is set directly on its own connection instead), so its own
+    # connection state is reported here instead.
     fo_by_comment = {r.get("comment", ""): r for r in current.get("failover_routes", [])}
+    ppp_by_iface = {_norm_iface(c.get("name", "")): c for c in current.get("ppp", [])}
     links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
-    for idx in range(len(links)):
+    for idx, link in enumerate(links):
         role = _fo_role(idx)
         r = fo_by_comment.get(f"{_FAILOVER_TAG}{role}")
         if r:
@@ -226,6 +230,15 @@ def routes_summary(current, cfg):
                    "interface directly; try re-applying once the line is "
                    "fully connected)")
             lines.append(f"Failover {role} via {gw}{note} · {state}")
+            continue
+        iface_key = _norm_iface(getattr(link, "interface", "") or "")
+        client = ppp_by_iface.get(iface_key)
+        if client:
+            running = str(client.get("running", "false")).lower() in ("true", "yes")
+            dist = client.get("default-route-distance", "?")
+            state = "connected" if running else "disconnected"
+            lines.append(f"Failover {role} via its own PPP connection "
+                        f"(no separate route needed) · {state} · distance {dist}")
     return lines or ["No internet lines found on this router."]
 
 
@@ -382,15 +395,17 @@ def routes_form(current, cfg):
                  "on the WAN tab. That's what Gateway Failover below actually "
                  "applies; this just reports what's currently live on the router."},
         {"type": "heading", "label": "Gateway Failover",
-         "hint": "One default route per configured uplink (not just the "
-                 "first two), each straight to that line's own real "
-                 "gateway (detected automatically) at its own priority "
-                 "distance. RouterOS uses whichever line's gateway is "
-                 "currently reachable — no separate check IP, no ping "
-                 "health check. This means it reacts when a line's own "
-                 "connection actually drops (interface/PPP session gone), "
-                 "but not to a line that's technically still connected "
-                 "while the internet beyond it is down."},
+         "hint": "Sets each configured uplink's priority (not just the "
+                 "first two). A DHCP line gets a dedicated route straight "
+                 "to its real gateway; a PPPoE/dial-up line's priority is "
+                 "set directly on its own connection instead (no gateway "
+                 "to detect — RouterOS's own PPP client already routes it "
+                 "correctly). RouterOS then uses whichever line is "
+                 "currently connected and has priority — no separate check "
+                 "IP, no ping health check. This means it reacts when a "
+                 "line's own connection actually drops, but not to a line "
+                 "that's technically still connected while the internet "
+                 "beyond it is down."},
         {"type": "toggle", "name": "fo_enabled", "value": "1",
          "on": fo_enabled, "label": "Enable gateway failover",
          "desc": "Turning this on or off can take between 2–5 minutes to "
@@ -501,32 +516,42 @@ def _fo_distance(idx, link):
 
 
 def _apply_failover(ops, flat, pusher, cfg):
-    """Reconcile a plain distance-based default route for EVERY configured
-    WAN uplink, not just a primary/secondary pair — a 3rd, 4th... link gets
-    its own managed route too, at its own distance (see _fo_distance).
+    """Reconcile distance-based priority for EVERY configured WAN uplink,
+    not just a primary/secondary pair — a 3rd, 4th... link is handled too,
+    each at its own distance (see _fo_distance). Two different mechanisms
+    depending on link type:
 
-    One route per link: dst-address=0.0.0.0/0, gateway = that link's own
-    real detected gateway (from PPP-active/DHCP, or the interface itself as
-    a last resort for PPP — see _gateway_for_link), distance = priority
-    order. No check IP, no check-gateway=ping, no Netwatch — RouterOS just
-    uses whichever line's gateway is currently reachable at the connection
-    level (interface up, PPP session live / ARP-resolvable), same as it
-    always does for any two routes to the same destination at different
-    distances. By explicit request: this only reacts to a line's own
-    connection actually going down, not to a line that's still up at that
-    level while the internet beyond it is unreachable — a deliberate
-    trade-off for something whose behavior only depends on data mikromon
-    can reliably detect (the gateway PPP/DHCP actually reports), rather
-    than a public IP's own reachability or RouterOS's own ping-timing.
+      - DHCP links: a managed static default route (dst-address=0.0.0.0/0,
+        gateway = the real DHCP-assigned IP, distance = priority order),
+        with the client's own add-default-route turned off so its dynamic
+        route doesn't compete. A real, DHCP-provided gateway IP has always
+        been reliably detectable.
 
-    Two earlier designs lived here: Netwatch + a hand-rolled down/up-script
-    (never recovered once a PPPoE session renegotiated with a new gateway
-    IP, since the routes were snapshotted at apply-time), then a recursive
-    check-gateway=ping scheme (worked, but depended on an external check
-    IP and RouterOS's own ping-based timing, which this router's specific
-    setup didn't get along with). Any leftover routes/Netwatch entries from
-    either are cleaned up automatically below, whether failover is being
-    turned on or off, since this feature no longer creates either.
+      - PPP/PPPoE links: NO managed route at all. Every gateway value that
+        could be constructed for one — the interface name, the interface's
+        own assigned address — turned out unreliable on real hardware: some
+        ISPs' PPPoE/CGNAT sessions don't expose anything RouterOS will
+        treat as a genuinely active gateway for a hand-built route (the
+        line would come up looking permanently down, or the opposite —
+        immediately fail over with no hesitation, depending on what was
+        tried). RouterOS's own PPP client, though, already creates a
+        correctly-routed dynamic default route the instant the session
+        connects — that's simply how PPPoE has always worked, no gateway
+        to guess at all. So these links are left at add-default-route=yes,
+        and only the client's own default-route-distance field is set
+        directly — mikromon controls priority, RouterOS's own client
+        handles the actual routing. Distance-based failover behaves
+        identically either way: RouterOS always prefers whichever default
+        route (static or dynamic) has the lowest distance and is active.
+
+    Two earlier designs lived here for PPP links specifically: Netwatch +
+    a hand-rolled down/up-script (never recovered once a PPPoE session
+    renegotiated with a new gateway IP, since routes were snapshotted at
+    apply-time), then a recursive check-gateway=ping scheme, then a plain
+    static route using the detected/fallback gateway directly — none of
+    these ever produced a reliably ACTIVE route for this failure mode.
+    Any leftover routes/Netwatch entries from those are cleaned up
+    automatically below, whether failover is being turned on or off.
 
     Gateways are derived from cfg.wan.links (the WAN uplinks the user
     configured) matched against live PPPoE/DHCP data on the router."""
@@ -670,19 +695,27 @@ def _apply_failover(ops, flat, pusher, cfg):
                         for a in _safe_fetch(pusher.api, _IP_ADDRESS) if a.get("interface")}
     fo_by_comment = {r.get("comment", ""): r for r in all_routes if fo_owns(r)}
 
+    is_ppp = []
     gateways = []
     for idx, link in enumerate(links):
+        iface = getattr(link, "interface", "") or ""
+        iface_key = _norm_iface(iface) if iface else ""
+        ppp_link = bool(iface_key) and iface_key in pppoe_names
+        is_ppp.append(ppp_link)
         gw = _gateway_for_link(link, pppoe_names, dhcp_by_iface,
                                ppp_active_by_name, ip_addr_by_iface)
-        if not gw:
+        if not gw and not ppp_link:
             # Fall back to the gateway already on the router from a
-            # previous apply (e.g. a PPPoE session that isn't up right now).
+            # previous apply (e.g. a DHCP lease that isn't bound right now).
             existing = fo_by_comment.get(f"{_FAILOVER_TAG}{_fo_role(idx)}")
             if existing and existing.get("gateway"):
                 gw = existing["gateway"]
         gateways.append(gw)
-    if not gateways[0]:
-        return  # primary gateway not detectable — cannot build routes
+    # Only bail for an undetectable gateway when the primary link actually
+    # needs one (DHCP) — a PPP primary never builds a route from `gw` at
+    # all (see below), so an empty value there is never fatal.
+    if not is_ppp[0] and not gateways[0]:
+        return
 
     # Built and reconciled ONE LINK AT A TIME, not as one big batch covering
     # every link at once. Reported live: turning failover on/off could
@@ -692,24 +725,48 @@ def _apply_failover(ops, flat, pusher, cfg):
     # rides over one of these WAN links could drop mid-apply before
     # reaching the op that would have fixed it.
     #
-    # For each link: ensure its own default route exists/is updated FIRST
-    # (add/update only — reconcile_list scoped to just this link's own
-    # comment never touches another link's route), and only THEN stop that
-    # link's client creating a competing dynamic route. By the time any
-    # client is told to stop routing on its own, that same link's static
-    # replacement is already in place.
+    # PPP/PPPoE links: no managed static route at all. Every gateway value
+    # we could construct for these — the interface name, the interface's
+    # own assigned address — turned out unreliable on real hardware (some
+    # ISPs' PPPoE/CGNAT sessions just don't expose anything RouterOS will
+    # actually treat as a valid, active gateway for a hand-built route).
+    # RouterOS's OWN PPP client, though, already creates a correctly
+    # routed dynamic default route the moment the session comes up — that
+    # is how PPPoE has always worked, with no gateway to guess at all.
+    # So for these links we leave add-default-route=yes and just set the
+    # client's own default-route-distance directly, letting RouterOS's own
+    # mechanism do the actual routing while mikromon only controls
+    # priority. Distance-based failover works identically either way:
+    # RouterOS always prefers whichever default route (static or dynamic)
+    # has the lowest distance and is actually active.
     #
-    # One route per link: gateway = that link's own real detected gateway,
-    # at its own priority distance. No check IP, no check-gateway, no
-    # Netwatch — RouterOS uses whichever line's gateway is reachable at the
-    # connection level, same as it always does for two routes to the same
-    # destination at different distances.
+    # DHCP links: unchanged — a real, DHCP-assigned gateway IP has always
+    # been reliably detectable, so they keep the managed static route +
+    # add-default-route=no approach.
     handled_routes = set()
-    for idx, gw in enumerate(gateways):
+    for idx, link in enumerate(links):
+        role = _fo_role(idx)
+        distance = _fo_distance(idx, link)
+        iface = getattr(link, "interface", "") or ""
+        if not iface:
+            continue
+        iface_key = _norm_iface(iface)
+
+        if is_ppp[idx]:
+            for c in pppoe_clients:
+                if _norm_iface(c.get("name")) != iface_key:
+                    continue
+                if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
+                    ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route", "yes",
+                                          f"PPPoE {iface}"))
+                if _norm(str(c.get("default-route-distance", "") or "")) != distance:
+                    ops.append(_set_field(_PPPOE_CLIENT, c, "default-route-distance",
+                                          distance, f"PPPoE {iface}"))
+            continue
+
+        gw = gateways[idx]
         if not gw:
             continue
-        role = _fo_role(idx)
-        distance = _fo_distance(idx, links[idx])
         main_comment = f"{_FAILOVER_TAG}{role}"
         handled_routes.add(main_comment)
 
@@ -730,19 +787,11 @@ def _apply_failover(ops, flat, pusher, cfg):
         # add-default-route=no removes the dynamic route immediately on
         # active connections and leaves only our managed route in control —
         # safe to do now since that route was just confirmed present above.
-        iface = getattr(links[idx], "interface", "") or ""
-        if iface:
-            iface_key = _norm_iface(iface)
-            for c in pppoe_clients:
-                if (_norm_iface(c.get("name")) == iface_key
-                        and str(c.get("add-default-route", "yes")).lower() not in ("no", "false")):
-                    ops.append(_set_field(_PPPOE_CLIENT, c, "add-default-route", "no",
-                                          f"PPPoE {iface}"))
-            for c in dhcp_clients:
-                if (_norm_iface(c.get("interface")) == iface_key
-                        and str(c.get("add-default-route", "yes")).lower() not in ("no", "false")):
-                    ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route", "no",
-                                          f"DHCP {iface}"))
+        for c in dhcp_clients:
+            if (_norm_iface(c.get("interface")) == iface_key
+                    and str(c.get("add-default-route", "yes")).lower() not in ("no", "false")):
+                ops.append(_set_field(_DHCP_CLIENT, c, "add-default-route", "no",
+                                      f"DHCP {iface}"))
 
     # Cleanup: any failover-owned routes left over that don't belong to any
     # currently configured link (e.g. an uplink removed from the WAN
