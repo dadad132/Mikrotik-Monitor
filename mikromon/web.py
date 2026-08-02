@@ -2844,10 +2844,11 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None,
 
 
 _TAB_INTRO = {
-    "routes": "See your internet lines (DHCP and PPPoE connections) and their current "
-              "status. Drag to reorder — the top line becomes the primary route.",
-    "wan": "Set automatic failover or load-balancing across your WAN uplinks, "
-           "and send specific LANs out a chosen internet line.",
+    "routes": "See your internet lines (DHCP and PPPoE connections) and their "
+              "current status, and turn automatic Gateway Failover on/off below. "
+              "Drag to reorder — the top line becomes the primary route.",
+    "wan": "Send specific LANs out a chosen internet line (policy routing). "
+           "Gateway Failover itself lives on the Routes tab.",
     "security": "Toggle common firewall protections. Existing rules below can be "
                 "viewed; easymikrotik only manages the ones it creates.",
     "harden": "Stop brute-force attacks: lock API/Winbox/SSH to your trusted IPs, "

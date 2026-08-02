@@ -2386,10 +2386,10 @@ def adopt_plan(pusher, cfg, feature, row_id):
 # Registry — keyed by URL slug; order follows the device tab bar.
 # ===========================================================================
 FEATURES = {
-    "routes": {"title": "Routes", "write": True,
+    "routes": {"title": "Routes — Gateway Failover", "write": True,
                "read": routes_read,
                "form": routes_form, "plan": routes_plan},
-    "wan": {"title": "WAN — failover & load balancing", "write": True,
+    "wan": {"title": "WAN — policy routing", "write": True,
             "read": sdwan_read, "summary": sdwan_summary, "form": sdwan_form,
             "plan": sdwan_plan},
     "security": {"title": "Security", "write": True, "read": security_read,
