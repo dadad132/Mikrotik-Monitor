@@ -1684,6 +1684,39 @@ check("detect_wan_gateways ignores a saved manual override — it reports "
 check("detect_wan_gateways finds a DHCP link's real gateway",
       dwg["ether2"] == "172.17.232.254")
 
+# Reported live: some ISPs' PPPoE/CGNAT setups never populate a distinct
+# remote address at all — neither /ppp/active's remote-address nor
+# /ip/address's own 'network' field — but the interface's OWN assigned
+# address (confirmed live as a genuinely reachable, working gateway on
+# that connected subnet) is still available and preferred over jumping
+# straight to using the bare interface name.
+ownaddr_links = [WanEndpoint(interface="Axxess", name="Axxess")]
+ownaddr_api = FakeApi({
+    ("interface", "pppoe-client"): [{"name": "Axxess"}],
+    ("ip", "dhcp-client"): [],
+    ("ppp", "active"): [{"name": "Axxess"}],  # no remote-address field at all
+    ("ip", "address"): [{"interface": "Axxess", "address": "100.127.128.105/32"}],
+})
+ownaddr_dwg = F.detect_wan_gateways(ownaddr_api, ownaddr_links)
+check("falls back to the interface's own assigned address (from /ip/address's "
+      "'address' field) when neither ppp-active nor the 'network' field give "
+      "a distinct remote address",
+      ownaddr_dwg["Axxess"] == "100.127.128.105")
+
+# ...but a real 'network' field (the actual documented remote-end case)
+# still takes priority over the interface's own address when both exist.
+network_api = FakeApi({
+    ("interface", "pppoe-client"): [{"name": "Axxess"}],
+    ("ip", "dhcp-client"): [],
+    ("ppp", "active"): [],
+    ("ip", "address"): [{"interface": "Axxess", "address": "100.127.128.105/32",
+                        "network": "41.2.3.4"}],
+})
+network_dwg = F.detect_wan_gateways(network_api, ownaddr_links)
+check("a real distinct 'network' (remote-end) value is still preferred over "
+      "the interface's own address when both are available",
+      network_dwg["Axxess"] == "41.2.3.4")
+
 # ---- 16. explicit per-uplink Distance (WAN uplinks editor) -----------------
 print("explicit WAN uplink distance (auto-detects the router client; saved "
       "immediately but NOT force-reconnected — see the safety note above):")
