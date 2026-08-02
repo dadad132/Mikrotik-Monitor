@@ -2772,6 +2772,12 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None,
                      f'{"".join(_opt(i) for i in other)}</optgroup>')
         return f'<select name="link_iface" style="width:100%">{opts}</select>'
 
+    def _type_field(selected=""):
+        opts = "".join(
+            f'<option value="{v}"{" selected" if v == selected else ""}>{lbl}</option>'
+            for v, lbl in (("", "Auto"), ("ppp", "Dial-up (PPPoE)"), ("dhcp", "DHCP / static")))
+        return f'<select name="link_type" style="width:100%">{opts}</select>'
+
     def row(link):
         dist = link.distance if (link and link.distance) else ""
         gw_saved = (link.gateway if link else "") or ""
@@ -2787,6 +2793,7 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None,
                 f'<td><input name="link_name" placeholder="ISP name (Vodacom)" '
                 f'value="{esc(link.name if link else "")}" style="width:100%"></td>'
                 f'<td>{_iface_field(link.interface if link else "")}</td>'
+                f'<td>{_type_field(link.link_type if link else "")}</td>'
                 f'<td><input name="link_gw" placeholder="{esc(gw_detected or "auto")}" '
                 f'value="{esc(gw_saved)}" style="width:100%">{gw_hint}</td>'
                 f'<td><input name="link_distance" type="number" min="1" max="253" '
@@ -2811,30 +2818,37 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None,
             f'<p class="muted">List your internet links in <b>priority order</b> — '
             f'<b>top = primary</b>, 2nd = first backup, and so on. <b>Drag the '
             f'&#9776; handle</b> (or use the &uarr;/&darr; buttons) to reorder; '
-            f'failover/load-balancing below uses this order. <b>Gateway</b> shows '
-            f'what mikromon detects automatically for that line (from PPP or '
-            f'DHCP) — leave it blank to use that. Only fill it in yourself if '
-            f'detection falls back to routing via the interface directly (no '
-            f'gateway IP found) or picks the wrong address. <b>Distance</b> is '
-            f'optional. Set it and that line always uses exactly that value — '
-            f'while failover is on (as its static route) and when failover is '
-            f'turned off (restored to your client). Leave it blank and, when '
-            f'failover is off, that line\'s distance is left completely alone '
-            f'(whatever it already was); while failover is on, it just gets a '
-            f'sensible position-based value (1st = 1, 2nd = 2, ...) for its '
-            f'static route. A changed Distance is saved on the client '
-            f'immediately, but RouterOS only applies it to that line\'s actual '
-            f'route on its <b>next reconnect</b> — mikromon does not force this '
-            f'automatically (that line may be the one carrying its own '
-            f'connection to this router, so bouncing it risks cutting itself '
-            f'off). Disconnect and reconnect the line yourself (or wait for it '
-            f'to happen naturally) to apply a distance change right '
-            f'away.</p>{detect_note}'
+            f'failover/load-balancing below uses this order. <b>Type</b> is '
+            f'"Auto" by default (detects PPPoE/dial-up vs DHCP from the '
+            f'router\'s own interface list) — only change it if that ever '
+            f'guesses wrong for a line. A <b>dial-up</b> line doesn\'t use '
+            f'the Gateway field at all: RouterOS\'s own PPP client already '
+            f'routes it correctly on its own, so Gateway Failover only sets '
+            f'that line\'s priority directly on the connection, no route '
+            f'built for it. A <b>DHCP</b> line gets a dedicated route to '
+            f'its real gateway instead, and <b>Gateway</b> shows what '
+            f'mikromon detects automatically for it — leave it blank to '
+            f'use that, or fill it in yourself if detection picks the '
+            f'wrong address. <b>Distance</b> is optional. Set it and that '
+            f'line always uses exactly that value — while failover is on '
+            f'and when failover is turned off (restored to your client). '
+            f'Leave it blank and, when failover is off, that line\'s '
+            f'distance is left completely alone (whatever it already was); '
+            f'while failover is on, it just gets a sensible position-based '
+            f'value (1st = 1, 2nd = 2, ...). A changed Distance is saved on '
+            f'the client immediately, but RouterOS only applies it to that '
+            f'line\'s actual route on its <b>next reconnect</b> — mikromon '
+            f'does not force this automatically (that line may be the one '
+            f'carrying its own connection to this router, so bouncing it '
+            f'risks cutting itself off). Disconnect and reconnect the line '
+            f'yourself (or wait for it to happen naturally) to apply a '
+            f'distance change right away.</p>{detect_note}'
             f'<form method="POST" action="/device/wan">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="device" value="{esc(name)}">'
             f'<table class="rowtbl" id="rows-wl"><thead><tr><th>Name</th>'
-            f'<th>Interface</th><th>Gateway</th><th>Distance</th><th>Order</th></tr></thead>'
+            f'<th>Interface</th><th>Type</th><th>Gateway</th><th>Distance</th>'
+            f'<th>Order</th></tr></thead>'
             f'<tbody>{body}</tbody></table>'
             f'<button type="button" class="btn ghost" onclick="pushAddRow(\'wl\')" '
             f'style="margin-top:6px">+ Add uplink</button>'
@@ -4648,12 +4662,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             names = multi.get("link_name", [])
             ifaces = multi.get("link_iface", [])
             gws = multi.get("link_gw", [])
+            types = multi.get("link_type", [])
             dists = multi.get("link_distance", [])
             for i, (nm, ifc) in enumerate(zip(names, ifaces)):
                 nm, ifc = nm.strip(), ifc.strip()
                 if nm or ifc:
                     gw = gws[i].strip() if i < len(gws) else ""
-                    entry = {"name": nm, "interface": ifc, "gateway": gw}
+                    link_type = types[i].strip().lower() if i < len(types) else ""
+                    if link_type not in ("ppp", "dhcp"):
+                        link_type = ""
+                    entry = {"name": nm, "interface": ifc, "gateway": gw,
+                             "link_type": link_type}
                     dist = dists[i].strip() if i < len(dists) else ""
                     if dist:
                         try:

@@ -246,6 +246,36 @@ check("a link with no chosen Distance shows the blank/auto placeholder, "
       "not a stray 'None'",
       'value="None"' not in wed_dist)
 
+# link_type (the WAN tab's "Connection type" override — Auto/Dial-up/DHCP,
+# see _apply_failover) must round-trip through save/load exactly like
+# Distance does.
+cfgtype = build_device({"name": "R", "host": "1.1.1.1", "wan": {"links": [
+    {"name": "Axxess", "interface": "Axxess", "link_type": "ppp"},
+    {"name": "Backup", "interface": "ether2", "link_type": "dhcp"},
+    {"name": "Auto", "interface": "ether3"}]}}, DEF)
+check("build_device parses an explicit link_type override",
+      [ep.link_type for ep in cfgtype.wan.links] == ["ppp", "dhcp", ""])
+check("an unrecognized link_type value is treated as auto (empty), not "
+      "passed through as garbage",
+      build_device({"name": "R", "host": "1.1.1.1", "wan": {"links": [
+          {"name": "X", "interface": "ether1", "link_type": "nonsense"}]}},
+          DEF).wan.links[0].link_type == "")
+resaved_type = device_to_dict(cfgtype)
+check("device_to_dict includes link_type when serializing back for storage",
+      [lk.get("link_type") for lk in resaved_type["wan"]["links"]] == ["ppp", "dhcp", ""])
+cfgtype2 = build_device(resaved_type, DEF)
+check("a second save/load round-trip still has the same link_type choices",
+      [ep.link_type for ep in cfgtype2.wan.links] == ["ppp", "dhcp", ""])
+wed_type = web._wan_uplink_editor("R", cfgtype, "csrf")
+check("the WAN uplinks editor shows the saved Connection type selected "
+      "for each row",
+      '<option value="ppp" selected>Dial-up (PPPoE)</option>' in wed_type
+      and '<option value="dhcp" selected>DHCP / static</option>' in wed_type)
+check("a link with no chosen type defaults to 'Auto' selected (also true "
+      "for the blank trailing 'add new' row and the hidden <template> row, "
+      "hence 3)",
+      wed_type.count('<option value="" selected>Auto</option>') == 3)
+
 # Detecting which port actually has the ISP plugged in (varies per install —
 # some start on ether1, others ether5) so it doesn't have to be guessed.
 wed_detect = web._wan_uplink_editor(
@@ -888,6 +918,23 @@ try:
           raw["wan"]["links"][0]["gateway"] == "41.2.3.4")
     check("a link left blank keeps auto-detection (no override saved)",
           raw["wan"]["links"][1].get("gateway", "") == "")
+    saved.close()
+    # link_type (Connection type override) must also round-trip, and an
+    # unrecognized value must never persist as garbage.
+    st = post_status(admin, "/device/wan",
+                     {"csrf": csrf, "device": "WebR1",
+                      "link_name": ["Fibre", "LTE"],
+                      "link_iface": ["ether1", "lte1"],
+                      "link_gw": ["", ""],
+                      "link_type": ["dhcp", "bogus"]})
+    check("link_type save accepted (redirect)", st == 303)
+    saved = DevicesStore(wdb)
+    raw = saved.raw("WebR1")
+    check("an explicit link_type override is saved on that link",
+          raw["wan"]["links"][0]["link_type"] == "dhcp")
+    check("an unrecognized link_type value is saved as auto (empty), not "
+          "passed through as-is",
+          raw["wan"]["links"][1]["link_type"] == "")
     saved.close()
     st = post_status(nobody, "/device/wan",
                      {"csrf": bcsrf, "device": "WebR1", "link_iface": ["x"]})

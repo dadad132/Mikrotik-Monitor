@@ -700,7 +700,17 @@ def _apply_failover(ops, flat, pusher, cfg):
     for idx, link in enumerate(links):
         iface = getattr(link, "interface", "") or ""
         iface_key = _norm_iface(iface) if iface else ""
-        ppp_link = bool(iface_key) and iface_key in pppoe_names
+        # link_type is an explicit override (WAN tab's "Connection type") —
+        # auto-detection (does this interface match a PPPoE client on the
+        # router?) is normally reliable, but has no way to be corrected by
+        # hand if it ever guesses wrong for a given interface.
+        link_type = (getattr(link, "link_type", "") or "").lower()
+        if link_type == "ppp":
+            ppp_link = True
+        elif link_type == "dhcp":
+            ppp_link = False
+        else:
+            ppp_link = bool(iface_key) and iface_key in pppoe_names
         is_ppp.append(ppp_link)
         gw = _gateway_for_link(link, pppoe_names, dhcp_by_iface,
                                ppp_active_by_name, ip_addr_by_iface)

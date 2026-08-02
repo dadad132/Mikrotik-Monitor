@@ -1653,6 +1653,52 @@ check("the PPP link (Wikiworx) gets its priority set directly on its own "
       any(o.path == ("interface", "pppoe-client") and o.action == "set"
           and o.params.get("default-route-distance") == "1" for o in uniq_plan.ops))
 
+# link_type is an explicit override for auto-detection (WAN tab's
+# "Connection type") — auto-detection is normally reliable, but has no way
+# to be corrected by hand if it ever guesses wrong for a given interface.
+override_link = WanEndpoint(interface="Wikiworx", name="Wikiworx",
+                            link_type="dhcp")  # force DHCP handling on a real PPP interface
+override_cfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[override_link]))
+override_api = FakeApi({
+    ("ip", "route"): [], ("tool", "netwatch"): [],
+    ("interface", "pppoe-client"): [
+        {".id": "*1", "name": "Wikiworx", "add-default-route": "yes", "disabled": "false"}],
+    ("ip", "dhcp-client"): [],
+    ("interface", "l2tp-client"): [],
+    ("ppp", "active"): [{"name": "Wikiworx", "remote-address": "10.0.0.1"}],
+    ("ip", "address"): [],
+})
+override_plan = F.routes_plan(Pusher(override_cfg, override_api, dry_run=False),
+                              override_cfg, {"fo_enabled": "1"}, {})
+check("link_type='dhcp' forces the managed-route strategy even on a real "
+      "PPP interface (an explicit override, honored as asked)",
+      any(o.path == ("ip", "route") and o.action == "add"
+          and o.params.get("gateway") == "10.0.0.1" for o in override_plan.ops))
+check("with link_type='dhcp' forced, the client's own default-route-distance "
+      "is left alone (that field is now irrelevant — a static route owns "
+      "priority instead)",
+      not any(o.path == ("interface", "pppoe-client") and o.action == "set"
+             and "default-route-distance" in o.params for o in override_plan.ops))
+
+# Forcing link_type='ppp' on an interface that ISN'T actually a PPPoE
+# client on the router must be a safe no-op (no route, no client field
+# found to set) rather than crashing or guessing something.
+wrong_override_link = WanEndpoint(interface="ether9", name="Nope", link_type="ppp")
+wrong_override_cfg = _t.SimpleNamespace(
+    name="R1", wan=_t.SimpleNamespace(links=[wrong_override_link]))
+wrong_override_api = FakeApi({
+    ("ip", "route"): [], ("tool", "netwatch"): [],
+    ("interface", "pppoe-client"): [],
+    ("ip", "dhcp-client"): [],
+    ("interface", "l2tp-client"): [], ("ppp", "active"): [], ("ip", "address"): [],
+})
+wrong_override_plan = F.routes_plan(
+    Pusher(wrong_override_cfg, wrong_override_api, dry_run=False),
+    wrong_override_cfg, {"fo_enabled": "1"}, {})
+check("forcing link_type='ppp' on an interface that isn't really a PPPoE "
+      "client is a safe no-op, not a crash",
+      wrong_override_plan.empty)
+
 # Pre-existing tag-based failover routes/netwatch (from an earlier apply)
 # must be recognized as ours and cleaned up when disabling.
 tagged_api = FakeApi({

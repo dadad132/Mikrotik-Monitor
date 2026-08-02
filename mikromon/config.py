@@ -77,6 +77,14 @@ class WanEndpoint:
     gateway: str = ""
     name: str = ""  # friendly ISP label, e.g. "Vodacom"
     distance: int | None = None  # explicit route priority; None = auto (position + 1)
+    # Connection type for Gateway Failover's routing strategy: "" (auto —
+    # detect PPPoE vs DHCP from the router's own interface list), "ppp"
+    # (force dial-up handling: no managed route, priority set directly on
+    # the connection), or "dhcp" (force a managed static route with a real
+    # gateway IP). An override, not something most setups need — added
+    # because auto-detection, while normally reliable, has no way to be
+    # corrected by hand if it ever guesses wrong for a given interface.
+    link_type: str = ""
 
     @property
     def configured(self) -> bool:
@@ -191,10 +199,14 @@ def _endpoint(d) -> WanEndpoint:
         distance = int(dist_raw) if dist_raw not in (None, "") else None
     except (TypeError, ValueError):
         distance = None
+    link_type = str(d.get("link_type", "")).lower()
+    if link_type not in ("ppp", "dhcp"):
+        link_type = ""
     return WanEndpoint(interface=str(d.get("interface", "")),
                        gateway=str(d.get("gateway", "")),
                        name=str(d.get("name", "")),
-                       distance=distance)
+                       distance=distance,
+                       link_type=link_type)
 
 
 def _wan_links(wan_raw: dict) -> list:
@@ -327,7 +339,8 @@ def device_to_dict(cfg: DeviceConfig) -> dict:
         "timeout": cfg.timeout, "lan_subnets": list(cfg.lan_subnets),
         "wan": {
             "links": [{"name": ep.name, "interface": ep.interface,
-                       "gateway": ep.gateway, "distance": ep.distance}
+                       "gateway": ep.gateway, "distance": ep.distance,
+                       "link_type": ep.link_type}
                       for ep in cfg.wan.links],
             "ping_targets": list(cfg.wan.ping_targets),
         },
