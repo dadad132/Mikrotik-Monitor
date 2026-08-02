@@ -16,6 +16,7 @@ see what a real router accepted or rejected.
 """
 from __future__ import annotations
 
+import ipaddress
 import re
 
 from .api import PushError
@@ -115,6 +116,18 @@ def _norm_iface(s) -> str:
     at all, which looks identical to "nothing is wrong" until you check
     the router's own log and see mikromon never touched that interface."""
     return str(s or "").strip().lower()
+
+
+def _looks_like_ip(s) -> bool:
+    """True if `s` parses as an IPv4/IPv6 address — used to tell whether
+    _gateway_for_link found a real gateway IP (from ppp-active/ip-address/
+    dhcp-client) or fell back to using the interface's own name (its last
+    resort, when neither PPP nor DHCP exposed a usable address)."""
+    try:
+        ipaddress.ip_address(str(s).split("/")[0])
+        return True
+    except ValueError:
+        return False
 
 
 def detect_isp_ifaces(api) -> set:
@@ -238,7 +251,21 @@ def routes_summary(current, cfg):
             active = str(r.get("active", "true")).lower() not in ("false", "no")
             status = r.get("gateway-status", "")
             state = status or ("route active" if active else "route inactive")
-            via = f" via {chk['gateway']}" if chk and chk.get("gateway") else ""
+            via = ""
+            real_gw = chk.get("gateway", "") if chk else ""
+            if real_gw and _looks_like_ip(real_gw):
+                via = f" via {real_gw}"
+            elif real_gw:
+                # Neither PPP-active nor the DHCP/PPP address data gave a
+                # gateway IP for this link, so it's routed via the interface
+                # itself (still valid, just less commonly what you'd expect
+                # to see) — this can also just mean the line hadn't finished
+                # connecting yet at the moment failover was last applied;
+                # re-applying re-detects the gateway live and may pick up a
+                # real IP once it has.
+                via = (f" via the {real_gw} interface directly (no gateway "
+                      f"IP found from PPP/DHCP — try re-applying once the "
+                      f"line is fully connected)")
             lines.append(f"Failover {role} checking {r.get('gateway', '?')}{via} · {state}")
     return lines or ["No internet lines found on this router."]
 

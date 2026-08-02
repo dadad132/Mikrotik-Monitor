@@ -1958,6 +1958,34 @@ check("with the recursive route design, the DHCP secondary's real "
       "distance (11) is shown, distinct from the primary's",
       rec_dhcp is not None and rec_dhcp["_dist"] == "11")
 
+# The Routes tab's Failover summary line must make it obvious when a link
+# has no detectable gateway IP (PPP-active/DHCP gave nothing usable, so
+# _gateway_for_link fell back to routing via the interface itself) instead
+# of silently showing the same "via X" text either way — reported live as
+# confusing/looking broken with no way to tell from the dashboard alone.
+rec_summary = F.routes_summary(rec_current, rec_cfg)
+fo_primary_line = next((ln for ln in rec_summary if ln.startswith("Failover primary")), "")
+check("a real gateway IP (from the check route) is shown plainly",
+      "via 41.2.3.4" in fo_primary_line)
+
+fallback_state = {**rec_state,
+    ("ip", "route"): [
+        {".id": "*1", "comment": "mikromon:failover:primary",
+         "dst-address": "0.0.0.0/0", "gateway": "1.1.1.1",
+         "check-gateway": "ping", "distance": "10", "active": "true"},
+        {".id": "*2", "comment": "mikromon:failover:check:primary",
+         "dst-address": "1.1.1.1/32", "gateway": "Axxess", "scope": "10"},
+    ],
+}
+fallback_current = F.routes_read(
+    Pusher(rec_cfg, FakeApi(dict(fallback_state)), dry_run=True), rec_cfg)
+fallback_summary = F.routes_summary(fallback_current, rec_cfg)
+fallback_line = next((ln for ln in fallback_summary
+                     if ln.startswith("Failover primary")), "")
+check("falling back to the interface itself (no gateway IP detected) is "
+      "called out explicitly, with a hint to re-apply",
+      "no gateway IP found" in fallback_line and "re-applying" in fallback_line)
+
 # routes_summary's own route-status text ("route active"/"route inactive")
 # only appears on the add-default-route=yes branch (a plain, non-failover
 # line) and goes through the same _route_status_for fix — it reads distance
