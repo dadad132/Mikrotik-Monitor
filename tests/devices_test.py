@@ -348,6 +348,20 @@ check("Maintenance dropdown groups Update + Backups + a Reboot form",
       and '/device/reboot' in bar and 'value="CSRF1"' in bar)
 check("non-admin tab bar has no Maintenance dropdown / reboot",
       "Maintenance" not in web._device_tabbar("R", "overview", False, "CSRF1"))
+# RouterOS's "Device Mode" security feature blocks adding a scheduler over
+# the API on some hardware — the raw error is opaque, so it's translated
+# into a plain explanation + the (physical, one-time) fix steps instead.
+dm_msg = web._friendly_push_error(
+    "apply failed after 2 op(s); rolled back 0. add /system/scheduler "
+    "failed: failure: not allowed by device-mode")
+check("a device-mode error gets a plain-language explanation, not raw text",
+      "Device Mode" in dm_msg and "physically" in dm_msg)
+check("the device-mode fix steps are included",
+      "/system/device-mode/update scheduler=yes" in dm_msg
+      and "power-cycle" in dm_msg.lower())
+check("an unrelated error gets no special-cased message (caller falls "
+      "back to the generic box)",
+      web._friendly_push_error("connection refused") == "")
 # backup 'Created' date: prefer the YYYYMMDD-HHMMSS stamp in mikromon names,
 # else the router's creation-time
 check("backup date parsed from the mikromon backup name",

@@ -2923,6 +2923,32 @@ def _render_temp_login_page(name, user, username, password, address, minutes) ->
     return _page(esc(name) + " · Temporary login", _header(user, "/") + inner)
 
 
+def _friendly_push_error(error: str) -> str:
+    """Translate a few known raw RouterOS error signatures into a plain
+    explanation + fix instead of just the technical error text. Returns ""
+    when nothing matches, so the caller falls back to the generic box."""
+    if "not allowed by device-mode" in error.lower():
+        return (
+            '<b>This router has RouterOS’s "Device Mode" security feature '
+            'turned on.</b> It blocks adding scheduler entries or scripts '
+            'over the API/Winbox unless someone physically confirms it at '
+            'the router itself — added after real attacks where a '
+            'compromised router got a backdoor installed remotely this way. '
+            'mikromon can’t work around this remotely; someone needs to '
+            'be physically at <b>this router</b> to fix it (one-time, per '
+            'device):'
+            '<ol style="margin:8px 0 0 20px">'
+            '<li>Connect (Winbox or terminal) and run: '
+            '<code>/system/device-mode/update scheduler=yes</code></li>'
+            '<li>Power-cycle the router (unplug/replug) within a few '
+            'minutes — that power cycle is the physical confirmation '
+            'RouterOS requires; it can’t be done over the network.</li>'
+            '<li>Reconnect and run <code>/system/device-mode/print</code> '
+            'to confirm <code>scheduler: yes</code> now shows.</li>'
+            '</ol>After that, this works on this router going forward.')
+    return ""
+
+
 def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                         fields=None, preview=None, submitted=None, error="",
                         msg="", recent=None, facts=None, unmanaged=None,
@@ -2936,11 +2962,14 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
     q = quote(name)
     banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
               f'</div>' if msg else "")
+    _friendly = _friendly_push_error(error) if error else ""
     err = (f'<div class="box" style="border-left:4px solid #dc2626">'
-           f'<b>Could not reach the router:</b> {esc(error)}<br>'
-           f'<span class="muted">See the activity log below for the full error. '
-           f'Check the host and the read-write push user on the Devices page.'
-           f'</span></div>' if error else "")
+           + (_friendly if _friendly else
+              f'<b>Could not reach the router:</b> {esc(error)}<br>'
+              f'<span class="muted">See the activity log below for the full '
+              f'error. Check the host and the read-write push user on the '
+              f'Devices page.</span>')
+           + '</div>' if error else "")
 
     if preview is not None and slug == "remote":
         # This tab needs to work for someone who's never seen RouterOS: no
