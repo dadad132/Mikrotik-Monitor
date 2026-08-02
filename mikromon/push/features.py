@@ -753,13 +753,22 @@ def _apply_failover(ops, flat, pusher, cfg):
         handled_routes.add(main_comment)
         handled_routes.add(check_comment)
 
+        # The host-check route MUST be created before the recursive default
+        # route that depends on it to resolve its gateway — reversed, the
+        # recursive route briefly (or, depending on how promptly RouterOS
+        # re-evaluates check-gateway, not-so-briefly) has no route at all
+        # for its own gateway to resolve through, so it comes up looking
+        # broken from the very first instant and RouterOS falls straight
+        # through to the next-lowest-distance line — exactly the "jumps to
+        # the backup line immediately, no hesitation" symptom this fixes.
         link_routes = [
-            {"comment": main_comment, "dst-address": "0.0.0.0/0", "gateway": host,
-             "check-gateway": "ping", "distance": distance, "target-scope": "11"},
             {"comment": check_comment, "dst-address": _net(host), "gateway": gw,
              "scope": "10"},
+            {"comment": main_comment, "dst-address": "0.0.0.0/0", "gateway": host,
+             "check-gateway": "ping", "distance": distance, "target-scope": "11"},
         ]
-        # 1. THIS link's host-check route + recursive default route, first.
+        # 1. THIS link's host-check route (its recursive dependency) first,
+        # then the recursive default route itself.
         ops.extend(reconcile_list(
             _ROUTE, "comment", link_routes, all_routes,
             owns=lambda r, mc=main_comment, cc=check_comment:

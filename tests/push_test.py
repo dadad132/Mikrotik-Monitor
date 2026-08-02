@@ -1426,6 +1426,20 @@ check("the host-check route sends the check IP out the link's OWN real "
 check("check-gateway is NOT set on the host-check route (only the "
       "recursive default route needs it)",
       "check-gateway" not in check_adds[f"{_FO_TAG}check:primary"].params)
+# The host-check route MUST be added before the recursive default route
+# that depends on it, for every link — reversed, the recursive route has
+# nothing to resolve its own gateway through at the instant it's created,
+# so it comes up looking broken and RouterOS falls straight through to a
+# lower-priority line immediately, with no hesitation (confirmed live: as
+# soon as failover was turned on, it jumped straight to the backup line).
+route_add_order = [o.params["comment"] for o in route_adds]
+for role in ("primary", "secondary", "link3"):
+    check(f"{role}'s host-check route is added before its own recursive "
+          f"default route (the route depends on the check route to "
+          f"resolve its gateway — reversed, it's broken from the instant "
+          f"it's created)",
+          route_add_order.index(f"{_FO_TAG}check:{role}")
+          < route_add_order.index(f"{_FO_TAG}{role}"))
 check("link3's own route distance is 3 (position + 1, no explicit Distance set)",
       main_adds[f"{_FO_TAG}link3"].params["distance"] == "3")
 check("primary always checks 1.1.1.1",
