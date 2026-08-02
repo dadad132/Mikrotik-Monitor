@@ -2710,17 +2710,36 @@ def _norm_html(v) -> str:
     return "true" if v in (True, "true") else str(v)
 
 
-def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None) -> str:
+def _wan_is_dialup_type(itype: str) -> bool:
+    """True for a dial-up-style interface (PPPoE/PPTP/L2TP/SSTP client) as
+    opposed to a plain Ethernet/wireless port — used to group the interface
+    picker so it's obvious which entries are "dial up" vs "ethernet port"."""
+    t = (itype or "").lower()
+    return any(k in t for k in ("pppoe", "pptp", "l2tp", "sstp"))
+
+
+def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None,
+                       detected_gateways=None) -> str:
     """Editable WAN uplink list (saved to the device record, not pushed).
 
     When ifaces is a list of interface dicts (fetched live from the router),
-    the interface column renders as a <select> dropdown instead of a text input.
-    online_ifaces (interface names with a bound DHCP lease, a running PPPoE/
-    L2TP session, or a live default route) get flagged in the dropdown and
-    sorted to the top — so which physical port the ISP is actually plugged
-    into doesn't have to be guessed when setting up a router from scratch
-    (some jobs start the ISP on ether1, others on ether5, ...)."""
+    the interface column renders as a <select> dropdown, grouped into
+    "Dial-up" (PPPoE/PPTP/L2TP/SSTP client) and "Ethernet/other" ports, so
+    it's clear at a glance which kind of connection each option is instead
+    of guessing from a raw RouterOS type name. online_ifaces (interface
+    names with a bound DHCP lease, a running PPPoE/L2TP session, or a live
+    default route) get flagged and sorted to the top of their group — so
+    which physical port the ISP is actually plugged into doesn't have to be
+    guessed when setting up a router from scratch (some jobs start the ISP
+    on ether1, others on ether5, ...).
+
+    detected_gateways (from push.features.detect_wan_gateways, live router
+    data) shows what mikromon would actually use as each line's gateway —
+    a manual override (the Gateway column) is optional and only needed when
+    detection falls back to routing via the interface itself (no gateway IP
+    found from PPP/DHCP) or gets the wrong one."""
     online = online_ifaces or set()
+    detected = detected_gateways or {}
 
     def _iface_field(selected=""):
         if ifaces is None:
@@ -2730,25 +2749,46 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None) -> str:
         names = [i.get("name", "") for i in ifaces]
         if selected and selected not in names:
             opts += f'<option value="{esc(selected)}" selected>{esc(selected)}</option>'
-        for iface in sorted(ifaces, key=lambda i: (i.get("name", "") not in online,
-                                                    i.get("name", ""))):
+
+        def _opt(iface):
             iname = iface.get("name", "")
-            if not iname:
-                continue
             itype = iface.get("type", "")
             sel = " selected" if iname == selected else ""
             lbl = iname + (f"  ({itype})" if itype and itype != "ether" else "")
             if iname in online:
                 lbl += "  \U0001f310 has an active internet connection"
-            opts += f'<option value="{esc(iname)}"{sel}>{esc(lbl)}</option>'
+            return f'<option value="{esc(iname)}"{sel}>{esc(lbl)}</option>'
+
+        sorted_ifaces = sorted(
+            (i for i in ifaces if i.get("name")),
+            key=lambda i: (i.get("name", "") not in online, i.get("name", "")))
+        dialup = [i for i in sorted_ifaces if _wan_is_dialup_type(i.get("type", ""))]
+        other = [i for i in sorted_ifaces if not _wan_is_dialup_type(i.get("type", ""))]
+        if dialup:
+            opts += (f'<optgroup label="Dial-up (PPPoE/PPTP/L2TP)">'
+                     f'{"".join(_opt(i) for i in dialup)}</optgroup>')
+        if other:
+            opts += (f'<optgroup label="Ethernet / other ports">'
+                     f'{"".join(_opt(i) for i in other)}</optgroup>')
         return f'<select name="link_iface" style="width:100%">{opts}</select>'
 
     def row(link):
         dist = link.distance if (link and link.distance) else ""
+        gw_saved = (link.gateway if link else "") or ""
+        gw_detected = detected.get(link.interface, "") if (link and link.interface) else ""
+        # Only show the "detected: X" caption when there's a manual override
+        # to compare it against — otherwise the (empty) field's own
+        # placeholder already shows the detected value, and the caption
+        # would just be a redundant repeat of it.
+        gw_hint = (f'<div class="muted" style="font-size:11px">detected: '
+                   f'{esc(gw_detected)}</div>'
+                   if gw_saved and gw_detected and gw_detected != gw_saved else "")
         return (f'<tr>'
                 f'<td><input name="link_name" placeholder="ISP name (Vodacom)" '
                 f'value="{esc(link.name if link else "")}" style="width:100%"></td>'
                 f'<td>{_iface_field(link.interface if link else "")}</td>'
+                f'<td><input name="link_gw" placeholder="{esc(gw_detected or "auto")}" '
+                f'value="{esc(gw_saved)}" style="width:100%">{gw_hint}</td>'
                 f'<td><input name="link_distance" type="number" min="1" max="253" '
                 f'placeholder="auto" value="{esc(str(dist))}" style="width:70px"></td>'
                 f'<td style="white-space:nowrap">'
@@ -2771,7 +2811,11 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None) -> str:
             f'<p class="muted">List your internet links in <b>priority order</b> — '
             f'<b>top = primary</b>, 2nd = first backup, and so on. <b>Drag the '
             f'&#9776; handle</b> (or use the &uarr;/&darr; buttons) to reorder; '
-            f'failover/load-balancing below uses this order. <b>Distance</b> is '
+            f'failover/load-balancing below uses this order. <b>Gateway</b> shows '
+            f'what mikromon detects automatically for that line (from PPP or '
+            f'DHCP) — leave it blank to use that. Only fill it in yourself if '
+            f'detection falls back to routing via the interface directly (no '
+            f'gateway IP found) or picks the wrong address. <b>Distance</b> is '
             f'optional. Set it and that line always uses exactly that value — '
             f'while failover is on (as its static route) and when failover is '
             f'turned off (restored to your client). Leave it blank and, when '
@@ -2790,7 +2834,7 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None) -> str:
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="device" value="{esc(name)}">'
             f'<table class="rowtbl" id="rows-wl"><thead><tr><th>Name</th>'
-            f'<th>Interface</th><th>Distance</th><th>Order</th></tr></thead>'
+            f'<th>Interface</th><th>Gateway</th><th>Distance</th><th>Order</th></tr></thead>'
             f'<tbody>{body}</tbody></table>'
             f'<button type="button" class="btn ghost" onclick="pushAddRow(\'wl\')" '
             f'style="margin-top:6px">+ Add uplink</button>'
@@ -2955,7 +2999,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                         confirm_action="/device/push", cfg=None,
                         extra_html="", extra_actions="", report_html="",
                         wan_ifaces=None, online_ifaces=None,
-                        can_manage=None) -> str:
+                        detected_gateways=None, can_manage=None) -> str:
     if can_manage is None:
         can_manage = AuthStore.is_admin(user or {})
     tabbar = _device_tabbar(name, slug, can_manage, csrf)
@@ -3055,7 +3099,8 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
     # The SD-WAN tab gets an inline WAN-uplink editor (device metadata, so it
     # works even when the router is unreachable). Hidden during the confirm step.
     wan_editor = (_wan_uplink_editor(name, cfg, csrf, ifaces=wan_ifaces,
-                                     online_ifaces=online_ifaces)
+                                     online_ifaces=online_ifaces,
+                                     detected_gateways=detected_gateways)
                   if slug == "wan" and preview is None else "")
     logbox = _recent_log_box(recent or [], device=name)
     intro = (f'<p class="muted" style="margin:-6px 0 14px">{_TAB_INTRO[slug]}</p>'
@@ -4519,6 +4564,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             cached_ifaces = [{"name": n} for n in (facts.get("interfaces") or [])]
             wan_ifaces = cached_ifaces or None
             online_ifaces = set()
+            detected_gateways = {}
             _report_html = report_html  # local copy; may be overridden below
             if preview is None and not error:
                 from .device import DeviceError
@@ -4549,6 +4595,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                             online_ifaces = detect_isp_ifaces(api)
                         except Exception:
                             online_ifaces = set()
+                        try:
+                            from .push.features import detect_wan_gateways
+                            detected_gateways = detect_wan_gateways(
+                                api, cfg.wan.links)
+                        except Exception:
+                            detected_gateways = {}
                     if "unmanaged" in feature:
                         unmanaged = feature["unmanaged"](pusher, cfg)
                     if slug == "scripts":
@@ -4577,7 +4629,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 confirm_action=confirm_action, cfg=cfg, extra_html=extra_html,
                 extra_actions=extra_actions, report_html=_report_html,
                 wan_ifaces=wan_ifaces, online_ifaces=online_ifaces,
-                can_manage=can_manage)
+                detected_gateways=detected_gateways, can_manage=can_manage)
             return self._send(200, page, "text/html; charset=utf-8")
 
         def _device_wan_post(self, flat, multi, user):
@@ -4594,11 +4646,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             links = []
             names = multi.get("link_name", [])
             ifaces = multi.get("link_iface", [])
+            gws = multi.get("link_gw", [])
             dists = multi.get("link_distance", [])
             for i, (nm, ifc) in enumerate(zip(names, ifaces)):
                 nm, ifc = nm.strip(), ifc.strip()
                 if nm or ifc:
-                    entry = {"name": nm, "interface": ifc, "gateway": ""}
+                    gw = gws[i].strip() if i < len(gws) else ""
+                    entry = {"name": nm, "interface": ifc, "gateway": gw}
                     dist = dists[i].strip() if i < len(dists) else ""
                     if dist:
                         try:

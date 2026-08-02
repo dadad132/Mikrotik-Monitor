@@ -263,6 +263,49 @@ check("the detection note only shows when ifaces (live router data) is available
       "has an active internet connection" not in wed  # no ifaces passed above
       and "mikromon detected an active internet connection" in wed_detect)
 
+# The interface picker groups dial-up (PPPoE/PPTP/L2TP) separately from
+# plain ethernet ports, so it's clear at a glance which kind of connection
+# each option is instead of guessing from a raw RouterOS type name.
+wed_groups = web._wan_uplink_editor(
+    "R", cfgwan, "csrf",
+    ifaces=[{"name": "ether1", "type": "ether"},
+           {"name": "Axxess", "type": "pppoe-out"},
+           {"name": "vlan10", "type": "vlan"}])
+check("dial-up (PPPoE-type) interfaces are grouped under their own optgroup",
+      'label="Dial-up (PPPoE/PPTP/L2TP)"' in wed_groups
+      and wed_groups.index('label="Dial-up (PPPoE/PPTP/L2TP)"')
+      < wed_groups.index('value="Axxess"'))
+check("plain ethernet/other ports are grouped separately from dial-up",
+      'label="Ethernet / other ports"' in wed_groups
+      and wed_groups.index('label="Ethernet / other ports"')
+      < wed_groups.index('value="ether1"'))
+
+# The Gateway column shows what mikromon auto-detects (as a placeholder,
+# and a small "detected:" hint) and lets the admin type in an override —
+# reported live: automatic detection can land on the interface name itself
+# (no gateway IP found from PPP/DHCP) or the wrong address, so a manual
+# escape hatch is needed rather than only ever trusting auto-detection.
+cfggw = build_device({"name": "R", "host": "1.1.1.1", "wan": {"links": [
+    {"name": "Axxess", "interface": "Axxess"},
+    {"name": "Backup", "interface": "ether2", "gateway": "172.17.232.254"}]}}, DEF)
+wed_gw = web._wan_uplink_editor(
+    "R", cfggw, "csrf", detected_gateways={"Axxess": "Axxess", "ether2": "172.17.232.254"})
+check("a link with no manual override shows the detected value as a "
+      "placeholder (so it's visible without typing anything)",
+      'name="link_gw" placeholder="Axxess" value=""' in wed_gw)
+check("a link WITH a manually-saved override shows that value filled in, "
+      "not the detected one",
+      'name="link_gw" placeholder="172.17.232.254" '
+      'value="172.17.232.254"' in wed_gw)
+check("no redundant 'detected: X' hint when the saved override already "
+      "matches the detected value",
+      wed_gw.count("detected:") == 0)
+wed_mismatch = web._wan_uplink_editor(
+    "R", cfggw, "csrf", detected_gateways={"Axxess": "Axxess", "ether2": "10.0.0.9"})
+check("a 'detected: X' hint appears when the live-detected gateway differs "
+      "from what's saved, so a stale override is visible",
+      "detected: 10.0.0.9" in wed_mismatch)
+
 # WAN Status dashboard box: a backup link that's individually down (its own
 # wan_link:N condition is a "problem") must show Offline, not just infer
 # "Online" from the overall picture looking fine. Confirmed live: a stopped
@@ -829,6 +872,22 @@ try:
     raw = saved.raw("WebR1")
     check("WAN uplinks saved from the SD-WAN tab",
           [l["interface"] for l in raw["wan"]["links"]] == ["ether1", "lte1"])
+    saved.close()
+    # A manual gateway override (link_gw) must round-trip — the escape
+    # hatch for when automatic detection (PPP-active/DHCP) falls back to
+    # the interface name or picks the wrong address.
+    st = post_status(admin, "/device/wan",
+                     {"csrf": csrf, "device": "WebR1",
+                      "link_name": ["Fibre", "LTE"],
+                      "link_iface": ["ether1", "lte1"],
+                      "link_gw": ["41.2.3.4", ""]})
+    check("manual gateway override save accepted (redirect)", st == 303)
+    saved = DevicesStore(wdb)
+    raw = saved.raw("WebR1")
+    check("the manual gateway override is saved on that link",
+          raw["wan"]["links"][0]["gateway"] == "41.2.3.4")
+    check("a link left blank keeps auto-detection (no override saved)",
+          raw["wan"]["links"][1].get("gateway", "") == "")
     saved.close()
     st = post_status(nobody, "/device/wan",
                      {"csrf": bcsrf, "device": "WebR1", "link_iface": ["x"]})

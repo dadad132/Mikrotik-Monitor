@@ -1663,6 +1663,27 @@ check("tag-based netwatch entry is recognized as ours and removed",
       {o.params[".id"] for o in tagged_disable.ops
        if o.path == ("tool", "netwatch") and o.action == "remove"} == {"*11"})
 
+# detect_wan_gateways: the WAN tab's "detected gateway" display reuses the
+# exact same detection _apply_failover uses, deliberately ignoring any
+# manual override already saved on the link (the whole point is to show
+# what would be auto-detected, for comparison against — or confirmation
+# of — that override).
+dwg_links = [WanEndpoint(interface="Axxess", name="Axxess", gateway="9.9.9.9"),
+            WanEndpoint(interface="ether2", name="Backup")]
+dwg_api = FakeApi({
+    ("interface", "pppoe-client"): [{"name": "Axxess"}],
+    ("ip", "dhcp-client"): [{"interface": "ether2", "gateway": "172.17.232.254"}],
+    ("ppp", "active"): [],
+    ("ip", "address"): [],
+})
+dwg = F.detect_wan_gateways(dwg_api, dwg_links)
+check("detect_wan_gateways ignores a saved manual override — it reports "
+      "what auto-detection alone would find (falls back to the interface "
+      "name here, since PPP-active/ip-address gave nothing usable)",
+      dwg["Axxess"] == "Axxess")
+check("detect_wan_gateways finds a DHCP link's real gateway",
+      dwg["ether2"] == "172.17.232.254")
+
 # ---- 16. explicit per-uplink Distance (WAN uplinks editor) -----------------
 print("explicit WAN uplink distance (auto-detects the router client; saved "
       "immediately but NOT force-reconnected — see the safety note above):")

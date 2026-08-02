@@ -445,6 +445,37 @@ def _gateway_for_link(link, pppoe_names, dhcp_by_iface,
     return ""
 
 
+def detect_wan_gateways(api, links) -> dict:
+    """Best-effort AUTO-DETECTED gateway for every configured WAN link,
+    keyed by the link's own `interface` value — deliberately ignoring any
+    manual override already saved on the link (see _gateway_for_link's
+    priority order), since the whole point is to show what mikromon would
+    detect on its own, for comparison against — or confirmation of — that
+    override. Used by the WAN tab to show each line's detected gateway
+    without needing a Winbox session to check."""
+    import types
+
+    pppoe_clients = _safe_fetch(api, _PPPOE_CLIENT)
+    dhcp_clients = _safe_fetch(api, _DHCP_CLIENT)
+    pppoe_names = {_norm_iface(c.get("name", "")): c.get("name", "")
+                  for c in pppoe_clients if c.get("name")}
+    dhcp_by_iface = {_norm_iface(c.get("interface", "")): c
+                     for c in dhcp_clients if c.get("interface")}
+    ppp_active_by_name = {_norm_iface(s.get("name", "")): s
+                          for s in _safe_fetch(api, _PPP_ACTIVE) if s.get("name")}
+    ip_addr_by_iface = {_norm_iface(a.get("interface", "")): a
+                        for a in _safe_fetch(api, _IP_ADDRESS) if a.get("interface")}
+    out = {}
+    for link in links:
+        iface = getattr(link, "interface", "") or ""
+        if not iface:
+            continue
+        bare = types.SimpleNamespace(interface=iface, gateway="")
+        out[iface] = _gateway_for_link(bare, pppoe_names, dhcp_by_iface,
+                                       ppp_active_by_name, ip_addr_by_iface)
+    return out
+
+
 def _fo_role(idx):
     """mikromon:failover: comment suffix for the link at this priority
     position — primary/secondary/link3/link4/... covering any number of
