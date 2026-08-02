@@ -1388,69 +1388,29 @@ fo_router_state = {
 }
 fo_api = FakeApi(dict(fo_router_state))
 fo_pusher = Pusher(fo_cfg, fo_api, dry_run=False)
-enable_plan = F.routes_plan(fo_pusher, fo_cfg,
-                            {"fo_enabled": "1", "fo_primary_check": "1.1.1.1",
-                             "fo_secondary_check": "8.8.8.8"}, {})
+enable_plan = F.routes_plan(fo_pusher, fo_cfg, {"fo_enabled": "1"}, {})
 route_adds = [o for o in enable_plan.ops if o.path == ("ip", "route") and o.action == "add"]
-main_adds = {o.params["comment"]: o for o in route_adds
-            if not o.params["comment"].startswith(f"{_FO_TAG}check:")}
-check_adds = {o.params["comment"]: o for o in route_adds
-             if o.params["comment"].startswith(f"{_FO_TAG}check:")}
+main_adds = {o.params["comment"]: o for o in route_adds}
 
-check("ALL 3 configured links get a failover route (not just primary/"
-      "secondary) — link3 gets its own route + check-route too",
+check("ALL 3 configured links get a failover route (not just primary/secondary)",
       {o.params["comment"] for o in route_adds} ==
-      {f"{_FO_TAG}primary", f"{_FO_TAG}check:primary",
-       f"{_FO_TAG}secondary", f"{_FO_TAG}check:secondary",
-       f"{_FO_TAG}link3", f"{_FO_TAG}check:link3"})
+      {f"{_FO_TAG}primary", f"{_FO_TAG}secondary", f"{_FO_TAG}link3"})
 check("route comments use the internal mikromon:failover: tag",
       f"{_FO_TAG}primary" in main_adds)
-check("no netwatch entries are created at all — RouterOS's own "
-      "check-gateway=ping replaces the custom script entirely",
+check("no netwatch entries are created — plain distance-based routes only, "
+      "by explicit request (no check IP, no check-gateway, no script)",
       not any(o.path == ("tool", "netwatch") and o.action == "add"
              for o in enable_plan.ops))
-check("the recursive default route's gateway is the check IP itself "
-      "(not the real ISP gateway) — that's what makes it recursive",
-      main_adds[f"{_FO_TAG}primary"].params["gateway"] == "1.1.1.1")
-check("the recursive default route has check-gateway=ping so RouterOS "
-      "itself continuously monitors it, no custom script needed",
-      main_adds[f"{_FO_TAG}primary"].params["check-gateway"] == "ping")
-check("the recursive default route has target-scope=11 (resolved via a "
-      "host route at scope=10)",
-      main_adds[f"{_FO_TAG}primary"].params["target-scope"] == "11")
-check("the host-check route sends the check IP out the link's OWN real "
-      "gateway (not the check IP itself) at scope=10",
-      check_adds[f"{_FO_TAG}check:primary"].params["gateway"] == "10.0.0.1"
-      and check_adds[f"{_FO_TAG}check:primary"].params["dst-address"] == "1.1.1.1/32"
-      and check_adds[f"{_FO_TAG}check:primary"].params["scope"] == "10")
-check("check-gateway is NOT set on the host-check route (only the "
-      "recursive default route needs it)",
-      "check-gateway" not in check_adds[f"{_FO_TAG}check:primary"].params)
-# The host-check route MUST be added before the recursive default route
-# that depends on it, for every link — reversed, the recursive route has
-# nothing to resolve its own gateway through at the instant it's created,
-# so it comes up looking broken and RouterOS falls straight through to a
-# lower-priority line immediately, with no hesitation (confirmed live: as
-# soon as failover was turned on, it jumped straight to the backup line).
-route_add_order = [o.params["comment"] for o in route_adds]
-for role in ("primary", "secondary", "link3"):
-    check(f"{role}'s host-check route is added before its own recursive "
-          f"default route (the route depends on the check route to "
-          f"resolve its gateway — reversed, it's broken from the instant "
-          f"it's created)",
-          route_add_order.index(f"{_FO_TAG}check:{role}")
-          < route_add_order.index(f"{_FO_TAG}{role}"))
+check("each link's default route uses its own REAL detected gateway "
+      "directly (no check IP, no recursion)",
+      main_adds[f"{_FO_TAG}primary"].params["gateway"] == "10.0.0.1"
+      and main_adds[f"{_FO_TAG}secondary"].params["gateway"] == "10.0.1.1")
+check("check-gateway/target-scope are NOT set on these routes — no "
+      "RouterOS-side health check, by explicit request",
+      "check-gateway" not in main_adds[f"{_FO_TAG}primary"].params
+      and "target-scope" not in main_adds[f"{_FO_TAG}primary"].params)
 check("link3's own route distance is 3 (position + 1, no explicit Distance set)",
       main_adds[f"{_FO_TAG}link3"].params["distance"] == "3")
-check("primary always checks 1.1.1.1",
-      check_adds[f"{_FO_TAG}check:primary"].params["dst-address"] == "1.1.1.1/32")
-check("secondary always checks 8.8.8.8",
-      check_adds[f"{_FO_TAG}check:secondary"].params["dst-address"] == "8.8.8.8/32")
-check("link3 gets its own unique check IP from the fallback pool — never "
-      "shares one with primary/secondary, which would make one of them a "
-      "meaningless check (RouterOS only has one active route per host)",
-      check_adds[f"{_FO_TAG}check:link3"].params["dst-address"]
-      not in ("1.1.1.1/32", "8.8.8.8/32"))
 check("no RouterOS scripts use invalid $(var) shell-style syntax",
       not any("$(" in str(v) for o in enable_plan.ops
              for v in o.params.values() if isinstance(v, str)))
@@ -1462,22 +1422,21 @@ check("ALL configured WAN clients get add-default-route=no when enabling",
 for op in enable_plan.ops:
     fo_api.execute(op)
 replan = F.routes_plan(fo_pusher, fo_cfg,
-                       {"fo_enabled": "1", "fo_primary_check": "1.1.1.1",
-                        "fo_secondary_check": "8.8.8.8"}, {})
+                       {"fo_enabled": "1"}, {})
 check("re-applying the same enabled config is a no-op (no churn/flapping)",
       not any(o.path in (("ip", "route"), ("tool", "netwatch")) for o in replan.ops))
 
-# Now disable failover: must remove ALL managed routes (6 — one host-check +
-# one recursive default per configured link) AND restore every configured
-# link's own routing — add-default-route=yes and disabled=no always, but
-# default-route-distance ONLY if the link has an explicit Distance chosen
-# (none of these 3 do), since that field is never touched while failover
-# is on and so already holds whatever it was before failover started.
+# Now disable failover: must remove ALL managed routes (one per configured
+# link) AND restore every configured link's own routing — add-default-
+# route=yes and disabled=no always, but default-route-distance ONLY if the
+# link has an explicit Distance chosen (none of these 3 do), since that
+# field is never touched while failover is on and so already holds
+# whatever it was before failover started.
 disable_plan = F.routes_plan(fo_pusher, fo_cfg, {"fo_enabled": ""}, {})
 removed_routes = {o.params[".id"] for o in disable_plan.ops
                   if o.path == ("ip", "route") and o.action == "remove"}
-check("disabling removes all 6 managed failover routes (3 links x 2 each)",
-      len(removed_routes) == 6)
+check("disabling removes all 3 managed failover routes (one per link)",
+      len(removed_routes) == 3)
 dhcp_restores = [o for o in disable_plan.ops if o.path == ("ip", "dhcp-client")]
 check("ALL 3 configured links get restored",
       {o.params[".id"] for o in dhcp_restores} == {"*1", "*2", "*3"})
@@ -1631,20 +1590,17 @@ case_api_on = FakeApi({
     ("ip", "address"): [],
 })
 case_plan_on = F.routes_plan(Pusher(case_cfg, case_api_on, dry_run=False), case_cfg,
-                            {"fo_enabled": "1", "fo_primary_check": "1.1.1.1"}, {})
+                            {"fo_enabled": "1"}, {})
 check("gateway detection and the add-default-route=no step both still "
       "match the client despite the case difference when enabling",
       any(o.path == ("ip", "route") and o.action == "add"
-          and o.params.get("comment") == "mikromon:failover:check:primary"
+          and o.params.get("comment") == "mikromon:failover:primary"
           and o.params.get("gateway") == "10.0.0.1" for o in case_plan_on.ops)
       and any(o.path == ("interface", "pppoe-client") and o.action == "set"
              and o.params.get("add-default-route") == "no" for o in case_plan_on.ops))
 
-# 4 uplinks: every link's check IP must be globally unique. RouterOS only
-# ever has ONE active route to a given host — if two links' check-routes
-# both pointed at the same IP, only one link would actually get pinged
-# through its own gateway; the other's Netwatch would silently ride along
-# whichever route won, making that link's health check meaningless.
+# 4 uplinks: each gets its own route with its own real gateway and its own
+# priority distance — no shared/aliased state between links.
 uniq_a = WanEndpoint(interface="Wikiworx", name="Wikiworx", distance=1)
 uniq_b = WanEndpoint(interface="ether5", name="Backup", distance=11)
 uniq_c = WanEndpoint(interface="ether3", name="Third", distance=12)
@@ -1668,12 +1624,14 @@ uniq_api = FakeApi({
     ("ip", "address"): [],
 })
 uniq_plan = F.routes_plan(Pusher(uniq_cfg, uniq_api, dry_run=False), uniq_cfg,
-                          {"fo_enabled": "1", "fo_primary_check": "1.1.1.1",
-                           "fo_secondary_check": "8.8.8.8"}, {})
-check_dsts = [o.params["dst-address"] for o in uniq_plan.ops
-             if o.path == ("ip", "route") and "check:" in str(o.params.get("comment", ""))]
-check("every one of 4 links' check-route destinations is globally unique",
-      len(check_dsts) == 4 and len(set(check_dsts)) == 4)
+                          {"fo_enabled": "1"}, {})
+uniq_route_adds = [o for o in uniq_plan.ops
+                  if o.path == ("ip", "route") and o.action == "add"]
+uniq_gws = {o.params["comment"]: o.params["gateway"] for o in uniq_route_adds}
+check("all 4 links get their own failover route",
+      len(uniq_route_adds) == 4)
+check("each of the 4 links' routes uses its own distinct real gateway",
+      len(set(uniq_gws.values())) == 4)
 
 # Pre-existing tag-based failover routes/netwatch (from an earlier apply)
 # must be recognized as ours and cleaned up when disabling.
@@ -1910,12 +1868,10 @@ check("the DHCP backup's distance in the drag-order list still reads "
       "correctly (unaffected by this fix)",
       dhcp_item is not None and dhcp_item["_dist"] == "11")
 
-# Reported live: with the recursive check-gateway=ping routes (current
-# design — see _apply_failover), EVERY line showed "distance 1" regardless
-# of what was actually chosen on the WAN tab. A managed main route's own
-# "gateway" field is the check IP now (not the real ISP gateway, since it's
-# a recursive route), so matching a client to its route by gateway never
-# succeeded, and every line fell through to the hardcoded "1" default.
+# Distance-based direct-gateway design: a managed route's own "gateway"
+# field IS the real ISP gateway directly (no recursion, no substitution
+# needed), so the Routes tab's client-to-route matching (by gateway) works
+# unmodified — confirms this stays true for the current design.
 rec_cfg = _t.SimpleNamespace(
     name="R1", wan=_t.SimpleNamespace(links=[
         WanEndpoint(interface="Wikiworx", name="Wikiworx", distance=10),
@@ -1923,15 +1879,11 @@ rec_cfg = _t.SimpleNamespace(
 rec_state = {
     ("ip", "route"): [
         {".id": "*1", "comment": "mikromon:failover:primary",
-         "dst-address": "0.0.0.0/0", "gateway": "1.1.1.1",
-         "check-gateway": "ping", "distance": "10", "active": "true"},
-        {".id": "*2", "comment": "mikromon:failover:check:primary",
-         "dst-address": "1.1.1.1/32", "gateway": "41.2.3.4", "scope": "10"},
+         "dst-address": "0.0.0.0/0", "gateway": "41.2.3.4",
+         "distance": "10", "active": "true"},
         {".id": "*3", "comment": "mikromon:failover:secondary",
-         "dst-address": "0.0.0.0/0", "gateway": "8.8.8.8",
-         "check-gateway": "ping", "distance": "11", "active": "false"},
-        {".id": "*4", "comment": "mikromon:failover:check:secondary",
-         "dst-address": "8.8.8.8/32", "gateway": "10.0.1.1", "scope": "10"},
+         "dst-address": "0.0.0.0/0", "gateway": "10.0.1.1",
+         "distance": "11", "active": "false"},
     ],
     ("tool", "netwatch"): [],
     ("interface", "pppoe-client"): [
@@ -1950,12 +1902,10 @@ rec_current = F.routes_read(Pusher(rec_cfg, FakeApi(dict(rec_state)), dry_run=Tr
 rec_items = F._wan_sortable_items(rec_current)
 rec_ppp = next((it for it in rec_items if it["id"].startswith("pppoe:")), None)
 rec_dhcp = next((it for it in rec_items if it["id"].startswith("dhcp:")), None)
-check("with the recursive route design, the PPPoE primary's real distance "
-      "(10) is shown — not '1' from a failed gateway match against the "
-      "recursive route's check-IP gateway",
+check("the PPPoE primary's real distance (10) is shown on the drag-order list",
       rec_ppp is not None and rec_ppp["_dist"] == "10")
-check("with the recursive route design, the DHCP secondary's real "
-      "distance (11) is shown, distinct from the primary's",
+check("the DHCP secondary's real distance (11) is shown, distinct from "
+      "the primary's",
       rec_dhcp is not None and rec_dhcp["_dist"] == "11")
 
 # The Routes tab's Failover summary line must make it obvious when a link
@@ -1965,16 +1915,14 @@ check("with the recursive route design, the DHCP secondary's real "
 # confusing/looking broken with no way to tell from the dashboard alone.
 rec_summary = F.routes_summary(rec_current, rec_cfg)
 fo_primary_line = next((ln for ln in rec_summary if ln.startswith("Failover primary")), "")
-check("a real gateway IP (from the check route) is shown plainly",
+check("a real gateway IP is shown plainly",
       "via 41.2.3.4" in fo_primary_line)
 
 fallback_state = {**rec_state,
     ("ip", "route"): [
         {".id": "*1", "comment": "mikromon:failover:primary",
-         "dst-address": "0.0.0.0/0", "gateway": "1.1.1.1",
-         "check-gateway": "ping", "distance": "10", "active": "true"},
-        {".id": "*2", "comment": "mikromon:failover:check:primary",
-         "dst-address": "1.1.1.1/32", "gateway": "Axxess", "scope": "10"},
+         "dst-address": "0.0.0.0/0", "gateway": "Axxess",
+         "distance": "10", "active": "true"},
     ],
 }
 fallback_current = F.routes_read(

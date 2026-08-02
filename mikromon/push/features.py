@@ -164,34 +164,11 @@ def routes_read(pusher, cfg):
     ppp_active = _safe_fetch(pusher.api, _PPP_ACTIVE)
     ip_addrs = _safe_fetch(pusher.api, _IP_ADDRESS)
     all_routes = _safe_fetch(pusher.api, _ROUTE)
-    routes_raw = [r for r in all_routes
-                 if str(r.get("dst-address", "")).startswith("0.0.0.0/0")
-                 and not str(r.get("comment", "")).startswith("mikromon:sdwan")]
+    routes = [r for r in all_routes
+             if str(r.get("dst-address", "")).startswith("0.0.0.0/0")
+             and not str(r.get("comment", "")).startswith("mikromon:sdwan")]
     failover_routes = [r for r in all_routes
                        if str(r.get("comment", "")).startswith(_FAILOVER_TAG)]
-    # A managed failover route's own "gateway" field is the check IP, not
-    # the real ISP gateway — it's a recursive route, see _apply_failover.
-    # _dist_from_routes/_route_status_for (below) match a client to its
-    # route by comparing gateways, so left as-is they'd never match a
-    # failover-managed client at all — every line would report the same
-    # fallback "distance 1" regardless of what was actually chosen on the
-    # WAN tab. Substitute the real gateway back in (from this link's own
-    # host-check route) for THIS list only — failover_routes above (used
-    # for the dedicated Failover summary line) keeps the real check-IP
-    # value, since that's the one that's actually useful to show there.
-    check_gw_by_role = {
-        c[len(f"{_FAILOVER_TAG}check:"):]: r.get("gateway", "")
-        for r in all_routes
-        if (c := str(r.get("comment", ""))).startswith(f"{_FAILOVER_TAG}check:")
-    }
-    routes = []
-    for r in routes_raw:
-        c = str(r.get("comment", ""))
-        if c.startswith(_FAILOVER_TAG) and not c.startswith(f"{_FAILOVER_TAG}check:"):
-            real_gw = check_gw_by_role.get(c[len(_FAILOVER_TAG):])
-            if real_gw:
-                r = dict(r, gateway=real_gw)
-        routes.append(r)
     return {"routes": routes, "dhcp": dhcp, "ppp": ppp,
             "ppp_active": ppp_active, "ip_addrs": ip_addrs,
             "failover_routes": failover_routes}
@@ -235,38 +212,20 @@ def routes_summary(current, cfg):
                      + ("" if active else " · inactive"))
     # Failover summary — one line per configured link that has a managed
     # failover route (covers any number of uplinks, not just primary/secondary).
-    # "active"/"gateway-status" come straight from RouterOS's own
-    # check-gateway=ping result on the recursive default route — no separate
-    # health-check record to cross-reference anymore.
-    fo_by_comment = {r.get("comment", ""): r for r in current.get("failover_routes", [])
-                     if not str(r.get("comment", "")).startswith(f"{_FAILOVER_TAG}check:")}
-    check_by_comment = {r.get("comment", ""): r for r in current.get("failover_routes", [])
-                        if str(r.get("comment", "")).startswith(f"{_FAILOVER_TAG}check:")}
+    fo_by_comment = {r.get("comment", ""): r for r in current.get("failover_routes", [])}
     links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
     for idx in range(len(links)):
         role = _fo_role(idx)
         r = fo_by_comment.get(f"{_FAILOVER_TAG}{role}")
-        chk = check_by_comment.get(f"{_FAILOVER_TAG}check:{role}")
         if r:
             active = str(r.get("active", "true")).lower() not in ("false", "no")
-            status = r.get("gateway-status", "")
-            state = status or ("route active" if active else "route inactive")
-            via = ""
-            real_gw = chk.get("gateway", "") if chk else ""
-            if real_gw and _looks_like_ip(real_gw):
-                via = f" via {real_gw}"
-            elif real_gw:
-                # Neither PPP-active nor the DHCP/PPP address data gave a
-                # gateway IP for this link, so it's routed via the interface
-                # itself (still valid, just less commonly what you'd expect
-                # to see) — this can also just mean the line hadn't finished
-                # connecting yet at the moment failover was last applied;
-                # re-applying re-detects the gateway live and may pick up a
-                # real IP once it has.
-                via = (f" via the {real_gw} interface directly (no gateway "
-                      f"IP found from PPP/DHCP — try re-applying once the "
-                      f"line is fully connected)")
-            lines.append(f"Failover {role} checking {r.get('gateway', '?')}{via} · {state}")
+            state = "route active" if active else "route inactive"
+            gw = r.get("gateway", "?")
+            note = ("" if _looks_like_ip(gw) else
+                   " (no gateway IP found from PPP/DHCP — routed via the "
+                   "interface directly; try re-applying once the line is "
+                   "fully connected)")
+            lines.append(f"Failover {role} via {gw}{note} · {state}")
     return lines or ["No internet lines found on this router."]
 
 
@@ -413,21 +372,7 @@ def _wan_gateway_for(client):
 
 def routes_form(current, cfg):
     items = _wan_sortable_items(current)
-
-    # Pre-fill check IPs from the existing failover check routes (each
-    # link's host route to its own check IP — see _apply_failover).
     fo_enabled = bool(current.get("failover_routes"))
-    primary_check = "1.1.1.1"
-    secondary_check = "8.8.8.8"
-    for r in current.get("failover_routes", []):
-        c = r.get("comment", "")
-        host = str(r.get("dst-address", "")).split("/")[0]
-        if c == f"{_FAILOVER_TAG}check:primary" and host:
-            primary_check = host
-        elif c == f"{_FAILOVER_TAG}check:secondary" and host:
-            secondary_check = host
-
-    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
 
     fields = [
         {"type": "list", "name": "wan_priority_info",
@@ -437,33 +382,20 @@ def routes_form(current, cfg):
                  "on the WAN tab. That's what Gateway Failover below actually "
                  "applies; this just reports what's currently live on the router."},
         {"type": "heading", "label": "Gateway Failover",
-         "hint": "Recursive routes with RouterOS's own gateway health check "
-                 "(check-gateway=ping) — the standard MikroTik failover "
-                 "pattern — one per configured uplink (not just the first "
-                 "two). Gateways are detected automatically. A 3rd+ line "
-                 "alternates between the two check IPs below by position "
-                 "instead of needing its own. RouterOS continuously pings "
-                 "each line's check IP and automatically prefers the "
-                 "highest-priority line that's currently responding — "
-                 "switching over, and switching back once a line recovers, "
-                 "both happen on their own with no separate script."},
+         "hint": "One default route per configured uplink (not just the "
+                 "first two), each straight to that line's own real "
+                 "gateway (detected automatically) at its own priority "
+                 "distance. RouterOS uses whichever line's gateway is "
+                 "currently reachable — no separate check IP, no ping "
+                 "health check. This means it reacts when a line's own "
+                 "connection actually drops (interface/PPP session gone), "
+                 "but not to a line that's technically still connected "
+                 "while the internet beyond it is down."},
         {"type": "toggle", "name": "fo_enabled", "value": "1",
          "on": fo_enabled, "label": "Enable gateway failover",
          "desc": "Turning this on or off can take between 2–5 minutes to "
                  "fully take effect on the router."},
-        {"type": "text", "name": "fo_primary_check",
-         "label": "Primary check IP", "value": primary_check,
-         "placeholder": "1.1.1.1",
-         "hint": "RouterOS pings this IP (via a dedicated route through the "
-                 "primary line) to confirm it has internet."},
     ]
-    if len(links) > 1:
-        fields.append({"type": "text", "name": "fo_secondary_check",
-                       "label": "Secondary check IP", "value": secondary_check,
-                       "placeholder": "8.8.8.8",
-                       "hint": "RouterOS pings this IP (via a dedicated route "
-                               "through the backup line) to confirm it has "
-                               "internet."})
     return fields
 
 
@@ -534,83 +466,52 @@ def _fo_distance(idx, link):
     return str(explicit) if explicit else str(idx + 1)
 
 
-# Well-known public resolvers used as fallback check IPs for a 3rd+ uplink,
-# so it never has to share one with primary/secondary.
-_FO_EXTRA_CHECK_IPS = ["9.9.9.9", "208.67.222.222", "1.0.0.1", "8.8.4.4",
-                      "149.112.112.112", "208.67.220.220"]
-
-
-def _fo_check_hosts(n, primary_check, secondary_check):
-    """n unique check IPs, one per configured link, in priority order.
-
-    The first two are the user's own configured primary/secondary check
-    IPs (from the form); a 3rd+ link pulls from a small pool of well-known
-    public resolvers instead of reusing primary's or secondary's — sharing
-    one is unsafe, since RouterOS only ever has a single active route to a
-    given destination. Two links pinging the same check IP would mean only
-    ONE of them is ever actually routed through its own gateway; the
-    other's Netwatch check would silently ride along whichever route won,
-    making it meaningless rather than an independent health check."""
-    hosts = [primary_check.split("/")[0]]
-    if n > 1:
-        hosts.append(secondary_check.split("/")[0])
-    pool = [ip for ip in _FO_EXTRA_CHECK_IPS if ip not in hosts]
-    i = 0
-    while len(hosts) < n:
-        if pool:
-            hosts.append(pool[i % len(pool)])
-        else:
-            hosts.append(hosts[0])  # pool exhausted (8+ uplinks) — degrade, don't crash
-        i += 1
-    return hosts
-
-
 def _apply_failover(ops, flat, pusher, cfg):
-    """Reconcile recursive failover routes for EVERY configured WAN uplink,
-    not just a primary/secondary pair — a 3rd, 4th... link gets its own
-    managed route pair too, at its own distance (see _fo_distance).
+    """Reconcile a plain distance-based default route for EVERY configured
+    WAN uplink, not just a primary/secondary pair — a 3rd, 4th... link gets
+    its own managed route too, at its own distance (see _fo_distance).
 
-    Uses RouterOS's own native recursive-gateway + check-gateway=ping
-    mechanism (the standard documented MikroTik failover pattern) instead of
-    a custom Netwatch script: for each link, a host route sends its check IP
-    out that link's own gateway (scope=10, so it's eligible as a next hop),
-    and a recursive default route points AT that check IP (not the real
-    gateway) with check-gateway=ping and target-scope=11 — RouterOS
-    continuously pings the check IP via the resolved host route and
-    automatically marks the default route active/inactive based on the
-    result, so the lowest-distance HEALTHY route always wins, no custom
-    script needed for either failing over or recovering.
+    One route per link: dst-address=0.0.0.0/0, gateway = that link's own
+    real detected gateway (from PPP-active/DHCP, or the interface itself as
+    a last resort for PPP — see _gateway_for_link), distance = priority
+    order. No check IP, no check-gateway=ping, no Netwatch — RouterOS just
+    uses whichever line's gateway is currently reachable at the connection
+    level (interface up, PPP session live / ARP-resolvable), same as it
+    always does for any two routes to the same destination at different
+    distances. By explicit request: this only reacts to a line's own
+    connection actually going down, not to a line that's still up at that
+    level while the internet beyond it is unreachable — a deliberate
+    trade-off for something whose behavior only depends on data mikromon
+    can reliably detect (the gateway PPP/DHCP actually reports), rather
+    than a public IP's own reachability or RouterOS's own ping-timing.
 
-    Previous builds used Netwatch + a hand-rolled down/up-script; that
-    could fail over correctly but, if a link's PPPoE session renegotiated
-    with a new remote/gateway IP, the static routes (baked in at the last
-    manual apply) went stale and never resolved again — the link would look
-    permanently down even once it was actually fine, since nothing
-    refreshed the gateway automatically. Any leftover Netwatch entries from
-    that design are cleaned up unconditionally below, whether failover is
-    being turned on or off, since this feature no longer creates any.
+    Two earlier designs lived here: Netwatch + a hand-rolled down/up-script
+    (never recovered once a PPPoE session renegotiated with a new gateway
+    IP, since the routes were snapshotted at apply-time), then a recursive
+    check-gateway=ping scheme (worked, but depended on an external check
+    IP and RouterOS's own ping-based timing, which this router's specific
+    setup didn't get along with). Any leftover routes/Netwatch entries from
+    either are cleaned up automatically below, whether failover is being
+    turned on or off, since this feature no longer creates either.
 
     Gateways are derived from cfg.wan.links (the WAN uplinks the user
-    configured) matched against live PPPoE/DHCP data on the router. Only
-    the two check IPs (public addresses each line's health is checked
-    against) come from the form — links beyond the first two alternate
-    between them by position (3rd shares the primary check IP, 4th shares
-    secondary's, and so on), so a 3rd+ uplink doesn't need its own
-    dedicated check-IP field."""
+    configured) matched against live PPPoE/DHCP data on the router."""
     fo_owns = _prefix_owner(_FAILOVER_TAG)
     all_routes = _safe_fetch(pusher.api, _ROUTE)
     links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
 
     # One-time migration cleanup: this feature no longer creates Netwatch
-    # entries at all, so any left over from a previous version are removed
+    # entries at all (two designs ago), so any left over are removed
     # unconditionally here, regardless of whether failover is being turned
-    # on or off below.
+    # on or off below. Leftover check:-comment routes from the recursive
+    # design (one design ago) are cleaned up further down by the normal
+    # "stale route" sweep, since they're simply never in handled_routes now.
     for w in _safe_fetch(pusher.api, _NETWATCH):
         if fo_owns(w):
             ops.append(Operation(
                 "remove", _NETWATCH, {".id": w[".id"]},
                 desc=f"remove old netwatch comment={w.get('comment', '')} "
-                    f"(replaced by RouterOS's own check-gateway=ping)",
+                    f"(replaced by a plain distance-based route)",
                 inverse=Operation(
                     "add", _NETWATCH, {f: v for f, v in w.items() if f != ".id"},
                     desc=f"restore netwatch comment={w.get('comment', '')}")))
@@ -749,90 +650,52 @@ def _apply_failover(ops, flat, pusher, cfg):
     if not gateways[0]:
         return  # primary gateway not detectable — cannot build routes
 
-    primary_check = flat.get("fo_primary_check", "").strip() or "1.1.1.1"
-    secondary_check = flat.get("fo_secondary_check", "").strip() or "8.8.8.8"
-
-    def _net(ip):
-        return ip if "/" in ip else f"{ip}/32"
-
-    check_hosts = _fo_check_hosts(len(gateways), primary_check, secondary_check)
-
-    # The standard MikroTik recursive-check failover pattern, for every
-    # configured link — but built and reconciled ONE LINK AT A TIME, not as
-    # one big batch covering every link at once. Reported live: turning
-    # failover on/off could leave the router briefly with no working default
-    # route at all, because every link's static route (or every client
-    # restore) was queued as a single group, so a router whose mikromon
-    # connection rides over one of these WAN links could drop mid-apply
-    # before reaching the op that would have fixed it.
+    # Built and reconciled ONE LINK AT A TIME, not as one big batch covering
+    # every link at once. Reported live: turning failover on/off could
+    # leave the router briefly with no working default route at all,
+    # because every link's static route (or every client restore) was
+    # queued as a single group, so a router whose mikromon connection
+    # rides over one of these WAN links could drop mid-apply before
+    # reaching the op that would have fixed it.
     #
-    # For each link here: ensure its own host-check route + recursive
-    # default route exist/are updated FIRST (add/update only —
-    # reconcile_list scoped to just this link's own comments never removes
-    # another link's entries), and only THEN stop that link's client
-    # creating a competing dynamic route. By the time any client is told to
-    # stop routing on its own, that same link's static replacement is
-    # already in place.
+    # For each link: ensure its own default route exists/is updated FIRST
+    # (add/update only — reconcile_list scoped to just this link's own
+    # comment never touches another link's route), and only THEN stop that
+    # link's client creating a competing dynamic route. By the time any
+    # client is told to stop routing on its own, that same link's static
+    # replacement is already in place.
     #
-    # Two routes per link:
-    #   - a host route sending this link's check IP out its OWN gateway
-    #     (scope=10, so it's eligible as a next hop for the route below);
-    #   - a recursive default route whose gateway is the check IP itself
-    #     (not the real ISP gateway), with check-gateway=ping and
-    #     target-scope=11. RouterOS resolves that gateway via the host
-    #     route above, continuously pings it, and automatically marks this
-    #     default route active/inactive based on the result — the
-    #     lowest-distance HEALTHY route always wins. No custom script is
-    #     needed for either failing over or recovering; RouterOS's own
-    #     routing engine handles both continuously.
-    #
-    # This ONLY works if every link's check IP is unique (see
-    # _fo_check_hosts) — RouterOS has a single active route per destination,
-    # so two links sharing one check IP would mean only one of them is ever
-    # actually resolved via its own gateway; the other's health check would
-    # silently ride along whichever host route won, making it meaningless.
+    # One route per link: gateway = that link's own real detected gateway,
+    # at its own priority distance. No check IP, no check-gateway, no
+    # Netwatch — RouterOS uses whichever line's gateway is reachable at the
+    # connection level, same as it always does for two routes to the same
+    # destination at different distances.
     handled_routes = set()
     for idx, gw in enumerate(gateways):
         if not gw:
             continue
         role = _fo_role(idx)
-        host = check_hosts[idx]
         distance = _fo_distance(idx, links[idx])
         main_comment = f"{_FAILOVER_TAG}{role}"
-        check_comment = f"{_FAILOVER_TAG}check:{role}"
         handled_routes.add(main_comment)
-        handled_routes.add(check_comment)
 
-        # The host-check route MUST be created before the recursive default
-        # route that depends on it to resolve its gateway — reversed, the
-        # recursive route briefly (or, depending on how promptly RouterOS
-        # re-evaluates check-gateway, not-so-briefly) has no route at all
-        # for its own gateway to resolve through, so it comes up looking
-        # broken from the very first instant and RouterOS falls straight
-        # through to the next-lowest-distance line — exactly the "jumps to
-        # the backup line immediately, no hesitation" symptom this fixes.
         link_routes = [
-            {"comment": check_comment, "dst-address": _net(host), "gateway": gw,
-             "scope": "10"},
-            {"comment": main_comment, "dst-address": "0.0.0.0/0", "gateway": host,
-             "check-gateway": "ping", "distance": distance, "target-scope": "11"},
+            {"comment": main_comment, "dst-address": "0.0.0.0/0", "gateway": gw,
+             "distance": distance},
         ]
-        # 1. THIS link's host-check route (its recursive dependency) first,
-        # then the recursive default route itself.
+        # 1. THIS link's default route, first.
         ops.extend(reconcile_list(
             _ROUTE, "comment", link_routes, all_routes,
-            owns=lambda r, mc=main_comment, cc=check_comment:
-                str(r.get("comment", "")) in (mc, cc),
+            owns=lambda r, mc=main_comment: str(r.get("comment", "")) == mc,
             label="failover route"))
 
         # 2. THEN stop this link's client creating its own competing dynamic
         # route. A client with add-default-route=yes creates a dynamic
-        # route that stays active even when RouterOS marks our recursive
-        # route unreachable for that same link, so a lower-priority static
-        # route never gets a chance to win. Setting add-default-route=no
-        # removes the dynamic route immediately on active connections and
-        # leaves only our managed routes in control — safe to do now since
-        # they were just confirmed present above.
+        # route that stays active regardless of priority, so a
+        # lower-priority static route never gets a chance to win. Setting
+        # add-default-route=no removes the dynamic route immediately on
+        # active connections and leaves only our managed route in control —
+        # safe to do now since that route was just confirmed present above.
         iface = getattr(links[idx], "interface", "") or ""
         if iface:
             iface_key = _norm_iface(iface)
@@ -911,20 +774,18 @@ def sdwan_summary(current, cfg):
     links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
     lines = []
     fo_routes = {r.get("comment", ""): r for r in current.get("failover_routes", [])}
-    for idx, (role, rc, cc) in enumerate((
-            ("primary",   f"{_FAILOVER_TAG}primary",   f"{_FAILOVER_TAG}check:primary"),
-            ("secondary", f"{_FAILOVER_TAG}secondary",  f"{_FAILOVER_TAG}check:secondary"))):
+    for idx, (role, rc) in enumerate((
+            ("primary",   f"{_FAILOVER_TAG}primary"),
+            ("secondary", f"{_FAILOVER_TAG}secondary"))):
         r = fo_routes.get(rc)
         if not r:
             continue
         link = links[idx] if idx < len(links) else None
         name = link.label(idx) if link else role.title()
-        chk = fo_routes.get(cc)
-        gw = chk.get("gateway", "?") if chk else r.get("gateway", "?")
+        gw = r.get("gateway", "?")
         dist = r.get("distance", "?")
         active = str(r.get("active", "true")).lower() not in ("false", "no")
-        status = r.get("gateway-status", "")
-        state = status or ("active" if active else "inactive")
+        state = "active" if active else "inactive"
         lines.append(f"{name} via {gw} · distance {dist} · {state}")
     # If no managed failover routes, fall back to plain default routes
     if not lines:
