@@ -1363,7 +1363,7 @@ check("install is detached too (survives the reboot disconnect)",
       inst.ops[0].detach is True)
 
 
-# ---- 15. gateway failover: name-based routes + disable/enable netwatch ----
+# ---- 15. gateway failover: recursive routes + RouterOS check-gateway=ping --
 print("gateway failover (routes tab):")
 from mikromon.config import WanEndpoint  # noqa: E402
 
@@ -1392,7 +1392,10 @@ enable_plan = F.routes_plan(fo_pusher, fo_cfg,
                             {"fo_enabled": "1", "fo_primary_check": "1.1.1.1",
                              "fo_secondary_check": "8.8.8.8"}, {})
 route_adds = [o for o in enable_plan.ops if o.path == ("ip", "route") and o.action == "add"]
-watch_adds = [o for o in enable_plan.ops if o.path == ("tool", "netwatch") and o.action == "add"]
+main_adds = {o.params["comment"]: o for o in route_adds
+            if not o.params["comment"].startswith(f"{_FO_TAG}check:")}
+check_adds = {o.params["comment"]: o for o in route_adds
+             if o.params["comment"].startswith(f"{_FO_TAG}check:")}
 
 check("ALL 3 configured links get a failover route (not just primary/"
       "secondary) — link3 gets its own route + check-route too",
@@ -1401,52 +1404,39 @@ check("ALL 3 configured links get a failover route (not just primary/"
        f"{_FO_TAG}secondary", f"{_FO_TAG}check:secondary",
        f"{_FO_TAG}link3", f"{_FO_TAG}check:link3"})
 check("route comments use the internal mikromon:failover: tag",
-      any(o.params["comment"] == f"{_FO_TAG}primary" for o in route_adds))
-check("check-route comment is 'check:<role>'",
-      any(o.params["comment"] == f"{_FO_TAG}check:primary"
-          and o.params["dst-address"] == "1.1.1.1/32" for o in route_adds))
+      f"{_FO_TAG}primary" in main_adds)
+check("no netwatch entries are created at all — RouterOS's own "
+      "check-gateway=ping replaces the custom script entirely",
+      not any(o.path == ("tool", "netwatch") and o.action == "add"
+             for o in enable_plan.ops))
+check("the recursive default route's gateway is the check IP itself "
+      "(not the real ISP gateway) — that's what makes it recursive",
+      main_adds[f"{_FO_TAG}primary"].params["gateway"] == "1.1.1.1")
+check("the recursive default route has check-gateway=ping so RouterOS "
+      "itself continuously monitors it, no custom script needed",
+      main_adds[f"{_FO_TAG}primary"].params["check-gateway"] == "ping")
+check("the recursive default route has target-scope=11 (resolved via a "
+      "host route at scope=10)",
+      main_adds[f"{_FO_TAG}primary"].params["target-scope"] == "11")
+check("the host-check route sends the check IP out the link's OWN real "
+      "gateway (not the check IP itself) at scope=10",
+      check_adds[f"{_FO_TAG}check:primary"].params["gateway"] == "10.0.0.1"
+      and check_adds[f"{_FO_TAG}check:primary"].params["dst-address"] == "1.1.1.1/32"
+      and check_adds[f"{_FO_TAG}check:primary"].params["scope"] == "10")
+check("check-gateway is NOT set on the host-check route (only the "
+      "recursive default route needs it)",
+      "check-gateway" not in check_adds[f"{_FO_TAG}check:primary"].params)
 check("link3's own route distance is 3 (position + 1, no explicit Distance set)",
-      any(o.params["comment"] == f"{_FO_TAG}link3" and o.params["distance"] == "3"
-          for o in route_adds))
+      main_adds[f"{_FO_TAG}link3"].params["distance"] == "3")
 check("primary always checks 1.1.1.1",
-      any(w.params["comment"] == f"{_FO_TAG}watch:primary" and w.params["host"] == "1.1.1.1"
-          for w in watch_adds))
+      check_adds[f"{_FO_TAG}check:primary"].params["dst-address"] == "1.1.1.1/32")
 check("secondary always checks 8.8.8.8",
-      any(w.params["comment"] == f"{_FO_TAG}watch:secondary" and w.params["host"] == "8.8.8.8"
-          for w in watch_adds))
+      check_adds[f"{_FO_TAG}check:secondary"].params["dst-address"] == "8.8.8.8/32")
 check("link3 gets its own unique check IP from the fallback pool — never "
       "shares one with primary/secondary, which would make one of them a "
       "meaningless check (RouterOS only has one active route per host)",
-      any(w.params["comment"] == f"{_FO_TAG}watch:link3"
-          and w.params["host"] not in ("1.1.1.1", "8.8.8.8")
-          for w in watch_adds))
-check("netwatch interval defaults to 30s (no fo_interval field in the form)",
-      all(w.params["interval"] == "30s" for w in watch_adds))
-primary_down = next(w.params["down-script"] for w in watch_adds
-                    if w.params["comment"] == f"{_FO_TAG}watch:primary")
-check("down-script only disables the route after confirming the outage "
-      "(a single missed Netwatch ping no longer flips it) — reported live "
-      "as unwanted flapping on brief blips",
-      f'/ip route disable [find comment="{_FO_TAG}primary"]' in primary_down
-      and ":delay 5s" in primary_down and "/ping 1.1.1.1" in primary_down)
-check("down-script confirms with 2 extra retries (3 attempts total: "
-      "Netwatch's own + 2 here)",
-      primary_down.count(":delay 5s") == 2
-      and primary_down.count("/ping 1.1.1.1") == 2)
-check("each confirmation attempt sends multiple packets (not just 1) so a "
-      "single dropped ICMP packet — common on LTE/backup links — no longer "
-      "looks identical to a real outage; any one reply out of the count "
-      "still counts as 'still up'",
-      primary_down.count("count=3") == 2 and "count=1" not in primary_down)
-check("up-script enables the route immediately by its tag — recovery "
-      "needs only the next successful Netwatch check, no confirmation",
-      any(w.params["up-script"].strip() == f'/ip route enable  [find comment="{_FO_TAG}primary"]'.strip()
-          for w in watch_adds))
-check("static routes no longer set check-gateway — Netwatch's own "
-      "(now retry-confirmed) down-script is the single source of truth "
-      "for whether a link's route is enabled, avoiding two independent "
-      "mechanisms fighting over the same route",
-      not any("check-gateway" in o.params for o in route_adds))
+      check_adds[f"{_FO_TAG}check:link3"].params["dst-address"]
+      not in ("1.1.1.1/32", "8.8.8.8/32"))
 check("no RouterOS scripts use invalid $(var) shell-style syntax",
       not any("$(" in str(v) for o in enable_plan.ops
              for v in o.params.values() if isinstance(v, str)))
@@ -1463,8 +1453,8 @@ replan = F.routes_plan(fo_pusher, fo_cfg,
 check("re-applying the same enabled config is a no-op (no churn/flapping)",
       not any(o.path in (("ip", "route"), ("tool", "netwatch")) for o in replan.ops))
 
-# Now disable failover: must remove ALL managed routes/netwatch (6 routes,
-# 3 netwatch — one set per configured link) AND restore every configured
+# Now disable failover: must remove ALL managed routes (6 — one host-check +
+# one recursive default per configured link) AND restore every configured
 # link's own routing — add-default-route=yes and disabled=no always, but
 # default-route-distance ONLY if the link has an explicit Distance chosen
 # (none of these 3 do), since that field is never touched while failover
@@ -1472,12 +1462,8 @@ check("re-applying the same enabled config is a no-op (no churn/flapping)",
 disable_plan = F.routes_plan(fo_pusher, fo_cfg, {"fo_enabled": ""}, {})
 removed_routes = {o.params[".id"] for o in disable_plan.ops
                   if o.path == ("ip", "route") and o.action == "remove"}
-removed_watch = {o.params[".id"] for o in disable_plan.ops
-                 if o.path == ("tool", "netwatch") and o.action == "remove"}
 check("disabling removes all 6 managed failover routes (3 links x 2 each)",
       len(removed_routes) == 6)
-check("disabling removes all 3 managed netwatch entries",
-      len(removed_watch) == 3)
 dhcp_restores = [o for o in disable_plan.ops if o.path == ("ip", "dhcp-client")]
 check("ALL 3 configured links get restored",
       {o.params[".id"] for o in dhcp_restores} == {"*1", "*2", "*3"})
@@ -1635,7 +1621,7 @@ case_plan_on = F.routes_plan(Pusher(case_cfg, case_api_on, dry_run=False), case_
 check("gateway detection and the add-default-route=no step both still "
       "match the client despite the case difference when enabling",
       any(o.path == ("ip", "route") and o.action == "add"
-          and o.params.get("comment") == "mikromon:failover:primary"
+          and o.params.get("comment") == "mikromon:failover:check:primary"
           and o.params.get("gateway") == "10.0.0.1" for o in case_plan_on.ops)
       and any(o.path == ("interface", "pppoe-client") and o.action == "set"
              and o.params.get("add-default-route") == "no" for o in case_plan_on.ops))
