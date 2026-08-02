@@ -13,6 +13,12 @@
 # How often (seconds) to poll every device. 60s is a good balance.
 poll_interval: 60
 
+# How many devices to poll AT ONCE (bounded thread pool), not one at a time.
+# With a large fleet, sequential polling could take far longer than
+# poll_interval to get through every device — a slow/unreachable one blocks
+# everything queued behind it.
+poll_concurrency: 20
+
 # Where to persist state between runs (which conditions are already alerted,
 # last-seen log lines, known DHCP clients, etc). Relative to the working dir.
 state_file: ./state.json

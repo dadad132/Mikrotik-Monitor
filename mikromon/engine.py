@@ -5,6 +5,7 @@ import logging
 import signal
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from .alert import Severity
 from .checks import enabled_checks, required_datasets
@@ -50,6 +51,13 @@ class Engine:
             self.metrics = MetricsStore(config.metrics_db)
             self.metrics.prune(getattr(config, "metrics_retention_days", 30))
         self._stop = threading.Event()
+        # Poll devices concurrently (bounded), not one at a time — with many
+        # devices, sequential polling could take far longer than
+        # poll_interval to get through everyone, since a slow/unreachable
+        # device blocks every device queued behind it.
+        self.poll_concurrency = max(1, int(getattr(config, "poll_concurrency", 20)))
+        self._pool = ThreadPoolExecutor(max_workers=self.poll_concurrency,
+                                        thread_name_prefix="mikromon-poll")
         known = {d.name for d in self.devices}
         self.state.prune_unknown_devices(known)
         # Web-managed mode: the devices DB is the single source of truth, so
@@ -168,9 +176,10 @@ class Engine:
                 signal.signal(sig, lambda *_: self._stop.set())
             except ValueError:
                 pass  # not on the main thread (e.g. tests)
-        log.info("mikromon started: %d device(s), polling every %ds%s",
+        log.info("mikromon started: %d device(s), polling every %ds "
+                 "(up to %d at once)%s",
                  len(self.devices), self.config.poll_interval,
-                 " [DRY RUN]" if self.dry_run else "")
+                 self.poll_concurrency, " [DRY RUN]" if self.dry_run else "")
         while not self._stop.is_set():
             try:
                 self.run_once()
@@ -178,6 +187,7 @@ class Engine:
                 log.exception("Unexpected error during poll cycle")
             self._stop.wait(self.config.poll_interval)
         log.info("mikromon stopping; saving state.")
+        self._pool.shutdown(wait=False)
         self.state.save()
 
     def run_once(self) -> list:
@@ -190,8 +200,13 @@ class Engine:
             if self.metrics is not None:
                 self.metrics.keep_only(known)
         batch = []
-        for device in self.devices:
-            batch.extend(self._poll_device(device))
+        futures = [self._pool.submit(self._poll_device, device)
+                  for device in self.devices]
+        for fut in futures:
+            try:
+                batch.extend(fut.result())
+            except Exception:  # noqa: BLE001 — one device's crash must not
+                log.exception("Unexpected error polling a device")  # skip the rest
         self.dispatch(batch)
         self._maybe_resync_after_grace()
         self.state.save()

@@ -141,6 +141,12 @@ class DeviceConfig:
 @dataclass
 class AppConfig:
     poll_interval: int = 60
+    poll_concurrency: int = 20  # how many devices to poll at once (bounded
+                                 # thread pool) — sequential, one-at-a-time
+                                 # polling means a slow/unreachable device
+                                 # blocks every device queued behind it, so a
+                                 # large fleet could take far longer than
+                                 # poll_interval to get all the way through
     state_file: str = "./state.json"
     log_level: str = "INFO"
     confirmations: int = 2
@@ -256,6 +262,7 @@ def load_config(path: str) -> AppConfig:
 
     return AppConfig(
         poll_interval=int(raw.get("poll_interval", 60)),
+        poll_concurrency=int(raw.get("poll_concurrency", 20)),
         state_file=str(raw.get("state_file", "./state.json")),
         log_level=str(raw.get("log_level", "INFO")).upper(),
         confirmations=int(raw.get("confirmations", 2)),

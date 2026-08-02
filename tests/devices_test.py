@@ -71,6 +71,45 @@ eng.devices = eng._devices_from_store()
 check("engine hot-reload sees new device",
       sorted(x.name for x in eng.devices) == ["E1", "E2"])
 
+import types as _types  # noqa: E402
+
+# Devices are polled concurrently (bounded thread pool), not one at a time —
+# with many devices, sequential polling could take far longer than
+# poll_interval to get through everyone.
+conc_cfg = AppConfig(state_file=os.path.join(tmp, "conc.json"), devices=[],
+                     poll_concurrency=10, defaults=DEF)
+conc_eng = Engine(conc_cfg, devices=[], notifiers=[])
+conc_eng.devices = [_types.SimpleNamespace(name=f"D{i}") for i in range(5)]
+_delay = 0.3
+def _fake_poll_slow(device):
+    time.sleep(_delay)
+    return []
+conc_eng._poll_device = _fake_poll_slow
+_t0 = time.time()
+conc_eng.run_once()
+_elapsed = time.time() - _t0
+check("polling 5 devices concurrently takes ~1 delay, not 5x (proves "
+      "devices are actually polled in parallel, not one at a time)",
+      _elapsed < _delay * 3)
+
+# One device's crash must not stop the others from being polled — a plain
+# sequential loop with no per-future isolation would let one bad device
+# take down the whole poll cycle.
+seen = []
+def _fake_poll_with_failure(device):
+    if device.name == "Bad":
+        raise RuntimeError("boom")
+    seen.append(device.name)
+    return []
+fail_cfg = AppConfig(state_file=os.path.join(tmp, "failpoll.json"), devices=[],
+                     poll_concurrency=10, defaults=DEF)
+fail_eng = Engine(fail_cfg, devices=[], notifiers=[])
+fail_eng.devices = [_types.SimpleNamespace(name=n) for n in ("A", "Bad", "C")]
+fail_eng._poll_device = _fake_poll_with_failure
+fail_eng.run_once()
+check("one device's crash doesn't stop the other devices from being polled",
+      sorted(seen) == ["A", "C"])
+
 # keep_only sweeps orphan series so the devices DB stays authoritative.
 mko = MetricsStore(os.path.join(tmp, "ko.db"))
 mko.record([(1.0, "E1", "up", "", 1.0), (1.0, "Ghost", "up", "", 1.0)])
