@@ -1684,12 +1684,12 @@ check("detect_wan_gateways ignores a saved manual override — it reports "
 check("detect_wan_gateways finds a DHCP link's real gateway",
       dwg["ether2"] == "172.17.232.254")
 
-# Reported live: some ISPs' PPPoE/CGNAT setups never populate a distinct
-# remote address at all — neither /ppp/active's remote-address nor
-# /ip/address's own 'network' field — but the interface's OWN assigned
-# address (confirmed live as a genuinely reachable, working gateway on
-# that connected subnet) is still available and preferred over jumping
-# straight to using the bare interface name.
+# Confirmed live: the interface's OWN assigned address (/ip/address's
+# 'address' field) is NOT a usable gateway — it's this router's own IP, not
+# a next hop — even though it can look like a plausible fallback candidate.
+# Detection must never use it; when ppp-active and the 'network' field both
+# give nothing, it falls back to the interface name instead (still a
+# separate, deliberate design choice — see _gateway_for_link).
 ownaddr_links = [WanEndpoint(interface="Axxess", name="Axxess")]
 ownaddr_api = FakeApi({
     ("interface", "pppoe-client"): [{"name": "Axxess"}],
@@ -1698,13 +1698,13 @@ ownaddr_api = FakeApi({
     ("ip", "address"): [{"interface": "Axxess", "address": "100.127.128.105/32"}],
 })
 ownaddr_dwg = F.detect_wan_gateways(ownaddr_api, ownaddr_links)
-check("falls back to the interface's own assigned address (from /ip/address's "
-      "'address' field) when neither ppp-active nor the 'network' field give "
-      "a distinct remote address",
-      ownaddr_dwg["Axxess"] == "100.127.128.105")
+check("never falls back to the interface's own assigned address — that's "
+      "this router's own IP, not a real gateway, even when nothing else "
+      "is available",
+      ownaddr_dwg["Axxess"] == "Axxess")
 
-# ...but a real 'network' field (the actual documented remote-end case)
-# still takes priority over the interface's own address when both exist.
+# A real 'network' field (the actual documented remote-end case) is still
+# used correctly when it IS available.
 network_api = FakeApi({
     ("interface", "pppoe-client"): [{"name": "Axxess"}],
     ("ip", "dhcp-client"): [],
@@ -1713,8 +1713,7 @@ network_api = FakeApi({
                         "network": "41.2.3.4"}],
 })
 network_dwg = F.detect_wan_gateways(network_api, ownaddr_links)
-check("a real distinct 'network' (remote-end) value is still preferred over "
-      "the interface's own address when both are available",
+check("a real distinct 'network' (remote-end) value is used when available",
       network_dwg["Axxess"] == "41.2.3.4")
 
 # ---- 16. explicit per-uplink Distance (WAN uplinks editor) -----------------

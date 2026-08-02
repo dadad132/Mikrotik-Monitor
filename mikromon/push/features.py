@@ -245,13 +245,9 @@ def _ppp_client_gateway(client, ppp_active_by_name, ip_addr_by_iface):
         if remote:
             return remote
     if ip_addr_by_iface:
-        addr = ip_addr_by_iface.get(name_key, {})
-        network = addr.get("network", "")
+        network = ip_addr_by_iface.get(name_key, {}).get("network", "")
         if network and network not in ("0.0.0.0", ""):
             return network
-        own = str(addr.get("address", "")).split("/")[0]
-        if own and own not in ("0.0.0.0", ""):
-            return own
     return str(client.get("name", ""))
 
 
@@ -409,19 +405,15 @@ def _gateway_for_link(link, pppoe_names, dhcp_by_iface,
 
     Priority:
       1. Explicit gateway set in the WAN uplinks editor (manual override).
-      2. PPP/PPPoE interface → look up an address for the active session:
+      2. PPP/PPPoE interface → look up the remote address of the active session:
          a. /ppp/active  remote-address field
          b. /ip/address  network field (PPP point-to-point creates a /32 where
             'network' is the remote/ISP end — that IS the gateway IP)
-         c. /ip/address  address field (the interface's OWN assigned local
-            address) — some ISPs' CGNAT/PPPoE setups never populate a
-            distinct remote 'network' at all, but the interface's own
-            address is still directly reachable over that connected
-            subnet, and confirmed live as the address that actually
-            worked when neither of the above gave anything usable.
-         If none of these return an address, fall back to the interface
-         name itself so RouterOS can still route via the PPPoE interface
-         directly.
+         If neither returns an IP, fall back to the interface name so RouterOS
+         can still route via the PPPoE interface directly. Deliberately does
+         NOT fall back to the interface's own assigned address (/ip/address's
+         'address' field) — that's this router's own IP, not a next hop, and
+         is not a usable gateway even though it looks like a plausible one.
       3. DHCP client on the interface → use the DHCP-assigned gateway IP."""
     gw = getattr(link, "gateway", "") or ""
     if gw:
@@ -444,14 +436,6 @@ def _gateway_for_link(link, pppoe_names, dhcp_by_iface,
             network = addr.get("network", "")
             if network and network not in ("0.0.0.0", ""):
                 return network
-            # Neither of the above gave a distinct remote address — fall
-            # back to the interface's own assigned address (stripped of
-            # its mask) rather than jumping straight to the interface
-            # name, since that address is still a real, directly
-            # reachable IP on this connected subnet.
-            own = str(addr.get("address", "")).split("/")[0]
-            if own and own not in ("0.0.0.0", ""):
-                return own
         # Last resort: use the router's OWN (correctly-cased) name for this
         # PPPoE client as the gateway — not the WAN editor's possibly
         # differently-cased text, which RouterOS wouldn't recognize.
