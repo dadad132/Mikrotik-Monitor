@@ -249,7 +249,7 @@ def _device_chips(known_devices, selected, all_on) -> str:
 
 
 def _render_admin(auth: AuthStore, known_devices, csrf: str, user,
-                  msg: str = "", error: str = "") -> str:
+                  msg: str = "", error: str = "", roadwarrior_box: str = "") -> str:
     rows = []
     for u in auth.list_users(user["org_id"]):
         is_all = u["devices"] == "*"
@@ -306,6 +306,7 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user,
         f'<div style="margin-top:14px">'
         f'<button class="btn" type="submit">Add member</button></div>'
         f'</form></div>'
+        f'{roadwarrior_box}'
         f'</div>')
     return _page("Team", _header(user, "/admin") + inner + _ADMIN_JS)
 

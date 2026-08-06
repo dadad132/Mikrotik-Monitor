@@ -1438,21 +1438,20 @@ def _alloc_tunnel_ip(hub, name) -> str:
     return ip
 
 
-def _alloc_roadwarrior_ip(hub, key, device, label) -> str:
-    """Allocate (or return the existing) tunnel IP for a human/road-warrior
-    WireGuard peer riding on `device`'s own hub connection (see the Tunnel
-    tab's road-warrior peers section) — drawn from the SAME pool as device
-    leases so it can never collide with a router's own tunnel IP. Keyed by an
-    opaque `key` (not the device name), since several road-warriors can share
-    one router's connection."""
+def _alloc_roadwarrior_ip(hub, key, label, org_id) -> str:
+    """Allocate (or return the existing) tunnel IP for a human's own personal
+    WireGuard peer — a direct peer of the HUB itself (see the Team page's
+    "Personal VPN access" section), not riding on any one router's
+    connection. Drawn from the SAME pool as device leases so it can never
+    collide with a router's own tunnel IP."""
     rw = hub.setdefault("roadwarriors", {})
     existing = rw.get(key)
     if existing and existing.get("ip"):
-        existing["device"], existing["label"] = device, label
+        existing["label"], existing["org_id"] = label, org_id
         return existing["ip"]
     used = set(hub.get("leases", {}).values()) | _rw_used_ips(hub)
     ip = _pick_unused_tunnel_ip(hub, used)
-    rw[key] = {"device": device, "label": label, "ip": ip}
+    rw[key] = {"label": label, "org_id": org_id, "ip": ip}
     return ip
 
 
@@ -1528,26 +1527,28 @@ def _vpn_group_info(hub, device_name):
 
 
 def _hub_wg_leases(hub) -> dict:
-    """Build the {name: {ip, pubkey, extra}} shape _write_wg_peers needs,
-    folding in both road-warrior peers (see _alloc_roadwarrior_ip) and
-    site-to-site LAN subnets (see _vpn_flat_subnets) as extra allowed
-    addresses on their host device's own hub peer entry — otherwise the hub
-    would silently drop that traffic even though the router happily
-    forwards it (the hub only accepts a source IP/subnet that's in the
-    AllowedIPs of the peer it arrived from)."""
+    """Build the {name: {ip, pubkey, extra}} shape _write_wg_peers needs:
+    one entry per router (folding in site-to-site LAN subnets, see
+    _vpn_flat_subnets, as "extra" allowed addresses on the router's own hub
+    peer entry — otherwise the hub would silently drop that traffic even
+    though the router happily forwards it), plus one entry per person's own
+    personal VPN peer (see _alloc_roadwarrior_ip) — a peer of the hub in its
+    own right, not riding on any router's connection, so no "extra" of its
+    own."""
     leases_meta = hub.get("leases_meta") or {}
     leases_all = hub.get("leases") or {}
     extra_by_device: dict = {}
-    for rw in (hub.get("roadwarriors") or {}).values():
-        dev, ip = rw.get("device", ""), rw.get("ip", "")
-        if dev and ip:
-            extra_by_device.setdefault(dev, []).append(ip)
     for dev, subnet in _vpn_flat_subnets(hub).items():
         extra_by_device.setdefault(dev, []).append(subnet)
-    return {n: {"ip": m.get("ip") or leases_all.get(n),
-                "pubkey": m.get("pubkey"),
-                "extra": extra_by_device.get(n, [])}
-            for n, m in leases_meta.items()}
+    out = {n: {"ip": m.get("ip") or leases_all.get(n),
+               "pubkey": m.get("pubkey"),
+               "extra": extra_by_device.get(n, [])}
+           for n, m in leases_meta.items()}
+    for key, rw in (hub.get("roadwarriors") or {}).items():
+        if rw.get("ip") and rw.get("pubkey"):
+            out[f"person:{rw.get('label') or key}"] = {
+                "ip": rw["ip"], "pubkey": rw["pubkey"], "extra": []}
+    return out
 
 
 def _subnet_conflict(hub, device_name, subnet) -> str:
@@ -1634,8 +1635,7 @@ def _prep_vpn_group(name, flat, devices_db) -> None:
 def _sync_vpn_group_to_hub(devices_db) -> None:
     """After a confirmed VPN-tab apply, rewrite the hub's wg-peers.conf
     (extended AllowedIPs) and wg-routes.conf (kernel routes) so the reload
-    service picks up the change — the VPN-tab mirror of
-    _sync_tunnel_roadwarriors_to_hub. Best-effort: never blocks the response."""
+    service picks up the change. Best-effort: never blocks the response."""
     try:
         hub_file = _hub_path(devices_db)
         hub = _hub_load(hub_file)
@@ -1667,6 +1667,119 @@ def _vpn_available_devices(devices_db, hub, exclude_name, org_id) -> list:
     for group in (hub.get("vpn_groups") or {}).values():
         grouped.update((group.get("members") or {}).keys())
     return sorted(n for n in org_names if n != exclude_name and n not in grouped)
+
+
+def _rw_allowed_subnets(hub, devices_db, org_id) -> list:
+    """What a personal VPN peer belonging to `org_id` should have as its own
+    AllowedIPs: every one of THIS company's own routers' tunnel IPs (as
+    /32s), plus every VPN-group subnet that at least one of this company's
+    routers is a member of. Deliberately NOT the whole hub network — this
+    is a shared, multi-tenant hub, and a wide-open peer would be able to
+    reach every OTHER company's routers too. A snapshot at generation time:
+    adding more devices later doesn't retroactively widen an already-issued
+    peer's config — regenerate it (Team page) to pick up new devices."""
+    if not devices_db or org_id is None:
+        return []
+    from .devices_store import DevicesStore
+    try:
+        ds = DevicesStore(devices_db)
+        try:
+            org_names = set(ds.names_for_org(org_id))
+        finally:
+            ds.close()
+    except Exception:  # noqa: BLE001
+        return []
+    leases = hub.get("leases") or {}
+    out = sorted({f"{ip}/32" for name, ip in leases.items() if name in org_names})
+    for dev, subnet in _vpn_flat_subnets(hub).items():
+        if dev in org_names and subnet not in out:
+            out.append(subnet)
+    return out
+
+
+def _roadwarrior_box(devices_db, hub, org_id, csrf) -> str:
+    """Team page: personal VPN access — lets a company issue its own staff
+    a direct WireGuard peer of the hub (not tied to any one router), so
+    Winbox/SSH/ping to the company's own routers works from an ordinary
+    laptop with no on-router config and no per-device temporary login."""
+    if not devices_db or not csrf:
+        return ""
+    mine = [(key, rw) for key, rw in (hub.get("roadwarriors") or {}).items()
+           if rw.get("org_id") == org_id]
+    rows = "".join(
+        f'<tr><td>{esc(rw.get("label", ""))}</td>'
+        f'<td><code>{esc(rw.get("ip", ""))}</code></td>'
+        f'<td><form method="POST" action="/admin/roadwarrior-revoke" '
+        f'class="inline" onsubmit="return confirm('
+        f'\'Revoke {esc(rw.get("label", "this peer"))}\\\'s VPN access? '
+        f'Their client will stop connecting immediately.\')">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="key" value="{esc(key)}">'
+        f'<button class="btn ghost" type="submit">Revoke</button>'
+        f'</form></td></tr>'
+        for key, rw in sorted(mine, key=lambda kr: kr[1].get("label", "")))
+    table = (f'<table><tr><th>Label</th><th>Tunnel IP</th><th></th></tr>'
+            f'{rows}</table>' if mine else
+            '<p class="muted">Nobody has personal VPN access yet.</p>')
+    return (f'<div class="box"><h2>Personal VPN access</h2>'
+            f'<p class="muted">Give someone on your team a direct WireGuard '
+            f'connection into your company\'s routers — useful when Remote '
+            f'access\'s tunnel-only address isn\'t reachable from their own '
+            f'computer. mikromon generates the keys and shows a ready-to-'
+            f'import config <b>once</b> — it can\'t be shown again, so save '
+            f'it immediately; use Revoke + Add again for a fresh one if '
+            f'it\'s lost.</p>'
+            f'{table}'
+            f'<form method="POST" action="/admin/roadwarrior-add" '
+            f'style="margin-top:10px">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            f'<input name="label" placeholder="e.g. Alice\'s laptop" required> '
+            f'<button class="btn" type="submit">Add a peer</button>'
+            f'</form></div>')
+
+
+def _roadwarrior_conf_text(label, priv, ip, hub_ip, hub_port, hub_pubkey,
+                           allowed) -> str:
+    allowed_str = ", ".join(allowed) if allowed else ip + "/32"
+    return (f"# mikromon personal VPN access — {label}\n"
+            f"[Interface]\n"
+            f"PrivateKey = {priv}\n"
+            f"Address = {ip}/32\n\n"
+            f"[Peer]\n"
+            f"PublicKey = {hub_pubkey}\n"
+            f"Endpoint = {hub_ip}:{hub_port}\n"
+            f"AllowedIPs = {allowed_str}\n"
+            f"PersistentKeepalive = 25")
+
+
+def _render_roadwarrior_config_page(user, label, conf_text) -> str:
+    """Shown ONCE, right after a personal VPN peer is created — the
+    WireGuard client config to hand to the person. Never a redirect: the
+    private key would end up in the URL/browser history. mikromon never
+    stores the private key, so if this page is lost, revoke this peer on
+    the Team page and add it again for a fresh one."""
+    import base64
+    b64 = base64.b64encode(conf_text.encode("utf-8")).decode("ascii")
+    inner = (
+        f'<div class="wrap" style="max-width:760px">'
+        f'<div class="box" style="border-left:4px solid #16a34a">'
+        f'<h1 style="margin-top:0">Personal VPN access created for '
+        f'{esc(label)}</h1>'
+        f'<p><b>Save this now</b> — mikromon never stores the private key, '
+        f'so this is the only time it\'s shown. Import it into the '
+        f'WireGuard app (Windows/Mac/Linux/iOS/Android all have one) as a '
+        f'new tunnel, then turn it on.</p>'
+        f'<pre style="{_PRE}">{esc(conf_text)}</pre>'
+        f'<p><a class="btn" download="mikromon-{esc(label)}.conf" '
+        f'href="data:text/plain;charset=utf-8;base64,{b64}">'
+        f'Download .conf file</a></p>'
+        f'<p class="muted">Only reaches this company\'s own routers and '
+        f'their linked VPN-group networks — not other companies on this '
+        f'server. If you add more routers or VPN links later, revoke this '
+        f'peer and add it again to pick up the new addresses.</p>'
+        f'<a class="btn ghost" href="/admin">Done</a>'
+        f'</div></div>')
+    return _page(esc(label) + " · Personal VPN access", _header(user, "/admin") + inner)
 
 
 def _vpn_group_box(name, devices_db, org_id, csrf) -> str:
@@ -1769,58 +1882,6 @@ def _remote_regenerate_box(name, users, csrf) -> str:
             f'revokes the login below and issues it a new password '
             f'immediately, shown once again.</p>'
             f'<table><tr><th>Login</th><th></th></tr>{rows}</table></div>')
-
-
-def _tunnel_roadwarrior_ips(device_name, multi, devices_db) -> None:
-    """Resolve (allocating if needed) a hub tunnel IP for every road-warrior
-    peer row submitted on the Tunnel tab (tunnel_form/tunnel_plan's "wgrw"
-    rows), and inject it back into `multi` as a parallel "wgrw__allowed_ip"
-    column so tunnel_plan can set each peer's allowed-address to it. Also
-    drops this device's road-warrior registrations that are no longer in the
-    submitted rows.
-
-    Runs on both preview and confirm — allocating here is just mikromon's own
-    bookkeeping (hub.json), never a router change, and it must be persisted
-    on preview too or the preview and the eventual apply could show a
-    different peer address. The router itself is never touched until the
-    plan this feeds is actually applied; the hub's live WireGuard config
-    isn't touched until _sync_tunnel_roadwarriors_to_hub runs post-commit."""
-    if not devices_db:
-        return
-    names = multi.get("wgrw__name", [])
-    pubkeys = multi.get("wgrw__pubkey", [])
-    hub_file = _hub_path(devices_db)
-    hub = _hub_load(hub_file)
-    hub.setdefault("subnet", _HUB_SUBNET_DEFAULT)
-    allowed_ips, seen_keys = [], set()
-    for i in range(max(len(names), len(pubkeys))):
-        rw_name = (names[i].strip() if i < len(names) else "")
-        pubkey = (pubkeys[i].strip() if i < len(pubkeys) else "")
-        if not rw_name or not pubkey:
-            allowed_ips.append("")
-            continue
-        key = f"{device_name}\x1f{rw_name}"
-        seen_keys.add(key)
-        allowed_ips.append(_alloc_roadwarrior_ip(hub, key, device_name, rw_name))
-    multi["wgrw__allowed_ip"] = allowed_ips
-    for key, entry in list((hub.get("roadwarriors") or {}).items()):
-        if entry.get("device") == device_name and key not in seen_keys:
-            del hub["roadwarriors"][key]
-    _hub_save(hub_file, hub)
-
-
-def _sync_tunnel_roadwarriors_to_hub(devices_db) -> None:
-    """After a confirmed Tunnel-tab apply, rewrite the hub's wg-peers.conf so
-    it picks up any road-warrior IPs just registered against this device —
-    the mirror of _register_hub_peer's own post-apply hook for the
-    hubtunnel feature. Best-effort: never blocks the response."""
-    try:
-        hub_file = _hub_path(devices_db)
-        hub = _hub_load(hub_file)
-        peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
-        _write_wg_peers(peers_path, _hub_wg_leases(hub))
-    except Exception:  # noqa: BLE001
-        pass
 
 
 def _hub_peers_status(peers_path: str) -> dict:
@@ -2700,46 +2761,6 @@ def _wg_repair_box(name, csrf) -> str:
             f'<input type="hidden" name="device" value="{q}">'
             f'<div class="actions"><button class="btn" type="submit">'
             f'Diagnose &amp; repair now</button></div></form></div>')
-
-
-def _tunnel_roadwarrior_box(name, current, devices_db) -> str:
-    """Client-config values for this router's cross-device (road-warrior)
-    peers — their assigned tunnel IP plus what to put in their OWN WireGuard
-    client, since mikromon only pushes the router side of that peer."""
-    if not devices_db:
-        return ""
-    hub = _hub_load(_hub_path(devices_db))
-    rws = [rw for rw in (hub.get("roadwarriors") or {}).values()
-          if rw.get("device") == name and rw.get("ip")]
-    if not rws:
-        return ""
-    router_pub = next((i.get("public-key", "") for i in current.get("ifaces", [])
-                       if i.get("public-key")), "(generating…)")
-    listen_port = next((i.get("listen-port", "?") for i in current.get("ifaces", [])), "?")
-    rows = ""
-    for rw in sorted(rws, key=lambda r: r.get("label", "")):
-        client_conf = (
-            f"[Interface]\nPrivateKey = <the person's OWN private key>\n"
-            f"Address = {rw['ip']}/32\n\n"
-            f"[Peer]\nPublicKey = {router_pub}\n"
-            f"Endpoint = <this router's public IP or hostname>:{listen_port}\n"
-            f"AllowedIPs = 10.10.0.0/16\nPersistentKeepalive = 25")
-        rows += (f'<tr><td>{esc(rw.get("label", ""))}</td>'
-                 f'<td><code>{esc(rw["ip"])}</code></td>'
-                 f'<td><details><summary class="muted">client config</summary>'
-                 f'<pre style="{_PRE}">{esc(client_conf)}</pre></details></td></tr>')
-    return (f'<div class="box"><h2>Cross-device peer client config</h2>'
-            f'<p class="muted">Each row below is a peer added under '
-            f'"Cross-device peers" above, once applied. Send the person the '
-            f'expanded config (fill in their own private key and this '
-            f'router\'s real public IP/hostname) — mikromon cannot generate '
-            f'their private key or know your public IP for them. '
-            f'<b>AllowedIPs = 10.10.0.0/16</b> is what makes their client '
-            f'route other company routers through this tunnel, not just this '
-            f'one; narrow it to specific device IPs once you\'ve worked out '
-            f'how you want to restrict that.</p>'
-            f'<table><tr><th>Label</th><th>Tunnel IP</th><th></th></tr>'
-            f'{rows}</table></div>')
 
 
 def _update_box(name, csrf, current):
@@ -3958,9 +3979,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 known = _known_devices(store, _load_state(state_file))
                 store.close()
             q = parse_qs(urlparse(self.path).query)
+            csrf = self._session()["csrf"]
+            rw_box = ""
+            if devices_db:
+                hub = _hub_load(_hub_path(devices_db))
+                rw_box = _roadwarrior_box(devices_db, hub, user["org_id"], csrf)
             return self._send(200, _render_admin(
-                auth, known, self._session()["csrf"], user,
-                msg=q.get("ok", [""])[0], error=q.get("error", [""])[0]),
+                auth, known, csrf, user,
+                msg=q.get("ok", [""])[0], error=q.get("error", [""])[0],
+                roadwarrior_box=rw_box),
                 "text/html; charset=utf-8")
 
         def _serve_billing(self, url, user):
@@ -5912,6 +5939,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._hub_reload_peers_post(flat, user)
             if path == "/admin/company":
                 return self._post_company(flat, user)
+            if path == "/admin/roadwarrior-add":
+                return self._roadwarrior_add_post(flat, user)
+            if path == "/admin/roadwarrior-revoke":
+                return self._roadwarrior_revoke_post(flat, user)
             try:
                 if path == "/admin/add":
                     auth.add_member(user["org_id"], flat.get("email", ""),
@@ -6405,6 +6436,68 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._device_tempaccess_page(name, user, creds=creds)
 
         # ---- Company details (admin/owner only) ----
+        def _roadwarrior_add_post(self, flat, user):
+            """Owner-only: issue a new personal WireGuard peer of the hub for
+            someone on this company's team — generates the keypair
+            server-side (mirrors how Provision generates a router's own),
+            registers it on the hub, and shows the ready-to-import config
+            once (see _render_roadwarrior_config_page)."""
+            if not devices_db:
+                return self._redirect("/admin?error=" + quote(
+                    "Device management is not enabled on this server."))
+            label = (flat.get("label") or "").strip()
+            if not label:
+                return self._redirect("/admin?error=" + quote(
+                    "Give this VPN peer a label (e.g. whose laptop it is)."))
+            hub_file = _hub_path(devices_db)
+            hub = _hub_load(hub_file)
+            hub.setdefault("subnet", _HUB_SUBNET_DEFAULT)
+            hub_pubkey = hub.get("hub_pubkey", "")
+            hub_ip = hub.get("hub_ip") or _detect_server_ip()
+            hub_port = hub.get("listen_port", _WG_PORT_DEFAULT)
+            if not hub_pubkey:
+                return self._redirect("/admin?error=" + quote(
+                    "The WireGuard hub isn't set up on this server yet — "
+                    "run deploy/install.sh, then try again."))
+            priv, pub = _wg_keypair()
+            if priv is None:
+                return self._redirect("/admin?error=" + quote(
+                    f"Could not generate a WireGuard keypair: {pub}"))
+            import secrets as _sec
+            key = _sec.token_hex(8)
+            org_id = user["org_id"]
+            ip = _alloc_roadwarrior_ip(hub, key, label, org_id)
+            hub["roadwarriors"][key]["pubkey"] = pub
+            _hub_save(hub_file, hub)
+            _write_wg_peers(hub.get("wg_peers") or _WG_PEERS_DEFAULT,
+                            _hub_wg_leases(hub))
+            allowed = _rw_allowed_subnets(hub, devices_db, org_id)
+            conf = _roadwarrior_conf_text(label, priv, ip, hub_ip, hub_port,
+                                          hub_pubkey, allowed)
+            return self._send(200, _render_roadwarrior_config_page(
+                user, label, conf), "text/html; charset=utf-8")
+
+        def _roadwarrior_revoke_post(self, flat, user):
+            """Owner-only: revoke a personal VPN peer — org-scoped so nobody
+            can revoke (or even address, since the key is never shown to the
+            browser outside this company's own Team page) another
+            company's peer."""
+            if not devices_db:
+                return self._send(400, "device management not enabled")
+            key = flat.get("key", "")
+            hub_file = _hub_path(devices_db)
+            hub = _hub_load(hub_file)
+            rw = (hub.get("roadwarriors") or {}).get(key)
+            if rw is None or rw.get("org_id") != user["org_id"]:
+                return self._send(404, "no such VPN peer")
+            label = rw.get("label", "")
+            del hub["roadwarriors"][key]
+            _hub_save(hub_file, hub)
+            _write_wg_peers(hub.get("wg_peers") or _WG_PEERS_DEFAULT,
+                            _hub_wg_leases(hub))
+            return self._redirect("/admin?ok=" +
+                                  quote(f"Revoked {label}'s VPN access."))
+
         def _post_company(self, flat, user):
             new_name = flat.get("org_name", "").strip()
             if not new_name:

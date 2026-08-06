@@ -460,62 +460,66 @@ kp = web._wg_keypair()
 check("wg keypair helper returns a tuple (priv/pub or graceful None+err)",
       isinstance(kp, tuple) and len(kp) == 2)
 
-# Cross-device (road-warrior) WireGuard peers — human peers riding on a
-# router's own hub connection so they can also reach other company routers
-# over the hub tunnel (Tunnel tab's "Cross-device peers" rows).
+# Personal VPN access (road-warrior peers) — a person's own direct WireGuard
+# peer of the HUB itself (not riding on any one router's connection), org-
+# scoped so one company's staff can never be handed access to another
+# company's routers on this shared, multi-tenant hub (Team page).
 rw_hub = {}
-rw_ip1 = web._alloc_roadwarrior_ip(rw_hub, "R1\x1falice", "R1", "alice")
-rw_ip2 = web._alloc_roadwarrior_ip(rw_hub, "R1\x1fbob", "R1", "bob")
+rw_ip1 = web._alloc_roadwarrior_ip(rw_hub, "keyalice", "alice", 1)
+rw_ip2 = web._alloc_roadwarrior_ip(rw_hub, "keybob", "bob", 1)
 check("road-warrior IPs are unique and stable per key",
       rw_ip1 != rw_ip2
-      and web._alloc_roadwarrior_ip(rw_hub, "R1\x1falice", "R1", "alice") == rw_ip1)
+      and web._alloc_roadwarrior_ip(rw_hub, "keyalice", "alice", 1) == rw_ip1)
 collide_hub = {"leases": {"R1": rw_ip1}}
 check("road-warrior allocation never collides with an existing device lease",
-      web._alloc_roadwarrior_ip(collide_hub, "R1\x1fcarol", "R1", "carol") != rw_ip1)
+      web._alloc_roadwarrior_ip(collide_hub, "keycarol", "carol", 1) != rw_ip1)
 
 leases_hub = {
     "leases_meta": {"R1": {"ip": "10.10.1.1", "pubkey": "R1KEY="}},
     "leases": {"R1": "10.10.1.1"},
-    "roadwarriors": {"R1\x1falice": {"device": "R1", "label": "alice",
-                                    "ip": "10.10.9.9"}},
+    "roadwarriors": {"keyalice": {"label": "alice", "org_id": 1,
+                                  "ip": "10.10.9.9", "pubkey": "ALICEPUB="}},
 }
 merged = web._hub_wg_leases(leases_hub)
-check("_hub_wg_leases folds a device's road-warrior peers into its own "
-      "'extra' allowed IPs",
-      merged["R1"]["ip"] == "10.10.1.1" and merged["R1"]["extra"] == ["10.10.9.9"])
+check("_hub_wg_leases keeps a router's own entry untouched by road-warriors "
+      "(no more folding into its 'extra' allowed IPs)",
+      merged["R1"]["ip"] == "10.10.1.1" and merged["R1"]["extra"] == [])
+check("a road-warrior gets its OWN dedicated hub peer entry",
+      any(v["ip"] == "10.10.9.9" and v["pubkey"] == "ALICEPUB="
+          for k, v in merged.items() if k != "R1"))
 rw_peersp = os.path.join(tmp, "wg-peers-rw.conf")
 web._write_wg_peers(rw_peersp, merged)
 rw_body = open(rw_peersp).read()
-check("the hub's peers file accepts BOTH the router's own IP and its "
-      "road-warrior's IP from the SAME peer entry (or the hub silently "
-      "drops the road-warrior's traffic even though the router forwards it)",
-      "AllowedIPs = 10.10.1.1/32, 10.10.9.9/32" in rw_body)
+check("the hub's peers file has TWO separate [Peer] blocks — the router's "
+      "own and the road-warrior's own, each with just its own /32",
+      rw_body.count("[Peer]") == 2
+      and "AllowedIPs = 10.10.1.1/32" in rw_body
+      and "AllowedIPs = 10.10.9.9/32" in rw_body)
 
-# _tunnel_roadwarrior_ips: the web-layer glue that reads submitted "wgrw"
-# rows, allocates/persists each one's IP into hub.json, and injects it back
-# as a parallel column for tunnel_plan to use.
-rw_devices_db = os.path.join(tmp, "rwdevices.json")
-with open(rw_devices_db, "w") as f:
-    f.write("{}")
-rw_multi = {"wgrw__name": ["alice"], "wgrw__pubkey": ["ALICEKEY="]}
-web._tunnel_roadwarrior_ips("R2", rw_multi, rw_devices_db)
-check("_tunnel_roadwarrior_ips injects an allocated IP for a new road-warrior row",
-      len(rw_multi["wgrw__allowed_ip"]) == 1 and bool(rw_multi["wgrw__allowed_ip"][0]))
-saved_hub = web._hub_load(web._hub_path(rw_devices_db))
-check("the allocation is persisted to hub.json",
-      any(rw.get("device") == "R2" and rw.get("label") == "alice"
-          for rw in saved_hub.get("roadwarriors", {}).values()))
-first_ip = rw_multi["wgrw__allowed_ip"][0]
-rw_multi2 = {"wgrw__name": ["alice"], "wgrw__pubkey": ["ALICEKEY="]}
-web._tunnel_roadwarrior_ips("R2", rw_multi2, rw_devices_db)
-check("re-submitting the same road-warrior row reuses the same IP (idempotent)",
-      rw_multi2["wgrw__allowed_ip"][0] == first_ip)
-rw_multi_removed = {"wgrw__name": [], "wgrw__pubkey": []}
-web._tunnel_roadwarrior_ips("R2", rw_multi_removed, rw_devices_db)
-saved_hub2 = web._hub_load(web._hub_path(rw_devices_db))
-check("removing a road-warrior row from the form drops its hub.json registration",
-      not any(rw.get("device") == "R2"
-              for rw in saved_hub2.get("roadwarriors", {}).values()))
+# _rw_allowed_subnets: what a road-warrior's OWN client config should route
+# through the tunnel — org-scoped, never another company's devices/subnets.
+rw_wdb = os.path.join(tmp, "rworgs", "devices.db")
+os.makedirs(os.path.dirname(rw_wdb), exist_ok=True)
+rw_ds = DevicesStore(rw_wdb)
+rw_ds.upsert({"name": "OrgA-R1", "host": "10.0.9.1"}, DEF, org_id=1)
+rw_ds.upsert({"name": "OrgB-R1", "host": "10.0.9.2"}, DEF, org_id=2)
+rw_ds.close()
+rw_scope_hub = {
+    "leases": {"OrgA-R1": "10.10.5.5", "OrgB-R1": "10.10.6.6"},
+    "vpn_groups": {
+        "OrgA-R1": {"subnet": "192.168.10.0/24", "members": {}},
+        "OrgB-R1": {"subnet": "192.168.20.0/24", "members": {}},
+    },
+}
+scope_a = web._rw_allowed_subnets(rw_scope_hub, rw_wdb, 1)
+check("a road-warrior's allowed subnets include their OWN company's device "
+      "tunnel IP", "10.10.5.5/32" in scope_a)
+check("...and their own company's linked VPN-group subnet",
+      "192.168.10.0/24" in scope_a)
+check("...but NEVER another company's device tunnel IP",
+      "10.10.6.6/32" not in scope_a)
+check("...or another company's VPN-group subnet",
+      "192.168.20.0/24" not in scope_a)
 
 # Site-to-site VPN (VPN tab): one router is the "main host" for a group,
 # other routers are added as "sub-units" of it — each sub-unit's subnet
@@ -912,6 +916,29 @@ try:
                      {"csrf": bcsrf, "device": "WebR1", "username": "alice"})
     check("unallocated member blocked from regenerating a remote login (403)",
           st == 403)
+    # --- Team page: personal VPN access (road-warrior peers) — guard paths.
+    # A real add needs `wg` (wireguard-tools) on the test host to generate a
+    # keypair, which isn't guaranteed here, so this only covers permission
+    # and org-scoping, not the happy path (covered offline above). ---
+    st = post_status(nobody, "/admin/roadwarrior-add",
+                     {"csrf": bcsrf, "label": "Bob's laptop"})
+    check("member (non-owner) blocked from issuing personal VPN access (403)",
+          st == 403)
+    st = post_status(admin, "/admin/roadwarrior-add", {"csrf": csrf, "label": ""})
+    check("adding a VPN peer with no label is rejected (redirect w/ error)",
+          st == 303)
+    other_org_hub = web._hub_load(web._hub_path(wdb))
+    other_org_hub.setdefault("roadwarriors", {})["otherorgkey"] = {
+        "label": "Someone else's laptop", "org_id": 999999,
+        "ip": "10.10.44.44", "pubkey": "OTHERORGPUB="}
+    web._hub_save(web._hub_path(wdb), other_org_hub)
+    st = post_status(admin, "/admin/roadwarrior-revoke",
+                     {"csrf": csrf, "key": "otherorgkey"})
+    check("owner cannot revoke another company's VPN peer, even by guessing "
+          "its key (404)", st == 404)
+    still_there = web._hub_load(web._hub_path(wdb))
+    check("that other company's peer is untouched",
+          "otherorgkey" in still_there.get("roadwarriors", {}))
     st, body = get(admin, "/logs")
     check("admin can open the activity log", st == 200 and "activity log" in body.lower())
     st, _ = get(nobody, "/logs")
