@@ -799,6 +799,25 @@ check("no password is pushed if the web layer never supplied one (a stray "
       "call must fail safe, not create a passwordless/blank-password user)",
       F.remote_plan(r_pusher, r_cfg, {"tempuser": "bob"}, {}).empty)
 
+# web.py's _org_wg_addresses computes who's allowed to actually USE the temp
+# login (this company's own WireGuard presence) and injects it as
+# flat["_remote_allowed_address"] — remote_plan restricts the created user
+# to it, comma-joined addresses and all, rather than leaving it wide open.
+addr_plan = F.remote_plan(r_pusher, r_cfg, {
+    "tempuser": "carol", "_tempuser_password": "CarolPW1!",
+    "_remote_allowed_address": "10.10.5.5/32,192.168.10.0/24"}, {})
+carol_add = next(o for o in addr_plan.ops if o.path == ("user",))
+check("a supplied allowed-address list is set on the new user",
+      carol_add.params.get("address") == "10.10.5.5/32,192.168.10.0/24")
+check("the plan's description mentions the restriction, not just silently "
+      "applying it", "restricted to" in carol_add.desc)
+no_addr_plan = F.remote_plan(r_pusher, r_cfg, {
+    "tempuser": "dave", "_tempuser_password": "DavePW1!"}, {})
+dave_add = next(o for o in no_addr_plan.ops if o.path == ("user",))
+check("no allowed-address supplied (e.g. devices_db not configured) -> no "
+      "address restriction pushed at all, same as before this existed",
+      "address" not in dave_add.params)
+
 # Apply for real (a DIFFERENT password than the preview used — previews and
 # confirms are never guaranteed the same one, since it's never shown until
 # a real commit).

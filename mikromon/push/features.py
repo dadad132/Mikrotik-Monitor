@@ -1590,7 +1590,11 @@ def remote_form(current, cfg):
         {"type": "heading", "label": "Grant temporary access",
          "hint": f"Type who it's for and click Create — the password and "
                 f"address to give them come right after. It stops working "
-                f"on its own in {_REMOTE_DEFAULT_MINUTES} minutes."},
+                f"on its own in {_REMOTE_DEFAULT_MINUTES} minutes. The login "
+                f"only works from this company's own WireGuard presence "
+                f"(a router's own tunnel, a linked VPN-group network, or "
+                f"someone's Personal VPN access peer) — never from anyone "
+                f"outside it, even on this same server."},
         {"type": "text", "name": "tempuser", "label": "Who is this for?",
          "placeholder": "e.g. alice, or the contractor's name"},
     ]
@@ -1631,12 +1635,26 @@ def remote_plan(pusher, cfg, flat, multi):
     password = flat.get("_tempuser_password", "")
     if new_username and new_username not in current_users and password:
         minutes = _REMOTE_DEFAULT_MINUTES
+        # web.py's _org_wg_addresses computes every address that belongs to
+        # this company's own WireGuard presence (its routers' tunnel IPs,
+        # linked VPN-group subnets, and every Personal VPN peer already
+        # issued to the team) — restricting the login to it means it works
+        # for anyone on the company's own tunnel, not pinned to whichever
+        # one person happened to click Create, while still excluding every
+        # OTHER company sharing this hub. Empty (e.g. devices_db not
+        # configured, or this org has nothing registered yet) -> no
+        # restriction, same as before this existed.
+        allowed = (flat.get("_remote_allowed_address") or "").strip()
+        user_params = {"name": new_username, "password": password,
+                       "group": _REMOTE_DEFAULT_GROUP,
+                       "comment": _REMOTE_TAG + new_username}
+        if allowed:
+            user_params["address"] = allowed
         ops.append(Operation(
-            "add", ("user",),
-            {"name": new_username, "password": password,
-             "group": _REMOTE_DEFAULT_GROUP, "comment": _REMOTE_TAG + new_username},
+            "add", ("user",), user_params,
             desc=f"create temporary login '{new_username}' "
-                 f"({_REMOTE_DEFAULT_GROUP}, expires in {minutes} min)"))
+                 f"({_REMOTE_DEFAULT_GROUP}, expires in {minutes} min"
+                 + (f", restricted to {allowed}" if allowed else "") + ")"))
         sched_name = _REMOTE_SCHED_PREFIX + new_username
         event = (f'/user remove [find name="{new_username}"]\n'
                  f'/system scheduler remove [find name="{sched_name}"]')

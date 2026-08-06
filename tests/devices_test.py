@@ -521,6 +521,28 @@ check("...but NEVER another company's device tunnel IP",
 check("...or another company's VPN-group subnet",
       "192.168.20.0/24" not in scope_a)
 
+# _org_wg_addresses: who a fresh Remote-access temporary login should be
+# restricted to — everything _rw_allowed_subnets covers, PLUS every Personal
+# VPN peer already issued to this company's own team (Team page), still
+# never another company's.
+rw_scope_hub["roadwarriors"] = {
+    "keyalice": {"label": "Alice's laptop", "org_id": 1, "ip": "10.10.44.44"},
+    "keymallory": {"label": "Mallory (org B)", "org_id": 2, "ip": "10.10.55.55"},
+}
+org_addrs_a = web._org_wg_addresses(rw_scope_hub, rw_wdb, 1)
+check("a temp login's allowed addresses include this org's own device "
+      "tunnel IP", "10.10.5.5/32" in org_addrs_a)
+check("...and this org's own linked VPN-group subnet",
+      "192.168.10.0/24" in org_addrs_a)
+check("...and every Personal VPN peer already issued to THIS org's team",
+      "10.10.44.44/32" in org_addrs_a)
+check("...but never another org's device tunnel IP",
+      "10.10.6.6/32" not in org_addrs_a)
+check("...or another org's VPN-group subnet",
+      "192.168.20.0/24" not in org_addrs_a)
+check("...or another org's Personal VPN peer",
+      "10.10.55.55/32" not in org_addrs_a)
+
 # Site-to-site VPN (VPN tab): one router is the "main host" for a group,
 # other routers are added as "sub-units" of it — each sub-unit's subnet
 # gets routed through the hub's own tunnel IP, to the main host and every

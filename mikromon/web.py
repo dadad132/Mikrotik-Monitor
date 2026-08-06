@@ -1697,6 +1697,23 @@ def _rw_allowed_subnets(hub, devices_db, org_id) -> list:
     return out
 
 
+def _org_wg_addresses(hub, devices_db, org_id) -> list:
+    """Every address that legitimately belongs to `org_id` on this shared,
+    multi-tenant hub: this company's own routers' tunnel IPs, their linked
+    VPN-group subnets (_rw_allowed_subnets covers both), PLUS every Personal
+    VPN peer already issued to this company's team (Team page). Used to
+    restrict a freshly-created Remote-access temporary login to "anyone
+    connecting via this company's own WireGuard presence" — not pinned to
+    one single address (which person on the team actually clicks Create
+    varies), but still meaningfully narrower than "anyone at all": another
+    company's WireGuard traffic on this same hub is never included."""
+    out = set(_rw_allowed_subnets(hub, devices_db, org_id))
+    for rw in (hub.get("roadwarriors") or {}).values():
+        if rw.get("org_id") == org_id and rw.get("ip"):
+            out.add(f"{rw['ip']}/32")
+    return sorted(out)
+
+
 def _roadwarrior_box(devices_db, hub, org_id, csrf) -> str:
     """Team page: personal VPN access — lets a company issue its own staff
     a direct WireGuard peer of the hub (not tied to any one router), so
@@ -5037,6 +5054,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         # pushes it (see below), so there's nothing to keep
                         # stable between preview and confirm.
                         flat["_tempuser_password"] = _gen_password()
+                        if devices_db:
+                            hub = _hub_load(_hub_path(devices_db))
+                            flat["_remote_allowed_address"] = ",".join(
+                                _org_wg_addresses(
+                                    hub, devices_db, (user or {}).get("org_id")))
                     if slug == "tunnel":
                         _prep_vpn_group(name, flat, devices_db)
                     plan = feature["plan"](pusher, cfg, flat, multi)
@@ -5415,11 +5437,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         "remove", ("system", "scheduler"), {".id": sched[".id"]},
                         desc=f"cancel expiry for '{username}'"))
                 new_password = _gen_password()
+                new_user_params = {"name": username, "password": new_password,
+                                   "group": _REMOTE_DEFAULT_GROUP,
+                                   "comment": _REMOTE_TAG + username}
+                if devices_db:
+                    hub = _hub_load(_hub_path(devices_db))
+                    allowed = ",".join(_org_wg_addresses(
+                        hub, devices_db, (user or {}).get("org_id")))
+                    if allowed:
+                        new_user_params["address"] = allowed
                 ops.append(Operation(
-                    "add", ("user",),
-                    {"name": username, "password": new_password,
-                     "group": _REMOTE_DEFAULT_GROUP,
-                     "comment": _REMOTE_TAG + username},
+                    "add", ("user",), new_user_params,
                     desc=f"recreate temporary login '{username}' with a new "
                          f"password"))
                 sched_name = _REMOTE_SCHED_PREFIX + username
