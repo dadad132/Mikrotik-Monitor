@@ -543,6 +543,41 @@ check("...or another org's VPN-group subnet",
 check("...or another org's Personal VPN peer",
       "10.10.55.55/32" not in org_addrs_a)
 
+# _build_wg_diagnostics_lines: the superadmin diagnostics report's hub/
+# tunnel section — everything needed to debug "can't reach a device" or
+# "VPN routing isn't working" without SSH access, degrading gracefully
+# when devices_db/hub.json isn't there and when the wg/systemctl/journalctl/
+# ip binaries aren't available (as on this test machine).
+check("no devices_db configured -> a clear one-line explanation, not a crash",
+      any("no hub in use" in ln
+          for ln in web._build_wg_diagnostics_lines(None)))
+wgdiag_wdb = os.path.join(tmp, "wgdiag", "devices.db")
+os.makedirs(os.path.dirname(wgdiag_wdb), exist_ok=True)
+wgdiag_hub_file = web._hub_path(wgdiag_wdb)
+web._hub_save(wgdiag_hub_file, {
+    "hub_ip": "203.0.113.9", "listen_port": "51820", "subnet": "10.10.0.0/16",
+    "hub_pubkey": "HUBPUBKEY=",
+    "leases_meta": {"R1": {"ip": "10.10.1.1", "pubkey": "R1PUB="}},
+    "roadwarriors": {"k1": {"label": "Alice", "org_id": 1,
+                            "ip": "10.10.44.44", "pubkey": "APUB="}},
+    "vpn_groups": {"R1": {"subnet": "192.168.10.0/24",
+                          "members": {"R2": {"subnet": "192.168.20.0/24"}}}},
+})
+wgdiag_lines = web._build_wg_diagnostics_lines(wgdiag_wdb)
+wgdiag_text = "\n".join(wgdiag_lines)
+check("shows the registered router peer (name, tunnel IP, pubkey presence)",
+      "R1: ip=10.10.1.1 pubkey=set" in wgdiag_text)
+check("shows the registered Personal VPN peer",
+      "Alice: org_id=1 ip=10.10.44.44 pubkey=set" in wgdiag_text)
+check("shows the VPN site-to-site group and its sub-unit",
+      "R1 (main)" in wgdiag_text and "+ R2 (sub-unit)" in wgdiag_text)
+check("never leaks a private key (hub.json only ever stores public ones)",
+      "PRIVATE" not in wgdiag_text.upper()
+      and "PRIVKEY" not in wgdiag_text.upper())
+check("missing/unavailable diagnostic commands degrade to a clear note, "
+      "not a crash or a stack trace",
+      "Traceback" not in wgdiag_text)
+
 # Site-to-site VPN (VPN tab): one router is the "main host" for a group,
 # other routers are added as "sub-units" of it — each sub-unit's subnet
 # gets routed through the hub's own tunnel IP, to the main host and every

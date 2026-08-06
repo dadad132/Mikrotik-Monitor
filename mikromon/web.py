@@ -140,6 +140,115 @@ def _all_devices(store, state, allowed=None) -> list:
     return [_device_view(store, state, n) for n in names]
 
 
+def _build_wg_diagnostics_lines(devices_db) -> list:
+    """Hub/tunnel-level diagnostics for the same downloadable report: what
+    hub.json has registered (router peers, Personal VPN peers, VPN
+    site-to-site groups), the actual wg-peers.conf/wg-routes.conf file
+    contents, and — best-effort, some may need root and will just show a
+    permission error if so, which is itself useful information — live
+    `wg show`, the reload systemd units' status/logs, and the kernel
+    routing table. Never includes a private key: hub.json only ever stores
+    public keys, and `wg show` here is never called with the extra
+    `private-key`... argument that would print one."""
+    import subprocess
+    lines = ["", "=" * 70, "WireGuard hub / tunnel diagnostics", "=" * 70,
+             "(some checks below need root — a permission error on one just "
+             "means this server's mikromon service isn't running as root, "
+             "not that anything is actually broken)", ""]
+    if not devices_db:
+        lines.append("(devices_db not configured — no hub in use)")
+        return lines
+    hub_file = _hub_path(devices_db)
+    hub = _hub_load(hub_file)
+    if not hub:
+        lines.append(f"(no hub.json at {hub_file}, or it's empty/unreadable "
+                     f"— the WireGuard hub may never have been set up)")
+        return lines
+
+    lines.append(f"hub.json: {hub_file}")
+    lines.append(f"  hub_ip: {hub.get('hub_ip', '?')}   "
+                 f"listen_port: {hub.get('listen_port', '?')}   "
+                 f"subnet: {hub.get('subnet', _HUB_SUBNET_DEFAULT)}")
+    lines.append(f"  hub_pubkey: {hub.get('hub_pubkey') or '(not set)'}")
+    peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
+    routes_path = hub.get("wg_routes") or _WG_ROUTES_DEFAULT
+    lines.append(f"  peers file: {peers_path}")
+    lines.append(f"  routes file: {routes_path}")
+    lines.append("")
+
+    leases_meta = hub.get("leases_meta") or {}
+    lines.append(f"Registered router peers ({len(leases_meta)}):")
+    for name, m in sorted(leases_meta.items()):
+        lines.append(f"  {name}: ip={m.get('ip', '?')} "
+                     f"pubkey={'set' if m.get('pubkey') else 'MISSING'}")
+    if not leases_meta:
+        lines.append("  (none)")
+    lines.append("")
+
+    roadwarriors = hub.get("roadwarriors") or {}
+    lines.append(f"Registered Personal VPN peers ({len(roadwarriors)}):")
+    for key, rw in sorted(roadwarriors.items()):
+        lines.append(f"  {rw.get('label', key)}: org_id={rw.get('org_id', '?')} "
+                     f"ip={rw.get('ip', '?')} "
+                     f"pubkey={'set' if rw.get('pubkey') else 'MISSING'}")
+    if not roadwarriors:
+        lines.append("  (none)")
+    lines.append("")
+
+    vpn_groups = hub.get("vpn_groups") or {}
+    lines.append(f"VPN site-to-site groups ({len(vpn_groups)}):")
+    for main_name, group in sorted(vpn_groups.items()):
+        lines.append(f"  {main_name} (main) — subnet {group.get('subnet', '?')}")
+        for mname, m in sorted((group.get("members") or {}).items()):
+            lines.append(f"    + {mname} (sub-unit) — subnet "
+                         f"{m.get('subnet', '?')}")
+    if not vpn_groups:
+        lines.append("  (none)")
+    lines.append("")
+
+    def run(label, cmd, timeout=8):
+        lines.append(f"--- {label}: {' '.join(cmd)} ---")
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout)
+            out = (r.stdout or "").rstrip()
+            err = (r.stderr or "").rstrip()
+            if out:
+                lines.append(out)
+            if r.returncode != 0:
+                lines.append(f"(exit code {r.returncode}"
+                             + (f": {err}" if err else "") + ")")
+            elif not out:
+                lines.append("(no output)")
+        except FileNotFoundError:
+            lines.append("(command not found — not installed on this server)")
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"(failed: {exc})")
+        lines.append("")
+
+    run("live WireGuard peer/handshake state", ["wg", "show", "wg0"])
+    run("reload service + path unit status",
+        ["systemctl", "status", "--no-pager",
+         "mikromon-wg-reload.service", "mikromon-wg-reload.path"])
+    run("reload service recent log",
+        ["journalctl", "-u", "mikromon-wg-reload.service", "-n", "40",
+         "--no-pager"])
+    run("kernel routing table", ["ip", "route", "show"])
+
+    for label, path in (("peers file contents", peers_path),
+                        ("routes file contents", routes_path)):
+        lines.append(f"--- {label}: {path} ---")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read().rstrip()
+            lines.append(content if content else "(empty)")
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"(could not read: {exc})")
+        lines.append("")
+
+    return lines
+
+
 def _build_diagnostics_report(auth, devices_db, state_file, metrics_db,
                               defaults) -> str:
     """Plain-text dump of every device's live monitoring state, across every
@@ -147,9 +256,13 @@ def _build_diagnostics_report(auth, devices_db, state_file, metrics_db,
     this exists. Reads state.json/metrics.db directly rather than through
     _device_view so it can show the RAW condition fields (pending/pending_n/
     severity/since) that matter for debugging, not just the filtered
-    "problems" list a dashboard would show."""
+    "problems" list a dashboard would show. Also includes hub/tunnel-level
+    WireGuard diagnostics (_build_wg_diagnostics_lines) — everything needed
+    to debug both "can't reach a device" and "VPN routing isn't working" in
+    one downloadable file, without needing SSH access."""
     lines = [f"mikromon diagnostics — {time.strftime('%Y-%m-%d %H:%M:%S %Z')}",
              "=" * 70, ""]
+    lines.extend(_build_wg_diagnostics_lines(devices_db))
     state = _load_state(state_file)
     devices_state = state.get("devices", {})
 

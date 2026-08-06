@@ -276,6 +276,8 @@ try:
           and "mikromon-diagnostics-" in diag_disposition)
     check("report body is non-empty and has the expected header line",
           diag_body.startswith("mikromon diagnostics"))
+    check("report includes the WireGuard hub/tunnel diagnostics section",
+          "WireGuard hub / tunnel diagnostics" in diag_body)
     try:
         op_helper.open(urllib.request.Request(
             B0 + "/superadmin/diagnostics/download"))
