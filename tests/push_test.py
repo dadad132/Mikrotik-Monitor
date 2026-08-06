@@ -836,6 +836,75 @@ check("revoking removes the user", r_api.state[("user",)] == [])
 check("revoking also cancels the now-pointless expiry scheduler",
       r_api.state[("system", "scheduler")] == [])
 
+# remote_test: diagnoses WHY a login might not be reachable even though it
+# was created — read-only, never changes anything.
+RT_SVC = ("ip", "service")
+RT_FW = ("ip", "firewall", "filter")
+rt_healthy_api = FakeApi({
+    RT_SVC: [
+        {"name": "winbox", "disabled": "false", "address": ""},
+        {"name": "www", "disabled": "false", "address": ""},
+        {"name": "ssh", "disabled": "false", "address": ""},
+    ],
+    RT_FW: [{".id": "*1", "chain": "input", "in-interface": "mikromon",
+            "action": "accept", "comment": "mikromon:tunnel:fw",
+            "disabled": "false"}],
+})
+rt_healthy = F.remote_test(rt_healthy_api)
+check("remote_test: all services open + tunnel rule present -> all 'ok', "
+      "nothing to fix", all(s["level"] == "ok" for s in rt_healthy)
+      and len(rt_healthy) == 4)
+
+rt_disabled_api = FakeApi({
+    RT_SVC: [{"name": "winbox", "disabled": "true", "address": ""},
+            {"name": "www", "disabled": "false", "address": ""},
+            {"name": "ssh", "disabled": "false", "address": ""}],
+    RT_FW: [{".id": "*1", "chain": "input", "in-interface": "mikromon",
+            "action": "accept", "comment": "mikromon:tunnel:fw",
+            "disabled": "false"}],
+})
+rt_disabled = F.remote_test(rt_disabled_api)
+check("remote_test flags a disabled Winbox service as an error",
+      any(s["level"] == "error" and "Winbox is DISABLED" in s["msg"]
+          for s in rt_disabled))
+
+rt_restricted_api = FakeApi({
+    RT_SVC: [{"name": "winbox", "disabled": "false", "address": "41.1.2.3/32"},
+            {"name": "www", "disabled": "false", "address": ""},
+            {"name": "ssh", "disabled": "false", "address": ""}],
+    RT_FW: [{".id": "*1", "chain": "input", "in-interface": "mikromon",
+            "action": "accept", "comment": "mikromon:tunnel:fw",
+            "disabled": "false"}],
+})
+rt_restricted = F.remote_test(rt_restricted_api)
+check("remote_test warns when Winbox is address-restricted (a likely cause "
+      "of a silent 'stuck on Connecting' if the tunnel isn't in that range)",
+      any(s["level"] == "warn" and "restricted to 41.1.2.3/32" in s["msg"]
+          for s in rt_restricted))
+
+rt_no_fw_api = FakeApi({
+    RT_SVC: [{"name": "winbox", "disabled": "false", "address": ""},
+            {"name": "www", "disabled": "false", "address": ""},
+            {"name": "ssh", "disabled": "false", "address": ""}],
+    RT_FW: [],
+})
+rt_no_fw = F.remote_test(rt_no_fw_api)
+check("remote_test flags a MISSING tunnel firewall accept rule as an error",
+      any(s["level"] == "error" and "MISSING" in s["msg"] for s in rt_no_fw))
+
+rt_disabled_fw_api = FakeApi({
+    RT_SVC: [{"name": "winbox", "disabled": "false", "address": ""},
+            {"name": "www", "disabled": "false", "address": ""},
+            {"name": "ssh", "disabled": "false", "address": ""}],
+    RT_FW: [{".id": "*1", "chain": "input", "in-interface": "mikromon",
+            "action": "accept", "comment": "mikromon:tunnel:fw",
+            "disabled": "true"}],
+})
+rt_disabled_fw = F.remote_test(rt_disabled_fw_api)
+check("remote_test flags a DISABLED (but present) tunnel firewall rule too",
+      any(s["level"] == "error" and "DISABLED" in s["msg"]
+          for s in rt_disabled_fw))
+
 
 # ---- 14. NextDNS content blocking grid (DNS sinkhole) ----------------------
 print("nextdns content blocking grid:")

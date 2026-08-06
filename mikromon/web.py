@@ -2663,6 +2663,57 @@ def _wg_repair_report_html(report) -> str:
             f'{applied_html}</div>')
 
 
+_REMOTE_TEST_STYLE = {
+    "healthy":   ("#16a34a", "✓ Looks reachable"),
+    "attention": ("#d97706", "⚠ Needs attention"),
+    "failed":    ("#dc2626", "✗ Found the problem"),
+}
+
+
+def _remote_test_report_html(report, tunnel_ip) -> str:
+    """Render a Remote-access connectivity report: what mikromon's own
+    server (which sits ON the hub, so it can always reach the router) found
+    when it checked the management services, the tunnel firewall rule, and
+    tried each port directly — plus the one thing it can't check for you:
+    whether your OWN computer is on the same tunnel (see Personal VPN
+    access on the Team page)."""
+    color, title = _REMOTE_TEST_STYLE.get(report.get("status"),
+                                          ("#334155", "Connectivity report"))
+    items = []
+    for s in report.get("steps", []):
+        icon, c = _WG_STEP.get(s.get("level"), ("•", "#334155"))
+        items.append(f'<li style="margin:6px 0"><span style="color:{c};'
+                     f'font-weight:bold">{icon}</span> {esc(s.get("msg", ""))}</li>')
+    return (f'<div class="box" style="border-left:4px solid {color}">'
+            f'<h2 style="margin-top:0;color:{color}">{esc(title)}</h2>'
+            f'<p class="muted" style="margin:0 0 8px">Checked from '
+            f'mikromon\'s own server against '
+            f'{esc(tunnel_ip) if tunnel_ip else "this router"}. If every '
+            f'check above passes but Winbox still hangs on "Connecting…", '
+            f'the router side is fine — the computer running Winbox isn\'t '
+            f'on the tunnel. See <a href="/admin">Personal VPN access</a> '
+            f'on the Team page.</p>'
+            f'<ul style="list-style:none;padding:0;margin:0">{"".join(items)}</ul>'
+            f'</div>')
+
+
+def _remote_test_box(name, csrf) -> str:
+    q = esc(name)
+    return (f'<div class="box"><h2>Test connectivity</h2>'
+            f'<p class="muted">Creating a login only proves mikromon\'s own '
+            f'server can reach this router — it doesn\'t prove YOUR '
+            f'computer can. Run this to check the router side: whether '
+            f'Winbox/WebFig/SSH are enabled and not address-restricted in a '
+            f'way that would silently block you, whether the tunnel\'s '
+            f'firewall rule is in place, and whether each port actually '
+            f'answers.</p>'
+            f'<form method="POST" action="/device/remote-test">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            f'<input type="hidden" name="device" value="{q}">'
+            f'<div class="actions"><button class="btn ghost" type="submit">'
+            f'Test connectivity</button></div></form></div>')
+
+
 def _hubtunnel_box(name, current, csrf="", devices_db=None) -> str:
     """Hub-side (Ubuntu WireGuard server) setup help. deploy/install.sh sets this
     up automatically; the Provision tab registers each device as a peer."""
@@ -4825,8 +4876,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         extra_html = _vpn_group_box(
                             name, devices_db, (user or {}).get("org_id"), csrf)
                     elif slug == "remote":
-                        extra_html = _remote_regenerate_box(
-                            name, current.get("users", []), csrf)
+                        extra_html = (
+                            _remote_regenerate_box(name, current.get("users", []), csrf)
+                            + _remote_test_box(name, csrf))
                     elif slug == "update":
                         extra_html, extra_actions = _update_box(name, csrf, current)
                     elif slug == "interfaces":
@@ -5224,6 +5276,87 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             self._purge_device_data(name)
             page = _render_offboard_page(name, result, "/", user)
             return self._send(200, page, "text/html; charset=utf-8")
+
+        def _device_remote_test_post(self, flat, user):
+            """"Test connectivity" on the Remote access tab: diagnoses why a
+            login might not be reachable even though it was created
+            successfully. remote_test() (read-only, API-based) checks the
+            router side; this then also tries a raw TCP connect to each
+            management port FROM MIKROMON'S OWN SERVER — which, sitting ON
+            the hub, can always reach a properly-configured router, so this
+            only proves the router side is fine, never that any particular
+            person's own computer can reach it too (that's what Personal
+            VPN access, on the Team page, is for)."""
+            import socket as _socket
+            from .config import build_device
+            from .device import DeviceError
+            from .push import PushError, rw_device
+            from .push.api import PushApi
+            from .push.features import remote_test, _REMOTE_TEST_SERVICES
+
+            name = flat.get("device", "")
+            if not self._can_manage_device(user, name):
+                return self._send(403, "forbidden")
+            raw = self._device_raw(name)
+            if raw is None:
+                return self._send(404, "no such device")
+            cfg = build_device(raw, defaults)
+            dev = rw_device(cfg)
+            api = PushApi(dev)
+            steps, err = [], None
+            try:
+                try:
+                    api.connect()
+                    steps = remote_test(api)
+                except (DeviceError, PushError) as exc:
+                    err = str(exc)
+            finally:
+                dev.close()
+            if err is not None:
+                steps = [{"level": "error",
+                         "msg": f"Could not connect to the router at all to "
+                                f"run these checks: {err}. Verify the Host "
+                                f"and the read-write push user on the "
+                                f"Devices page."}]
+            tunnel_ip = _device_tunnel_ip(name, devices_db) or getattr(cfg, "host", "")
+            if tunnel_ip:
+                for svc_name, label, port in _REMOTE_TEST_SERVICES:
+                    try:
+                        with _socket.create_connection((tunnel_ip, port), timeout=3):
+                            steps.append({
+                                "level": "ok",
+                                "msg": f"{label} (port {port}) answered a raw "
+                                       f"connection from mikromon's own server "
+                                       f"at {tunnel_ip} — the router side is "
+                                       f"reachable and listening."})
+                    except OSError as exc:
+                        steps.append({
+                            "level": "error",
+                            "msg": f"{label} (port {port}) at {tunnel_ip} did "
+                                   f"NOT answer mikromon's own server ({exc}) "
+                                   f"— check the service is enabled and this "
+                                   f"is really the router's current address."})
+            else:
+                steps.append({
+                    "level": "warn",
+                    "msg": "No tunnel IP or configured host found for this "
+                           "device — can't try a direct connection. Look up "
+                           "its address on the Devices page."})
+            has_error = any(s["level"] == "error" for s in steps)
+            has_warn = any(s["level"] == "warn" for s in steps)
+            status = "failed" if has_error else "attention" if has_warn else "healthy"
+            report = {"status": status, "steps": steps}
+            audit = self._auditlog()
+            if audit:
+                audit.append(name, (user or {}).get("login", ""), "remote",
+                             "test-connectivity",
+                             "ok" if status == "healthy" else status,
+                             "; ".join(s["msg"] for s in steps),
+                             "; ".join(s["msg"] for s in steps))
+                audit.close()
+            return self._feature_tab_page(
+                name, user, "remote",
+                report_html=_remote_test_report_html(report, tunnel_ip))
 
         def _device_remote_regenerate_post(self, flat, user):
             """"Forgot to copy it" fix for the Remote access tab: revoke the
@@ -5885,7 +6018,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                              "/device/reboot", "/device/access", "/device/confirm",
                              "/device/vpn-make-main", "/device/vpn-add-member",
                              "/device/vpn-remove-member", "/device/vpn-stop-main",
-                             "/device/remote-regenerate")
+                             "/device/remote-regenerate", "/device/remote-test")
             if path in _DEVICE_WRITE:
                 if not self._can_manage_device(user, flat.get("device", "")):
                     return self._send(403, "forbidden")
@@ -5919,6 +6052,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._device_vpn_stop_main_post(flat, user)
                 if path == "/device/remote-regenerate":
                     return self._device_remote_regenerate_post(flat, user)
+                if path == "/device/remote-test":
+                    return self._device_remote_test_post(flat, user)
             # Everything below is OWNER-ONLY (org-level: inventory, users,
             # billing, server ops).
             if not AuthStore.is_admin(user or {}):

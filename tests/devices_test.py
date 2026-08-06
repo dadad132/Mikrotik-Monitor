@@ -916,6 +916,12 @@ try:
                      {"csrf": bcsrf, "device": "WebR1", "username": "alice"})
     check("unallocated member blocked from regenerating a remote login (403)",
           st == 403)
+    # "Test connectivity" — permission gate only (a real run needs a live
+    # router connection, same limitation as the rest of this section).
+    st = post_status(nobody, "/device/remote-test",
+                     {"csrf": bcsrf, "device": "WebR1"})
+    check("unallocated member blocked from testing Remote access connectivity (403)",
+          st == 403)
     # --- Team page: personal VPN access (road-warrior peers) — guard paths.
     # A real add needs `wg` (wireguard-tools) on the test host to generate a
     # keypair, which isn't guaranteed here, so this only covers permission

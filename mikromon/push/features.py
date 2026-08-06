@@ -1650,6 +1650,73 @@ def remote_plan(pusher, cfg, flat, multi):
     return Plan(cfg.name, ops, summary="temporary access")
 
 
+_REMOTE_TEST_SERVICES = (("winbox", "Winbox", 8291), ("www", "WebFig", 80),
+                         ("ssh", "SSH", 22))
+
+
+def remote_test(api) -> list:
+    """Diagnose why Remote access might not be reachable even though the
+    temporary login itself was created successfully — that only proves
+    mikromon's OWN server (which sits ON the hub) can reach the router; it
+    says nothing about whether any particular person's own computer can.
+    Checks, read-only, never changes anything:
+      - each management service (Winbox/WebFig/SSH) enabled + any address
+        restriction, since a restriction that excludes the tunnel silently
+        drops the connection (RouterOS gives no error — it just never
+        replies, which is exactly a "stuck on Connecting" symptom)
+      - the tunnel's own input-chain firewall accept rule, added during
+        Provision — if a router was provisioned before this existed, or it
+        was removed by hand, traffic arriving over the tunnel FOR THE
+        ROUTER ITSELF can be silently dropped too
+    Returns a list of {"level", "msg"} steps; the caller (web.py) appends
+    its own raw-TCP reachability findings and renders the combined report."""
+    steps = []
+
+    def note(level, msg):
+        steps.append({"level": level, "msg": msg})
+
+    services = _safe_fetch(api, _SERVICE)
+    by = {s.get("name"): s for s in services}
+    for svc_name, label, port in _REMOTE_TEST_SERVICES:
+        s = by.get(svc_name)
+        if s is None:
+            note("warn", f"{label} (port {port}): could not read its status "
+                         f"from /ip/service.")
+            continue
+        if _norm(s.get("disabled", "")) == "true":
+            note("error", f"{label} is DISABLED on this router — turn it on "
+                          f"(Restrict management access tab, or run "
+                          f"\"/ip service enable {svc_name}\") before it can "
+                          f"be reached at all.")
+            continue
+        addr = (s.get("address") or "").strip()
+        if addr:
+            note("warn", f"{label} is restricted to {addr} — if the address "
+                        f"you're connecting FROM isn't inside that range, "
+                        f"RouterOS drops the connection with no error at "
+                        f"all, which looks exactly like a stuck "
+                        f"\"Connecting…\". Check the Restrict management "
+                        f"access tab.")
+        else:
+            note("ok", f"{label} is enabled and not address-restricted.")
+
+    fw = _safe_fetch(api, _FILTER)
+    tunnel_rule = next((r for r in fw
+                        if str(r.get("comment", "")) == "mikromon:tunnel:fw"),
+                       None)
+    if tunnel_rule is None:
+        note("error", "The tunnel's own firewall accept rule "
+                      "(mikromon:tunnel:fw) is MISSING — traffic arriving "
+                      "over the WireGuard tunnel for this router itself may "
+                      "be silently dropped. Re-run Provision to restore it.")
+    elif _norm(tunnel_rule.get("disabled", "")) == "true":
+        note("error", "The tunnel's firewall accept rule exists but is "
+                      "DISABLED — re-enable it, or re-run Provision.")
+    else:
+        note("ok", "The tunnel's firewall accept rule is present and enabled.")
+    return steps
+
+
 # ===========================================================================
 # Tunnel — WireGuard VPN (RouterOS 7.1+ only; graceful notice on v6/unknown)
 # ===========================================================================
