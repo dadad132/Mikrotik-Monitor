@@ -993,6 +993,22 @@ try:
           "just the one clicked from",
           "WebR1" in urllib.parse.unquote(location)
           and "WebR2" in urllib.parse.unquote(location))
+    # _build_vpn_router_diagnostics_lines: the diagnostics report's live
+    # expected-vs-actual comparison for every router in a VPN group — the
+    # direct way to tell "the grouping bookkeeping says connected" from
+    # "the router genuinely has the route". WebR1's host (8.8.8.8) is
+    # unreachable as a router, so this also proves the bounded reachable()
+    # probe kicks in here too (no hang for the full connect timeout).
+    vpn_diag = "\n".join(web._build_vpn_router_diagnostics_lines(wdb, DEF))
+    check("shows what route WebR1 (main) expects, computed the same way "
+          "the real push does", "expects a route to each of: 192.168.61.0/24"
+          in vpn_diag)
+    check("an unreachable router is reported clearly and quickly, not a "
+          "silent hang", "WebR1" in vpn_diag and "UNREACHABLE" in vpn_diag)
+    check("no VPN groups at all -> a clear one-line explanation, not a crash",
+          "no VPN groups registered" in
+          "\n".join(web._build_vpn_router_diagnostics_lines(
+              os.path.join(tmp, "novpngroups", "devices.db"), DEF)))
     # --- Remote access tab: "forgot to copy it" regenerate button — guard
     # paths only (an actual regenerate needs a live router connection,
     # same limitation as the rest of this section) ---

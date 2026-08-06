@@ -249,6 +249,121 @@ def _build_wg_diagnostics_lines(devices_db) -> list:
     return lines
 
 
+def _build_vpn_router_diagnostics_lines(devices_db, defaults) -> list:
+    """Live, per-router VPN diagnostics: for every device currently in a VPN
+    group, what routes/firewall rule mikromon's own push logic WOULD push
+    right now (recomputed the exact same way _push_vpn_routes_to does),
+    side by side with what's actually on the router, read live over the
+    API. This is the direct way to tell "the grouping bookkeeping says
+    connected" from "the router genuinely has the route and firewall rule"
+    — the two can drift apart if a router was offline when it should have
+    been pushed to, or a push-logic change (like the forward-chain firewall
+    rule) was never re-applied to an already-grouped pair. Bounded per
+    router (a quick reachability probe first, same as _push_vpn_routes_to)
+    so one offline router can't hang the whole report."""
+    from .config import build_device
+    from .device import DeviceError
+    from .push import PushError, rw_device
+    from .push.api import PushApi
+    from .push.features import _VPN_ROUTE_TAG, _VPN_FW_TAG
+
+    lines = ["", "=" * 70, "VPN site-to-site: per-router live state",
+             "=" * 70, ""]
+    if not devices_db:
+        lines.append("(devices_db not configured — no VPN groups possible)")
+        return lines
+    hub = _hub_load(_hub_path(devices_db))
+    groups = hub.get("vpn_groups") or {}
+    if not groups:
+        lines.append("(no VPN groups registered)")
+        return lines
+    names = []
+    for main_name, group in groups.items():
+        if main_name not in names:
+            names.append(main_name)
+        for member_name in (group.get("members") or {}):
+            if member_name not in names:
+                names.append(member_name)
+
+    from .devices_store import DevicesStore
+    try:
+        ds = DevicesStore(devices_db)
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"(could not open devices.db: {exc})")
+        return lines
+
+    try:
+        for name in names:
+            lines.append(f"--- {name} ---")
+            flat: dict = {}
+            _prep_vpn_group(name, flat, devices_db)
+            expected_subnets = flat.get("_vpn_other_subnets") or []
+            hub_ip = flat.get("_vpn_hub_ip") or ""
+            in_group = bool(flat.get("_vpn_in_group"))
+            lines.append(f"  expects a route to each of: "
+                        f"{', '.join(expected_subnets) or '(none)'} "
+                        f"via {hub_ip or '?'}")
+            raw = ds.raw(name)
+            if raw is None:
+                lines.append("  (not in devices.db — skipped)")
+                lines.append("")
+                continue
+            cfg = build_device(raw, defaults)
+            dev = rw_device(cfg)
+            try:
+                if not dev.reachable():
+                    lines.append("  UNREACHABLE from this server right now "
+                                 "— can't check its live routes/firewall.")
+                    lines.append("")
+                    continue
+                api = PushApi(dev)
+                try:
+                    api.connect()
+                    routes = api.fetch(("ip", "route"))
+                    fw = api.fetch(("ip", "firewall", "filter"))
+                except (DeviceError, PushError) as exc:
+                    lines.append(f"  could not connect: {exc}")
+                    lines.append("")
+                    continue
+            finally:
+                dev.close()
+            actual_routes = {r.get("dst-address"): r.get("gateway")
+                             for r in routes
+                             if str(r.get("comment", "")) == _VPN_ROUTE_TAG}
+            lines.append("  actual mikromon-tagged routes on the router: "
+                        + (", ".join(f"{k} via {v}"
+                                     for k, v in sorted(actual_routes.items()))
+                           or "(none)"))
+            missing = [s for s in expected_subnets if s not in actual_routes]
+            extra = [s for s in actual_routes if s not in expected_subnets]
+            if missing:
+                lines.append(f"  MISSING route(s): {', '.join(missing)} — "
+                             f"click \"Refresh routes & firewall rule now\" "
+                             f"on this router's VPN tab.")
+            if extra:
+                lines.append(f"  stale/extra route(s) that should have been "
+                             f"removed: {', '.join(extra)}")
+            if not missing and not extra and expected_subnets:
+                lines.append("  routes: OK, match exactly.")
+            fw_tags = {str(r.get("comment", "")) for r in fw
+                      if str(r.get("comment", "")).startswith(_VPN_FW_TAG)
+                      and str(r.get("disabled", "")).lower() != "true"}
+            if in_group:
+                if len(fw_tags) >= 2:
+                    lines.append("  forward-chain firewall rule: present.")
+                else:
+                    lines.append("  forward-chain firewall rule: MISSING "
+                                 "(or disabled) — this alone would cause "
+                                 "exactly a stuck/timed-out ping across the "
+                                 "VPN even with the route above correct. "
+                                 "Click \"Refresh routes & firewall rule "
+                                 "now\" on this router's VPN tab.")
+            lines.append("")
+    finally:
+        ds.close()
+    return lines
+
+
 def _build_diagnostics_report(auth, devices_db, state_file, metrics_db,
                               defaults) -> str:
     """Plain-text dump of every device's live monitoring state, across every
@@ -257,12 +372,15 @@ def _build_diagnostics_report(auth, devices_db, state_file, metrics_db,
     _device_view so it can show the RAW condition fields (pending/pending_n/
     severity/since) that matter for debugging, not just the filtered
     "problems" list a dashboard would show. Also includes hub/tunnel-level
-    WireGuard diagnostics (_build_wg_diagnostics_lines) — everything needed
-    to debug both "can't reach a device" and "VPN routing isn't working" in
-    one downloadable file, without needing SSH access."""
+    WireGuard diagnostics (_build_wg_diagnostics_lines) and, for every
+    router in a VPN group, a live expected-vs-actual comparison of its
+    routes/firewall rule (_build_vpn_router_diagnostics_lines) — everything
+    needed to debug "can't reach a device" and "VPN routing isn't working"
+    in one downloadable file, without needing SSH access."""
     lines = [f"mikromon diagnostics — {time.strftime('%Y-%m-%d %H:%M:%S %Z')}",
              "=" * 70, ""]
     lines.extend(_build_wg_diagnostics_lines(devices_db))
+    lines.extend(_build_vpn_router_diagnostics_lines(devices_db, defaults))
     state = _load_state(state_file)
     devices_state = state.get("devices", {})
 

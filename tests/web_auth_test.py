@@ -278,6 +278,8 @@ try:
           diag_body.startswith("mikromon diagnostics"))
     check("report includes the WireGuard hub/tunnel diagnostics section",
           "WireGuard hub / tunnel diagnostics" in diag_body)
+    check("report includes the per-router VPN live-state comparison section",
+          "VPN site-to-site: per-router live state" in diag_body)
     try:
         op_helper.open(urllib.request.Request(
             B0 + "/superadmin/diagnostics/download"))
