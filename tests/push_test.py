@@ -924,6 +924,57 @@ check("remote_test flags a DISABLED (but present) tunnel firewall rule too",
       any(s["level"] == "error" and "DISABLED" in s["msg"]
           for s in rt_disabled_fw))
 
+# The exact scenario that caused real confusion: every /ip/service check and
+# the tunnel firewall rule all pass, but the LOGIN ITSELF still carries an
+# address restriction (the opt-in checkbox) that the service-level checks
+# never look at — remote_test must surface this separately, or "everything
+# green" is actively misleading.
+RT_USER = ("user",)
+rt_restricted_login_api = FakeApi({
+    RT_SVC: [{"name": "winbox", "disabled": "false", "address": ""},
+            {"name": "www", "disabled": "false", "address": ""},
+            {"name": "ssh", "disabled": "false", "address": ""}],
+    RT_FW: [{".id": "*1", "chain": "input", "in-interface": "mikromon",
+            "action": "accept", "comment": "mikromon:tunnel:fw",
+            "disabled": "false"}],
+    RT_USER: [{"name": "tmpalice", "comment": "mikromon:remote:tmpalice",
+              "address": "10.10.0.0/16"}],
+})
+rt_restricted_login = F.remote_test(rt_restricted_login_api)
+check("remote_test flags a temp login's OWN address restriction even when "
+      "every service-level check passes clean",
+      any(s["level"] == "warn" and "tmpalice" in s["msg"]
+          and "10.10.0.0/16" in s["msg"] for s in rt_restricted_login))
+
+rt_open_login_api = FakeApi({
+    RT_SVC: [{"name": "winbox", "disabled": "false", "address": ""},
+            {"name": "www", "disabled": "false", "address": ""},
+            {"name": "ssh", "disabled": "false", "address": ""}],
+    RT_FW: [{".id": "*1", "chain": "input", "in-interface": "mikromon",
+            "action": "accept", "comment": "mikromon:tunnel:fw",
+            "disabled": "false"}],
+    RT_USER: [{"name": "tmpbob", "comment": "mikromon:remote:tmpbob",
+              "address": ""}],
+})
+rt_open_login = F.remote_test(rt_open_login_api)
+check("a temp login with no address restriction of its own reports 'ok', "
+      "not silently skipped",
+      any(s["level"] == "ok" and "tmpbob" in s["msg"] for s in rt_open_login))
+
+rt_unmanaged_user_api = FakeApi({
+    RT_SVC: [{"name": "winbox", "disabled": "false", "address": ""},
+            {"name": "www", "disabled": "false", "address": ""},
+            {"name": "ssh", "disabled": "false", "address": ""}],
+    RT_FW: [{".id": "*1", "chain": "input", "in-interface": "mikromon",
+            "action": "accept", "comment": "mikromon:tunnel:fw",
+            "disabled": "false"}],
+    RT_USER: [{"name": "admin", "comment": "", "address": "192.168.1.0/24"}],
+})
+rt_unmanaged = F.remote_test(rt_unmanaged_user_api)
+check("a human-made user (no mikromon:remote: comment) is never reported "
+      "on — only logins mikromon itself created",
+      not any("admin" in s["msg"] for s in rt_unmanaged))
+
 
 # ---- 14. NextDNS content blocking grid (DNS sinkhole) ----------------------
 print("nextdns content blocking grid:")

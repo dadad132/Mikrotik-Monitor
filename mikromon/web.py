@@ -5054,7 +5054,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         # pushes it (see below), so there's nothing to keep
                         # stable between preview and confirm.
                         flat["_tempuser_password"] = _gen_password()
-                        if devices_db:
+                        # Opt-in (default OFF): some routers are also reached
+                        # some other way (public IP, port-forward, a
+                        # different VPN entirely) — restricting by default
+                        # would silently break that path for anyone who
+                        # doesn't go through mikromon's own tunnel.
+                        if devices_db and flat.get("restrict_source") == "1":
                             hub = _hub_load(_hub_path(devices_db))
                             flat["_remote_allowed_address"] = ",".join(
                                 _org_wg_addresses(
@@ -5440,12 +5445,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 new_user_params = {"name": username, "password": new_password,
                                    "group": _REMOTE_DEFAULT_GROUP,
                                    "comment": _REMOTE_TAG + username}
-                if devices_db:
-                    hub = _hub_load(_hub_path(devices_db))
-                    allowed = ",".join(_org_wg_addresses(
-                        hub, devices_db, (user or {}).get("org_id")))
-                    if allowed:
-                        new_user_params["address"] = allowed
+                # Carry over whatever address restriction the login already
+                # had (it's opt-in, set at creation time) rather than
+                # deciding fresh — regenerating shouldn't silently add or
+                # drop a restriction the person creating it never chose here.
+                existing_addr = (existing.get("address") or "").strip()
+                if existing_addr:
+                    new_user_params["address"] = existing_addr
                 ops.append(Operation(
                     "add", ("user",), new_user_params,
                     desc=f"recreate temporary login '{username}' with a new "

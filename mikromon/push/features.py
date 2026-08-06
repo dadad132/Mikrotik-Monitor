@@ -1590,13 +1590,18 @@ def remote_form(current, cfg):
         {"type": "heading", "label": "Grant temporary access",
          "hint": f"Type who it's for and click Create — the password and "
                 f"address to give them come right after. It stops working "
-                f"on its own in {_REMOTE_DEFAULT_MINUTES} minutes. The login "
-                f"only works from this company's own WireGuard presence "
-                f"(a router's own tunnel, a linked VPN-group network, or "
-                f"someone's Personal VPN access peer) — never from anyone "
-                f"outside it, even on this same server."},
+                f"on its own in {_REMOTE_DEFAULT_MINUTES} minutes."},
         {"type": "text", "name": "tempuser", "label": "Who is this for?",
          "placeholder": "e.g. alice, or the contractor's name"},
+        {"type": "toggle", "name": "restrict_source", "value": "1",
+         "label": "Restrict to this company's own WireGuard presence",
+         "on": False,
+         "desc": "Only lets the login be used from this company's own "
+                 "tunnel (a router's own connection, a linked VPN-group "
+                 "network, or a Personal VPN access peer). Leave OFF if "
+                 "this router is also reachable some other way (a public "
+                 "IP, port-forward, different VPN, etc.) — turning this on "
+                 "would block that other path too."},
     ]
     # Only shown once someone actually has access — a first-time visitor
     # just sees the one field above, nothing else.
@@ -1682,6 +1687,11 @@ def remote_test(api) -> list:
         restriction, since a restriction that excludes the tunnel silently
         drops the connection (RouterOS gives no error — it just never
         replies, which is exactly a "stuck on Connecting" symptom)
+      - any currently-active temporary login's OWN address restriction (the
+        opt-in checkbox on the Remote access tab) — separate from, and
+        invisible to, the service-level checks above; a router can pass
+        every one of those and still refuse a specific login because of
+        this
       - the tunnel's own input-chain firewall accept rule, added during
         Provision — if a router was provisioned before this existed, or it
         was removed by hand, traffic arriving over the tunnel FOR THE
@@ -1717,6 +1727,31 @@ def remote_test(api) -> list:
                         f"access tab.")
         else:
             note("ok", f"{label} is enabled and not address-restricted.")
+
+    # The temporary login itself can ALSO carry its own address restriction
+    # (the opt-in "Restrict to this company's own WireGuard presence"
+    # checkbox) — separate from, and invisible to, the /ip/service checks
+    # above. A router can pass every service check and still refuse a
+    # specific login if THIS is what's blocking it.
+    users = _safe_fetch(api, ("user",))
+    remote_users = [u for u in users
+                    if str(u.get("comment", "")).startswith(_REMOTE_TAG)]
+    for u in remote_users:
+        uname = u.get("name", "?")
+        addr = (u.get("address") or "").strip()
+        if addr:
+            note("warn", f"The login '{uname}' itself is restricted to "
+                        f"{addr} (set when it was created, via the "
+                        f"\"Restrict to this company's own WireGuard "
+                        f"presence\" option) — if you're connecting from "
+                        f"outside that range, RouterOS refuses the login "
+                        f"with no error at all, even though every service "
+                        f"check above passes. Regenerate '{uname}' with "
+                        f"that option OFF if this router is also reached "
+                        f"some other way.")
+        else:
+            note("ok", f"The login '{uname}' has no address restriction of "
+                       f"its own.")
 
     fw = _safe_fetch(api, _FILTER)
     tunnel_rule = next((r for r in fw
