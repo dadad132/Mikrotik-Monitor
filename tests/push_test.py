@@ -1201,6 +1201,72 @@ check("a route mikromon doesn't own is never modified or removed",
       not any(o.params.get("dst-address") == "172.16.0.0/24"
               for o in untouched_plan.ops))
 
+# The forward-chain firewall rule: a route alone isn't enough for LAN-to-LAN
+# site-to-site traffic to actually pass — RouterOS's default/hardened forward
+# policy can silently drop it. tunnel_plan looks up this router's own
+# dial-home WireGuard interface (tagged "mikromon:tunnel:if" during
+# provisioning) and adds a forward-chain accept for it in both directions.
+FW = ("ip", "firewall", "filter")
+_VPN_FW_TAG = F._VPN_FW_TAG
+t_fw_api = FakeApi({
+    ("ip", "route"): [],
+    WG: [{"name": "mikromon", "comment": "mikromon:tunnel:if"}],
+})
+t_fw_pusher = Pusher(t_cfg, t_fw_api, dry_run=True)
+fw_plan = F.tunnel_plan(t_fw_pusher, t_cfg, in_group_flat, {})
+fw_adds = [o for o in fw_plan.ops if o.path == FW and o.action == "add"]
+check("being in a group with a found WG interface adds exactly 2 forward "
+      "rules (in + out)", len(fw_adds) == 2)
+check("one forward rule matches on in-interface (WG -> LAN direction)",
+      any(o.params.get("in-interface") == "mikromon" for o in fw_adds))
+check("the other matches on out-interface (LAN -> WG direction)",
+      any(o.params.get("out-interface") == "mikromon" for o in fw_adds))
+check("both forward rules accept and are tagged as mikromon's own",
+      all(o.params.get("action") == "accept"
+          and str(o.params.get("comment", "")).startswith(_VPN_FW_TAG)
+          for o in fw_adds))
+check("both are placed at the very front of the filter list, so an existing "
+      "\"drop everything else\" rule further down can't shadow them",
+      all(o.params.get("place-before") == 0 for o in fw_adds))
+
+# idempotent: already-tagged forward rules aren't re-added
+t_fw_api2 = FakeApi({
+    ("ip", "route"): [
+        {".id": "*1", "dst-address": "192.168.2.0/24", "gateway": "10.10.0.1",
+         "comment": _VPN_ROUTE_TAG},
+        {".id": "*2", "dst-address": "192.168.3.0/24", "gateway": "10.10.0.1",
+         "comment": _VPN_ROUTE_TAG},
+    ],
+    WG: [{"name": "mikromon", "comment": "mikromon:tunnel:if"}],
+    FW: [
+        {".id": "*10", "chain": "forward", "in-interface": "mikromon",
+         "action": "accept", "comment": _VPN_FW_TAG + "in"},
+        {".id": "*11", "chain": "forward", "out-interface": "mikromon",
+         "action": "accept", "comment": _VPN_FW_TAG + "out"},
+    ],
+})
+t_fw_pusher2 = Pusher(t_cfg, t_fw_api2, dry_run=True)
+check("re-applying with both routes AND forward rules already in place is "
+      "a total no-op",
+      F.tunnel_plan(t_fw_pusher2, t_cfg, in_group_flat, {}).empty)
+
+# leaving the group removes the forward rules too, not just the routes
+leave_fw_plan = F.tunnel_plan(t_fw_pusher2, t_cfg, not_grouped_flat, {})
+fw_removes = [o for o in leave_fw_plan.ops if o.path == FW and o.action == "remove"]
+check("leaving the group removes both forward rules",
+      {o.params.get(".id") for o in fw_removes} == {"*10", "*11"})
+
+# a router that's grouped but whose own WireGuard interface can't be found
+# (e.g. pre-7.1 firmware, or a stray read failure) skips the firewall step
+# entirely rather than guessing an interface name or crashing.
+t_fw_api3 = FakeApi({("ip", "route"): []})  # no ("interface","wireguard") at all
+t_fw_pusher3 = Pusher(t_cfg, t_fw_api3, dry_run=True)
+no_iface_plan = F.tunnel_plan(t_fw_pusher3, t_cfg, in_group_flat, {})
+check("no WireGuard interface found -> no forward-rule ops attempted "
+      "(routes still get added normally)",
+      not any(o.path == FW for o in no_iface_plan.ops)
+      and any(o.path == ("ip", "route") for o in no_iface_plan.ops))
+
 # web.py's grouping actions validate subnet conflicts before ever writing to
 # hub.json, but tunnel_plan still refuses defensively if _vpn_error is set.
 err_flat = {"_vpn_in_group": True,

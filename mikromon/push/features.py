@@ -1753,9 +1753,11 @@ def tunnel_form(current, cfg):
                       f'group. To change this, remove it from {main_name}\'s '
                       f'VPN tab first.'},
             {"type": "static", "label": "How this works",
-             "value": "Routes to the main host and every other sub-unit are "
-                      "pushed automatically whenever the group changes — "
-                      "there's nothing to do on this tab."},
+             "value": "Routes to the main host and every other sub-unit — "
+                      "plus the firewall rule that actually lets that "
+                      "traffic pass through the tunnel — are pushed "
+                      "automatically whenever the group changes. There's "
+                      "nothing to do on this tab."},
         ]
     if role == "main":
         members = current.get("vpn_members") or {}
@@ -1766,9 +1768,11 @@ def tunnel_form(current, cfg):
              "value": current.get("vpn_own_subnet") or "(not detected)"},
             {"type": "static", "label": "Sub-units", "value": member_list},
             {"type": "static", "label": "How this works",
-             "value": "Routes to every sub-unit listed above are pushed "
-                      "automatically to every affected router as soon as you "
-                      "add or remove one below."},
+             "value": "Routes to every sub-unit listed above — plus the "
+                      "firewall rule that actually lets that traffic pass "
+                      "through the tunnel — are pushed automatically to "
+                      "every affected router as soon as you add or remove "
+                      "one below."},
         ]
     detected = current.get("lan_subnets") or []
     fields: list[dict] = [
@@ -1788,16 +1792,78 @@ def tunnel_form(current, cfg):
     return fields
 
 
+_VPN_FW_TAG = "mikromon:vpnfw:"
+
+
+def _vpn_wg_iface_name(pusher) -> str:
+    """This router's own dial-home WireGuard interface name, identified by
+    the comment provisioning tags it with ("mikromon:tunnel:if") rather than
+    assuming the literal name "mikromon" — belt-and-braces in case it was
+    ever renamed by hand. "" if not found, so the caller skips the firewall
+    op instead of guessing wrong."""
+    for row in _safe_fetch(pusher.api, _WG_IFACE):
+        if str(row.get("comment", "")) == "mikromon:tunnel:if":
+            return row.get("name", "")
+    return ""
+
+
+def _vpn_firewall_ops(pusher, iface: str) -> list:
+    """Forward-chain accept for the site-to-site tunnel, in both directions.
+    Without this, a route alone isn't enough: routing decides WHERE a packet
+    goes, but RouterOS's default (or hardened) forward policy commonly drops
+    NEW forwarded traffic that isn't LAN-sourced, which would silently
+    swallow VPN-group traffic even though the route is completely correct.
+    Only "in-interface"/"out-interface" match this tunnel specifically — no
+    address-list to keep in sync, since the interface itself already scopes
+    this to exactly the traffic a grouped site legitimately carries.
+    Added at the very front of the filter list (place-before=0) so an
+    existing "drop everything else" rule further down can't shadow it — the
+    same reasoning as the input-chain rule provisioning already adds for
+    reaching the router's own management services over the tunnel. `iface`
+    empty means "not part of a group" (or the interface couldn't be found) —
+    remove any previously-added rule in that case."""
+    current = _safe_fetch(pusher.api, _FILTER)
+    tagged = {r.get("comment"): r for r in current
+             if str(r.get("comment", "")).startswith(_VPN_FW_TAG)}
+    desired = {
+        _VPN_FW_TAG + "in": {"chain": "forward", "in-interface": iface},
+        _VPN_FW_TAG + "out": {"chain": "forward", "out-interface": iface},
+    } if iface else {}
+    ops = []
+    for tag, params in desired.items():
+        if tag not in tagged:
+            direction = tag.rsplit(":", 1)[-1]
+            ops.append(Operation(
+                "add", _FILTER, {**params, "action": "accept", "comment": tag,
+                                 "place-before": 0},
+                desc=f"allow VPN site-to-site traffic through the tunnel "
+                     f"({direction})",
+                inverse=Operation("remove", _FILTER, {},
+                                  desc=f"remove VPN forward rule ({direction})")))
+    for tag, row in tagged.items():
+        if tag not in desired:
+            direction = tag.rsplit(":", 1)[-1]
+            ops.append(Operation(
+                "remove", _FILTER, {".id": row[".id"]},
+                desc=f"remove VPN forward rule ({direction}) — no longer in "
+                     f"a group",
+                inverse=Operation("add", _FILTER,
+                                  {f: v for f, v in row.items() if f != ".id"},
+                                  desc=f"restore VPN forward rule ({direction})")))
+    return ops
+
+
 def tunnel_plan(pusher, cfg, flat, multi):
     """Push (or remove) static routes so this router can reach every other
-    site in its VPN group through the hub. web.py's _prep_vpn_group
-    injects flat["_vpn_other_subnets"] (every OTHER site's subnet in this
-    router's own group, from hub.json), flat["_vpn_hub_ip"] (the gateway to
-    use — the hub's own tunnel address) and flat["_vpn_in_group"] before
-    calling this; flat["_vpn_error"] is set instead if a submitted subnet
-    conflicted with another site or the tunnel network (surfaced via a
-    dedicated grouping action, not this form, but tunnel_plan still checks
-    it defensively)."""
+    site in its VPN group through the hub, plus the forward-chain firewall
+    rule that actually lets that traffic pass (see _vpn_firewall_ops).
+    web.py's _prep_vpn_group injects flat["_vpn_other_subnets"] (every OTHER
+    site's subnet in this router's own group, from hub.json),
+    flat["_vpn_hub_ip"] (the gateway to use — the hub's own tunnel address)
+    and flat["_vpn_in_group"] before calling this; flat["_vpn_error"] is set
+    instead if a submitted subnet conflicted with another site or the tunnel
+    network (surfaced via a dedicated grouping action, not this form, but
+    tunnel_plan still checks it defensively)."""
     if flat.get("_vpn_error"):
         raise PushError(flat["_vpn_error"])
     in_group = bool(flat.get("_vpn_in_group"))
@@ -1810,6 +1876,8 @@ def tunnel_plan(pusher, cfg, flat, multi):
                          manage_tag=_VPN_ROUTE_TAG,
                          owns=_prefix_owner(_VPN_ROUTE_TAG),
                          label="VPN site route")
+    iface = _vpn_wg_iface_name(pusher) if in_group else ""
+    ops += _vpn_firewall_ops(pusher, iface)
     return Plan(cfg.name, ops,
                summary=f"vpn: {len(other_subnets)} site route(s)"
                        if in_group else "vpn (not part of a group)")
