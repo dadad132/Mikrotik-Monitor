@@ -1558,7 +1558,7 @@ def interfaces_summary(current, cfg):
 # ===========================================================================
 _REMOTE_TAG = "mikromon:remote:"
 _REMOTE_SCHED_PREFIX = "mikromon-tempaccess-"
-_REMOTE_DEFAULT_MINUTES = 60
+_REMOTE_DEFAULT_MINUTES = 30
 _REMOTE_DEFAULT_GROUP = "full"
 
 
