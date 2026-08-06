@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 
 from .auth import AuthStore
-from .billing import PLANS, GRACE_DAYS, FREE_DEVICES
+from .billing import PLANS, GRACE_DAYS, FREE_DEVICES, TRIAL_DEVICES, _TRIAL_DAYS
 from .util import human_bytes
 from .web_shared import _BRAND, _PAGE_CSS, esc, _header, _page, _who
 
@@ -709,6 +709,275 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
              f'{_billing_contact_box(billing_contact, csrf)}'
              f'{diagnostics_box}{backup_box}</div>')
     return _page("Platform Admin", _header(user, "/superadmin") + inner)
+
+
+def _guide_section(anchor: str, title: str, body: str) -> str:
+    return (f'<div class="box" id="{anchor}"><h2 style="margin-top:0">{title}</h2>'
+            f'{body}</div>')
+
+
+def _render_guide(user, tab_intro: dict) -> str:
+    """A plain-language walkthrough of every tab and a glossary of the
+    networking terms used throughout the dashboard — for someone who isn't
+    sure what a setting does or what a term means, without having to ask
+    or guess. Static content; doesn't touch the database. `tab_intro` is
+    web.py's _TAB_INTRO (passed in rather than imported, to avoid a
+    circular import — web.py imports render functions from this module)."""
+    toc_items = [
+        ("overview", "What this dashboard does"),
+        ("dashboard", "The Dashboard"),
+        ("devices", "Devices, ownership &amp; team access"),
+        ("provision", "Adding a new router (Provision)"),
+        ("tabs", "What each device tab does"),
+        ("vpn", "VPN — connecting sites together"),
+        ("safety", "Backups, Preview/Apply &amp; Safe mode"),
+        ("devicemode", "“Device Mode” errors"),
+        ("billing", "Trials, plans &amp; billing"),
+        ("activity", "Activity log"),
+        ("glossary", "Glossary — what do these words mean?"),
+    ]
+    toc = ("<div class=\"box\"><h2 style=\"margin-top:0\">Contents</h2>"
+           "<ul style=\"columns:2;column-gap:24px;margin:0;padding-left:20px\">"
+           + "".join(f'<li style="margin-bottom:6px"><a href="#{a}">{t}</a></li>'
+                     for a, t in toc_items)
+           + "</ul></div>")
+
+    overview = _guide_section("overview", "What this dashboard does", (
+        '<p>This dashboard monitors and configures MikroTik routers — yours '
+        'or your clients\' — from one place, without needing Winbox open on '
+        'every site. It polls each router to show whether it\'s online and '
+        'what its internet lines are doing, and it can push configuration '
+        'changes (firewall, WAN failover, VPN, port forwarding, and more) '
+        'to a router the same way you would by hand, just from a web page '
+        'instead of the router\'s own tools.</p>'
+        '<p>Every change is <b>previewed before it\'s applied</b> — you see '
+        'exactly what would change on the router before anything actually '
+        'happens, and a backup is taken automatically first. See '
+        '<a href="#safety">Backups, Preview/Apply &amp; Safe mode</a>.</p>'))
+
+    dashboard = _guide_section("dashboard", "The Dashboard", (
+        '<p>The Dashboard lists every router you manage with its current '
+        'status: <b>online/offline</b>, and any active <b>problems</b> '
+        '(a WAN line down, high latency, a device that stopped checking in, '
+        'etc). Click a router to open its own page, where every '
+        'configuration tab for that specific router lives.</p>'
+        '<p>A "problem" clears itself automatically once the underlying '
+        'condition is fixed — there\'s nothing to manually dismiss.</p>'))
+
+    devices = _guide_section("devices", "Devices, ownership &amp; team access", (
+        '<p>The <b>Devices</b> tab (company owners only) is where routers '
+        'are added, renamed or removed, and where you see every router '
+        'that belongs to your company.</p>'
+        '<p>Two account roles:</p>'
+        '<ul>'
+        '<li><b>Owner</b> — full control of every router in the company, '
+        'plus Team, Billing and the Devices inventory.</li>'
+        '<li><b>Member</b> — can only see and manage the specific routers '
+        'an owner has allocated to them (Team page), and never sees the '
+        'Devices inventory or Billing.</li>'
+        '</ul>'
+        '<p>Every router belongs to exactly one company. Nobody outside '
+        'that company — not even another paying customer — can see it, '
+        'connect to it, or add it to a VPN group with theirs.</p>'))
+
+    provision = _guide_section("provision", "Adding a new router (Provision)", (
+        '<p>The <b>Provision</b> tab generates a small script you paste '
+        'into the router\'s own terminal (via Winbox/SSH) once, by hand. '
+        'It creates a dedicated API user this dashboard uses from then on — '
+        'your normal admin login is never stored here. It also sets up the '
+        'router as a WireGuard peer of this dashboard\'s server (the '
+        '<b>hub</b> — see the <a href="#vpn">VPN section</a>) so it can be '
+        'reached even behind CGNAT/a home internet connection with no '
+        'public IP, and enables Safe mode\'s self-check path.</p>'
+        '<p>You only ever do this once per router. After that, every tab '
+        'works purely from the dashboard.</p>'))
+
+    tab_rows = [
+        ("Routes — Gateway Failover", tab_intro.get("routes", "")),
+        ("WAN — policy routing", tab_intro.get("wan", "")),
+        ("Security", tab_intro.get("security", "")),
+        ("Restrict management access", tab_intro.get("harden", "")),
+        ("DNS", tab_intro.get("nextdns", "")),
+        ("Queues (QoS)", tab_intro.get("qos", "")),
+        ("Port forwarding", tab_intro.get("portfwd", "")),
+        ("Interfaces", tab_intro.get("interfaces", "")),
+        ("Remote access", tab_intro.get("remote", "")),
+        ("Custom scripts", tab_intro.get("scripts", "")),
+        ("Update RouterOS", tab_intro.get("update", "")),
+    ]
+    tabs_table = "".join(
+        f'<tr><td style="white-space:nowrap;vertical-align:top"><b>{esc(name)}</b></td>'
+        f'<td>{esc(desc)}</td></tr>'
+        for name, desc in tab_rows if desc)
+    tabs = _guide_section("tabs", "What each device tab does", (
+        '<p>Open a router from the Dashboard to see its tabs. Every tab '
+        'follows the same pattern: change something, click <b>Preview</b> '
+        'to see exactly what would be sent to the router, then '
+        '<b>Apply</b> to actually push it.</p>'
+        f'<table><tr><th>Tab</th><th>What it\'s for</th></tr>{tabs_table}</table>'
+        '<p class="muted" style="margin-top:10px">The VPN tab and the '
+        'Backups tab work a little differently — see the sections below.</p>'))
+
+    vpn = _guide_section("vpn", "VPN — connecting sites together", (
+        '<p>This dashboard\'s server runs its own always-on WireGuard '
+        'VPN — the <b>hub</b>. Every provisioned router dials home to it, '
+        'which is also how the dashboard reaches routers with no public IP '
+        '(CGNAT, mobile data, etc). This tunnel is what Remote access, '
+        'the self-repair check, and the VPN tab all run over — there is '
+        'no separate VPN product involved, it\'s all the same tunnel.</p>'
+        '<h3>Site-to-site: Main host &amp; sub-units</h3>'
+        '<p>To let two (or more) of your sites reach each other\'s local '
+        'network — e.g. so a computer at Site A can reach a printer or '
+        'server at Site B — open the VPN tab on one router and click '
+        '<b>"Make this the main VPN host."</b> Then, still on that same '
+        'router\'s VPN tab, pick another one of your routers from the '
+        'dropdown and click <b>"Add sub-unit."</b> The dashboard connects '
+        'to that router live, detects its own local network automatically '
+        '(no typing in IP ranges), and links the two. Routes are pushed to '
+        'every affected router automatically the moment you add or remove '
+        'a sub-unit — there\'s nothing further to apply by hand.</p>'
+        '<p>A router that\'s already the main host of a group, or already '
+        'a sub-unit of one, can\'t be reconfigured until it\'s removed from '
+        'that group first (from the main host\'s VPN tab).</p>'
+        '<p><b>What this does and doesn\'t do:</b> it links whole local '
+        'networks together (all devices on both sides can reach each '
+        'other, subject to each router\'s own firewall) — it does not '
+        'share internet access between sites, and it routes through this '
+        'dashboard\'s hub rather than a direct tunnel between the two '
+        'routers, so if the hub is down, cross-site traffic pauses (each '
+        'site\'s own local network and internet keep working normally).</p>'))
+
+    safety = _guide_section("safety", "Backups, Preview/Apply &amp; Safe mode", (
+        '<p><b>Preview, then Apply.</b> Every change you make on a tab is a '
+        'two-step process: Preview shows exactly what would be added, '
+        'changed or removed on the router — nothing happens to the router '
+        'yet. Apply actually sends it.</p>'
+        '<p><b>Automatic backup.</b> Right before Apply commits anything, '
+        'the dashboard takes a full snapshot of the router\'s configuration '
+        'and stores it on the Backups tab, so you can restore to exactly '
+        'how it was before if something goes wrong.</p>'
+        '<p><b>Safe mode.</b> For changes that could cut off access to the '
+        'router itself (e.g. firewall or WAN changes), you can tick '
+        '"Safe mode" before applying. The router checks, a few minutes '
+        'later, that it can still reach the dashboard\'s hub — if it can\'t '
+        '(because the change locked everyone out), it automatically '
+        'reverts itself back to the backup taken just before. You don\'t '
+        'have to guess whether a change is risky.</p>'))
+
+    devicemode = _guide_section("devicemode", "“Device Mode” errors", (
+        '<p>Some newer MikroTik routers ship with a security feature '
+        'called <b>Device Mode</b>, which blocks anything — including this '
+        'dashboard — from remotely adding scheduled tasks or scripts '
+        'unless someone has physically confirmed it at the router (a '
+        'button press or a power-cycle, depending on the model). MikroTik '
+        'added this after real-world attacks used remotely-added scheduler '
+        'entries as a backdoor.</p>'
+        '<p>If a tab reports this error, it means that specific change '
+        'needs a one-time physical confirmation at the router before it '
+        'can go through — the error message on the page spells out the '
+        'exact steps for your router\'s hardware. There\'s no remote way '
+        'around this by design, and there shouldn\'t be — an attacker who '
+        'ever obtained your login should not also be able to bypass it.</p>'))
+
+    billing = _guide_section("billing", "Trials, plans &amp; billing", (
+        f'<p>A brand-new company gets a <b>{TRIAL_DEVICES}-device free '
+        f'trial for {_TRIAL_DAYS} days</b>, no card required, to try things '
+        f'out. After the trial (or a subscription) lapses, there\'s a '
+        f'{GRACE_DAYS}-day grace period — you\'ll see a banner and can '
+        f'still use everything — before the account is suspended.</p>'
+        '<p>If a "who to contact" address has been set up for this server, '
+        'it\'s shown on that banner and on the suspended page once it '
+        'gets there, so you know exactly who to email to arrange payment '
+        'and get switched back on.</p>'
+        f'<p>Without an active plan, a company is capped at '
+        f'{FREE_DEVICES} devices. Paid plans raise that cap — see the '
+        f'Billing page (company owners) for current plan sizes and '
+        f'pricing.</p>'))
+
+    activity = _guide_section("activity", "Activity log", (
+        '<p>The <b>Activity</b> tab (owners) is a timeline of every '
+        'preview, apply, and result for every router in your company — '
+        'who did what, when, and whether it succeeded. Use it to check '
+        'what changed recently, or to see exactly why an applied change '
+        'failed.</p>'))
+
+    glossary_terms = [
+        ("WAN", "The internet-facing side of a router — the line(s) that "
+                "go out to your ISP. A router can have more than one "
+                "(e.g. a fibre line and a backup LTE/PPPoE line)."),
+        ("LAN", "The local network side — the devices, computers and "
+                "Wi-Fi clients behind the router, on its own private "
+                "network."),
+        ("Gateway", "The next device a packet is sent to on its way "
+                "somewhere else — usually your ISP's equipment for WAN "
+                "traffic. \"Setting a gateway\" means telling the router "
+                "who to hand off traffic to."),
+        ("Subnet / CIDR", "A block of IP addresses written like "
+                "192.168.1.0/24 — the network a device lives on. Two "
+                "sites being linked over VPN must use different, "
+                "non-overlapping subnets, or devices on each side "
+                "would have clashing addresses."),
+        ("DHCP", "The way most internet lines (and most home/office "
+                "networks) hand out an IP address and gateway "
+                "automatically, with nothing to type in by hand."),
+        ("PPPoE / “dial-up”", "A connection type common on "
+                "fibre and DSL lines, where the router \"dials\" the "
+                "ISP with a username/password to get online (similar in "
+                "spirit to old dial-up internet, hence the nickname) "
+                "instead of just receiving an address over DHCP."),
+        ("NAT", "Network Address Translation — lets many devices on a "
+                "LAN share one public WAN IP address to reach the "
+                "internet."),
+        ("CGNAT", "Carrier-Grade NAT — your ISP sharing one public IP "
+                "across many customers. If your WAN address looks like "
+                "100.64.x.x–100.127.x.x, that's CGNAT, not a real public "
+                "IP — it's why routers behind it can't normally be "
+                "reached directly from the internet, and why this "
+                "dashboard's WireGuard hub (see the VPN section) is used "
+                "to reach them instead."),
+        ("VPN", "Virtual Private Network — an encrypted tunnel that "
+                "makes two networks (or a device and a network) behave "
+                "as if they were directly connected, wherever they "
+                "actually are."),
+        ("WireGuard", "The specific, modern VPN technology this "
+                "dashboard uses for its hub-and-spoke tunnel to every "
+                "router."),
+        ("Firewall", "Rules on the router that decide what traffic is "
+                "allowed in, out, or through it."),
+        ("QoS", "Quality of Service — capping or prioritizing how much "
+                "bandwidth a device or network is allowed to use, so one "
+                "user or app can't saturate the whole line."),
+        ("Failover", "Automatically switching to a backup internet line "
+                "if the primary one goes down, then switching back once "
+                "it recovers."),
+        ("Device Mode", "A MikroTik security feature — see the "
+                "dedicated section above."),
+        ("Safe mode", "This dashboard's own auto-revert safety net for "
+                "risky changes — see the section above."),
+        ("Hub", "This dashboard's own WireGuard server that every "
+                "router dials home to."),
+        ("Superadmin", "The platform-level account (not tied to any one "
+                "company) that manages billing, backups and server-wide "
+                "settings for every company on this install."),
+    ]
+    glossary_rows = "".join(
+        f'<tr><td style="white-space:nowrap;vertical-align:top"><b>{esc(term)}</b></td>'
+        f'<td>{esc(defn)}</td></tr>'
+        for term, defn in glossary_terms)
+    glossary = _guide_section("glossary", "Glossary — what do these words mean?", (
+        '<p class="muted" style="margin-top:0">Not sure what a term on one '
+        'of the tabs means? Look it up here, or search for it online — '
+        'these are all standard networking terms, not anything specific '
+        'to this dashboard, so there\'s plenty written about each one.</p>'
+        f'<table><tr><th>Term</th><th>Meaning</th></tr>{glossary_rows}</table>'))
+
+    inner = (f'<div class="wrap"><h1>Guide</h1>'
+             f'<p class="muted" style="margin-top:-8px">A plain-language '
+             f'walkthrough of what everything on this dashboard does, and a '
+             f'glossary of the networking terms it uses.</p>'
+             f'{toc}{overview}{dashboard}{devices}{provision}{tabs}{vpn}'
+             f'{safety}{devicemode}{billing}{activity}{glossary}</div>')
+    return _page("Guide", _header(user, "/guide") + inner)
 
 
 def _sa_tile(value, label: str, color: str) -> str:

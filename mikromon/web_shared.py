@@ -244,7 +244,7 @@ def _nav(user, active) -> str:
                   ("/admin", "Users")]
         if user.get("_show_billing"):
             items.append(("/billing", "Billing"))
-    items += [("/account", "Account")]
+    items += [("/guide", "Guide"), ("/account", "Account")]
     if user.get("is_superadmin"):
         items.append(("/superadmin", "Platform"))
     links = "".join(

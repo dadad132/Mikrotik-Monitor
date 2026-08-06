@@ -40,7 +40,7 @@ from .web_shared import (
 )
 from .web_auth import (
     _render_login, _render_signup, _render_account,
-    _render_admin,
+    _render_admin, _render_guide,
     _render_billing, _render_locked, _grace_banner_html,
     _render_superadmin,
 )
@@ -1738,11 +1738,10 @@ def _vpn_group_box(name, devices_db, org_id, csrf) -> str:
                 f'main VPN host</button></form>')
     return (f'<div class="box"><h2>Site-to-site VPN grouping</h2>'
             f'<p class="muted">This router is the <b>main VPN host</b>. Add '
-            f'other company routers below as sub-units — each one gets '
-            f'routes to reach this router and every other sub-unit here. '
-            f'Applying the tab above only pushes routes on <b>this</b> '
-            f'router; a newly added sub-unit needs to apply its own VPN tab '
-            f'too (it will show as already grouped once added).</p>'
+            f'other company routers below as sub-units — routes are pushed '
+            f'automatically to this router and every affected sub-unit as '
+            f'soon as you add or remove one, no need to open each router\'s '
+            f'own VPN tab.</p>'
             f'{table}{add_form}{stop_form}</div>')
 
 
@@ -3780,6 +3779,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     msg=q.get("ok", [""])[0], error=q.get("error", [""])[0],
                     org=org_data),
                     "text/html; charset=utf-8")
+            if path == "/guide":
+                return self._send(200, _render_guide(user, _TAB_INTRO),
+                                  "text/html; charset=utf-8")
             if path == "/admin":
                 return self._serve_admin(user)
             if path == "/devices":
@@ -5203,12 +5205,80 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 name, user, "hubtunnel",
                 report_html=_wg_repair_report_html(report))
 
+        def _push_vpn_routes_to(self, names, user) -> list:
+            """Auto-apply (commit, not preview) the VPN tab's routes on every
+            device in `names` — called right after a grouping change
+            (make-main/add-member/remove-member/stop-main) so the routes go
+            out immediately instead of requiring someone to open each
+            router's own VPN tab and click Preview/Apply by hand. Best-effort
+            per device; returns a list of "name: error" strings for whichever
+            ones failed (empty if every push succeeded)."""
+            from .config import build_device
+            from .device import DeviceError
+            from .push import FEATURES, Pusher, PushError, rw_device
+            from .push.api import PushApi
+
+            feature = FEATURES["tunnel"]
+            uname = (user or {}).get("login", "")
+            errors = []
+            for member_name in names:
+                raw = self._device_raw(member_name)
+                if raw is None:
+                    errors.append(f"{member_name}: not found")
+                    continue
+                cfg = build_device(raw, defaults)
+                audit = self._auditlog()
+                dev = rw_device(cfg)
+                try:
+                    # Quick bounded probe first (a sub-unit being offline is a
+                    # normal case) so one unreachable router in the group
+                    # doesn't hang this request for its full configured
+                    # timeout — see the same pattern in device offboarding.
+                    if not dev.reachable():
+                        errors.append(f"{member_name}: router unreachable — "
+                                      f"routes not pushed")
+                        continue
+                    api = PushApi(dev)
+                    pusher = Pusher(cfg, api, dry_run=False, audit=audit,
+                                    user=uname)
+                    try:
+                        api.connect()
+                        flat: dict = {}
+                        _prep_vpn_group(member_name, flat, devices_db)
+                        plan = feature["plan"](pusher, cfg, flat, {})
+                    except (DeviceError, PushError) as exc:
+                        if audit:
+                            audit.append(member_name, uname, "tunnel", "apply",
+                                         "error",
+                                         f"auto-push after VPN group change "
+                                         f"failed: {exc}", str(exc))
+                        errors.append(f"{member_name}: {exc}")
+                        continue
+                    if not plan.empty:
+                        bkname = f"before-tunnel-{time.strftime('%Y%m%d-%H%M%S')}"
+                        try:
+                            pusher.apply(pusher.plan_backup(bkname),
+                                         feature="tunnel:backup")
+                        except PushError as exc:
+                            errors.append(f"{member_name}: backup failed, "
+                                          f"not applied ({exc})")
+                            continue
+                    try:
+                        pusher.apply(plan, feature="tunnel")
+                    except PushError as exc:
+                        errors.append(f"{member_name}: {exc}")
+                finally:
+                    dev.close()
+                    if audit:
+                        audit.close()
+            return errors
+
         def _device_vpn_make_main_post(self, flat, user):
             """Make this router the main VPN host: connect live and detect
-            its own LAN subnet, then register it in hub.json — bookkeeping
-            only, no router change here (the actual routes go out through
-            the normal VPN tab preview/apply flow). Refuses if this device
-            is already part of a group, either role."""
+            its own LAN subnet, register it in hub.json, then push routes
+            right away (a no-op today since it has no sub-units yet, but
+            keeps behavior consistent with add/remove-member). Refuses if
+            this device is already part of a group, either role."""
             from .config import build_device
             from .device import DeviceError
             from .push import Pusher, PushError, rw_device
@@ -5255,17 +5325,21 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             hub.setdefault("vpn_groups", {})[name] = {"subnet": subnet, "members": {}}
             _hub_save(hub_file, hub)
             _sync_vpn_group_to_hub(devices_db)
+            errors = self._push_vpn_routes_to([name], user)
+            msg = f"{name} is now the main VPN host, sharing {subnet}."
+            if errors:
+                msg += " Route push warning: " + "; ".join(errors)
             return self._redirect(
-                f"/device?name={q}&tab=tunnel&msg=" +
-                quote(f"{name} is now the main VPN host, sharing {subnet}."))
+                f"/device?name={q}&tab=tunnel&msg=" + quote(msg))
 
         def _device_vpn_add_member_post(self, flat, user):
             """Add another company router as a sub-unit of this router's
             VPN group: connect live to the CHOSEN device (using its own
             stored credentials) to detect its LAN subnet, validate it
-            doesn't conflict with anything already registered, and record
-            it — bookkeeping only. Each router pushes its own routes once
-            it applies its own VPN tab."""
+            doesn't conflict with anything already registered, record it,
+            then push the updated routes to the main host and every
+            sub-unit (including the new one) right away — see
+            _push_vpn_routes_to."""
             from .config import build_device
             from .device import DeviceError
             from .push import Pusher, PushError, rw_device
@@ -5322,17 +5396,21 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             info.setdefault("members", {})[member_name] = {"subnet": subnet}
             _hub_save(hub_file, hub)
             _sync_vpn_group_to_hub(devices_db)
+            targets = [name] + list((info.get("members") or {}).keys())
+            errors = self._push_vpn_routes_to(targets, user)
+            msg = (f"Added {member_name} ({subnet}) — routes pushed "
+                   f"automatically to {', '.join(targets)}.")
+            if errors:
+                msg += " Failed for: " + "; ".join(errors)
             return self._redirect(
-                f"/device?name={q}&tab=tunnel&msg=" +
-                quote(f"Added {member_name} ({subnet}) — apply the VPN tab "
-                      f"on both routers to push the new routes."))
+                f"/device?name={q}&tab=tunnel&msg=" + quote(msg))
 
         def _device_vpn_remove_member_post(self, flat, user):
-            """Remove a sub-unit from this router's VPN group — bookkeeping
-            only. The removed router's own routes become stale and are
-            cleaned up automatically the next time IT applies its own VPN
-            tab (tunnel_plan's normal reconcile-and-remove-stale-routes
-            behavior)."""
+            """Remove a sub-unit from this router's VPN group, then push
+            straight away to the main host, every remaining sub-unit (routes
+            change since the group shrank) and the removed router itself
+            (tunnel_plan naturally reconciles its stale route away once it's
+            no longer in the group) — see _push_vpn_routes_to."""
             name = flat.get("device", "")
             member_name = (flat.get("member") or "").strip()
             q = quote(name)
@@ -5341,13 +5419,18 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             hub_file = _hub_path(devices_db)
             hub = _hub_load(hub_file)
             role, info = _vpn_group_info(hub, name)
+            msg = f"Removed {member_name} from the VPN group."
             if role == "main" and member_name in (info.get("members") or {}):
                 del info["members"][member_name]
                 _hub_save(hub_file, hub)
                 _sync_vpn_group_to_hub(devices_db)
+                targets = [name, member_name] + list((info.get("members") or {}).keys())
+                errors = self._push_vpn_routes_to(targets, user)
+                msg += " Routes pushed automatically."
+                if errors:
+                    msg += " Failed for: " + "; ".join(errors)
             return self._redirect(
-                f"/device?name={q}&tab=tunnel&msg=" +
-                quote(f"Removed {member_name} from the VPN group."))
+                f"/device?name={q}&tab=tunnel&msg=" + quote(msg))
 
         def _device_vpn_stop_main_post(self, flat, user):
             """Stop being a VPN main host — only allowed with zero
@@ -5370,9 +5453,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             (hub.get("vpn_groups") or {}).pop(name, None)
             _hub_save(hub_file, hub)
             _sync_vpn_group_to_hub(devices_db)
+            errors = self._push_vpn_routes_to([name], user)
+            msg = f"{name} is no longer a VPN main host."
+            if errors:
+                msg += " Route cleanup warning: " + "; ".join(errors)
             return self._redirect(
-                f"/device?name={q}&tab=tunnel&msg=" +
-                quote(f"{name} is no longer a VPN main host."))
+                f"/device?name={q}&tab=tunnel&msg=" + quote(msg))
 
         def _hub_reload_peers_post(self, flat, user):
             """Rebuild wg-peers.conf from hub.json leases and write it.

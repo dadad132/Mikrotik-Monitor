@@ -881,9 +881,24 @@ try:
     st = post_status(nobody, "/device/vpn-add-member",
                      {"csrf": bcsrf, "device": "WebR1", "member": "WebR2"})
     check("unallocated member blocked from adding a VPN sub-unit (403)", st == 403)
-    st = post_status(admin, "/device/vpn-stop-main", {"csrf": csrf, "device": "WebR1"})
-    # WebR1 has no members here, so stop-main should succeed.
+    o = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(admin.cj), _NoRedir)
+    body = urllib.parse.urlencode(
+        {"csrf": csrf, "device": "WebR1"}).encode()
+    try:
+        r = o.open(urllib.request.Request(B + "/device/vpn-stop-main",
+                                          data=body), timeout=8)
+        st, location = getattr(r, "status", r.code), r.headers.get("Location", "")
+    except urllib.error.HTTPError as e:
+        st, location = e.code, e.headers.get("Location", "")
+    # WebR1 has no members here, so stop-main should succeed. WebR1's host
+    # (8.8.8.8, from an earlier WAN-edit test) is unreachable as a router,
+    # so the auto-push this now triggers should fail gracefully (bounded by
+    # dev.reachable()'s quick probe, not a full connect timeout) and say so
+    # in the redirect message, rather than silently doing nothing.
     check("stop-main succeeds (redirect) when the group has no sub-units", st == 303)
+    check("stop-main's auto-push reports the unreachable router, not silence",
+          "unreachable" in urllib.parse.unquote(location))
     hub_after_stop = web._hub_load(web._hub_path(wdb))
     check("stop-main actually removed WebR1 from vpn_groups",
           "WebR1" not in hub_after_stop.get("vpn_groups", {}))
