@@ -3760,7 +3760,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         return self._redirect("/billing")
                 elif billing.in_grace_period(org_id):
                     self._grace_banner = _grace_banner_html(
-                        billing.days_left_in_grace(org_id))
+                        billing.days_left_in_grace(org_id),
+                        auth.get_billing_contact() if auth else None)
 
             if path == "/billing":
                 return self._serve_billing(url, user)
@@ -3926,13 +3927,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(403, "forbidden")
             q = parse_qs(url.query)
             bill = billing.get(user["org_id"]) if billing else None
+            contact = auth.get_billing_contact() if auth else None
             if billing and billing.is_locked(user["org_id"]):
-                return self._send(200, _render_locked(user),
+                return self._send(200, _render_locked(user, contact),
                                   "text/html; charset=utf-8")
             pf_enabled = bool(_pf_merchant_id and _pf_merchant_key)
             return self._send(200, _render_billing(
                 user, bill, pf_enabled, self._session()["csrf"],
-                msg=q.get("ok", [""])[0], error=q.get("error", [""])[0]),
+                msg=q.get("ok", [""])[0], error=q.get("error", [""])[0],
+                contact=contact),
                 "text/html; charset=utf-8")
 
         def _serve_superadmin(self, url, user):
@@ -3987,7 +3990,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 user, rows, backups, self._session()["csrf"],
                 msg=q.get("ok", [""])[0],
                 error=q.get("error", [""])[0],
-                smtp=smtp_settings, billing_on=billing is not None),
+                smtp=smtp_settings, billing_on=billing is not None,
+                billing_contact=auth.get_billing_contact() if auth else None),
                 "text/html; charset=utf-8")
 
         def _backup_paths(self):
@@ -4095,6 +4099,26 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             auth.set_smtp(cfg)
             return self._redirect("/superadmin?ok=" +
                                   quote("Email (SMTP) settings saved."))
+
+        def _post_superadmin_billing_contact(self, user):
+            """Superadmin-only: set who a trial-expired/locked company should
+            email to arrange payment and reactivation."""
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if auth is None:
+                return self._redirect("/superadmin?error=" +
+                                      quote("Auth store is not enabled."))
+            cfg = {
+                "name": flat.get("name", "").strip(),
+                "email": flat.get("email", "").strip(),
+            }
+            auth.set_billing_contact(cfg)
+            return self._redirect("/superadmin?ok=" +
+                                  quote("Billing contact saved."))
 
         def _post_superadmin_backup_create(self, user):
             """Superadmin-only: build a new backup archive (config, every
@@ -5593,6 +5617,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_billing(user)
             if path == "/superadmin/smtp":
                 return self._post_superadmin_smtp(user)
+            if path == "/superadmin/billing-contact":
+                return self._post_superadmin_billing_contact(user)
             # Everything below requires a logged-in user + a valid CSRF token.
             if not user:
                 return self._send(403, "forbidden")

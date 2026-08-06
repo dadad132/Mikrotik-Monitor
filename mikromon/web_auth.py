@@ -310,19 +310,32 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user,
     return _page("Team", _header(user, "/admin") + inner + _ADMIN_JS)
 
 
-def _grace_banner_html(days_left: float) -> str:
+def _contact_line(contact: dict | None) -> str:
+    """'Email Jane at jane@x.com' — or '' if the superadmin never set one."""
+    if not contact or not contact.get("email"):
+        return ""
+    email = contact["email"]
+    name = (contact.get("name") or "").strip()
+    who = f"{esc(name)} at " if name else ""
+    return (f'Email {who}<a href="mailto:{esc(email)}">{esc(email)}</a> to '
+            f'arrange payment and reactivation.')
+
+
+def _grace_banner_html(days_left: float, contact: dict | None = None) -> str:
     days = max(1, int(days_left) + 1)
     plural = "day" if days == 1 else "days"
+    line = _contact_line(contact)
     return (f'<div style="background:#fef3c7;border-bottom:2px solid #d97706;'
             f'padding:10px 20px;text-align:center;font-size:13px;color:#92400e">'
             f'<b>Subscription lapsed.</b> You have {days} {plural} before your '
             f'account is locked. '
-            f'<a href="/billing" style="color:#92400e;font-weight:700">Upgrade now</a>'
+            + (f'{line} ' if line else "")
+            + f'<a href="/billing" style="color:#92400e;font-weight:700">Upgrade now</a>'
             f'</div>')
 
 
 def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
-                    msg: str = "", error: str = "") -> str:
+                    msg: str = "", error: str = "", contact: dict | None = None) -> str:
     """Billing page: current subscription status + PayFast plan subscribe buttons."""
     status = (bill or {}).get("status", "none")
     plan_name = (bill or {}).get("plan") or ""
@@ -349,12 +362,17 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
     elif status in ("grace",):
         ge_fmt = (time.strftime("%d %b %Y", time.localtime(grace_end))
                   if grace_end else "soon")
+        contact_p = (f'<p class="muted" style="margin:4px 0 0">{_contact_line(contact)}</p>'
+                    if _contact_line(contact) else "")
         status_html = (f'<p style="margin:0"><span style="color:#d97706;font-weight:700">'
                        f'Grace Period</span> &middot; subscribe before {ge_fmt} to '
-                       f'avoid lockout</p>')
+                       f'avoid lockout</p>{contact_p}')
     elif status in ("canceled", "locked", "inactive"):
+        contact_p = (f'<p class="muted" style="margin:4px 0 0">{_contact_line(contact)}</p>'
+                    if _contact_line(contact) else "")
         status_html = ('<p style="margin:0"><span style="color:#dc2626;font-weight:700">'
-                       'Suspended</span> &middot; choose a plan below to reactivate</p>')
+                       'Suspended</span> &middot; choose a plan below to reactivate</p>'
+                       + contact_p)
     else:
         status_html = (f'<p style="margin:0"><span style="color:#64748b;font-weight:700">'
                        f'Free plan</span> &middot; {FREE_DEVICES} devices &middot; '
@@ -418,13 +436,16 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
     return _page("Billing", _header(user, "/billing") + inner)
 
 
-def _render_locked(user) -> str:
+def _render_locked(user, contact: dict | None = None) -> str:
     """Full-page lockout shown when an org's grace period has expired."""
+    line = _contact_line(contact)
+    contact_p = f'<p style="margin-top:14px">{line}</p>' if line else ""
     inner = (f'<div class="wrap" style="max-width:560px;margin-top:10vh;text-align:center">'
              f'<div class="box">'
              f'<h1 style="color:#dc2626;margin-bottom:8px">Account Suspended</h1>'
              f'<p>Your subscription has lapsed and the {GRACE_DAYS}-day grace period '
              f'has expired. All access has been suspended.</p>'
+             f'{contact_p}'
              f'<p><a class="btn" href="/billing">Reactivate your account</a></p>'
              f'<p class="muted" style="margin-top:18px">'
              f'<a href="/logout">Log out</a></p>'
@@ -502,9 +523,33 @@ def _smtp_settings_box(smtp, csrf) -> str:
         f'</form></div>')
 
 
+def _billing_contact_box(contact, csrf) -> str:
+    """Superadmin setting: who a trial-expired/locked company should email to
+    arrange payment — shown to them on the grace banner and lockout page."""
+    c = contact or {}
+    def v(k, d=""):
+        return esc(str(c.get(k, d)))
+    return (
+        f'<div class="box"><h2>Billing contact</h2>'
+        f'<p class="muted">Shown to a company once their free trial or '
+        f'subscription lapses, so they know who to email to arrange payment '
+        f'and get reactivated. Leave blank to hide this message.</p>'
+        f'<form method="POST" action="/superadmin/billing-contact">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">'
+        f'<label>Name<br><input name="name" value="{v("name")}" '
+        f'placeholder="Jane Smith" style="width:100%"></label>'
+        f'<label>Email<br><input name="email" type="email" value="{v("email")}" '
+        f'placeholder="billing@yourdomain.com" style="width:100%"></label>'
+        f'</div>'
+        f'<div style="margin-top:10px"><button class="btn" type="submit">'
+        f'Save billing contact</button></div>'
+        f'</form></div>')
+
+
 def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        msg: str = "", error: str = "", smtp=None,
-                       billing_on: bool = False) -> str:
+                       billing_on: bool = False, billing_contact=None) -> str:
     """Platform superadmin panel — shows all orgs, billing status, and device counts."""
     note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
            (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
@@ -660,7 +705,9 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
     )
 
     inner = (f'<div class="wrap"><h1>Platform admin</h1>{note}{tiles}{table}'
-             f'{_smtp_settings_box(smtp, csrf)}{diagnostics_box}{backup_box}</div>')
+             f'{_smtp_settings_box(smtp, csrf)}'
+             f'{_billing_contact_box(billing_contact, csrf)}'
+             f'{diagnostics_box}{backup_box}</div>')
     return _page("Platform Admin", _header(user, "/superadmin") + inner)
 
 

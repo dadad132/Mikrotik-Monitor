@@ -431,6 +431,15 @@ class AuthStore:
     def set_smtp(self, cfg: dict) -> None:
         self.set_setting("smtp", cfg)
 
+    def get_billing_contact(self) -> dict | None:
+        """Who a trial-expired/locked company should email to arrange payment
+        and reactivation, as set by the superadmin. None if never configured."""
+        d = self.get_setting("billing_contact")
+        return d if isinstance(d, dict) and d.get("email") else None
+
+    def set_billing_contact(self, cfg: dict) -> None:
+        self.set_setting("billing_contact", cfg)
+
     def get_alert_emails(self, org_id: int) -> list:
         row = self.db.execute(
             "SELECT alert_emails FROM orgs WHERE id = ?",
