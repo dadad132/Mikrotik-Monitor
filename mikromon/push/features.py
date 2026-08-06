@@ -1752,11 +1752,10 @@ def tunnel_form(current, cfg):
              "value": f'This router is a sub-unit of "{main_name}"\'s VPN '
                       f'group. To change this, remove it from {main_name}\'s '
                       f'VPN tab first.'},
-            {"type": "static", "label": "What applying does",
+            {"type": "static", "label": "How this works",
              "value": "Routes to the main host and every other sub-unit are "
                       "pushed automatically whenever the group changes — "
-                      "nothing to do here. Preview/apply below only if you "
-                      "want to double-check or re-push manually."},
+                      "there's nothing to do on this tab."},
         ]
     if role == "main":
         members = current.get("vpn_members") or {}
@@ -1766,12 +1765,10 @@ def tunnel_form(current, cfg):
             {"type": "static", "label": "This router's shared network",
              "value": current.get("vpn_own_subnet") or "(not detected)"},
             {"type": "static", "label": "Sub-units", "value": member_list},
-            {"type": "static", "label": "What applying does",
+            {"type": "static", "label": "How this works",
              "value": "Routes to every sub-unit listed above are pushed "
                       "automatically to every affected router as soon as you "
-                      "add or remove one below — nothing to do here. "
-                      "Preview/apply is only needed if you want to "
-                      "double-check or re-push manually."},
+                      "add or remove one below."},
         ]
     detected = current.get("lan_subnets") or []
     fields: list[dict] = [

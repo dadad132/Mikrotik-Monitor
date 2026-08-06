@@ -3192,7 +3192,15 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                      f'<ul style="margin:0 0 0 18px">{sm}</ul></div>')
         else:
             state = ""
-        if fields is not None:
+        if fields is not None and slug == "tunnel":
+            # VPN grouping (make-main/add-member/remove-member/stop-main,
+            # in extra_html) already pushes routes automatically — this tab
+            # has nothing left to fill in, so a Preview/Apply button here
+            # would only confuse people into thinking they need to click it.
+            ff = "".join(_field_html(d) for d in fields)
+            form = (f'<div class="box"><h2>{esc(feature["title"])}</h2>'
+                    f'<div class="fields">{ff}</div></div>')
+        elif fields is not None:
             ff = "".join(_field_html(d) for d in fields)
             preview_btn = ('<button class="btn" type="submit">Preview changes '
                            '(dry-run)</button>')
