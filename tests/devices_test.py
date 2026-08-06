@@ -517,30 +517,50 @@ check("removing a road-warrior row from the form drops its hub.json registration
       not any(rw.get("device") == "R2"
               for rw in saved_hub2.get("roadwarriors", {}).values()))
 
-# Site-to-site VPN mesh (VPN tab): each device shares a LAN subnet, and every
-# OTHER site's subnet gets routed through the hub's own tunnel IP.
-conflict_hub = {"subnet": "10.10.0.0/16",
-                "sites": {"HQ": {"subnet": "192.168.1.0/24"}}}
+# Site-to-site VPN (VPN tab): one router is the "main host" for a group,
+# other routers are added as "sub-units" of it — each sub-unit's subnet
+# gets routed through the hub's own tunnel IP, to the main host and every
+# other sub-unit in the same group.
+vpn_groups_hub = {
+    "vpn_groups": {
+        "HQ": {"subnet": "192.168.1.0/24",
+              "members": {"Branch": {"subnet": "192.168.2.0/24"}}},
+    },
+}
+check("_vpn_flat_subnets includes both the main host and its sub-units",
+      web._vpn_flat_subnets(vpn_groups_hub) ==
+      {"HQ": "192.168.1.0/24", "Branch": "192.168.2.0/24"})
+check("_vpn_group_info identifies a main host, with its group dict",
+      web._vpn_group_info(vpn_groups_hub, "HQ") ==
+      ("main", vpn_groups_hub["vpn_groups"]["HQ"]))
+check("_vpn_group_info identifies a sub-unit, with its main host's name",
+      web._vpn_group_info(vpn_groups_hub, "Branch") == ("member", "HQ"))
+check("_vpn_group_info reports (None, None) for a device in no group",
+      web._vpn_group_info(vpn_groups_hub, "Nobody") == (None, None))
+
+conflict_hub = {"subnet": "10.10.0.0/16", **vpn_groups_hub}
 check("a subnet overlapping the hub's own tunnel pool is rejected",
-      "tunnel network" in web._subnet_conflict(conflict_hub, "Branch", "10.10.5.0/24"))
-check("a subnet overlapping another site's subnet is rejected",
-      "HQ" in web._subnet_conflict(conflict_hub, "Branch", "192.168.1.0/25"))
+      "tunnel network" in web._subnet_conflict(conflict_hub, "Third", "10.10.5.0/24"))
+check("a subnet overlapping the main host's subnet is rejected",
+      "HQ" in web._subnet_conflict(conflict_hub, "Third", "192.168.1.0/25"))
+check("a subnet overlapping an existing sub-unit's subnet is rejected",
+      "Branch" in web._subnet_conflict(conflict_hub, "Third", "192.168.2.0/25"))
 check("a clear, non-overlapping subnet passes",
-      web._subnet_conflict(conflict_hub, "Branch", "192.168.2.0/24") == "")
-check("a site re-confirming its OWN already-registered subnet is not a conflict",
+      web._subnet_conflict(conflict_hub, "Third", "192.168.3.0/24") == "")
+check("a device re-confirming its OWN already-registered subnet is not a conflict",
       web._subnet_conflict(conflict_hub, "HQ", "192.168.1.0/24") == "")
 check("garbage input is rejected with a clear message, not a crash",
-      "valid" in web._subnet_conflict(conflict_hub, "Branch", "not-a-subnet"))
+      "valid" in web._subnet_conflict(conflict_hub, "Third", "not-a-subnet"))
 
 sites_hub = {
     "leases_meta": {"HQ": {"ip": "10.10.1.1", "pubkey": "HQKEY="},
                     "Branch": {"ip": "10.10.1.2", "pubkey": "BRKEY="}},
     "leases": {"HQ": "10.10.1.1", "Branch": "10.10.1.2"},
-    "sites": {"HQ": {"subnet": "192.168.1.0/24"},
-             "Branch": {"subnet": "192.168.2.0/24"}},
+    **vpn_groups_hub,
 }
 sites_merged = web._hub_wg_leases(sites_hub)
-check("_hub_wg_leases folds a site's own LAN subnet into its 'extra' allowed addresses",
+check("_hub_wg_leases folds both the main host's and its sub-unit's LAN "
+      "subnets into their own 'extra' allowed addresses",
       sites_merged["HQ"]["extra"] == ["192.168.1.0/24"]
       and sites_merged["Branch"]["extra"] == ["192.168.2.0/24"])
 sites_peersp = os.path.join(tmp, "wg-peers-sites.conf")
@@ -552,42 +572,38 @@ check("a site's LAN subnet is written with its own mask, not force-suffixed /32"
 routesp = os.path.join(tmp, "wg-routes.conf")
 ok_routes, _ = web._write_wg_routes(routesp, sites_hub)
 routes_body = open(routesp).read()
-check("wg-routes.conf lists one line per registered site subnet",
+check("wg-routes.conf lists one line per registered site subnet (main "
+      "host + sub-units)",
       ok_routes and set(routes_body.split()) == {"192.168.1.0/24", "192.168.2.0/24"})
 
-# _prep_vpn_mesh: the web-layer glue that validates + persists a device's own
-# site registration, then injects what tunnel_plan needs (other sites'
-# subnets + the hub's tunnel IP) since tunnel_plan never sees devices_db.
+# _prep_vpn_group: the web-layer glue that reads a device's spot in the VPN
+# grouping and injects what tunnel_plan needs (the other subnets in ITS OWN
+# group + the hub's tunnel IP) since tunnel_plan never sees devices_db. It
+# is read-only with respect to grouping itself — that only ever changes via
+# the dedicated make-main/add-member/remove-member/stop-main actions.
 vpn_devices_db = os.path.join(tmp, "vpndevices.json")
-with open(vpn_devices_db, "w") as f:
-    f.write("{}")
-hq_flat = {"vpn_join": "1", "vpn_subnet": "192.168.1.0/24"}
-web._prep_vpn_mesh("HQ", hq_flat, vpn_devices_db)
-check("_prep_vpn_mesh registers a valid subnet and injects the hub's tunnel IP",
-      hq_flat["_vpn_hub_ip"] == "10.10.0.1" and not hq_flat.get("_vpn_error"))
-check("_prep_vpn_mesh persists the registration to hub.json",
-      web._hub_load(web._hub_path(vpn_devices_db))
-      .get("sites", {}).get("HQ", {}).get("subnet") == "192.168.1.0/24")
+web._hub_save(web._hub_path(vpn_devices_db), dict(vpn_groups_hub))
 
-branch_flat = {"vpn_join": "1", "vpn_subnet": "192.168.2.0/24"}
-web._prep_vpn_mesh("Branch", branch_flat, vpn_devices_db)
-check("a second site sees the first site's subnet injected as an 'other subnet'",
+hq_flat = {}
+web._prep_vpn_group("HQ", hq_flat, vpn_devices_db)
+check("_prep_vpn_group recognizes a main host and injects the hub's tunnel IP",
+      hq_flat["_vpn_in_group"] is True and hq_flat["_vpn_hub_ip"] == "10.10.0.1")
+check("a main host's 'other subnets' are its sub-units' subnets",
+      hq_flat["_vpn_other_subnets"] == ["192.168.2.0/24"])
+
+branch_flat = {}
+web._prep_vpn_group("Branch", branch_flat, vpn_devices_db)
+check("_prep_vpn_group recognizes a sub-unit",
+      branch_flat["_vpn_in_group"] is True)
+check("a sub-unit's 'other subnets' are its main host's subnet plus any "
+      "OTHER sub-units' subnets (none here)",
       branch_flat["_vpn_other_subnets"] == ["192.168.1.0/24"])
-hq_flat2 = {"vpn_join": "1", "vpn_subnet": "192.168.1.0/24"}
-web._prep_vpn_mesh("HQ", hq_flat2, vpn_devices_db)
-check("HQ, re-submitted, now sees Branch's subnet as its own 'other subnet'",
-      hq_flat2["_vpn_other_subnets"] == ["192.168.2.0/24"])
 
-conflict_flat = {"vpn_join": "1", "vpn_subnet": "192.168.1.0/25"}
-web._prep_vpn_mesh("Third", conflict_flat, vpn_devices_db)
-check("an overlapping subnet sets _vpn_error and is NOT registered",
-      bool(conflict_flat.get("_vpn_error"))
-      and "Third" not in web._hub_load(web._hub_path(vpn_devices_db)).get("sites", {}))
-
-leave_flat_db = {"vpn_join": "", "vpn_subnet": ""}
-web._prep_vpn_mesh("Branch", leave_flat_db, vpn_devices_db)
-check("turning the VPN off for a site removes its hub.json registration",
-      "Branch" not in web._hub_load(web._hub_path(vpn_devices_db)).get("sites", {}))
+nobody_flat = {}
+web._prep_vpn_group("Nobody", nobody_flat, vpn_devices_db)
+check("a device in no group at all gets nothing to route to",
+      nobody_flat["_vpn_in_group"] is False
+      and nobody_flat["_vpn_other_subnets"] == [])
 
 vpn_peersp = os.path.join(tmp, "wg-peers-sync.conf")
 vpn_routesp = os.path.join(tmp, "wg-routes-sync.conf")
@@ -596,8 +612,8 @@ sync_hub["wg_peers"], sync_hub["wg_routes"] = vpn_peersp, vpn_routesp
 sync_hub["leases_meta"] = {"HQ": {"ip": "10.10.1.1", "pubkey": "HQKEY="}}
 sync_hub["leases"] = {"HQ": "10.10.1.1"}
 web._hub_save(web._hub_path(vpn_devices_db), sync_hub)
-web._sync_vpn_mesh_to_hub(vpn_devices_db)
-check("_sync_vpn_mesh_to_hub writes both the peers file and the routes file",
+web._sync_vpn_group_to_hub(vpn_devices_db)
+check("_sync_vpn_group_to_hub writes both the peers file and the routes file",
       "192.168.1.0/24" in open(vpn_peersp).read()
       and "192.168.1.0/24" in open(vpn_routesp).read())
 
@@ -849,6 +865,28 @@ try:
                                   "tab=tunnel", "tab=update",
                                   "tab=provision")))
     check("Hub tunnel tab removed", "tab=hubtunnel" not in body)
+    # --- VPN tab site-to-site grouping: guard paths that don't need a live
+    # router connection (the actual subnet-detection paths are covered
+    # offline, in the "Site-to-site VPN" unit tests above) ---
+    hub_for_vpn = web._hub_load(web._hub_path(wdb))
+    hub_for_vpn.setdefault("vpn_groups", {})["WebR1"] = {
+        "subnet": "192.168.50.0/24", "members": {}}
+    web._hub_save(web._hub_path(wdb), hub_for_vpn)
+    st = post_status(admin, "/device/vpn-make-main", {"csrf": csrf, "device": "WebR1"})
+    check("make-main is refused (redirect) when already part of a VPN group",
+          st == 303)
+    st = post_status(admin, "/device/vpn-add-member",
+                     {"csrf": csrf, "device": "WebR1", "member": ""})
+    check("add-member with no sub-unit selected is rejected (400)", st == 400)
+    st = post_status(nobody, "/device/vpn-add-member",
+                     {"csrf": bcsrf, "device": "WebR1", "member": "WebR2"})
+    check("unallocated member blocked from adding a VPN sub-unit (403)", st == 403)
+    st = post_status(admin, "/device/vpn-stop-main", {"csrf": csrf, "device": "WebR1"})
+    # WebR1 has no members here, so stop-main should succeed.
+    check("stop-main succeeds (redirect) when the group has no sub-units", st == 303)
+    hub_after_stop = web._hub_load(web._hub_path(wdb))
+    check("stop-main actually removed WebR1 from vpn_groups",
+          "WebR1" not in hub_after_stop.get("vpn_groups", {}))
     st, body = get(admin, "/logs")
     check("admin can open the activity log", st == 200 and "activity log" in body.lower())
     st, _ = get(nobody, "/logs")

@@ -1730,19 +1730,46 @@ def tunnel_read(pusher, cfg):
 
 
 def tunnel_form(current, cfg):
-    """VPN tab — site-to-site: share this router's LAN into the mesh so it
-    can reach (and be reached by) every other site's LAN through the
-    existing WireGuard hub. web.py injects current["vpn_site"] (this
-    device's current hub.json registration, if any) before calling this,
-    since that lives in hub.json, not on the router."""
+    """VPN tab — site-to-site: a router is either the "main" VPN host for a
+    group of other routers, a "sub-unit" of another router's group, or not
+    part of any group yet. Grouping itself (making a router the main host,
+    adding/removing sub-units) is handled by dedicated actions in web.py's
+    VPN-grouping box (current["vpn_role"] etc. is injected there, from
+    hub.json, before this is called) — this form only ever pushes the
+    routes that grouping implies, nothing to configure here directly."""
     if current.get("unsupported"):
         v = current.get("version", "unknown")
         return [{"type": "static", "label": "Not supported on this firmware",
                  "value": (f"WireGuard is available on RouterOS 7.1 and later. "
                            f"This router is running {v}. "
                            f"Upgrade to 7.1+ to use the VPN tab.")}]
-    site = current.get("vpn_site") or {}
-    joined = bool(site.get("subnet"))
+    role = current.get("vpn_role")
+    if role == "member":
+        main_name = current.get("vpn_main", "?")
+        return [
+            {"type": "heading", "label": "Site-to-site VPN"},
+            {"type": "static", "label": "Status",
+             "value": f'This router is a sub-unit of "{main_name}"\'s VPN '
+                      f'group. To change this, remove it from {main_name}\'s '
+                      f'VPN tab first.'},
+            {"type": "static", "label": "What applying does",
+             "value": "Pushes the routes to reach the main host and every "
+                      "other sub-unit in the group — nothing to fill in, "
+                      "just preview and apply."},
+        ]
+    if role == "main":
+        members = current.get("vpn_members") or {}
+        member_list = ", ".join(sorted(members)) or "(none yet)"
+        return [
+            {"type": "heading", "label": "Site-to-site VPN — main host"},
+            {"type": "static", "label": "This router's shared network",
+             "value": current.get("vpn_own_subnet") or "(not detected)"},
+            {"type": "static", "label": "Sub-units", "value": member_list},
+            {"type": "static", "label": "What applying does",
+             "value": "Pushes the routes to reach every sub-unit listed "
+                      "above — manage sub-units below, then preview and "
+                      "apply here to push the routes."},
+        ]
     detected = current.get("lan_subnets") or []
     fields: list[dict] = [
         {"type": "heading", "label": "Site-to-site VPN",
@@ -1750,47 +1777,42 @@ def tunnel_form(current, cfg):
                  "networks through the WireGuard tunnel, so devices on "
                  "either side can reach each other directly — no separate "
                  "VPN client needed on those devices."},
+        {"type": "static", "label": "Status",
+         "value": "Not part of a VPN group yet. Make this router the main "
+                  "host below, or add it as a sub-unit from another "
+                  "router's VPN tab."},
     ]
     if detected:
         fields.append({"type": "static", "label": "Detected network(s) here",
                        "value": ", ".join(detected)})
-    fields.append({"type": "toggle", "name": "vpn_join", "value": "1",
-                   "on": joined, "label": "Join the site-to-site VPN",
-                   "desc": "Turning this on or off can take a few minutes "
-                           "to fully take effect."})
-    fields.append({"type": "text", "name": "vpn_subnet",
-                   "label": "This router's network to share",
-                   "value": site.get("subnet") or (detected[0] if detected else ""),
-                   "placeholder": "192.168.1.0/24",
-                   "hint": "The network behind this router that other sites "
-                           "should be able to reach. Must not overlap with "
-                           "another site's network or the VPN tunnel network "
-                           "itself — it's checked automatically when you apply."})
     return fields
 
 
 def tunnel_plan(pusher, cfg, flat, multi):
     """Push (or remove) static routes so this router can reach every other
-    site's LAN through the hub. web.py's _prep_vpn_mesh injects
-    flat["_vpn_other_subnets"] (every OTHER site's subnet, from hub.json)
-    and flat["_vpn_hub_ip"] (the gateway to use — the hub's own tunnel
-    address) before calling this; flat["_vpn_error"] is set instead if the
-    submitted subnet conflicts with another site or the tunnel network."""
+    site in its VPN group through the hub. web.py's _prep_vpn_group
+    injects flat["_vpn_other_subnets"] (every OTHER site's subnet in this
+    router's own group, from hub.json), flat["_vpn_hub_ip"] (the gateway to
+    use — the hub's own tunnel address) and flat["_vpn_in_group"] before
+    calling this; flat["_vpn_error"] is set instead if a submitted subnet
+    conflicted with another site or the tunnel network (surfaced via a
+    dedicated grouping action, not this form, but tunnel_plan still checks
+    it defensively)."""
     if flat.get("_vpn_error"):
         raise PushError(flat["_vpn_error"])
-    joined = flat.get("vpn_join") == "1"
+    in_group = bool(flat.get("_vpn_in_group"))
     hub_ip = flat.get("_vpn_hub_ip") or ""
     other_subnets = flat.get("_vpn_other_subnets") or []
     current_routes = _safe_fetch(pusher.api, _ROUTE)
     desired = ([{"dst-address": subnet, "gateway": hub_ip}
-               for subnet in other_subnets] if (joined and hub_ip) else [])
+               for subnet in other_subnets] if (in_group and hub_ip) else [])
     ops = reconcile_list(_ROUTE, "dst-address", desired, current_routes,
                          manage_tag=_VPN_ROUTE_TAG,
                          owns=_prefix_owner(_VPN_ROUTE_TAG),
-                         label="VPN mesh route")
+                         label="VPN site route")
     return Plan(cfg.name, ops,
-               summary=f"vpn mesh: {len(other_subnets)} site route(s)"
-                       if joined else "vpn mesh (not joined)")
+               summary=f"vpn: {len(other_subnets)} site route(s)"
+                       if in_group else "vpn (not part of a group)")
 
 
 # ===========================================================================

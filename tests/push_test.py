@@ -1117,39 +1117,56 @@ check("tunnel_read detects the LAN subnet and excludes the WAN uplink's own subn
 check("tunnel_read excludes a disabled address entirely",
       "10.5.5.0/29" not in (t_current.get("lan_subnets") or []))
 
-# tunnel_form: not yet joined -> toggle off, subnet field pre-filled from detection
-form_not_joined = F.tunnel_form(t_current, t_cfg)
-check("tunnel_form pre-fills the detected subnet when not yet joined",
-      any(f.get("name") == "vpn_subnet" and f.get("value") == "192.168.1.0/24"
-          for f in form_not_joined))
-check("tunnel_form's join toggle is off when this device has no hub.json registration",
-      any(f.get("name") == "vpn_join" and f.get("on") is False
-          for f in form_not_joined))
+# tunnel_form: not part of any group yet (vpn_role is None — the default
+# when web.py hasn't injected anything, matching a device hub.json has
+# never registered) -> shows the detected network, nothing to submit that
+# affects grouping (that's the dedicated make-main/add-member actions).
+form_ungrouped = F.tunnel_form(t_current, t_cfg)
+check("tunnel_form (ungrouped) shows the detected network",
+      any(f.get("label") == "Detected network(s) here"
+          and f.get("value") == "192.168.1.0/24" for f in form_ungrouped))
+check("tunnel_form (ungrouped) has no vpn_join/vpn_subnet fields anymore — "
+      "grouping is a dedicated action, not a form toggle",
+      not any(f.get("name") in ("vpn_join", "vpn_subnet") for f in form_ungrouped))
 
-# tunnel_form: already joined (web.py injects current["vpn_site"] from hub.json)
-t_current_joined = dict(t_current, vpn_site={"subnet": "192.168.1.0/24"})
-form_joined = F.tunnel_form(t_current_joined, t_cfg)
-check("tunnel_form's join toggle is on once hub.json has this device registered",
-      any(f.get("name") == "vpn_join" and f.get("on") is True
-          for f in form_joined))
+# tunnel_form: this router IS the main host (web.py injects vpn_role="main",
+# vpn_own_subnet, vpn_members from hub.json before calling this)
+t_current_main = dict(t_current, vpn_role="main", vpn_own_subnet="192.168.1.0/24",
+                      vpn_members={"Branch": {"subnet": "192.168.2.0/24"}})
+form_main = F.tunnel_form(t_current_main, t_cfg)
+check("tunnel_form (main) shows this router's own shared network",
+      any(f.get("label") == "This router's shared network"
+          and f.get("value") == "192.168.1.0/24" for f in form_main))
+check("tunnel_form (main) lists its sub-units",
+      any(f.get("label") == "Sub-units" and "Branch" in f.get("value", "")
+          for f in form_main))
 
-# tunnel_plan: joining pushes one route per other site, via the hub's tunnel IP
+# tunnel_form: this router is a SUB-UNIT of another router's group
+t_current_member = dict(t_current, vpn_role="member", vpn_main="HQ")
+form_member = F.tunnel_form(t_current_member, t_cfg)
+check("tunnel_form (sub-unit) reports whose group it belongs to, read-only",
+      any("HQ" in f.get("value", "") for f in form_member))
+
+# tunnel_plan: routes are entirely driven by what web.py's _prep_vpn_group
+# injects (flat["_vpn_in_group"]/["_vpn_other_subnets"]/["_vpn_hub_ip"]) —
+# tunnel_plan itself has no notion of "main" vs "sub-unit", just "what do
+# I need to route to". One route per other site in the group, via the
+# hub's own tunnel IP.
 t_plan_api = FakeApi({("ip", "route"): []})
 t_plan_pusher = Pusher(t_cfg, t_plan_api, dry_run=True)
-join_flat = {"vpn_join": "1", "vpn_subnet": "192.168.1.0/24",
-            "_vpn_hub_ip": "10.10.0.1",
-            "_vpn_other_subnets": ["192.168.2.0/24", "192.168.3.0/24"]}
-join_plan = F.tunnel_plan(t_plan_pusher, t_cfg, join_flat, {})
-route_adds = [o for o in join_plan.ops
+in_group_flat = {"_vpn_in_group": True, "_vpn_hub_ip": "10.10.0.1",
+                 "_vpn_other_subnets": ["192.168.2.0/24", "192.168.3.0/24"]}
+group_plan = F.tunnel_plan(t_plan_pusher, t_cfg, in_group_flat, {})
+route_adds = [o for o in group_plan.ops
              if o.path == ("ip", "route") and o.action == "add"]
-check("joining adds exactly one route per other site",
+check("being in a group adds exactly one route per other site in it",
       len(route_adds) == 2)
 check("each route's gateway is the hub's own tunnel IP",
       all(o.params.get("gateway") == "10.10.0.1" for o in route_adds))
 check("each route's destination is the other site's subnet",
       {o.params.get("dst-address") for o in route_adds} ==
       {"192.168.2.0/24", "192.168.3.0/24"})
-check("routes are tagged so only mikromon's own VPN-mesh routes are ever touched",
+check("routes are tagged so only mikromon's own VPN routes are ever touched",
       all(o.params.get("comment") == _VPN_ROUTE_TAG for o in route_adds))
 
 # idempotent: re-applying against a router that already has both routes is a no-op
@@ -1160,15 +1177,17 @@ t_plan_api2 = FakeApi({("ip", "route"): [
      "comment": _VPN_ROUTE_TAG},
 ]})
 t_plan_pusher2 = Pusher(t_cfg, t_plan_api2, dry_run=True)
-check("re-applying the same joined state is a no-op",
-      F.tunnel_plan(t_plan_pusher2, t_cfg, join_flat, {}).empty)
+check("re-applying the same group state is a no-op",
+      F.tunnel_plan(t_plan_pusher2, t_cfg, in_group_flat, {}).empty)
 
-# not joined (or toggled off): any previously-owned routes are removed
-leave_flat = {"vpn_join": "", "_vpn_hub_ip": "10.10.0.1", "_vpn_other_subnets": []}
-leave_plan = F.tunnel_plan(t_plan_pusher2, t_cfg, leave_flat, {})
+# not part of any group: any previously-owned routes are removed
+not_grouped_flat = {"_vpn_in_group": False, "_vpn_hub_ip": "10.10.0.1",
+                    "_vpn_other_subnets": []}
+leave_plan = F.tunnel_plan(t_plan_pusher2, t_cfg, not_grouped_flat, {})
 route_removes = [o for o in leave_plan.ops
                 if o.path == ("ip", "route") and o.action == "remove"]
-check("turning the VPN off removes every route mikromon owns here",
+check("leaving the group (or never joining) removes every route mikromon "
+      "owns here",
       len(route_removes) == 2)
 
 # an unrelated hand-made route is never touched
@@ -1177,14 +1196,14 @@ t_plan_api3 = FakeApi({("ip", "route"): [
      "comment": "hand-made static route"},
 ]})
 t_plan_pusher3 = Pusher(t_cfg, t_plan_api3, dry_run=True)
-untouched_plan = F.tunnel_plan(t_plan_pusher3, t_cfg, leave_flat, {})
+untouched_plan = F.tunnel_plan(t_plan_pusher3, t_cfg, not_grouped_flat, {})
 check("a route mikromon doesn't own is never modified or removed",
       not any(o.params.get("dst-address") == "172.16.0.0/24"
               for o in untouched_plan.ops))
 
-# web.py sets flat["_vpn_error"] when the submitted subnet conflicts with
-# another site or the tunnel network; tunnel_plan must refuse to apply anything.
-err_flat = {"vpn_join": "1", "vpn_subnet": "10.10.5.0/24",
+# web.py's grouping actions validate subnet conflicts before ever writing to
+# hub.json, but tunnel_plan still refuses defensively if _vpn_error is set.
+err_flat = {"_vpn_in_group": True,
            "_vpn_error": "That network overlaps with the VPN tunnel network "
                          "(10.10.0.0/16) — pick a different one.",
            "_vpn_hub_ip": "10.10.0.1", "_vpn_other_subnets": []}

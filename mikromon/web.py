@@ -1496,12 +1496,43 @@ def _write_wg_peers(path, leases):
         return False, str(exc)
 
 
+def _vpn_flat_subnets(hub) -> dict:
+    """Flatten hub.json's "vpn_groups" (each main host + its sub-units) into
+    a single {device_name: subnet} map — the shape _hub_wg_leases,
+    _write_wg_routes and _subnet_conflict all just need "every registered
+    site's subnet", regardless of whether that site is a main host or a
+    sub-unit of one."""
+    out = {}
+    for main_name, group in (hub.get("vpn_groups") or {}).items():
+        if group.get("subnet"):
+            out[main_name] = group["subnet"]
+        for member_name, member in (group.get("members") or {}).items():
+            if member.get("subnet"):
+                out[member_name] = member["subnet"]
+    return out
+
+
+def _vpn_group_info(hub, device_name):
+    """Where `device_name` sits in the VPN grouping right now:
+      ("main", group_dict)  — it's a main host (group_dict has "subnet"/"members")
+      ("member", main_name) — it's a sub-unit of another router's group
+      (None, None)          — not part of any group yet
+    A device can only ever be ONE of these — enforced when adding/making main."""
+    groups = hub.get("vpn_groups") or {}
+    if device_name in groups:
+        return "main", groups[device_name]
+    for main_name, group in groups.items():
+        if device_name in (group.get("members") or {}):
+            return "member", main_name
+    return None, None
+
+
 def _hub_wg_leases(hub) -> dict:
     """Build the {name: {ip, pubkey, extra}} shape _write_wg_peers needs,
     folding in both road-warrior peers (see _alloc_roadwarrior_ip) and
-    site-to-site LAN subnets (see the VPN tab's "sites" registry) as extra
-    allowed addresses on their host device's own hub peer entry — otherwise
-    the hub would silently drop that traffic even though the router happily
+    site-to-site LAN subnets (see _vpn_flat_subnets) as extra allowed
+    addresses on their host device's own hub peer entry — otherwise the hub
+    would silently drop that traffic even though the router happily
     forwards it (the hub only accepts a source IP/subnet that's in the
     AllowedIPs of the peer it arrived from)."""
     leases_meta = hub.get("leases_meta") or {}
@@ -1511,10 +1542,8 @@ def _hub_wg_leases(hub) -> dict:
         dev, ip = rw.get("device", ""), rw.get("ip", "")
         if dev and ip:
             extra_by_device.setdefault(dev, []).append(ip)
-    for dev, site in (hub.get("sites") or {}).items():
-        subnet = site.get("subnet", "")
-        if subnet:
-            extra_by_device.setdefault(dev, []).append(subnet)
+    for dev, subnet in _vpn_flat_subnets(hub).items():
+        extra_by_device.setdefault(dev, []).append(subnet)
     return {n: {"ip": m.get("ip") or leases_all.get(n),
                 "pubkey": m.get("pubkey"),
                 "extra": extra_by_device.get(n, [])}
@@ -1524,8 +1553,8 @@ def _hub_wg_leases(hub) -> dict:
 def _subnet_conflict(hub, device_name, subnet) -> str:
     """Validate a site's proposed LAN subnet against every other subnet
     already in play — the hub's own tunnel pool, and every other registered
-    site — so two sites (or a site and the tunnel network itself) never end
-    up with overlapping routes. Returns an error message, or "" if clear."""
+    site (main host or sub-unit) — so two sites never end up with
+    overlapping routes. Returns an error message, or "" if clear."""
     import ipaddress
     try:
         net = ipaddress.ip_network(str(subnet).strip(), strict=False)
@@ -1540,11 +1569,8 @@ def _subnet_conflict(hub, device_name, subnet) -> str:
                     f"({hub_subnet}) — pick a different one.")
     except ValueError:
         pass
-    for other_name, site in (hub.get("sites") or {}).items():
-        if other_name == device_name:
-            continue
-        other_subnet = site.get("subnet", "")
-        if not other_subnet:
+    for other_name, other_subnet in _vpn_flat_subnets(hub).items():
+        if other_name == device_name or not other_subnet:
             continue
         try:
             other_net = ipaddress.ip_network(other_subnet, strict=False)
@@ -1557,13 +1583,11 @@ def _subnet_conflict(hub, device_name, subnet) -> str:
 
 
 def _write_wg_routes(path, hub):
-    """Write one line per registered site subnet (see the VPN tab) so the
-    hub's reload service (deploy/install.sh) can add a kernel route for each
-    one, alongside the fixed tunnel-pool route it already maintains.
-    hub.json's "sites" registry is the source of truth. Returns (ok, err)."""
-    subnets = sorted({site.get("subnet", "")
-                      for site in (hub.get("sites") or {}).values()
-                      if site.get("subnet")})
+    """Write one line per registered site subnet (main hosts + sub-units)
+    so the hub's reload service (deploy/install.sh) can add a kernel route
+    for each one, alongside the fixed tunnel-pool route it already
+    maintains. Returns (ok, err)."""
+    subnets = sorted(set(_vpn_flat_subnets(hub).values()))
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(subnets) + ("\n" if subnets else ""))
@@ -1572,42 +1596,42 @@ def _write_wg_routes(path, hub):
         return False, str(exc)
 
 
-def _prep_vpn_mesh(name, flat, devices_db) -> None:
-    """Web-layer glue for the VPN tab: validate and persist this device's
-    site registration in hub.json (bookkeeping only — never a router change
-    here), then inject what tunnel_plan needs to build routes to every other
-    site — since tunnel_plan only sees flat/multi, not devices_db/hub.json.
-    Runs on both preview and confirm so the two stay consistent (same
-    reasoning as _tunnel_roadwarrior_ips: allocating/registering here is
-    local bookkeeping, not a router change, so it must happen before the
-    preview too or the preview could show different routes than the apply)."""
+def _prep_vpn_group(name, flat, devices_db) -> None:
+    """Web-layer glue for the VPN tab: read this device's spot in the VPN
+    grouping (main host / sub-unit / neither) and inject what tunnel_plan
+    needs to build routes to every other site in that same group — since
+    tunnel_plan only sees flat/multi, not devices_db/hub.json. Read-only
+    with respect to the grouping itself (that's only ever changed by the
+    dedicated make-main/add-member/remove-member/stop-main actions); this
+    just resolves "what does MY group need me to route to" for whichever
+    group (if any) this device is currently in."""
     flat["_vpn_other_subnets"] = []
     flat["_vpn_hub_ip"] = ""
+    flat["_vpn_in_group"] = False
     if not devices_db:
         return
-    hub_file = _hub_path(devices_db)
-    hub = _hub_load(hub_file)
+    hub = _hub_load(_hub_path(devices_db))
     hub.setdefault("subnet", _HUB_SUBNET_DEFAULT)
     flat["_vpn_hub_ip"] = _hub_tunnel_ip(hub)
-    join = flat.get("vpn_join") == "1"
-    subnet = (flat.get("vpn_subnet") or "").strip()
-    sites = hub.setdefault("sites", {})
-    if join and subnet:
-        err = _subnet_conflict(hub, name, subnet)
-        if err:
-            flat["_vpn_error"] = err
-            sites.pop(name, None)
-        else:
-            sites[name] = {"subnet": subnet}
-    else:
-        sites.pop(name, None)
-    flat["_vpn_other_subnets"] = sorted({
-        site["subnet"] for dn, site in sites.items()
-        if dn != name and site.get("subnet")})
-    _hub_save(hub_file, hub)
+    role, info = _vpn_group_info(hub, name)
+    others: set = set()
+    if role == "main":
+        flat["_vpn_in_group"] = True
+        for member in (info.get("members") or {}).values():
+            if member.get("subnet"):
+                others.add(member["subnet"])
+    elif role == "member":
+        flat["_vpn_in_group"] = True
+        group = (hub.get("vpn_groups") or {}).get(info, {})
+        if group.get("subnet"):
+            others.add(group["subnet"])
+        for member_name, member in (group.get("members") or {}).items():
+            if member_name != name and member.get("subnet"):
+                others.add(member["subnet"])
+    flat["_vpn_other_subnets"] = sorted(others)
 
 
-def _sync_vpn_mesh_to_hub(devices_db) -> None:
+def _sync_vpn_group_to_hub(devices_db) -> None:
     """After a confirmed VPN-tab apply, rewrite the hub's wg-peers.conf
     (extended AllowedIPs) and wg-routes.conf (kernel routes) so the reload
     service picks up the change — the VPN-tab mirror of
@@ -1623,28 +1647,103 @@ def _sync_vpn_mesh_to_hub(devices_db) -> None:
         pass
 
 
-def _vpn_mesh_box(name, devices_db) -> str:
-    """Read-only list of every site currently in the mesh (hub.json's
-    "sites" registry), shown on the VPN tab so joining a second site shows
-    the first one already there, and vice versa."""
+def _vpn_available_devices(devices_db, hub, exclude_name, org_id) -> list:
+    """Other devices in the SAME company that aren't already part of any
+    VPN group (as a main host or a sub-unit) — for the "add sub-unit"
+    dropdown. Always org-scoped: a company must never see, let alone
+    connect to, another company's routers."""
     if not devices_db:
+        return []
+    from .devices_store import DevicesStore
+    try:
+        ds = DevicesStore(devices_db)
+        try:
+            org_names = set(ds.names_for_org(org_id)) if org_id is not None else set()
+        finally:
+            ds.close()
+    except Exception:  # noqa: BLE001
+        return []
+    grouped = set(hub.get("vpn_groups") or {})
+    for group in (hub.get("vpn_groups") or {}).values():
+        grouped.update((group.get("members") or {}).keys())
+    return sorted(n for n in org_names if n != exclude_name and n not in grouped)
+
+
+def _vpn_group_box(name, devices_db, org_id, csrf) -> str:
+    """The VPN tab's site-grouping controls: "Make this the main VPN host"
+    when ungrouped, or (for a main host) the current sub-units + an "add
+    sub-unit" picker. A sub-unit's own tab shows nothing here — its status
+    is already covered by tunnel_form's static message, and it can only be
+    removed from its main host's own tab (by design — see tunnel_form)."""
+    if not devices_db or not csrf:
         return ""
     hub = _hub_load(_hub_path(devices_db))
-    sites = hub.get("sites") or {}
-    if not sites:
-        return ""
+    role, info = _vpn_group_info(hub, name)
+    q = esc(name)
+
+    if role is None:
+        return (f'<div class="box"><h2>Site-to-site VPN grouping</h2>'
+                f'<p class="muted">Not part of a VPN group yet. Make this '
+                f'router the main host to start connecting other sites to '
+                f'it, or add it as a sub-unit from another router\'s VPN '
+                f'tab instead.</p>'
+                f'<form method="POST" action="/device/vpn-make-main">'
+                f'<input type="hidden" name="csrf" value="{csrf}">'
+                f'<input type="hidden" name="device" value="{q}">'
+                f'<div class="actions"><button class="btn" type="submit">'
+                f'Make this the main VPN host</button></div></form></div>')
+
+    if role == "member":
+        return ""  # covered by tunnel_form's status message; nothing to act on here
+
+    # role == "main"
+    members = (info or {}).get("members") or {}
     rows = ""
-    for dn, site in sorted(sites.items()):
-        badge = ' <span class="badge">this router</span>' if dn == name else ""
-        rows += (f'<tr><td>{esc(dn)}{badge}</td>'
-                f'<td><code>{esc(site.get("subnet", ""))}</code></td></tr>')
-    return (f'<div class="box"><h2>Sites in this VPN mesh</h2>'
-            f'<table><tr><th>Router</th><th>Network</th></tr>{rows}</table>'
-            f'<p class="muted">Every router below can reach every other '
-            f"router's network through the tunnel. Applying this tab only "
-            f'pushes routes on <b>this</b> router — after adding a new '
-            f'site, re-apply the VPN tab on the routers that were already '
-            f'joined so they pick up the new route too.</p></div>')
+    for member_name, member in sorted(members.items()):
+        rows += (f'<tr><td>{esc(member_name)}</td>'
+                f'<td><code>{esc(member.get("subnet", ""))}</code></td>'
+                f'<td><form method="POST" action="/device/vpn-remove-member" '
+                f'class="inline">'
+                f'<input type="hidden" name="csrf" value="{csrf}">'
+                f'<input type="hidden" name="device" value="{q}">'
+                f'<input type="hidden" name="member" value="{esc(member_name)}">'
+                f'<button class="btn ghost" type="submit">Remove</button>'
+                f'</form></td></tr>')
+    table = (f'<table><tr><th>Sub-unit</th><th>Network</th><th></th></tr>'
+            f'{rows}</table>' if members else
+            '<p class="muted">No sub-units connected here yet.</p>')
+
+    available = _vpn_available_devices(devices_db, hub, name, org_id)
+    if available:
+        opts = "".join(f'<option value="{esc(d)}">{esc(d)}</option>' for d in available)
+        add_form = (f'<form method="POST" action="/device/vpn-add-member" '
+                   f'style="margin-top:10px">'
+                   f'<input type="hidden" name="csrf" value="{csrf}">'
+                   f'<input type="hidden" name="device" value="{q}">'
+                   f'<select name="member" style="min-width:200px">{opts}</select> '
+                   f'<button class="btn" type="submit">Add sub-unit</button>'
+                   f'</form>')
+    else:
+        add_form = ('<p class="muted" style="margin-top:10px">No other '
+                    'company routers are available to add — they\'re either '
+                    'already part of a VPN group, or you don\'t have any '
+                    'other routers yet.</p>')
+
+    stop_form = ("" if members else
+                f'<form method="POST" action="/device/vpn-stop-main" '
+                f'style="margin-top:14px">'
+                f'<input type="hidden" name="csrf" value="{csrf}">'
+                f'<input type="hidden" name="device" value="{q}">'
+                f'<button class="btn ghost" type="submit">Stop being the '
+                f'main VPN host</button></form>')
+    return (f'<div class="box"><h2>Site-to-site VPN grouping</h2>'
+            f'<p class="muted">This router is the <b>main VPN host</b>. Add '
+            f'other company routers below as sub-units — each one gets '
+            f'routes to reach this router and every other sub-unit here. '
+            f'Applying the tab above only pushes routes on <b>this</b> '
+            f'router; a newly added sub-unit needs to apply its own VPN tab '
+            f'too (it will show as already grouped once added).</p>'
+            f'{table}{add_form}{stop_form}</div>')
 
 
 def _tunnel_roadwarrior_ips(device_name, multi, devices_db) -> None:
@@ -4594,7 +4693,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     current = feature["read"](pusher, cfg)
                     if slug == "tunnel" and devices_db:
                         hub = _hub_load(_hub_path(devices_db))
-                        current["vpn_site"] = (hub.get("sites") or {}).get(name)
+                        role, info = _vpn_group_info(hub, name)
+                        current["vpn_role"] = role
+                        if role == "main":
+                            current["vpn_own_subnet"] = (info or {}).get("subnet", "")
+                            current["vpn_members"] = (info or {}).get("members", {})
+                        elif role == "member":
+                            current["vpn_main"] = info
                     summary_lines = (feature["summary"](current, cfg)
                                      if "summary" in feature else None)
                     if "form" in feature:
@@ -4625,7 +4730,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     elif slug == "hubtunnel":
                         extra_html = _hubtunnel_box(name, current, csrf, devices_db)
                     elif slug == "tunnel":
-                        extra_html = _vpn_mesh_box(name, devices_db)
+                        extra_html = _vpn_group_box(
+                            name, devices_db, (user or {}).get("org_id"), csrf)
                     elif slug == "update":
                         extra_html, extra_actions = _update_box(name, csrf, current)
                     elif slug == "interfaces":
@@ -4785,7 +4891,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         # stable between preview and confirm.
                         flat["_tempuser_password"] = _gen_password()
                     if slug == "tunnel":
-                        _prep_vpn_mesh(name, flat, devices_db)
+                        _prep_vpn_group(name, flat, devices_db)
                     plan = feature["plan"](pusher, cfg, flat, multi)
                 except (DeviceError, PushError) as exc:
                     if audit:
@@ -4824,7 +4930,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # Just applied the VPN tab: push the updated AllowedIPs/routes
                 # to the hub so it actually accepts/forwards this site's subnet.
                 if slug == "tunnel" and devices_db:
-                    _sync_vpn_mesh_to_hub(devices_db)
+                    _sync_vpn_group_to_hub(devices_db)
                 # Just created a temporary login: show the connection details
                 # ONCE, directly (never a redirect — the password would end
                 # up in the URL/browser history/access logs). RouterOS never
@@ -5072,6 +5178,177 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._feature_tab_page(
                 name, user, "hubtunnel",
                 report_html=_wg_repair_report_html(report))
+
+        def _device_vpn_make_main_post(self, flat, user):
+            """Make this router the main VPN host: connect live and detect
+            its own LAN subnet, then register it in hub.json — bookkeeping
+            only, no router change here (the actual routes go out through
+            the normal VPN tab preview/apply flow). Refuses if this device
+            is already part of a group, either role."""
+            from .config import build_device
+            from .device import DeviceError
+            from .push import Pusher, PushError, rw_device
+            from .push.api import PushApi
+            from .push.features import _detect_lan_subnets
+
+            name = flat.get("device", "")
+            q = quote(name)
+            if devices_db is None:
+                return self._send(400, "device management not enabled")
+            raw = self._device_raw(name)
+            if raw is None:
+                return self._send(404, "no such device")
+            hub_file = _hub_path(devices_db)
+            hub = _hub_load(hub_file)
+            role, _info = _vpn_group_info(hub, name)
+            if role is not None:
+                return self._redirect(f"/device?name={q}&tab=tunnel&msg=" +
+                                      quote("Already part of a VPN group."))
+            cfg = build_device(raw, defaults)
+            dev = rw_device(cfg)
+            api = PushApi(dev)
+            pusher = Pusher(cfg, api, dry_run=True)
+            detected = []
+            try:
+                try:
+                    api.connect()
+                    detected = _detect_lan_subnets(pusher, cfg)
+                except (DeviceError, PushError) as exc:
+                    return self._redirect(
+                        f"/device?name={q}&tab=tunnel&msg=" +
+                        quote(f"Could not reach the router to detect its "
+                              f"network: {exc}"))
+            finally:
+                dev.close()
+            if not detected:
+                return self._redirect(
+                    f"/device?name={q}&tab=tunnel&msg=" +
+                    quote("Could not detect a LAN network on this router to share."))
+            subnet = detected[0]
+            err = _subnet_conflict(hub, name, subnet)
+            if err:
+                return self._redirect(f"/device?name={q}&tab=tunnel&msg=" + quote(err))
+            hub.setdefault("vpn_groups", {})[name] = {"subnet": subnet, "members": {}}
+            _hub_save(hub_file, hub)
+            _sync_vpn_group_to_hub(devices_db)
+            return self._redirect(
+                f"/device?name={q}&tab=tunnel&msg=" +
+                quote(f"{name} is now the main VPN host, sharing {subnet}."))
+
+        def _device_vpn_add_member_post(self, flat, user):
+            """Add another company router as a sub-unit of this router's
+            VPN group: connect live to the CHOSEN device (using its own
+            stored credentials) to detect its LAN subnet, validate it
+            doesn't conflict with anything already registered, and record
+            it — bookkeeping only. Each router pushes its own routes once
+            it applies its own VPN tab."""
+            from .config import build_device
+            from .device import DeviceError
+            from .push import Pusher, PushError, rw_device
+            from .push.api import PushApi
+            from .push.features import _detect_lan_subnets
+
+            name = flat.get("device", "")
+            member_name = (flat.get("member") or "").strip()
+            q = quote(name)
+            if not member_name:
+                return self._send(400, "no sub-unit selected")
+            if not self._can_manage_device(user, member_name):
+                return self._send(403, "forbidden")
+            if devices_db is None:
+                return self._send(400, "device management not enabled")
+            hub_file = _hub_path(devices_db)
+            hub = _hub_load(hub_file)
+            role, info = _vpn_group_info(hub, name)
+            if role != "main":
+                return self._send(400, "this router is not a VPN main host")
+            member_role, _ = _vpn_group_info(hub, member_name)
+            if member_role is not None:
+                return self._redirect(
+                    f"/device?name={q}&tab=tunnel&msg=" +
+                    quote(f"{member_name} is already part of a VPN group."))
+            member_raw = self._device_raw(member_name)
+            if member_raw is None:
+                return self._send(404, "no such device")
+            cfg = build_device(member_raw, defaults)
+            dev = rw_device(cfg)
+            api = PushApi(dev)
+            pusher = Pusher(cfg, api, dry_run=True)
+            detected = []
+            try:
+                try:
+                    api.connect()
+                    detected = _detect_lan_subnets(pusher, cfg)
+                except (DeviceError, PushError) as exc:
+                    return self._redirect(
+                        f"/device?name={q}&tab=tunnel&msg=" +
+                        quote(f"Could not reach {member_name} to detect its "
+                              f"network: {exc}"))
+            finally:
+                dev.close()
+            if not detected:
+                return self._redirect(
+                    f"/device?name={q}&tab=tunnel&msg=" +
+                    quote(f"Could not detect a LAN network on {member_name} "
+                          f"to share."))
+            subnet = detected[0]
+            err = _subnet_conflict(hub, member_name, subnet)
+            if err:
+                return self._redirect(f"/device?name={q}&tab=tunnel&msg=" + quote(err))
+            info.setdefault("members", {})[member_name] = {"subnet": subnet}
+            _hub_save(hub_file, hub)
+            _sync_vpn_group_to_hub(devices_db)
+            return self._redirect(
+                f"/device?name={q}&tab=tunnel&msg=" +
+                quote(f"Added {member_name} ({subnet}) — apply the VPN tab "
+                      f"on both routers to push the new routes."))
+
+        def _device_vpn_remove_member_post(self, flat, user):
+            """Remove a sub-unit from this router's VPN group — bookkeeping
+            only. The removed router's own routes become stale and are
+            cleaned up automatically the next time IT applies its own VPN
+            tab (tunnel_plan's normal reconcile-and-remove-stale-routes
+            behavior)."""
+            name = flat.get("device", "")
+            member_name = (flat.get("member") or "").strip()
+            q = quote(name)
+            if devices_db is None:
+                return self._send(400, "device management not enabled")
+            hub_file = _hub_path(devices_db)
+            hub = _hub_load(hub_file)
+            role, info = _vpn_group_info(hub, name)
+            if role == "main" and member_name in (info.get("members") or {}):
+                del info["members"][member_name]
+                _hub_save(hub_file, hub)
+                _sync_vpn_group_to_hub(devices_db)
+            return self._redirect(
+                f"/device?name={q}&tab=tunnel&msg=" +
+                quote(f"Removed {member_name} from the VPN group."))
+
+        def _device_vpn_stop_main_post(self, flat, user):
+            """Stop being a VPN main host — only allowed with zero
+            sub-units, to avoid silently orphaning connected routers
+            without an explicit removal step first."""
+            name = flat.get("device", "")
+            q = quote(name)
+            if devices_db is None:
+                return self._send(400, "device management not enabled")
+            hub_file = _hub_path(devices_db)
+            hub = _hub_load(hub_file)
+            role, info = _vpn_group_info(hub, name)
+            if role != "main":
+                return self._redirect(f"/device?name={q}&tab=tunnel")
+            if info.get("members"):
+                return self._redirect(
+                    f"/device?name={q}&tab=tunnel&msg=" +
+                    quote("Remove all sub-units first before stopping as "
+                          "the main host."))
+            (hub.get("vpn_groups") or {}).pop(name, None)
+            _hub_save(hub_file, hub)
+            _sync_vpn_group_to_hub(devices_db)
+            return self._redirect(
+                f"/device?name={q}&tab=tunnel&msg=" +
+                quote(f"{name} is no longer a VPN main host."))
 
         def _hub_reload_peers_post(self, flat, user):
             """Rebuild wg-peers.conf from hub.json leases and write it.
@@ -5330,7 +5607,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             _DEVICE_WRITE = ("/device/backup", "/device/tempaccess",
                              "/device/provision", "/device/push",
                              "/device/wg-repair", "/device/adopt", "/device/wan",
-                             "/device/reboot", "/device/access", "/device/confirm")
+                             "/device/reboot", "/device/access", "/device/confirm",
+                             "/device/vpn-make-main", "/device/vpn-add-member",
+                             "/device/vpn-remove-member", "/device/vpn-stop-main")
             if path in _DEVICE_WRITE:
                 if not self._can_manage_device(user, flat.get("device", "")):
                     return self._send(403, "forbidden")
@@ -5354,6 +5633,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._device_access_post(flat, user)
                 if path == "/device/confirm":
                     return self._device_confirm_post(flat, user)
+                if path == "/device/vpn-make-main":
+                    return self._device_vpn_make_main_post(flat, user)
+                if path == "/device/vpn-add-member":
+                    return self._device_vpn_add_member_post(flat, user)
+                if path == "/device/vpn-remove-member":
+                    return self._device_vpn_remove_member_post(flat, user)
+                if path == "/device/vpn-stop-main":
+                    return self._device_vpn_stop_main_post(flat, user)
             # Everything below is OWNER-ONLY (org-level: inventory, users,
             # billing, server ops).
             if not AuthStore.is_admin(user or {}):
