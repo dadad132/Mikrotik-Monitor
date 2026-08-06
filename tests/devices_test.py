@@ -963,6 +963,36 @@ try:
     hub_after_stop = web._hub_load(web._hub_path(wdb))
     check("stop-main actually removed WebR1 from vpn_groups",
           "WebR1" not in hub_after_stop.get("vpn_groups", {}))
+    # "Refresh routes & firewall rule now" — forces a re-push for a whole
+    # group without a disruptive remove-and-re-add (e.g. after a mikromon
+    # update changes what gets pushed, or a router was offline originally).
+    st = post_status(nobody, "/device/vpn-refresh",
+                     {"csrf": bcsrf, "device": "WebR1"})
+    check("unallocated member blocked from refreshing VPN routes (403)",
+          st == 403)
+    st = post_status(admin, "/device/vpn-refresh", {"csrf": csrf, "device": "WebR1"})
+    check("refresh on a router that's not in any VPN group just says so "
+          "(redirect, no crash)", st == 303)
+    hub_for_refresh = web._hub_load(web._hub_path(wdb))
+    hub_for_refresh.setdefault("vpn_groups", {})["WebR1"] = {
+        "subnet": "192.168.60.0/24",
+        "members": {"WebR2": {"subnet": "192.168.61.0/24"}}}
+    web._hub_save(web._hub_path(wdb), hub_for_refresh)
+    o = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(admin.cj), _NoRedir)
+    body = urllib.parse.urlencode({"csrf": csrf, "device": "WebR1"}).encode()
+    try:
+        r = o.open(urllib.request.Request(B + "/device/vpn-refresh",
+                                          data=body), timeout=8)
+        st, location = getattr(r, "status", r.code), r.headers.get("Location", "")
+    except urllib.error.HTTPError as e:
+        st, location = e.code, e.headers.get("Location", "")
+    check("refresh on a grouped router (main w/ a sub-unit) succeeds "
+          "(redirect)", st == 303)
+    check("refresh attempted a push to BOTH the main and its sub-unit, not "
+          "just the one clicked from",
+          "WebR1" in urllib.parse.unquote(location)
+          and "WebR2" in urllib.parse.unquote(location))
     # --- Remote access tab: "forgot to copy it" regenerate button — guard
     # paths only (an actual regenerate needs a live router connection,
     # same limitation as the rest of this section) ---

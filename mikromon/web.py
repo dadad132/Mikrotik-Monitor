@@ -1912,12 +1912,27 @@ def _render_roadwarrior_config_page(user, label, conf_text) -> str:
     return _page(esc(label) + " · Personal VPN access", _header(user, "/admin") + inner)
 
 
+def _vpn_refresh_form(name, csrf) -> str:
+    q = esc(name)
+    return (f'<form method="POST" action="/device/vpn-refresh" '
+            f'style="margin-top:10px">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            f'<input type="hidden" name="device" value="{q}">'
+            f'<button class="btn ghost" type="submit">Refresh routes &amp; '
+            f'firewall rule now</button></form>'
+            f'<p class="muted" style="margin-top:4px;font-size:12px">Pushes '
+            f'the current routes and firewall rule to the whole group again '
+            f'— use this if a router was offline when it was last added or '
+            f'removed, or after a mikromon update changes what gets pushed.</p>')
+
+
 def _vpn_group_box(name, devices_db, org_id, csrf) -> str:
     """The VPN tab's site-grouping controls: "Make this the main VPN host"
     when ungrouped, or (for a main host) the current sub-units + an "add
-    sub-unit" picker. A sub-unit's own tab shows nothing here — its status
-    is already covered by tunnel_form's static message, and it can only be
-    removed from its main host's own tab (by design — see tunnel_form)."""
+    sub-unit" picker. A sub-unit's own tab shows only the Refresh button —
+    its status is already covered by tunnel_form's static message, and it
+    can only be added/removed from its main host's own tab (by design —
+    see tunnel_form)."""
     if not devices_db or not csrf:
         return ""
     hub = _hub_load(_hub_path(devices_db))
@@ -1937,7 +1952,8 @@ def _vpn_group_box(name, devices_db, org_id, csrf) -> str:
                 f'Make this the main VPN host</button></div></form></div>')
 
     if role == "member":
-        return ""  # covered by tunnel_form's status message; nothing to act on here
+        return (f'<div class="box"><h2>Site-to-site VPN grouping</h2>'
+                f'{_vpn_refresh_form(name, csrf)}</div>')
 
     # role == "main"
     members = (info or {}).get("members") or {}
@@ -1979,13 +1995,14 @@ def _vpn_group_box(name, devices_db, org_id, csrf) -> str:
                 f'<input type="hidden" name="device" value="{q}">'
                 f'<button class="btn ghost" type="submit">Stop being the '
                 f'main VPN host</button></form>')
+    refresh = _vpn_refresh_form(name, csrf) if members else ""
     return (f'<div class="box"><h2>Site-to-site VPN grouping</h2>'
             f'<p class="muted">This router is the <b>main VPN host</b>. Add '
             f'other company routers below as sub-units — routes are pushed '
             f'automatically to this router and every affected sub-unit as '
             f'soon as you add or remove one, no need to open each router\'s '
             f'own VPN tab.</p>'
-            f'{table}{add_form}{stop_form}</div>')
+            f'{table}{add_form}{refresh}{stop_form}</div>')
 
 
 def _remote_regenerate_box(name, users, csrf) -> str:
@@ -5903,6 +5920,37 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._redirect(
                 f"/device?name={q}&tab=tunnel&msg=" + quote(msg))
 
+        def _device_vpn_refresh_post(self, flat, user):
+            """Force re-push VPN routes + the forward-chain firewall rule to
+            a router's WHOLE group (main + every sub-unit) right now — for
+            when the push logic itself has changed since the group was
+            created (e.g. a firewall rule added in a later mikromon update)
+            or a router was offline during the original auto-push, and the
+            group needs to pick up the current behavior without a
+            disruptive remove-and-re-add."""
+            name = flat.get("device", "")
+            q = quote(name)
+            if not self._can_manage_device(user, name):
+                return self._send(403, "forbidden")
+            if devices_db is None:
+                return self._send(400, "device management not enabled")
+            hub = _hub_load(_hub_path(devices_db))
+            role, info = _vpn_group_info(hub, name)
+            if role is None:
+                return self._redirect(f"/device?name={q}&tab=tunnel&msg=" +
+                                      quote("Not part of a VPN group."))
+            if role == "main":
+                targets = [name] + list((info.get("members") or {}).keys())
+            else:  # member; info is the main host's name
+                main_group = (hub.get("vpn_groups") or {}).get(info, {})
+                targets = [info] + list((main_group.get("members") or {}).keys())
+            errors = self._push_vpn_routes_to(targets, user)
+            msg = f"Routes refreshed for {', '.join(targets)}."
+            if errors:
+                msg += " Failed for: " + "; ".join(errors)
+            return self._redirect(
+                f"/device?name={q}&tab=tunnel&msg=" + quote(msg))
+
         def _hub_reload_peers_post(self, flat, user):
             """Rebuild wg-peers.conf from hub.json leases and write it.
             Writing the file triggers the mikromon-wg-reload.path unit to run
@@ -6165,6 +6213,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                              "/device/reboot", "/device/access", "/device/confirm",
                              "/device/vpn-make-main", "/device/vpn-add-member",
                              "/device/vpn-remove-member", "/device/vpn-stop-main",
+                             "/device/vpn-refresh",
                              "/device/remote-regenerate", "/device/remote-test")
             if path in _DEVICE_WRITE:
                 if not self._can_manage_device(user, flat.get("device", "")):
@@ -6197,6 +6246,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._device_vpn_remove_member_post(flat, user)
                 if path == "/device/vpn-stop-main":
                     return self._device_vpn_stop_main_post(flat, user)
+                if path == "/device/vpn-refresh":
+                    return self._device_vpn_refresh_post(flat, user)
                 if path == "/device/remote-regenerate":
                     return self._device_remote_regenerate_post(flat, user)
                 if path == "/device/remote-test":
