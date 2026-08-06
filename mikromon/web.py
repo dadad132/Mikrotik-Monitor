@@ -1745,6 +1745,32 @@ def _vpn_group_box(name, devices_db, org_id, csrf) -> str:
             f'{table}{add_form}{stop_form}</div>')
 
 
+def _remote_regenerate_box(name, users, csrf) -> str:
+    """Remote access tab: a "forgot to copy the password" fix. RouterOS
+    never lets a password be read back once set, and mikromon never stores
+    it — so the only way to recover a missed copy/paste is to revoke that
+    login and recreate it under the same name with a fresh password, shown
+    once again on the same one-time reveal page."""
+    if not users:
+        return ""
+    rows = "".join(
+        f'<tr><td>{esc(u.get("name", ""))}</td>'
+        f'<td><form method="POST" action="/device/remote-regenerate" '
+        f'class="inline">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="device" value="{esc(name)}">'
+        f'<input type="hidden" name="username" value="{esc(u.get("name", ""))}">'
+        f'<button class="btn ghost" type="submit">Regenerate password</button>'
+        f'</form></td></tr>'
+        for u in users)
+    return (f'<div class="box"><h2>Forgot to copy the details?</h2>'
+            f'<p class="muted">RouterOS never lets a password be read back '
+            f'once set, so if you missed it, the fix is a fresh one — this '
+            f'revokes the login below and issues it a new password '
+            f'immediately, shown once again.</p>'
+            f'<table><tr><th>Login</th><th></th></tr>{rows}</table></div>')
+
+
 def _tunnel_roadwarrior_ips(device_name, multi, devices_db) -> None:
     """Resolve (allocating if needed) a hub tunnel IP for every road-warrior
     peer row submitted on the Tunnel tab (tunnel_form/tunnel_plan's "wgrw"
@@ -3045,11 +3071,13 @@ _CONFIRM_JS = """
 
 
 def _render_temp_login_page(name, user, username, password, address, minutes) -> str:
-    """Shown ONCE, right after a temporary login is created (Remote access
-    tab) — the connection details to hand to the person. Never a redirect:
-    the password would end up in the URL, browser history and access logs.
-    RouterOS never lets a password be read back, so if this page is lost the
-    only fix is revoking the login and creating a new one."""
+    """Shown ONCE, right after a temporary login is created OR regenerated
+    (Remote access tab) — the connection details to hand to the person.
+    Never a redirect: the password would end up in the URL, browser history
+    and access logs. RouterOS never lets a password be read back, so if this
+    page is lost, the fix is the "Regenerate password" button on the Remote
+    access tab (see _remote_regenerate_box / _device_remote_regenerate_post),
+    which lands back on this same page with a fresh password."""
     q = quote(name)
     addr_shown = address or "<this router's address>"
     conn_lines = "\n".join(
@@ -3064,8 +3092,11 @@ def _render_temp_login_page(name, user, username, password, address, minutes) ->
         f'<div class="box" style="border-left:4px solid #16a34a">'
         f'<h1 style="margin-top:0">Temporary login created for {esc(name)}</h1>'
         f'<p><b>Copy these now</b> — RouterOS never lets the password be read '
-        f'back, so this is the only time it\'s shown. It expires automatically '
-        f'in about <b>{minutes} minutes</b>, or revoke it early from this tab.</p>'
+        f'back, so this is the only time it\'s shown as-is. It expires '
+        f'automatically in about <b>{minutes} minutes</b>, or revoke it early '
+        f'from this tab. If you miss it, go back to the Remote access tab '
+        f'and click <b>Regenerate password</b> for this login to get a fresh '
+        f'one shown the same way.</p>'
         f'<table style="margin:10px 0">'
         f'<tr><td class="muted">Username</td><td><code>{esc(username)}</code></td></tr>'
         f'<tr><td class="muted">Password</td><td><code>{esc(password)}</code></td></tr>'
@@ -4766,6 +4797,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     elif slug == "tunnel":
                         extra_html = _vpn_group_box(
                             name, devices_db, (user or {}).get("org_id"), csrf)
+                    elif slug == "remote":
+                        extra_html = _remote_regenerate_box(
+                            name, current.get("users", []), csrf)
                     elif slug == "update":
                         extra_html, extra_actions = _update_box(name, csrf, current)
                     elif slug == "interfaces":
@@ -5163,6 +5197,100 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             self._purge_device_data(name)
             page = _render_offboard_page(name, result, "/", user)
             return self._send(200, page, "text/html; charset=utf-8")
+
+        def _device_remote_regenerate_post(self, flat, user):
+            """"Forgot to copy it" fix for the Remote access tab: revoke the
+            named temporary login and recreate it immediately under the same
+            username with a fresh password, then show the one-time reveal
+            page again — the only way to recover, since RouterOS never
+            returns a password once set and mikromon never stores one."""
+            from .config import build_device
+            from .device import DeviceError
+            from .push import Pusher, PushError, rw_device
+            from .push.api import PushApi
+            from .push.plan import Operation, Plan
+            from .push.features import (
+                _REMOTE_TAG, _REMOTE_SCHED_PREFIX, _REMOTE_DEFAULT_MINUTES,
+                _REMOTE_DEFAULT_GROUP)
+
+            name = flat.get("device", "")
+            username = (flat.get("username") or "").strip()
+            q = quote(name)
+            if not self._can_manage_device(user, name):
+                return self._send(403, "forbidden")
+            if not username:
+                return self._send(400, "no login selected")
+            raw = self._device_raw(name)
+            if raw is None:
+                return self._send(404, "no such device")
+            cfg = build_device(raw, defaults)
+            audit = self._auditlog()
+            uname = (user or {}).get("login", "")
+            dev = rw_device(cfg)
+            api = PushApi(dev)
+            pusher = Pusher(cfg, api, dry_run=False, audit=audit, user=uname)
+            try:
+                try:
+                    api.connect()
+                    users = api.fetch(("user",))
+                    scheds = api.fetch(("system", "scheduler"))
+                except (DeviceError, PushError) as exc:
+                    return self._redirect(
+                        f"/device?name={q}&tab=remote&error=" + quote(str(exc)))
+                existing = next((u for u in users if u.get("name") == username), None)
+                if existing is None or not str(
+                        existing.get("comment", "")).startswith(_REMOTE_TAG):
+                    return self._redirect(
+                        f"/device?name={q}&tab=remote&error=" +
+                        quote(f"'{username}' is not a mikromon-managed "
+                              f"temporary login."))
+                ops = [Operation(
+                    "remove", ("user",), {".id": existing[".id"]},
+                    desc=f"revoke temporary login '{username}' (regenerating)")]
+                sched = next((s for s in scheds
+                             if s.get("name") == _REMOTE_SCHED_PREFIX + username),
+                            None)
+                if sched:
+                    ops.append(Operation(
+                        "remove", ("system", "scheduler"), {".id": sched[".id"]},
+                        desc=f"cancel expiry for '{username}'"))
+                new_password = _gen_password()
+                ops.append(Operation(
+                    "add", ("user",),
+                    {"name": username, "password": new_password,
+                     "group": _REMOTE_DEFAULT_GROUP,
+                     "comment": _REMOTE_TAG + username},
+                    desc=f"recreate temporary login '{username}' with a new "
+                         f"password"))
+                sched_name = _REMOTE_SCHED_PREFIX + username
+                event = (f'/user remove [find name="{username}"]\n'
+                         f'/system scheduler remove [find name="{sched_name}"]')
+                ops.append(Operation(
+                    "add", ("system", "scheduler"),
+                    {"name": sched_name,
+                     "interval": f"{_REMOTE_DEFAULT_MINUTES}m",
+                     "on-event": event,
+                     "comment": _REMOTE_TAG + "expiry:" + username,
+                     "policy": "ftp,reboot,read,write,policy,test,password,"
+                              "sensitive,romon"},
+                    desc=f"expire '{username}' automatically after "
+                         f"{_REMOTE_DEFAULT_MINUTES} min"))
+                plan = Plan(cfg.name, ops, summary="regenerate temporary access")
+                try:
+                    pusher.apply(plan, feature="remote")
+                except PushError as exc:
+                    return self._redirect(
+                        f"/device?name={q}&tab=remote&error=" + quote(str(exc)))
+                address = (_device_tunnel_ip(name, devices_db)
+                          or getattr(cfg, "host", "") or "")
+                return self._send(200, _render_temp_login_page(
+                    name, user, username, new_password, address,
+                    _REMOTE_DEFAULT_MINUTES),
+                    "text/html; charset=utf-8")
+            finally:
+                dev.close()
+                if audit:
+                    audit.close()
 
         def _device_wg_repair_post(self, flat, user):
             """Connect to the router, diagnose + self-repair the WireGuard tunnel,
@@ -5729,7 +5857,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                              "/device/wg-repair", "/device/adopt", "/device/wan",
                              "/device/reboot", "/device/access", "/device/confirm",
                              "/device/vpn-make-main", "/device/vpn-add-member",
-                             "/device/vpn-remove-member", "/device/vpn-stop-main")
+                             "/device/vpn-remove-member", "/device/vpn-stop-main",
+                             "/device/remote-regenerate")
             if path in _DEVICE_WRITE:
                 if not self._can_manage_device(user, flat.get("device", "")):
                     return self._send(403, "forbidden")
@@ -5761,6 +5890,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._device_vpn_remove_member_post(flat, user)
                 if path == "/device/vpn-stop-main":
                     return self._device_vpn_stop_main_post(flat, user)
+                if path == "/device/remote-regenerate":
+                    return self._device_remote_regenerate_post(flat, user)
             # Everything below is OWNER-ONLY (org-level: inventory, users,
             # billing, server ops).
             if not AuthStore.is_admin(user or {}):

@@ -902,6 +902,16 @@ try:
     hub_after_stop = web._hub_load(web._hub_path(wdb))
     check("stop-main actually removed WebR1 from vpn_groups",
           "WebR1" not in hub_after_stop.get("vpn_groups", {}))
+    # --- Remote access tab: "forgot to copy it" regenerate button — guard
+    # paths only (an actual regenerate needs a live router connection,
+    # same limitation as the rest of this section) ---
+    st = post_status(admin, "/device/remote-regenerate",
+                     {"csrf": csrf, "device": "WebR1", "username": ""})
+    check("remote-regenerate with no login selected is rejected (400)", st == 400)
+    st = post_status(nobody, "/device/remote-regenerate",
+                     {"csrf": bcsrf, "device": "WebR1", "username": "alice"})
+    check("unallocated member blocked from regenerating a remote login (403)",
+          st == 403)
     st, body = get(admin, "/logs")
     check("admin can open the activity log", st == 200 and "activity log" in body.lower())
     st, _ = get(nobody, "/logs")
