@@ -265,7 +265,8 @@ def _build_vpn_router_diagnostics_lines(devices_db, defaults) -> list:
     from .device import DeviceError
     from .push import PushError, rw_device
     from .push.api import PushApi
-    from .push.features import _VPN_ROUTE_TAG, _VPN_FW_TAG
+    from .push.features import (_VPN_ROUTE_TAG, _VPN_FW_TAG, _HUB_TAG,
+                                _HUB_PEERS)
 
     lines = ["", "=" * 70, "VPN site-to-site: per-router live state",
              "=" * 70, ""]
@@ -321,6 +322,7 @@ def _build_vpn_router_diagnostics_lines(devices_db, defaults) -> list:
                     api.connect()
                     routes = api.fetch(("ip", "route"))
                     fw = api.fetch(("ip", "firewall", "filter"))
+                    peers = api.fetch(_HUB_PEERS)
                 except (DeviceError, PushError) as exc:
                     lines.append(f"  could not connect: {exc}")
                     lines.append("")
@@ -358,6 +360,32 @@ def _build_vpn_router_diagnostics_lines(devices_db, defaults) -> list:
                                  "VPN even with the route above correct. "
                                  "Click \"Refresh routes & firewall rule "
                                  "now\" on this router's VPN tab.")
+                hub_peer = next(
+                    (p for p in peers
+                     if str(p.get("comment", "")).startswith(_HUB_TAG)), None)
+                hub_subnet = flat.get("_vpn_hub_subnet") or "10.10.0.0/16"
+                if hub_peer is None:
+                    lines.append("  hub peer: not found (router isn't "
+                                 "provisioned for the tunnel at all).")
+                else:
+                    allowed = str(hub_peer.get("allowed-address", "")).strip()
+                    allowed_set = {a.strip() for a in allowed.split(",")
+                                  if a.strip()}
+                    want_set = {hub_subnet} | set(expected_subnets)
+                    if allowed_set == want_set:
+                        lines.append("  hub peer allowed-address: OK, "
+                                     "includes every other site's subnet.")
+                    else:
+                        missing_allow = want_set - allowed_set
+                        lines.append(
+                            f"  hub peer allowed-address: {allowed or '(empty)'}"
+                            f" — MISSING {', '.join(sorted(missing_allow)) or '(nothing missing, but has extra entries)'}. "
+                            f"This is the #1 cause of an immediate \"host "
+                            f"unreachable\" on an otherwise-correct route: "
+                            f"WireGuard silently drops any reply/traffic "
+                            f"sourced from a subnet not listed here. Click "
+                            f"\"Refresh routes & firewall rule now\" on this "
+                            f"router's VPN tab.")
             lines.append("")
     finally:
         ds.close()
@@ -1839,12 +1867,14 @@ def _prep_vpn_group(name, flat, devices_db) -> None:
     group (if any) this device is currently in."""
     flat["_vpn_other_subnets"] = []
     flat["_vpn_hub_ip"] = ""
+    flat["_vpn_hub_subnet"] = _HUB_SUBNET_DEFAULT
     flat["_vpn_in_group"] = False
     if not devices_db:
         return
     hub = _hub_load(_hub_path(devices_db))
     hub.setdefault("subnet", _HUB_SUBNET_DEFAULT)
     flat["_vpn_hub_ip"] = _hub_tunnel_ip(hub)
+    flat["_vpn_hub_subnet"] = hub["subnet"]
     role, info = _vpn_group_info(hub, name)
     others: set = set()
     if role == "main":

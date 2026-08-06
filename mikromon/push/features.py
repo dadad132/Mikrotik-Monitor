@@ -1973,21 +1973,68 @@ def _vpn_firewall_ops(pusher, iface: str) -> list:
     return ops
 
 
+def _vpn_hub_peer_ops(pusher, hub_subnet: str, other_subnets: list) -> list:
+    """The router's OWN WireGuard peer entry FOR THE HUB (tagged
+    "mikromon:tunnel:hub", created by Provision) restricts which SOURCE
+    addresses it accepts decrypted traffic from via its allowed-address
+    field — by default just the hub's own tunnel pool (e.g. 10.10.0.0/16).
+    That's enough for the router's own dial-home traffic, but a reply (or
+    any packet) arriving via a site-to-site VPN link has an inner source
+    address on a REMOTE router's LAN, not a tunnel address — WireGuard
+    silently drops it unless that subnet is ALSO in this peer's
+    allowed-address. Routes and the forward-chain firewall rule alone are
+    NOT enough; this is the piece that actually makes cross-site ping
+    work — without it you get an immediate "host unreachable", not a
+    timeout, since WireGuard itself refuses the packet rather than routing
+    even getting a chance to drop it. Reverts to just `hub_subnet` alone
+    when `other_subnets` is empty (not in a group, or just left one)."""
+    peers = _safe_fetch(pusher.api, _HUB_PEERS)
+    peer = next((p for p in peers
+                if str(p.get("comment", "")).startswith(_HUB_TAG)), None)
+    if peer is None:
+        return []  # not provisioned for the tunnel — nothing to extend
+    desired_set = {hub_subnet} | set(other_subnets)
+    current_allowed = str(peer.get("allowed-address", "")).strip()
+    current_set = {a.strip() for a in current_allowed.split(",") if a.strip()}
+    if current_set == desired_set:
+        return []
+    desired_str = ", ".join(sorted(desired_set))
+    extra = sorted(other_subnets)
+    extra_desc = (", ".join(extra) if extra
+                 else "(no other sites — reverting to just the hub pool)")
+    return [Operation(
+        "set", _HUB_PEERS,
+        {".id": peer[".id"], "allowed-address": desired_str},
+        desc=f"extend the hub peer's allowed-address to also accept "
+             f"{extra_desc} — otherwise WireGuard silently drops "
+             f"site-to-site VPN traffic sourced from those subnets",
+        inverse=Operation(
+            "set", _HUB_PEERS,
+            {".id": peer[".id"], "allowed-address": current_allowed},
+            desc="revert the hub peer's allowed-address"))]
+
+
 def tunnel_plan(pusher, cfg, flat, multi):
     """Push (or remove) static routes so this router can reach every other
-    site in its VPN group through the hub, plus the forward-chain firewall
-    rule that actually lets that traffic pass (see _vpn_firewall_ops).
-    web.py's _prep_vpn_group injects flat["_vpn_other_subnets"] (every OTHER
-    site's subnet in this router's own group, from hub.json),
-    flat["_vpn_hub_ip"] (the gateway to use — the hub's own tunnel address)
-    and flat["_vpn_in_group"] before calling this; flat["_vpn_error"] is set
-    instead if a submitted subnet conflicted with another site or the tunnel
-    network (surfaced via a dedicated grouping action, not this form, but
-    tunnel_plan still checks it defensively)."""
+    site in its VPN group through the hub, the forward-chain firewall rule
+    that actually lets that traffic pass (_vpn_firewall_ops), and the
+    matching expansion of the router's OWN hub-peer allowed-address
+    (_vpn_hub_peer_ops) — routes and the firewall rule alone are not
+    enough; WireGuard itself will otherwise silently drop inbound traffic
+    sourced from a remote site's LAN. web.py's _prep_vpn_group injects
+    flat["_vpn_other_subnets"] (every OTHER site's subnet in this router's
+    own group, from hub.json), flat["_vpn_hub_ip"] (the gateway to use —
+    the hub's own tunnel address), flat["_vpn_hub_subnet"] (the hub's whole
+    tunnel pool, e.g. 10.10.0.0/16) and flat["_vpn_in_group"] before
+    calling this; flat["_vpn_error"] is set instead if a submitted subnet
+    conflicted with another site or the tunnel network (surfaced via a
+    dedicated grouping action, not this form, but tunnel_plan still checks
+    it defensively)."""
     if flat.get("_vpn_error"):
         raise PushError(flat["_vpn_error"])
     in_group = bool(flat.get("_vpn_in_group"))
     hub_ip = flat.get("_vpn_hub_ip") or ""
+    hub_subnet = flat.get("_vpn_hub_subnet") or "10.10.0.0/16"
     other_subnets = flat.get("_vpn_other_subnets") or []
     current_routes = _safe_fetch(pusher.api, _ROUTE)
     desired = ([{"dst-address": subnet, "gateway": hub_ip}
@@ -1998,6 +2045,8 @@ def tunnel_plan(pusher, cfg, flat, multi):
                          label="VPN site route")
     iface = _vpn_wg_iface_name(pusher) if in_group else ""
     ops += _vpn_firewall_ops(pusher, iface)
+    ops += _vpn_hub_peer_ops(pusher, hub_subnet,
+                             other_subnets if in_group else [])
     return Plan(cfg.name, ops,
                summary=f"vpn: {len(other_subnets)} site route(s)"
                        if in_group else "vpn (not part of a group)")

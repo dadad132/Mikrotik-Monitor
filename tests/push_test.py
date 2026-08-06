@@ -1406,6 +1406,70 @@ check("no WireGuard interface found -> no forward-rule ops attempted "
       not any(o.path == FW for o in no_iface_plan.ops)
       and any(o.path == ("ip", "route") for o in no_iface_plan.ops))
 
+# The router's OWN hub-peer allowed-address must ALSO be extended to every
+# other site's subnet — the fix for the actual root cause found live: a
+# route + firewall rule alone are not enough, because WireGuard itself
+# silently drops decrypted traffic whose inner source isn't covered by the
+# receiving peer's allowed-address (fixed by default to just the hub's own
+# tunnel pool, e.g. 10.10.0.0/16 — never a remote site's LAN subnet).
+t_peer_api = FakeApi({
+    ("ip", "route"): [],
+    WG: [{"name": "mikromon", "comment": "mikromon:tunnel:if"}],
+    WGP: [{".id": "*p1", "comment": "mikromon:tunnel:hub",
+          "allowed-address": "10.10.0.0/16"}],
+})
+t_peer_pusher = Pusher(t_cfg, t_peer_api, dry_run=True)
+peer_plan = F.tunnel_plan(t_peer_pusher, t_cfg, in_group_flat, {})
+peer_sets = [o for o in peer_plan.ops if o.path == WGP and o.action == "set"]
+check("being in a group extends the hub peer's allowed-address to include "
+      "every other site's subnet", len(peer_sets) == 1
+      and peer_sets[0].params.get("allowed-address") ==
+          "10.10.0.0/16, 192.168.2.0/24, 192.168.3.0/24")
+check("the hub peer .id is targeted correctly (not a blind update)",
+      peer_sets[0].params.get(".id") == "*p1")
+
+# idempotent: already extended (any order/spacing) -> no-op
+t_peer_api2 = FakeApi({
+    ("ip", "route"): [
+        {".id": "*1", "dst-address": "192.168.2.0/24", "gateway": "10.10.0.1",
+         "comment": _VPN_ROUTE_TAG},
+        {".id": "*2", "dst-address": "192.168.3.0/24", "gateway": "10.10.0.1",
+         "comment": _VPN_ROUTE_TAG},
+    ],
+    WG: [{"name": "mikromon", "comment": "mikromon:tunnel:if"}],
+    FW: [
+        {".id": "*10", "chain": "forward", "in-interface": "mikromon",
+         "action": "accept", "comment": _VPN_FW_TAG + "in"},
+        {".id": "*11", "chain": "forward", "out-interface": "mikromon",
+         "action": "accept", "comment": _VPN_FW_TAG + "out"},
+    ],
+    WGP: [{".id": "*p1", "comment": "mikromon:tunnel:hub",
+          "allowed-address": "192.168.3.0/24,10.10.0.0/16,192.168.2.0/24"}],
+})
+t_peer_pusher2 = Pusher(t_cfg, t_peer_api2, dry_run=True)
+check("re-applying with the hub peer already correctly extended (different "
+      "order/spacing) is a total no-op",
+      F.tunnel_plan(t_peer_pusher2, t_cfg, in_group_flat, {}).empty)
+
+# leaving the group reverts the hub peer back to JUST the hub's own pool
+leave_peer_plan = F.tunnel_plan(t_peer_pusher2, t_cfg, not_grouped_flat, {})
+leave_peer_sets = [o for o in leave_peer_plan.ops
+                  if o.path == WGP and o.action == "set"]
+check("leaving the group reverts the hub peer's allowed-address to just "
+      "the hub pool, dropping the other sites' subnets",
+      len(leave_peer_sets) == 1
+      and leave_peer_sets[0].params.get("allowed-address") == "10.10.0.0/16")
+
+# no hub peer configured at all (e.g. router never provisioned for the
+# tunnel) -> nothing to extend, no crash
+t_peer_api3 = FakeApi({("ip", "route"): [],
+                       WG: [{"name": "mikromon",
+                            "comment": "mikromon:tunnel:if"}]})
+t_peer_pusher3 = Pusher(t_cfg, t_peer_api3, dry_run=True)
+no_peer_plan = F.tunnel_plan(t_peer_pusher3, t_cfg, in_group_flat, {})
+check("no hub peer configured -> no allowed-address ops attempted, no crash",
+      not any(o.path == WGP for o in no_peer_plan.ops))
+
 # web.py's grouping actions validate subnet conflicts before ever writing to
 # hub.json, but tunnel_plan still refuses defensively if _vpn_error is set.
 err_flat = {"_vpn_in_group": True,
