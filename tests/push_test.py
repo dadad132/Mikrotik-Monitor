@@ -1470,6 +1470,33 @@ no_peer_plan = F.tunnel_plan(t_peer_pusher3, t_cfg, in_group_flat, {})
 check("no hub peer configured -> no allowed-address ops attempted, no crash",
       not any(o.path == WGP for o in no_peer_plan.ops))
 
+# hub_endpoint_ops: for migrating the hub to a new server/IP (or a DDNS
+# hostname) without re-provisioning every router by hand — updates ONLY
+# endpoint-address/endpoint-port on the router's own hub-peer entry, never
+# touching allowed-address (so it never undoes a VPN-group extension).
+hep_api = FakeApi({
+    WGP: [{".id": "*h1", "comment": "mikromon:tunnel:hub",
+          "endpoint-address": "203.0.113.9", "endpoint-port": "51820",
+          "allowed-address": "10.10.0.0/16, 192.168.2.0/24"}],
+})
+hep_plan = F.hub_endpoint_ops(Pusher(t_cfg, hep_api, dry_run=True),
+                              "new.hub.example.com", "51821")
+check("moving the hub updates endpoint-address and endpoint-port",
+      len(hep_plan) == 1
+      and hep_plan[0].params.get("endpoint-address") == "new.hub.example.com"
+      and hep_plan[0].params.get("endpoint-port") == "51821")
+check("moving the hub never touches allowed-address (would undo a VPN-"
+      "group extension)", "allowed-address" not in hep_plan[0].params)
+
+check("already pointed at the requested endpoint -> no-op",
+      F.hub_endpoint_ops(Pusher(t_cfg, hep_api, dry_run=True),
+                         "203.0.113.9", "51820") == [])
+
+hep_api_none = FakeApi({WGP: []})
+check("no hub peer configured -> no ops, no crash",
+      F.hub_endpoint_ops(Pusher(t_cfg, hep_api_none, dry_run=True),
+                         "new.hub.example.com", "51821") == [])
+
 # web.py's grouping actions validate subnet conflicts before ever writing to
 # hub.json, but tunnel_plan still refuses defensively if _vpn_error is set.
 err_flat = {"_vpn_in_group": True,

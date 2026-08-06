@@ -2014,6 +2014,36 @@ def _vpn_hub_peer_ops(pusher, hub_subnet: str, other_subnets: list) -> list:
             desc="revert the hub peer's allowed-address"))]
 
 
+def hub_endpoint_ops(pusher, endpoint: str, port: str) -> list:
+    """Update the router's OWN hub-peer entry's endpoint-address/
+    endpoint-port only — for migrating the hub to a new server/IP (or
+    adopting a DDNS hostname) without re-provisioning every router by
+    hand. Deliberately leaves allowed-address untouched (see
+    _vpn_hub_peer_ops) so this never undoes a router's VPN-group
+    extensions. No-op if the router has no hub peer at all, or already
+    matches."""
+    peers = _safe_fetch(pusher.api, _HUB_PEERS)
+    peer = next((p for p in peers
+                if str(p.get("comment", "")).startswith(_HUB_TAG)), None)
+    if peer is None:
+        return []
+    cur_endpoint = str(peer.get("endpoint-address", "")).strip()
+    cur_port = str(peer.get("endpoint-port", "")).strip()
+    if cur_endpoint == endpoint and cur_port == str(port):
+        return []
+    return [Operation(
+        "set", _HUB_PEERS,
+        {".id": peer[".id"], "endpoint-address": endpoint,
+         "endpoint-port": str(port)},
+        desc=f"point the hub peer at {endpoint}:{port} (was "
+             f"{cur_endpoint or '?'}:{cur_port or '?'})",
+        inverse=Operation(
+            "set", _HUB_PEERS,
+            {".id": peer[".id"], "endpoint-address": cur_endpoint,
+             "endpoint-port": cur_port},
+            desc="revert the hub peer's endpoint"))]
+
+
 def tunnel_plan(pusher, cfg, flat, multi):
     """Push (or remove) static routes so this router can reach every other
     site in its VPN group through the hub, the forward-chain firewall rule

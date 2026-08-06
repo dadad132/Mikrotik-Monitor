@@ -548,9 +548,43 @@ def _billing_contact_box(contact, csrf) -> str:
         f'</form></div>')
 
 
+def _hub_endpoint_box(hub_ip, hub_port, router_count, csrf) -> str:
+    """Superadmin setting: the address every router dials home to. Lets you
+    migrate the hub to a new server (or switch to a DDNS hostname) without
+    re-provisioning every router by hand — saves the new default for
+    future provisions, and can optionally push it out to every already-
+    registered router right now."""
+    return (
+        f'<div class="box"><h2>Hub endpoint</h2>'
+        f'<p class="muted">The address every router dials home to (its '
+        f'own WireGuard peer entry for this server). Changing this alone '
+        f'only affects NEW provisions — tick "push to every router now" '
+        f'to also update the {router_count} already-registered router(s), '
+        f'so a server move or a switch to a DDNS hostname doesn\'t need '
+        f're-provisioning anything.</p>'
+        f'<form method="POST" action="/superadmin/hub-endpoint">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">'
+        f'<label>Hostname or IP<br><input name="hub_ip" value="{esc(hub_ip)}" '
+        f'placeholder="hub.yourdomain.com" style="width:100%"></label>'
+        f'<label>Port<br><input name="hub_port" value="{esc(hub_port)}" '
+        f'placeholder="51820" style="width:100%"></label>'
+        f'</div>'
+        f'<label class="chk" style="display:block;margin-top:8px">'
+        f'<input type="checkbox" name="push_now" value="1"> Push to every '
+        f'already-registered router now (best-effort — an unreachable '
+        f'router is skipped, not blocking; save again later to retry it)'
+        f'</label>'
+        f'<div style="margin-top:10px"><button class="btn" type="submit">'
+        f'Save</button></div>'
+        f'</form></div>')
+
+
 def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        msg: str = "", error: str = "", smtp=None,
-                       billing_on: bool = False, billing_contact=None) -> str:
+                       billing_on: bool = False, billing_contact=None,
+                       hub_ip: str = "", hub_port: str = "",
+                       router_count: int = 0) -> str:
     """Platform superadmin panel — shows all orgs, billing status, and device counts."""
     note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
            (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
@@ -708,6 +742,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
     inner = (f'<div class="wrap"><h1>Platform admin</h1>{note}{tiles}{table}'
              f'{_smtp_settings_box(smtp, csrf)}'
              f'{_billing_contact_box(billing_contact, csrf)}'
+             f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf)}'
              f'{diagnostics_box}{backup_box}</div>')
     return _page("Platform Admin", _header(user, "/superadmin") + inner)
 

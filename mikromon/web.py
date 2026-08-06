@@ -4400,12 +4400,20 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             from .backup import list_backups
             backups = list_backups(backups_dir)
             smtp_settings = auth.get_smtp() if auth else None
+            hub_ip = hub_port = ""
+            router_count = 0
+            if devices_db:
+                hub_for_sa = _hub_load(_hub_path(devices_db))
+                hub_ip = hub_for_sa.get("hub_ip", "")
+                hub_port = str(hub_for_sa.get("listen_port", "") or "51820")
+                router_count = len(hub_for_sa.get("leases_meta") or {})
             return self._send(200, _render_superadmin(
                 user, rows, backups, self._session()["csrf"],
                 msg=q.get("ok", [""])[0],
                 error=q.get("error", [""])[0],
                 smtp=smtp_settings, billing_on=billing is not None,
-                billing_contact=auth.get_billing_contact() if auth else None),
+                billing_contact=auth.get_billing_contact() if auth else None,
+                hub_ip=hub_ip, hub_port=hub_port, router_count=router_count),
                 "text/html; charset=utf-8")
 
         def _backup_paths(self):
@@ -4533,6 +4541,42 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             auth.set_billing_contact(cfg)
             return self._redirect("/superadmin?ok=" +
                                   quote("Billing contact saved."))
+
+        def _post_superadmin_hub_endpoint(self, user):
+            """Superadmin-only: change the address every router dials home
+            to (for migrating the hub server, or switching to a DDNS
+            hostname) — saves it as the default for future provisions, and
+            optionally pushes it out to every already-registered router
+            right now (see _push_hub_endpoint_to)."""
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if not devices_db:
+                return self._redirect("/superadmin?error=" +
+                                      quote("Device management is not enabled."))
+            hub_ip = (flat.get("hub_ip") or "").strip()
+            hub_port = (flat.get("hub_port") or "").strip() or "51820"
+            if not hub_ip:
+                return self._redirect("/superadmin?error=" +
+                                      quote("Hostname or IP cannot be empty."))
+            hub_file = _hub_path(devices_db)
+            hub = _hub_load(hub_file)
+            hub["hub_ip"] = hub_ip
+            hub["listen_port"] = hub_port
+            _hub_save(hub_file, hub)
+            msg = f"Hub endpoint set to {hub_ip}:{hub_port} for future provisions."
+            if flat.get("push_now") == "1":
+                names = list((hub.get("leases_meta") or {}).keys())
+                errors = self._push_hub_endpoint_to(names, hub_ip, hub_port, user)
+                ok_count = len(names) - len(errors)
+                msg += (f" Pushed to {ok_count}/{len(names)} already-"
+                       f"registered router(s).")
+                if errors:
+                    msg += " Failed: " + "; ".join(errors)
+            return self._redirect("/superadmin?ok=" + quote(msg))
 
         def _post_superadmin_backup_create(self, user):
             """Superadmin-only: build a new backup archive (config, every
@@ -5881,6 +5925,62 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         audit.close()
             return errors
 
+        def _push_hub_endpoint_to(self, names, endpoint, port, user) -> list:
+            """Push a new hub endpoint-address/port to every already-
+            provisioned router in `names` — for migrating the hub to a new
+            server/IP (or adopting a DDNS hostname) without re-provisioning
+            each router by hand. Same bounded-reachability pattern as
+            _push_vpn_routes_to so one offline router can't hang the whole
+            operation; best-effort, returns "name: error" strings for
+            whichever ones failed."""
+            from .config import build_device
+            from .device import DeviceError
+            from .push import Pusher, PushError, hub_endpoint_ops, rw_device
+            from .push.api import PushApi
+
+            uname = (user or {}).get("login", "")
+            errors = []
+            for name in names:
+                raw = self._device_raw(name)
+                if raw is None:
+                    errors.append(f"{name}: not found")
+                    continue
+                cfg = build_device(raw, defaults)
+                audit = self._auditlog()
+                dev = rw_device(cfg)
+                try:
+                    if not dev.reachable():
+                        errors.append(f"{name}: router unreachable — "
+                                      f"endpoint not updated")
+                        continue
+                    api = PushApi(dev)
+                    pusher = Pusher(cfg, api, dry_run=False, audit=audit,
+                                    user=uname)
+                    try:
+                        api.connect()
+                        ops = hub_endpoint_ops(pusher, endpoint, port)
+                    except (DeviceError, PushError) as exc:
+                        if audit:
+                            audit.append(name, uname, "hubtunnel", "apply",
+                                         "error",
+                                         f"hub endpoint update failed: {exc}",
+                                         str(exc))
+                        errors.append(f"{name}: {exc}")
+                        continue
+                    if ops:
+                        from .push.plan import Plan
+                        try:
+                            pusher.apply(Plan(cfg.name, ops,
+                                              summary="hub endpoint update"),
+                                        feature="hubtunnel")
+                        except PushError as exc:
+                            errors.append(f"{name}: {exc}")
+                finally:
+                    dev.close()
+                    if audit:
+                        audit.close()
+            return errors
+
         def _device_vpn_make_main_post(self, flat, user):
             """Make this router the main VPN host: connect live and detect
             its own LAN subnet, register it in hub.json, then push routes
@@ -6344,6 +6444,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_smtp(user)
             if path == "/superadmin/billing-contact":
                 return self._post_superadmin_billing_contact(user)
+            if path == "/superadmin/hub-endpoint":
+                return self._post_superadmin_hub_endpoint(user)
             # Everything below requires a logged-in user + a valid CSRF token.
             if not user:
                 return self._send(403, "forbidden")

@@ -287,6 +287,13 @@ try:
     except urllib.error.HTTPError as e:
         check("member blocked from diagnostics download (403)", e.code == 403)
 
+    print("  hub endpoint (no devices_db configured on this server):")
+    st, body = req(op_founder, "/superadmin/hub-endpoint",
+                   {"csrf": sa_csrf, "hub_ip": "hub.example.com",
+                    "hub_port": "51820"}, B0)
+    check("a clear error when device management isn't enabled here, not a "
+          "500", "Device management is not enabled" in body)
+
     print("  path-traversal protection:")
     for bad_name in ("../../etc/passwd", "/etc/passwd", "sub/dir.tar.gz"):
         try:

@@ -1088,6 +1088,31 @@ try:
     ds_orgb_cleanup = DevicesStore(wdb)
     ds_orgb_cleanup.delete("OrgB-Router")
     ds_orgb_cleanup.close()
+    # --- Superadmin: "Hub endpoint" — migrate the hub to a new server/IP
+    # (or a DDNS hostname) without re-provisioning every router by hand ---
+    st, _ = post(nobody, "/superadmin/hub-endpoint",
+                {"csrf": bcsrf, "hub_ip": "hub.example.com", "hub_port": "51820"})
+    check("non-superadmin blocked from changing the hub endpoint (403)",
+          st == 403)
+    st, body = post(admin, "/superadmin/hub-endpoint",
+                    {"csrf": csrf, "hub_ip": "", "hub_port": "51820"})
+    check("empty hostname/IP is rejected", "cannot be empty" in body)
+    st, body = post(admin, "/superadmin/hub-endpoint",
+                    {"csrf": csrf, "hub_ip": "hub.example.com",
+                     "hub_port": "51820"})
+    check("saving a new hub endpoint (no push) succeeds",
+          "Hub endpoint set to hub.example.com:51820" in body)
+    hub_after_endpoint = web._hub_load(web._hub_path(wdb))
+    check("the new endpoint is persisted to hub.json for future provisions",
+          hub_after_endpoint.get("hub_ip") == "hub.example.com"
+          and hub_after_endpoint.get("listen_port") == "51820")
+    st, body = post(admin, "/superadmin/hub-endpoint",
+                    {"csrf": csrf, "hub_ip": "hub2.example.com",
+                     "hub_port": "51820", "push_now": "1"})
+    check("push_now attempts (and reports on) every already-registered "
+          "router — WebR1's host is unreachable, so this also proves the "
+          "bounded probe kicks in here too (no hang for the full connect "
+          "timeout)", "Pushed to 0/1" in body and "unreachable" in body)
     st, _ = post(nobody, "/device/push",
                  {"csrf": bcsrf, "device": "WebR1", "feature": "security"})
     check("unallocated member blocked from pushing config (403)", st == 403)

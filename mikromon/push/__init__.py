@@ -17,11 +17,12 @@ Safety model:
 """
 from .audit import AuditLog
 from .features import (FEATURES, TAB_SLUGS, adopt_plan, device_offboard,
-                       provision_apply, wireguard_repair)
+                       hub_endpoint_ops, provision_apply, wireguard_repair)
 from .plan import Operation, Plan
 from .reconcile import reconcile_list
 from .runner import Pusher, PushError, rw_device
 
 __all__ = ["Operation", "Plan", "reconcile_list", "Pusher", "PushError",
            "rw_device", "AuditLog", "FEATURES", "TAB_SLUGS", "adopt_plan",
-           "device_offboard", "provision_apply", "wireguard_repair"]
+           "device_offboard", "hub_endpoint_ops", "provision_apply",
+           "wireguard_repair"]
