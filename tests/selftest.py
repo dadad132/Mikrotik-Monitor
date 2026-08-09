@@ -303,6 +303,50 @@ check("the SAME case-insensitively-matched route reported down is "
       "correctly alerted",
       keys(a) == ["wan_link:1"] and "Backup" in a[0].title)
 
+print("WAN failover: the PRIMARY link's own route matched via RouterOS's "
+      "immediate-gw field (\"<gateway-ip>%<interface>\"), not just "
+      "gateway-status text (confirmed live: a genuinely-up, traffic-"
+      "carrying primary was reported as failed-over to a garbled "
+      "\"<ip>%<interface>\" backup name, because gateway-status had no "
+      "\"via <iface>\" text AND the route was plain/unmanaged/no DHCP "
+      "entry — the immediate-gw fallback existed but returned the whole "
+      "raw zone-id string instead of just the interface part, so it could "
+      "never match the configured link):")
+dev9 = mkdev("TestRouter9", wan=WanConfig(links=[
+    WanEndpoint(interface="ether1-internet", gateway="", name="ZWN 1"),
+    WanEndpoint(interface="ether1-backup", gateway="", name="ZWN 2"),
+]))
+primary_immediate_gw_only = {"route": [
+    # No "via <iface>" text, no managed/name comment, and (deliberately)
+    # no dhcp_client entry for this interface at all — the ONLY thing that
+    # can identify this as the primary link is immediate-gw.
+    {"dst-address": "0.0.0.0/0", "gateway": "192.168.63.1", "distance": "1",
+     "active": "true", "gateway-status": "192.168.63.1 reachable",
+     "immediate-gw": "192.168.63.1%ether1-internet"},
+    {"dst-address": "0.0.0.0/0", "gateway": "10.9.9.9", "distance": "2",
+     "active": "true", "gateway-status": "10.9.9.9 reachable via ether1-backup"},
+]}
+a = run(WanCheck(), primary_immediate_gw_only, dev9, store)
+check("a genuinely-up PRIMARY found only via immediate-gw raises no false "
+      "failover alert", a == [])
+
+primary_immediate_gw_down = {"route": [
+    {"dst-address": "0.0.0.0/0", "gateway": "192.168.63.1", "distance": "1",
+     "active": "false", "gateway-status": "192.168.63.1 unreachable",
+     "immediate-gw": "192.168.63.1%ether1-internet"},
+    primary_immediate_gw_only["route"][1],
+]}
+a = run(WanCheck(), primary_immediate_gw_down, dev9, store)
+check("the SAME primary actually failing over is still correctly "
+      "detected, not masked by the immediate-gw fallback assuming it's "
+      "always fine",
+      keys(a) == ["wan_failover"]
+      and "ZWN 1" in a[0].title and "ZWN 2" in a[0].title
+      # The garbled raw zone-id string must never leak into a human-facing
+      # alert title — this is the same _iface_of() fix, applied to the
+      # NOW-current backup link's own name, not a raw route field.
+      and "%" not in a[0].title)
+
 print("WAN check: stale wan_failover/wan_link conditions clear instead of "
       "freezing forever (confirmed live: a device with WAN-failover "
       "monitoring turned off kept showing every uplink permanently offline "

@@ -54,7 +54,18 @@ def _iface_of(route: dict) -> str:
     m = re.search(r"via\s+(\S+)", str(route.get("gateway-status", "")))
     if m:
         return m.group(1)
-    return str(route.get("immediate-gw", "") or route.get("gateway", ""))
+    # immediate-gw is RouterOS's own "<gateway-ip>%<interface>" zone-id
+    # format — split it the same way. Confirmed live: returning it whole
+    # (the old behavior) meant this never matched a configured link's
+    # interface name, so a router whose gateway-status lacks "via <iface>"
+    # text (a real, seen-in-the-wild RouterOS quirk this fallback exists
+    # for) fell all the way through to reporting the PRIMARY link as
+    # failed-over — even while it was genuinely up and carrying traffic —
+    # and leaked the raw "<ip>%<iface>" string into the alert title.
+    immediate = str(route.get("immediate-gw", "") or "")
+    if "%" in immediate:
+        return immediate.rsplit("%", 1)[1]
+    return immediate or str(route.get("gateway", ""))
 
 
 def _label(route: dict) -> str:
