@@ -2474,6 +2474,99 @@ check("the PPP client's default-route-distance, when set, is always the "
       all(o.params["default-route-distance"] == "10" for o in ppp_dist_ops))
 
 
+print("nextdns_cloud_ops/nextdns_cloud_read/nextdns_cloud_form/nextdns_cloud_plan "
+      "(NextDNS tab — real NextDNS.io cloud profile per router, distinct from "
+      "the unrelated 'nextdns' local DNS-filter feature above):")
+_NDRES = ("system", "resource")
+DNS = ("ip", "dns")
+nd_cfg = types.SimpleNamespace(name="R1", nextdns_enabled=False, nextdns_profile_id="")
+
+# nextdns_cloud_ops: enabling with a profile id sets use-doh-server + verify-doh-cert.
+nd_api = FakeApi({_NDRES: [{"version": "7.14.3"}], DNS: [{".id": "*1"}]})
+nd_pusher = Pusher(nd_cfg, nd_api, dry_run=True)
+enable_plan = F.nextdns_cloud_ops(nd_pusher, "abc123")
+check("enabling sets use-doh-server to this router's own NextDNS profile URL",
+      any(o.params.get("use-doh-server") == "https://dns.nextdns.io/abc123"
+          for o in enable_plan.ops))
+check("enabling also turns on verify-doh-cert",
+      any(o.params.get("verify-doh-cert") == "yes" for o in enable_plan.ops))
+
+# Disabling (empty profile_id) clears use-doh-server, touches nothing else.
+nd_api2 = FakeApi({_NDRES: [{"version": "7.14.3"}],
+                   DNS: [{".id": "*1", "use-doh-server":
+                          "https://dns.nextdns.io/abc123"}]})
+disable_plan = F.nextdns_cloud_ops(Pusher(nd_cfg, nd_api2, dry_run=True), "")
+check("disabling clears use-doh-server",
+      any(o.params.get("use-doh-server") == "" for o in disable_plan.ops)
+      and not any("verify-doh-cert" in o.params for o in disable_plan.ops))
+
+# Already in the desired state -> no ops (idempotent).
+nd_api3 = FakeApi({_NDRES: [{"version": "7.14.3"}],
+                   DNS: [{".id": "*1", "use-doh-server":
+                          "https://dns.nextdns.io/abc123",
+                          "verify-doh-cert": "yes"}]})
+check("already-enabled router with the same profile -> empty plan",
+      F.nextdns_cloud_ops(Pusher(nd_cfg, nd_api3, dry_run=True), "abc123").empty)
+
+# RouterOS version gate: DoH needs 7.1+; older firmware -> no attempt at all
+# (there's no way to get a per-router NextDNS profile working without DoH).
+nd_api_old = FakeApi({_NDRES: [{"version": "6.49.10"}], DNS: [{".id": "*1"}]})
+old_plan = F.nextdns_cloud_ops(Pusher(nd_cfg, nd_api_old, dry_run=True), "abc123")
+check("RouterOS 6.x (no DoH support) -> empty plan instead of a doomed set",
+      old_plan.empty)
+check("unsupported RouterOS is reflected in the plan's own summary",
+      "7.1" in old_plan.summary)
+# ... but clearing (disabling) an old-firmware router's DoH still works —
+# there's nothing version-gated about clearing a field that's already set.
+nd_api_old_set = FakeApi({_NDRES: [{"version": "6.49.10"}],
+                          DNS: [{".id": "*1", "use-doh-server":
+                                 "https://dns.nextdns.io/abc123"}]})
+old_clear = F.nextdns_cloud_ops(Pusher(nd_cfg, nd_api_old_set, dry_run=True), "")
+check("clearing an already-set use-doh-server still works even on RouterOS 6.x",
+      any(o.params.get("use-doh-server") == "" for o in old_clear.ops))
+
+# nextdns_cloud_read: reports version support + the live use-doh-server value.
+nd_read_current = F.nextdns_cloud_read(
+    Pusher(nd_cfg, FakeApi({_NDRES: [{"version": "7.14.3"}],
+                           DNS: [{".id": "*1", "use-doh-server":
+                                  "https://dns.nextdns.io/xyz789"}]}),
+          dry_run=True), nd_cfg)
+check("nextdns_cloud_read reports DoH support on 7.x",
+      nd_read_current["supported"] is True)
+check("nextdns_cloud_read surfaces the router's live use-doh-server value",
+      nd_read_current["use_doh_server"] == "https://dns.nextdns.io/xyz789")
+
+# nextdns_cloud_form: static status fields only (no submit — see _nextdns_box
+# in web.py for the actual enable/disable buttons, same pattern as tunnel_form).
+unsupported_fields = F.nextdns_cloud_form(
+    {"supported": False, "version": "6.49.10"}, nd_cfg)
+check("form flags unsupported RouterOS with the 7.1+ requirement",
+      any("7.1" in f.get("value", "") for f in unsupported_fields))
+not_enabled_fields = F.nextdns_cloud_form({"supported": True, "use_doh_server": ""}, nd_cfg)
+check("form reports 'not enabled' when cfg has no profile",
+      any("Not enabled" in f.get("value", "") for f in not_enabled_fields))
+nd_cfg_on = types.SimpleNamespace(name="R1", nextdns_enabled=True,
+                                  nextdns_profile_id="abc123")
+pushed_fields = F.nextdns_cloud_form(
+    {"supported": True, "use_doh_server": "https://dns.nextdns.io/abc123"}, nd_cfg_on)
+check("form reports 'pushed to the router' when the live value matches cfg",
+      any("pushed to the router" in f.get("value", "") for f in pushed_fields))
+drifted_fields = F.nextdns_cloud_form(
+    {"supported": True, "use_doh_server": ""}, nd_cfg_on)
+check("form flags drift when cfg says enabled but the router disagrees",
+      any("not yet pushed" in f.get("value", "") for f in drifted_fields))
+
+# nextdns_cloud_plan (the FEATURES["nextdns_svc"]["plan"] entry, reached only
+# via a direct POST to /device/push — the tab itself has no such form): just
+# reflects cfg's own enabled/profile_id state onto the router.
+reflect_plan = F.nextdns_cloud_plan(
+    Pusher(nd_cfg_on, FakeApi({_NDRES: [{"version": "7.14.3"}], DNS: [{".id": "*1"}]}),
+          dry_run=True),
+    nd_cfg_on, {}, {})
+check("nextdns_cloud_plan pushes cfg.nextdns_profile_id when cfg says enabled",
+      any(o.params.get("use-doh-server") == "https://dns.nextdns.io/abc123"
+          for o in reflect_plan.ops))
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

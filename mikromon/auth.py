@@ -472,6 +472,21 @@ class AuthStore:
         self.set_setting("superadmin_bootstrap_email",
                          _norm_email(email) if email else "")
 
+    def get_nextdns(self) -> dict:
+        """Platform-wide NextDNS.io API credentials, set once by a
+        superadmin (Platform admin -> NextDNS) and used to auto-create a
+        separate NextDNS profile per router (see mikromon/nextdns.py and
+        push/features.py's nextdns_cloud_ops). `api_key` authenticates every
+        call; `template_profile` (optional) is an existing profile id whose
+        blocklist/security/privacy settings new profiles are cloned from, so
+        routers don't start from a blank NextDNS config. {} if never
+        configured."""
+        d = self.get_setting("nextdns")
+        return d if isinstance(d, dict) else {}
+
+    def set_nextdns(self, cfg: dict) -> None:
+        self.set_setting("nextdns", cfg)
+
     def set_billing_contact(self, cfg: dict) -> None:
         self.set_setting("billing_contact", cfg)
 

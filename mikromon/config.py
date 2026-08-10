@@ -138,6 +138,13 @@ class DeviceConfig:
     traffic_interfaces: list = field(default_factory=list)
     checks: dict = field(default_factory=lambda: dict(DEFAULT_CHECKS))
     thresholds: dict = field(default_factory=lambda: dict(DEFAULT_THRESHOLDS))
+    # This router's own NextDNS.io cloud profile (separate blocklists/
+    # allowlists/query-logs per router, not one shared globally) — see
+    # mikromon/nextdns.py and push/features.py's nextdns_cloud_ops().
+    # profile_id is set by mikromon itself (auto-created via the NextDNS
+    # API), never hand-typed.
+    nextdns_enabled: bool = False
+    nextdns_profile_id: str = ""
 
     def check_enabled(self, name: str) -> bool:
         return bool(self.checks.get(name, DEFAULT_CHECKS.get(name, False)))
@@ -326,6 +333,8 @@ def build_device(d: dict, defaults: dict, where: str = "device") -> DeviceConfig
         traffic_interfaces=[str(x) for x in (d.get("traffic_interfaces") or [])],
         checks={**DEFAULT_CHECKS, **(d.get("checks") or {})},
         thresholds={**defaults, **(d.get("thresholds") or {})},
+        nextdns_enabled=bool(d.get("nextdns_enabled", False)),
+        nextdns_profile_id=str(d.get("nextdns_profile_id", "") or ""),
     )
 
 
@@ -352,4 +361,6 @@ def device_to_dict(cfg: DeviceConfig) -> dict:
         "checks": {k: v for k, v in cfg.checks.items()
                    if v != DEFAULT_CHECKS.get(k)},
         "thresholds": dict(cfg.thresholds),
+        "nextdns_enabled": cfg.nextdns_enabled,
+        "nextdns_profile_id": cfg.nextdns_profile_id,
     }

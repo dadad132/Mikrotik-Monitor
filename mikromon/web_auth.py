@@ -605,6 +605,43 @@ def _regions_box(regions, csrf) -> str:
         f'</form></div>')
 
 
+def _nextdns_settings_box(nextdns, csrf) -> str:
+    """Superadmin setting: the platform's NextDNS.io API key, used to
+    auto-create a separate NextDNS profile per router (each company's
+    routers get their own blocklists/allowlists/query-logs, not one shared
+    globally) — see mikromon/nextdns.py. The optional template profile id
+    is an existing NextDNS profile whose settings new profiles are cloned
+    from, so routers don't start from a blank NextDNS config."""
+    n = nextdns or {}
+    has_key = "•••••• (saved)" if n.get("api_key") else ""
+    return (
+        f'<div class="box"><h2>NextDNS</h2>'
+        f'<p class="muted">Lets any router\'s "NextDNS" tab give itself its '
+        f'own NextDNS.io profile with one click. Get an API key from '
+        f'<a href="https://my.nextdns.io/account" target="_blank" '
+        f'rel="noopener">your NextDNS account settings</a>. Leave empty to '
+        f'keep the NextDNS tab hidden/unavailable for everyone.</p>'
+        f'<form method="POST" action="/superadmin/nextdns">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<div style="display:grid;grid-template-columns:repeat(auto-fit,'
+        f'minmax(220px,1fr));gap:10px">'
+        f'<label>API key<br><input name="api_key" type="password" '
+        f'placeholder="{has_key or "NextDNS API key"}" style="width:100%">'
+        f'</label>'
+        f'<label>Template profile id (optional)<br>'
+        f'<input name="template_profile" '
+        f'value="{esc(n.get("template_profile", ""))}" '
+        f'placeholder="e.g. abc123" style="width:100%"></label>'
+        f'</div>'
+        f'<p class="muted" style="font-size:12px;margin:6px 0 0">Template: '
+        f'an existing profile\'s blocklists/security/privacy settings to '
+        f'clone into every new router\'s profile, instead of starting '
+        f'blank. Find its id in the profile\'s NextDNS dashboard URL.</p>'
+        f'<div style="margin-top:10px"><button class="btn" type="submit">'
+        f'Save NextDNS settings</button></div>'
+        f'</form></div>')
+
+
 def _render_region_picker(regions, go: str, this_url: str = "",
                           this_name: str = "This server") -> str:
     """Public "choose your region" page — linked from the signup/login
@@ -692,7 +729,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        billing_on: bool = False, billing_contact=None,
                        hub_ip: str = "", hub_port: str = "",
                        router_count: int = 0, hub_pubkey: str = "",
-                       regions=None) -> str:
+                       regions=None, nextdns=None) -> str:
     """Platform superadmin panel — shows all orgs, billing status, and device counts."""
     note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
            (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
@@ -852,6 +889,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
              f'{_billing_contact_box(billing_contact, csrf)}'
              f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf, hub_pubkey)}'
              f'{_regions_box(regions or [], csrf)}'
+             f'{_nextdns_settings_box(nextdns or {}, csrf)}'
              f'{diagnostics_box}{backup_box}</div>')
     return _page("Platform Admin", _header(user, "/superadmin") + inner)
 

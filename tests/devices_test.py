@@ -20,6 +20,7 @@ from http.server import ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from mikromon import nextdns as nextdns_mod
 from mikromon import web
 from mikromon.auth import AuthStore
 from mikromon.config import DEFAULT_THRESHOLDS, AppConfig, build_device, device_to_dict
@@ -1139,6 +1140,165 @@ try:
     _hub_cleanup = web._hub_load(web._hub_path(wdb))
     _hub_cleanup.pop("hub_pubkey", None)
     web._hub_save(web._hub_path(wdb), _hub_cleanup)
+
+    # --- Superadmin: "NextDNS" — platform API key + per-router profiles ---
+    # /device/nextdns redirects to the live tab page, which (like the VPN
+    # tab) tries a real connect to the router first — WebR1's host (9.9.9.9)
+    # is a real, filtered address in this sandbox that hangs rather than
+    # failing fast, so these checks read the redirect's own Location header
+    # (where the confirmation/error message lives) instead of following it,
+    # same trick the existing vpn-stop-main/vpn-refresh tests above use.
+    def post_loc(op, path, data):
+        o = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(op.cj), _NoRedir)
+        body = urllib.parse.urlencode(data, doseq=True).encode()
+        try:
+            r = o.open(urllib.request.Request(B + path, data=body), timeout=8)
+            st = getattr(r, "status", r.code)
+            loc = r.headers.get("Location", "")
+        except urllib.error.HTTPError as e:
+            st, loc = e.code, e.headers.get("Location", "")
+        return st, urllib.parse.unquote(loc)
+
+    st, _ = post(nobody, "/superadmin/nextdns",
+                {"csrf": bcsrf, "api_key": "x", "template_profile": ""})
+    check("non-superadmin blocked from saving NextDNS settings (403)", st == 403)
+
+    check("_nextdns_box, with no platform API key configured yet, tells the "
+          "admin a superadmin needs to set one up first",
+          "superadmin needs to add a NextDNS API key" in
+          web._nextdns_box("WebR1", build_device({"name": "WebR1",
+                                                   "host": "9.9.9.9"}, DEF),
+                           csrf, False))
+
+    st, loc = post_loc(admin, "/device/nextdns",
+                       {"csrf": csrf, "device": "WebR1", "enable": "1"})
+    check("enabling NextDNS with no platform API key configured is refused, "
+          "not a silent no-op or a crash",
+          "isn't set up on this server yet" in loc)
+
+    st, body = post(admin, "/superadmin/nextdns",
+                    {"csrf": csrf, "api_key": "sekret-nextdns-key",
+                     "template_profile": "tmpl99"})
+    check("saving NextDNS settings succeeds", "NextDNS settings saved" in body)
+    check("the platform API key + template are persisted",
+          AuthStore(adb).get_nextdns() ==
+          {"api_key": "sekret-nextdns-key", "template_profile": "tmpl99"})
+
+    st, body = get(admin, "/superadmin")
+    check("superadmin page shows the API key is saved (masked, like SMTP), "
+          "never the raw key", "(saved)" in body
+          and "sekret-nextdns-key" not in body)
+
+    check("_nextdns_box now offers to enable it, once a platform key exists",
+          "Enable NextDNS for this router" in
+          web._nextdns_box("WebR1", build_device({"name": "WebR1",
+                                                   "host": "9.9.9.9"}, DEF),
+                           csrf, True))
+
+    # Enable: a fresh NextDNS profile is created via the (mocked) API,
+    # cloning the configured template, and the router is pushed to use it —
+    # WebR1's host (9.9.9.9) is unreachable, so the push itself is skipped
+    # (bounded by dev.reachable()'s quick probe inside the handler itself,
+    # unrelated to the live-tab-page issue above), but the profile is still
+    # created and the local enabled state saved.
+    create_calls = []
+
+    def _fake_create(api_key, name, clone_from=""):
+        create_calls.append((api_key, name, clone_from))
+        return "created-profile-1"
+
+    orig_create = nextdns_mod.create_profile
+    nextdns_mod.create_profile = _fake_create
+    try:
+        st, loc = post_loc(admin, "/device/nextdns",
+                           {"csrf": csrf, "device": "WebR1", "enable": "1"})
+    finally:
+        nextdns_mod.create_profile = orig_create
+    check("enabling NextDNS reports success even though the router itself "
+          "is unreachable right now",
+          "NextDNS enabled for this router" in loc and "unreachable" in loc)
+    check("create_profile was called with the platform key, the device "
+          "name, and the configured template to clone",
+          create_calls == [("sekret-nextdns-key", "WebR1", "tmpl99")])
+    ds_after_enable = DevicesStore(wdb)
+    raw_after_enable = ds_after_enable.raw("WebR1")
+    ds_after_enable.close()
+    check("the assigned profile id + enabled flag are persisted to the device",
+          raw_after_enable.get("nextdns_enabled") is True
+          and raw_after_enable.get("nextdns_profile_id") == "created-profile-1")
+
+    box_after_enable = web._nextdns_box(
+        "WebR1", build_device(raw_after_enable, DEF), csrf, True)
+    check("_nextdns_box now shows the assigned profile + a link into NextDNS",
+          "created-profile-1" in box_after_enable
+          and "my.nextdns.io/created-profile-1/setup" in box_after_enable)
+
+    # Re-enabling (already enabled) must NOT create a second profile.
+    orig_create = nextdns_mod.create_profile
+    nextdns_mod.create_profile = _fake_create
+    try:
+        post_loc(admin, "/device/nextdns",
+                {"csrf": csrf, "device": "WebR1", "enable": "1"})
+    finally:
+        nextdns_mod.create_profile = orig_create
+    check("re-submitting enable=1 while already enabled is a no-op — no "
+          "second profile created", len(create_calls) == 1)
+
+    # Disable: deletes the profile via the (mocked) API and clears local state.
+    delete_calls = []
+
+    def _fake_delete(api_key, profile_id):
+        delete_calls.append((api_key, profile_id))
+
+    orig_delete = nextdns_mod.delete_profile
+    nextdns_mod.delete_profile = _fake_delete
+    try:
+        st, loc = post_loc(admin, "/device/nextdns",
+                           {"csrf": csrf, "device": "WebR1", "enable": "0"})
+    finally:
+        nextdns_mod.delete_profile = orig_delete
+    check("disabling NextDNS confirms", "NextDNS disabled for this router" in loc)
+    check("delete_profile was called for the profile that had been created",
+          delete_calls == [("sekret-nextdns-key", "created-profile-1")])
+    ds_after_disable = DevicesStore(wdb)
+    raw_after_disable = ds_after_disable.raw("WebR1")
+    ds_after_disable.close()
+    check("local state is cleared after disabling",
+          raw_after_disable.get("nextdns_enabled") is False
+          and raw_after_disable.get("nextdns_profile_id") == "")
+
+    # A failing delete (e.g. the profile was already removed on NextDNS's
+    # side) must still clear the LOCAL state — never leave a router stuck
+    # permanently showing "enabled" just because the cleanup call failed.
+    nextdns_mod.create_profile = _fake_create
+    try:
+        post_loc(admin, "/device/nextdns", {"csrf": csrf, "device": "WebR1", "enable": "1"})
+    finally:
+        nextdns_mod.create_profile = orig_create
+
+    def _fake_delete_fails(api_key, profile_id):
+        raise nextdns_mod.NextDnsError("simulated: already gone")
+
+    orig_delete = nextdns_mod.delete_profile
+    nextdns_mod.delete_profile = _fake_delete_fails
+    try:
+        post_loc(admin, "/device/nextdns",
+                {"csrf": csrf, "device": "WebR1", "enable": "0"})
+    finally:
+        nextdns_mod.delete_profile = orig_delete
+    ds_after_failed_delete = DevicesStore(wdb)
+    raw_after_failed_delete = ds_after_failed_delete.raw("WebR1")
+    ds_after_failed_delete.close()
+    check("local state still clears even when the NextDNS API delete call fails",
+          raw_after_failed_delete.get("nextdns_enabled") is False
+          and raw_after_failed_delete.get("nextdns_profile_id") == "")
+
+    st = post_status(nobody, "/device/nextdns",
+                     {"csrf": bcsrf, "device": "WebR1", "enable": "1"})
+    check("unallocated member blocked from toggling NextDNS on a device "
+          "they can't manage (403)", st == 403)
+
     st, _ = post(nobody, "/device/push",
                  {"csrf": bcsrf, "device": "WebR1", "feature": "security"})
     check("unallocated member blocked from pushing config (403)", st == 403)

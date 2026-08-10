@@ -966,7 +966,7 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
 
 # Flat tabs on the device bar.
 _DEVICE_TABS = ["Overview", "Provision", "Routes", "WAN", "Security",
-                "DNS", "Queues", "Port forwarding",
+                "DNS", "NextDNS", "Queues", "Port forwarding",
                 "VPN", "Scripts"]
 _MAINT_ITEMS = [("Update", "update"), ("Backups", "backups"),
                 ("Restrict access", "harden"), ("Remote access", "remote"),
@@ -975,14 +975,15 @@ _MAINT_ITEMS = [("Update", "update"), ("Backups", "backups"),
 _LIVE_TABS = {"Overview": "", "Provision": "provision",
               "Routes": "routes", "WAN": "wan",
               "Security": "security", "Restrict access": "harden",
-              "DNS": "nextdns", "Queues": "qos", "QoS": "qos", "Port forwarding": "portfwd",
+              "DNS": "nextdns", "NextDNS": "nextdns_svc",
+              "Queues": "qos", "QoS": "qos", "Port forwarding": "portfwd",
               "Interfaces": "interfaces", "Remote access": "remote",
               "VPN": "tunnel", "Scripts": "scripts",
               "Update": "update", "Backups": "backups",
               "Temp Access": "tempaccess"}
 # tabs that WRITE to the router (admins only); Overview is read-only
 _ADMIN_TABS = {"provision", "routes", "wan", "security", "harden", "nextdns",
-               "qos", "portfwd", "remote", "tunnel", "scripts",
+               "nextdns_svc", "qos", "portfwd", "remote", "tunnel", "scripts",
                "update", "backups", "tempaccess", "interfaces"}
 
 
@@ -2151,6 +2152,49 @@ def _vpn_group_box(name, devices_db, org_id, csrf) -> str:
             f'soon as you add or remove one, no need to open each router\'s '
             f'own VPN tab.</p>'
             f'{table}{add_form}{refresh}{stop_form}</div>')
+
+
+def _nextdns_box(name, cfg, csrf, nextdns_configured: bool) -> str:
+    """The NextDNS tab's enable/disable control. Enabling auto-creates a
+    fresh NextDNS.io profile for THIS router via the API (see
+    web.py's _device_nextdns_post) and pushes the router's DNS to it
+    immediately — no separate Preview/Apply step, same reasoning as the VPN
+    tab's grouping controls (see _vpn_group_box)."""
+    q = esc(name)
+    if not nextdns_configured:
+        return (f'<div class="box"><h2>NextDNS</h2>'
+                f'<p class="muted">Not set up on this server yet — a '
+                f'superadmin needs to add a NextDNS API key first '
+                f'(Platform admin &rarr; NextDNS).</p></div>')
+    if cfg.nextdns_enabled and cfg.nextdns_profile_id:
+        pid = cfg.nextdns_profile_id
+        return (
+            f'<div class="box"><h2>NextDNS</h2>'
+            f'<p>Enabled — this router has its own profile, '
+            f'<code>{esc(pid)}</code>. '
+            f'<a href="https://my.nextdns.io/{esc(pid)}/setup" '
+            f'target="_blank" rel="noopener">Open in NextDNS</a> to manage '
+            f'its blocklists, allowlists, and query log.</p>'
+            f'<form method="POST" action="/device/nextdns">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            f'<input type="hidden" name="device" value="{q}">'
+            f'<input type="hidden" name="enable" value="0">'
+            f'<button class="btn ghost" type="submit">Disable &amp; delete '
+            f'this profile</button></form>'
+            f'<p class="muted" style="margin-top:4px;font-size:12px">'
+            f'Deletes the profile in NextDNS too, including its blocklist '
+            f'history for this router.</p></div>')
+    return (
+        f'<div class="box"><h2>NextDNS</h2>'
+        f'<p class="muted">Give this router its own NextDNS profile — '
+        f'separate blocklists, allowlists and query logs from every other '
+        f'router on this account. Needs RouterOS 7.1+ (DNS-over-HTTPS).</p>'
+        f'<form method="POST" action="/device/nextdns">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="device" value="{q}">'
+        f'<input type="hidden" name="enable" value="1">'
+        f'<button class="btn" type="submit">Enable NextDNS for this router'
+        f'</button></form></div>')
 
 
 def _remote_regenerate_box(name, users, csrf) -> str:
@@ -3360,6 +3404,10 @@ _TAB_INTRO = {
               "disable insecure services, and block attacker IPs. ⚠ Include this "
               "server's IP in the allowed list so you don't lock easymikrotik out.",
     "nextdns": "Point DNS at a filtering service and list any IPs that bypass it.",
+    "nextdns_svc": "Give this router its own NextDNS.io profile — separate "
+                   "blocklists, allowlists and query logs from every other "
+                   "router, managed in NextDNS's own dashboard. Different "
+                   "from the DNS tab's built-in filtering above.",
     "qos": "Cap upload/download speed for a subnet or interface (simple queues). "
            "Add a row, then Preview.",
     "portfwd": "Forward an external port to an internal device, or adopt forwards "
@@ -3590,11 +3638,13 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                      f'<ul style="margin:0 0 0 18px">{sm}</ul></div>')
         else:
             state = ""
-        if fields is not None and slug == "tunnel":
+        if fields is not None and slug in ("tunnel", "nextdns_svc"):
             # VPN grouping (make-main/add-member/remove-member/stop-main,
-            # in extra_html) already pushes routes automatically — this tab
-            # has nothing left to fill in, so a Preview/Apply button here
-            # would only confuse people into thinking they need to click it.
+            # in extra_html) already pushes routes automatically, and
+            # NextDNS's enable/disable button (also in extra_html) pushes
+            # its own DNS change immediately — neither tab has anything
+            # left to fill in, so a Preview/Apply button here would only
+            # confuse people into thinking they need to click it.
             ff = "".join(_field_html(d) for d in fields)
             form = (f'<div class="box"><h2>{esc(feature["title"])}</h2>'
                     f'<div class="fields">{ff}</div></div>')
@@ -4428,7 +4478,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 billing_contact=auth.get_billing_contact() if auth else None,
                 hub_ip=hub_ip, hub_port=hub_port, router_count=router_count,
                 hub_pubkey=hub_pubkey_cur,
-                regions=auth.get_regions() if auth else []),
+                regions=auth.get_regions() if auth else [],
+                nextdns=auth.get_nextdns() if auth else {}),
                 "text/html; charset=utf-8")
 
         def _backup_paths(self):
@@ -4577,6 +4628,29 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             auth.set_regions(regions)
             return self._redirect("/superadmin?ok=" +
                                   quote(f"Saved {len(regions)} region(s)."))
+
+        def _post_superadmin_nextdns(self, user):
+            """Superadmin-only: save the platform's NextDNS.io API key (and
+            optional template profile to clone from) used to auto-create a
+            per-router NextDNS profile from each device's NextDNS tab. Blank
+            api_key field keeps the stored one (masked, like SMTP)."""
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if auth is None:
+                return self._redirect("/superadmin?error=" +
+                                      quote("Auth store is not enabled."))
+            key = flat.get("api_key", "")
+            cfg = {
+                "api_key": key or auth.get_nextdns().get("api_key", ""),
+                "template_profile": flat.get("template_profile", "").strip(),
+            }
+            auth.set_nextdns(cfg)
+            return self._redirect("/superadmin?ok=" +
+                                  quote("NextDNS settings saved."))
 
         def _post_superadmin_hub_endpoint(self, user):
             """Superadmin-only: change the address (and, for a full
@@ -5259,6 +5333,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     elif slug == "tunnel":
                         extra_html = _vpn_group_box(
                             name, devices_db, (user or {}).get("org_id"), csrf)
+                    elif slug == "nextdns_svc":
+                        extra_html = _nextdns_box(
+                            name, cfg, csrf,
+                            bool(auth and auth.get_nextdns().get("api_key")))
                     elif slug == "remote":
                         extra_html = (
                             _remote_regenerate_box(name, current.get("users", []), csrf)
@@ -6247,6 +6325,94 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._redirect(
                 f"/device?name={q}&tab=tunnel&msg=" + quote(msg))
 
+        def _device_nextdns_post(self, flat, user):
+            """Enable/disable this router's own NextDNS.io cloud profile.
+            Enabling auto-creates a fresh profile via the API (cloning the
+            superadmin-configured template, if any) and pushes the router's
+            DNS to it immediately; disabling deletes the profile (best-effort
+            — a failed delete still clears the local state rather than
+            leaving the router stuck showing 'enabled'). One click, no
+            separate Preview/Apply step — see _nextdns_box."""
+            name = flat.get("device", "")
+            q = quote(name)
+            if not self._can_manage_device(user, name):
+                return self._send(403, "forbidden")
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            raw = self._device_raw(name)
+            if raw is None:
+                return self._send(404, "not found")
+            nextdns_cfg = auth.get_nextdns() if auth else {}
+            api_key = nextdns_cfg.get("api_key", "")
+            enable = flat.get("enable") == "1"
+            if enable and not api_key:
+                return self._redirect(
+                    f"/device?name={q}&tab=nextdns_svc&error=" +
+                    quote("NextDNS isn't set up on this server yet — a "
+                          "superadmin needs to add an API key first "
+                          "(Platform admin -> NextDNS)."))
+            from . import nextdns as nextdns_client
+            if enable:
+                if not (raw.get("nextdns_enabled") and raw.get("nextdns_profile_id")):
+                    try:
+                        profile_id = nextdns_client.create_profile(
+                            api_key, name,
+                            clone_from=nextdns_cfg.get("template_profile", ""))
+                    except nextdns_client.NextDnsError as exc:
+                        return self._redirect(
+                            f"/device?name={q}&tab=nextdns_svc&error=" +
+                            quote(f"Could not create a NextDNS profile: {exc}"))
+                    raw["nextdns_enabled"] = True
+                    raw["nextdns_profile_id"] = profile_id
+            else:
+                old_id = raw.get("nextdns_profile_id", "")
+                if old_id and api_key:
+                    try:
+                        nextdns_client.delete_profile(api_key, old_id)
+                    except nextdns_client.NextDnsError:
+                        pass  # best-effort — still clear local state below
+                raw["nextdns_enabled"] = False
+                raw["nextdns_profile_id"] = ""
+            store = self._devstore()
+            if store is not None:
+                store.upsert(raw, defaults, org_id=None)
+                store.close()
+
+            # Push the DNS change to the router right now (best-effort — the
+            # enabled/profile state above is already saved either way; the
+            # tab's own "Status" line shows if this push still needs a retry).
+            msg = "NextDNS enabled for this router." if enable else \
+                  "NextDNS disabled for this router."
+            from .config import build_device
+            from .device import DeviceError
+            from .push import Pusher, PushError, rw_device
+            from .push.api import PushApi
+            from .push.features import nextdns_cloud_ops
+            cfg = build_device(raw, defaults)
+            audit = self._auditlog()
+            dev = rw_device(cfg)
+            try:
+                if not dev.reachable():
+                    msg += " Router unreachable right now — the DNS change " \
+                           "will show as pending until it's back."
+                else:
+                    api = PushApi(dev)
+                    pusher = Pusher(cfg, api, dry_run=False, audit=audit,
+                                    user=(user or {}).get("login", ""))
+                    api.connect()
+                    plan = nextdns_cloud_ops(
+                        pusher, cfg.nextdns_profile_id if cfg.nextdns_enabled else "")
+                    if not plan.empty:
+                        pusher.apply(plan, feature="nextdns_svc")
+            except (DeviceError, PushError) as exc:
+                msg += f" Push failed: {exc}"
+            finally:
+                dev.close()
+                if audit:
+                    audit.close()
+            return self._redirect(f"/device?name={q}&tab=nextdns_svc&msg=" + quote(msg))
+
         def _hub_reload_peers_post(self, flat, user):
             """Rebuild wg-peers.conf from hub.json leases and write it.
             Writing the file triggers the mikromon-wg-reload.path unit to run
@@ -6496,6 +6662,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_hub_endpoint(user)
             if path == "/superadmin/regions":
                 return self._post_superadmin_regions(user)
+            if path == "/superadmin/nextdns":
+                return self._post_superadmin_nextdns(user)
             # Everything below requires a logged-in user + a valid CSRF token.
             if not user:
                 return self._send(403, "forbidden")
@@ -6513,7 +6681,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                              "/device/reboot", "/device/access", "/device/confirm",
                              "/device/vpn-make-main", "/device/vpn-add-member",
                              "/device/vpn-remove-member", "/device/vpn-stop-main",
-                             "/device/vpn-refresh",
+                             "/device/vpn-refresh", "/device/nextdns",
                              "/device/remote-regenerate", "/device/remote-test")
             if path in _DEVICE_WRITE:
                 if not self._can_manage_device(user, flat.get("device", "")):
@@ -6548,6 +6716,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._device_vpn_stop_main_post(flat, user)
                 if path == "/device/vpn-refresh":
                     return self._device_vpn_refresh_post(flat, user)
+                if path == "/device/nextdns":
+                    return self._device_nextdns_post(flat, user)
                 if path == "/device/remote-regenerate":
                     return self._device_remote_regenerate_post(flat, user)
                 if path == "/device/remote-test":
