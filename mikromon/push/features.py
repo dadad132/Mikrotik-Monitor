@@ -2014,11 +2014,17 @@ def _vpn_hub_peer_ops(pusher, hub_subnet: str, other_subnets: list) -> list:
             desc="revert the hub peer's allowed-address"))]
 
 
-def hub_endpoint_ops(pusher, endpoint: str, port: str) -> list:
+def hub_endpoint_ops(pusher, endpoint: str, port: str,
+                     pubkey: str | None = None) -> list:
     """Update the router's OWN hub-peer entry's endpoint-address/
-    endpoint-port only — for migrating the hub to a new server/IP (or
-    adopting a DDNS hostname) without re-provisioning every router by
-    hand. Deliberately leaves allowed-address untouched (see
+    endpoint-port — for migrating the hub to a new server/IP (or adopting a
+    DDNS hostname) without re-provisioning every router by hand. When
+    `pubkey` is also given, updates public-key too — for a migration where
+    the NEW server generated its own fresh WireGuard identity instead of
+    the old server's private key being copied over (avoids ever needing to
+    move a private key between hosts by hand at all: a router just needs
+    to be told the new server's public key + address, both of which are
+    freely shareable). Deliberately leaves allowed-address untouched (see
     _vpn_hub_peer_ops) so this never undoes a router's VPN-group
     extensions. No-op if the router has no hub peer at all, or already
     matches."""
@@ -2029,18 +2035,24 @@ def hub_endpoint_ops(pusher, endpoint: str, port: str) -> list:
         return []
     cur_endpoint = str(peer.get("endpoint-address", "")).strip()
     cur_port = str(peer.get("endpoint-port", "")).strip()
-    if cur_endpoint == endpoint and cur_port == str(port):
+    cur_pubkey = str(peer.get("public-key", "")).strip()
+    want_pubkey = pubkey.strip() if pubkey else cur_pubkey
+    if cur_endpoint == endpoint and cur_port == str(port) and cur_pubkey == want_pubkey:
         return []
+    new_params = {".id": peer[".id"], "endpoint-address": endpoint,
+                 "endpoint-port": str(port)}
+    old_params = {".id": peer[".id"], "endpoint-address": cur_endpoint,
+                 "endpoint-port": cur_port}
+    if pubkey:
+        new_params["public-key"] = want_pubkey
+        old_params["public-key"] = cur_pubkey
     return [Operation(
-        "set", _HUB_PEERS,
-        {".id": peer[".id"], "endpoint-address": endpoint,
-         "endpoint-port": str(port)},
-        desc=f"point the hub peer at {endpoint}:{port} (was "
-             f"{cur_endpoint or '?'}:{cur_port or '?'})",
+        "set", _HUB_PEERS, new_params,
+        desc=f"point the hub peer at {endpoint}:{port}"
+             + (" with a new public key" if pubkey else "")
+             + f" (was {cur_endpoint or '?'}:{cur_port or '?'})",
         inverse=Operation(
-            "set", _HUB_PEERS,
-            {".id": peer[".id"], "endpoint-address": cur_endpoint,
-             "endpoint-port": cur_port},
+            "set", _HUB_PEERS, old_params,
             desc="revert the hub peer's endpoint"))]
 
 

@@ -548,12 +548,26 @@ def _billing_contact_box(contact, csrf) -> str:
         f'</form></div>')
 
 
-def _hub_endpoint_box(hub_ip, hub_port, router_count, csrf) -> str:
+def _hub_endpoint_box(hub_ip, hub_port, router_count, csrf,
+                      hub_pubkey_current="") -> str:
     """Superadmin setting: the address every router dials home to. Lets you
     migrate the hub to a new server (or switch to a DDNS hostname) without
     re-provisioning every router by hand — saves the new default for
     future provisions, and can optionally push it out to every already-
-    registered router right now."""
+    registered router right now. The optional "new public key" field is
+    for a full identity migration (the new server generated its own fresh
+    keypair rather than the old server's private key ever being copied
+    between hosts by hand) — leave it blank for an address-only change on
+    the SAME hub identity, e.g. adopting a DDNS hostname. Also displays
+    THIS server's own public key read-only, so migrating TO this server
+    is a copy-paste from here into the OLD server's "New hub public key"
+    field — no SSH needed for that step either."""
+    this_key = (
+        f'<p class="muted" style="margin-top:10px">This server\'s own hub '
+        f'public key (copy this into the OLD server\'s "New hub public '
+        f'key" field when migrating TO this server):<br>'
+        f'<code style="word-break:break-all">{esc(hub_pubkey_current)}</code></p>'
+        if hub_pubkey_current else "")
     return (
         f'<div class="box"><h2>Hub endpoint</h2>'
         f'<p class="muted">The address every router dials home to (its '
@@ -562,6 +576,7 @@ def _hub_endpoint_box(hub_ip, hub_port, router_count, csrf) -> str:
         f'to also update the {router_count} already-registered router(s), '
         f'so a server move or a switch to a DDNS hostname doesn\'t need '
         f're-provisioning anything.</p>'
+        f'{this_key}'
         f'<form method="POST" action="/superadmin/hub-endpoint">'
         f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
         f'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">'
@@ -570,6 +585,12 @@ def _hub_endpoint_box(hub_ip, hub_port, router_count, csrf) -> str:
         f'<label>Port<br><input name="hub_port" value="{esc(hub_port)}" '
         f'placeholder="51820" style="width:100%"></label>'
         f'</div>'
+        f'<label style="display:block;margin-top:10px">New hub public key '
+        f'<span class="muted">(only for a full server migration to a hub '
+        f'with a DIFFERENT identity — leave blank otherwise)</span><br>'
+        f'<input name="hub_pubkey" '
+        f'placeholder="paste the new server\'s WireGuard public key here — only if it changed" '
+        f'style="width:100%;font-family:ui-monospace,monospace"></label>'
         f'<label class="chk" style="display:block;margin-top:8px">'
         f'<input type="checkbox" name="push_now" value="1"> Push to every '
         f'already-registered router now (best-effort — an unreachable '
@@ -584,7 +605,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        msg: str = "", error: str = "", smtp=None,
                        billing_on: bool = False, billing_contact=None,
                        hub_ip: str = "", hub_port: str = "",
-                       router_count: int = 0) -> str:
+                       router_count: int = 0, hub_pubkey: str = "") -> str:
     """Platform superadmin panel — shows all orgs, billing status, and device counts."""
     note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
            (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
@@ -742,7 +763,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
     inner = (f'<div class="wrap"><h1>Platform admin</h1>{note}{tiles}{table}'
              f'{_smtp_settings_box(smtp, csrf)}'
              f'{_billing_contact_box(billing_contact, csrf)}'
-             f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf)}'
+             f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf, hub_pubkey)}'
              f'{diagnostics_box}{backup_box}</div>')
     return _page("Platform Admin", _header(user, "/superadmin") + inner)
 

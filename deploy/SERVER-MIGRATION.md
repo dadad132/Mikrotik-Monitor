@@ -1,17 +1,88 @@
 # Moving mikromon to a new server
 
+There are two ways to do this. **Recommended** below needs almost no typing
+— everything except the very first install command happens by clicking
+through the dashboard. The alternative (further down) preserves the exact
+same WireGuard identity by copying a private key between hosts over SSH —
+more steps, more room for a typo, only worth it if you have a specific
+reason to keep the identical key.
+
+## Recommended: fresh identity, migrate via the dashboard
+
+**On the new server** (one terminal command — copy-paste this exactly,
+nothing to edit):
+
+```bash
+git clone <your-repo> mikromon && cd mikromon
+sudo bash deploy/install.sh
+```
+
+This sets everything up, including a **brand-new** WireGuard identity for
+this server (no key ever needs to travel between hosts by hand).
+
+**In the browser, on the new server's dashboard** (`http://<new-server>:8080`):
+sign up with any email — this account becomes a superadmin automatically,
+just to unlock the panel; it gets replaced when you restore your real data
+in a moment. Open **Platform admin** and note this server's own public key
+under **"Hub endpoint"** — you'll copy that in a later step.
+
+**On the OLD server's dashboard**: Platform admin → **Server backup** →
+Create new backup → Download it.
+
+**Back on the new server's dashboard**: Platform admin → Server backup →
+**Restore from a file** → upload the file you just downloaded.
+
+**One more terminal command, on the new server** (the restore doesn't take
+full effect until the services restart):
+
+```bash
+sudo systemctl restart mikromon mikromon-web
+```
+
+Refresh the dashboard and log in with your **real** account from the old
+server — the throwaway signup is gone, replaced by your restored data.
+
+**Point already-provisioned routers at the new server**: back on the
+**OLD** server's dashboard (still running — do this before decommissioning
+it), Platform admin → **"Hub endpoint"**:
+
+1. Enter the new server's address (a stable DNS hostname is strongly
+   preferred over a raw IP — see the note in that box).
+2. Paste the new server's public key (the one you noted a few steps back)
+   into **"New hub public key"**.
+3. Tick **"push to every already-registered router now"** and save.
+
+This connects to each already-provisioned router over its *current* (old)
+tunnel — which still works, since nothing has changed on the router yet —
+and updates its dial-home address and public key together in one push, so
+it starts trusting and dialing the new server immediately. No SSH, no
+re-provisioning, no touching a single router by hand. A router that
+happens to be offline at that moment is skipped, not blocking the rest;
+re-save the same box later to retry just the ones that were missed.
+
+Only if you use the on-demand Winbox/WebFig remote-access feature: the
+restored `config.yaml`'s `access:` block still points at the old server's
+hostname/cert. Regenerate it for the new host (one more copy-paste, safe to
+re-run):
+
+```bash
+sudo ACCESS_HOST=your.new.hostname bash deploy/install.sh
+```
+
+Point DNS at the new server once you've confirmed everything above worked.
+You can now decommission the old one.
+
+---
+
+## Alternative: preserve the exact same WireGuard identity
+
+Only worth doing if you specifically need the hub's public key to stay
+identical (e.g. it's pinned somewhere outside mikromon's control). This
+needs the hub's **private key** copied between hosts over SSH as root —
+more manual steps, more to get exactly right.
+
 A superadmin creates and manages backups from **Platform admin**
-(`/superadmin` → "Server backup"):
-
-* **Create new backup** — builds an archive and adds it to the list below.
-  Backups persist on the server (under `<config.yaml's dir>/backups-server/`)
-  so you can create one now and download it later, and so more than one can
-  exist at a time.
-* Each listed backup has **Download**, **Restore**, and **Delete**.
-* **Restore from a file** — upload a `.tar.gz` backup (from this server or
-  another one) and restore directly from it.
-
-Or from the CLI:
+(`/superadmin` → "Server backup"), same as above, or from the CLI:
 
 ```bash
 sudo -u mikromon /opt/mikromon/.venv/bin/python -m mikromon backup-server \
@@ -26,45 +97,13 @@ are copied through SQLite's own backup API, so it's safe to take a backup
 while the service is running — you get a consistent snapshot either way.
 Anything not configured (e.g. no billing set up) is silently skipped.
 
-Restoring **from the dashboard** overwrites this install's files immediately,
-but the currently-running process keeps some of them open (`auth.db` in
-particular) — restart the service afterward (`sudo systemctl restart mikromon
-mikromon-web`) for it to fully take effect. The success message says so as a
-reminder. For a clean migration to a brand-new server, prefer the CLI
-procedure below instead — it lets you restore before the service has ever
-started, so there's nothing to restart.
-
 **Not included** — these live outside mikromon's data files and don't travel
 in the archive:
 
 * **The hub's WireGuard identity** (`/etc/wireguard/` on the old server —
   private key, `wg0.conf`, `wg-peers.conf`). This is root-owned and outside
-  the app's data directory. Every already-provisioned router has this hub's
-  **public** key configured as its dial-home peer — if the new server
-  generates a new keypair instead, every router's tunnel breaks until it's
-  re-provisioned. Copy `/etc/wireguard/` from the old host to the new one (as
-  root) so existing routers keep dialing home with no changes on their side.
+  the app's data directory.
 * nginx/systemd config and the TLS certificate — regenerated by `install.sh`.
-
-Preserving the WireGuard identity keeps every router trusting the new server,
-but each router still has the **OLD server's IP/hostname** hardcoded as the
-address it dials — the identity moving doesn't tell them where it moved to.
-Superadmin → Platform admin → **"Hub endpoint"** fixes this in one step: set
-the new server's address there and tick "push to every already-registered
-router now" — it updates every router's own WireGuard peer entry over
-mikromon's existing connection, no re-provisioning, no touching routers by
-hand. See step 7 below.
-
-## Restore procedure (moving to a brand-new server, via the CLI)
-
-`restore-server` overwrites this install's config/auth/devices/billing/
-metrics/push-log files with the archive's contents — a full replace, not a
-merge. It's dry-run by default (prints what it *would* overwrite) so you can
-check it against the right install before touching anything; add `--apply`
-to actually write. Do this **before** the new server's mikromon service has
-ever started or been logged into — that way there's no existing `auth.db` to
-overwrite and nothing has an open handle on the files being replaced. If
-you already started it once, stop the services first (step 2).
 
 ```bash
 # 1. On the new server: run the installer (sets up the venv, systemd units,
@@ -75,8 +114,8 @@ sudo bash deploy/install.sh
 # 2. Make sure nothing is running / has touched the data files yet.
 sudo systemctl stop mikromon mikromon-web 2>/dev/null || true
 
-# 3. Copy /etc/wireguard/ from the OLD server first (see note above) —
-#    do this before starting anything on the new box.
+# 3. Copy /etc/wireguard/ from the OLD server first — do this before
+#    starting anything on the new box.
 #    e.g. from the old server: sudo tar -C /etc/wireguard -czf wg.tar.gz .
 #         on the new server:   sudo tar -C /etc/wireguard -xzf wg.tar.gz
 
@@ -96,36 +135,26 @@ sudo systemctl enable --now mikromon mikromon-web
 journalctl -u mikromon-web -f   # confirm it comes up clean
 ```
 
+`restore-server` strips `hub_ip` out of the restored `hub.json` on purpose
+(it's server-set, not something restoring old data should silently pin to
+the old host) — so the dashboard's own Provision-tab script generation
+already auto-detects this server's real address for *new* devices. Because
+the WireGuard identity was preserved (step 3), already-provisioned routers
+still trust this server without any changes — but they still have the OLD
+server's *address* hardcoded, so use **Platform admin → "Hub endpoint"**
+(address only, leave the public key field blank since it didn't change) +
+"push to every already-registered router now" to update it, exactly as in
+the recommended path above minus the pubkey field.
+
 Point DNS (or your `ACCESS_HOST`) at the new server once you've confirmed the
 dashboard logs in with your existing accounts and shows your existing
 devices.
 
-## 7. Point already-provisioned routers at the new server
-
-`restore-server` strips `hub_ip` out of the restored `hub.json` on purpose
-(it's server-set, not something restoring old data should silently pin to
-the old host) — so the dashboard's own Provision-tab script generation
-already auto-detects this server's real address for *new* devices. Routers
-provisioned *before* the migration still have the OLD server's address
-baked into their own WireGuard peer configuration, though, and need to be
-told where the hub moved to:
-
-1. Log in as a superadmin → **Platform admin**.
-2. Under **"Hub endpoint"**, enter this server's address (a stable DNS
-   hostname is strongly preferred over a raw IP here — see the note in that
-   box) and port.
-3. Tick **"push to every already-registered router now"** and save.
-
-This connects to each already-provisioned router over the tunnel (which
-still works, since its identity — public key — didn't change) and updates
-just that router's own `endpoint-address`/`endpoint-port`, nothing else — no
-re-provisioning, no touching a single router by hand. A router that happens
-to be offline at that moment is skipped, not blocking the rest; re-save the
-same box later to retry just the ones that were missed.
+---
 
 ## Upgrading mikromon itself (not a server move)
 
-Different from the above: to deploy a *code* update to an existing install
-(not moving hosts), see the "Upgrading" section in the main `README.md` —
-`git pull` alone does not update `/opt/mikromon`; you need to re-run
-`deploy/install.sh` from your source checkout.
+Different from either of the above: to deploy a *code* update to an
+existing install (not moving hosts), see the "Upgrading" section in the
+main `README.md` — `git pull` alone does not update `/opt/mikromon`; you
+need to re-run `deploy/install.sh` from your source checkout.

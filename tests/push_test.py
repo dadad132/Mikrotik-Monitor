@@ -1497,6 +1497,39 @@ check("no hub peer configured -> no ops, no crash",
       F.hub_endpoint_ops(Pusher(t_cfg, hep_api_none, dry_run=True),
                          "new.hub.example.com", "51821") == [])
 
+# hub_endpoint_ops(..., pubkey=...): a full identity migration — the NEW
+# server generated its own fresh keypair (never moved a private key
+# between hosts by hand), so a router needs both its new address AND its
+# new public key pushed together.
+hep_api2 = FakeApi({
+    WGP: [{".id": "*h2", "comment": "mikromon:tunnel:hub",
+          "endpoint-address": "old.hub.example.com", "endpoint-port": "51820",
+          "public-key": "OLDPUBKEY=", "allowed-address": "10.10.0.0/16"}],
+})
+hep_plan2 = F.hub_endpoint_ops(Pusher(t_cfg, hep_api2, dry_run=True),
+                               "new.hub.example.com", "51820",
+                               pubkey="NEWPUBKEY=")
+check("supplying pubkey= also updates the hub peer's public-key",
+      len(hep_plan2) == 1
+      and hep_plan2[0].params.get("public-key") == "NEWPUBKEY="
+      and hep_plan2[0].params.get("endpoint-address") == "new.hub.example.com")
+check("still never touches allowed-address even during a full identity move",
+      "allowed-address" not in hep_plan2[0].params)
+
+check("re-applying the same new pubkey+address is a no-op",
+      F.hub_endpoint_ops(Pusher(t_cfg, FakeApi({
+          WGP: [{".id": "*h2", "comment": "mikromon:tunnel:hub",
+                "endpoint-address": "new.hub.example.com",
+                "endpoint-port": "51820", "public-key": "NEWPUBKEY=",
+                "allowed-address": "10.10.0.0/16"}]}), dry_run=True),
+          "new.hub.example.com", "51820", pubkey="NEWPUBKEY=") == [])
+
+hep_plan3 = F.hub_endpoint_ops(Pusher(t_cfg, hep_api2, dry_run=True),
+                               "yet-another.example.com", "51820")
+check("pubkey=None (the default) moves the address only, never touching "
+      "public-key — same behavior as before this parameter existed",
+      len(hep_plan3) == 1 and "public-key" not in hep_plan3[0].params)
+
 # web.py's grouping actions validate subnet conflicts before ever writing to
 # hub.json, but tunnel_plan still refuses defensively if _vpn_error is set.
 err_flat = {"_vpn_in_group": True,

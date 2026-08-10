@@ -1113,6 +1113,32 @@ try:
           "router — WebR1's host is unreachable, so this also proves the "
           "bounded probe kicks in here too (no hang for the full connect "
           "timeout)", "Pushed to 0/1" in body and "unreachable" in body)
+    # New public key field — for a full identity migration where the new
+    # server generated its own fresh keypair (never copying a private key
+    # between hosts by hand).
+    st, body = post(admin, "/superadmin/hub-endpoint",
+                    {"csrf": csrf, "hub_ip": "hub3.example.com",
+                     "hub_port": "51820", "hub_pubkey": "NEWSERVERPUBKEY="})
+    check("saving a new hub public key is reflected in the confirmation",
+          "with a new public key" in body)
+    hub_after_pubkey = web._hub_load(web._hub_path(wdb))
+    check("the new public key is persisted to hub.json for future "
+          "provisions too, not just the address",
+          hub_after_pubkey.get("hub_pubkey") == "NEWSERVERPUBKEY=")
+    st, body = post(admin, "/superadmin/hub-endpoint",
+                    {"csrf": csrf, "hub_ip": "hub3.example.com",
+                     "hub_port": "51820"})
+    check("leaving the pubkey field blank on a later save doesn't wipe "
+          "the previously-set one back to empty",
+          web._hub_load(web._hub_path(wdb)).get("hub_pubkey")
+          == "NEWSERVERPUBKEY=")
+    # Clean up: this suite's later Provision-tab tests assert hub_pubkey is
+    # NOT set (to check the "run install.sh" prompt on an unconfigured hub),
+    # so restore that state rather than leaking this test's hub_pubkey into
+    # tests that run after it in this same shared wdb/hub.json.
+    _hub_cleanup = web._hub_load(web._hub_path(wdb))
+    _hub_cleanup.pop("hub_pubkey", None)
+    web._hub_save(web._hub_path(wdb), _hub_cleanup)
     st, _ = post(nobody, "/device/push",
                  {"csrf": bcsrf, "device": "WebR1", "feature": "security"})
     check("unallocated member blocked from pushing config (403)", st == 403)
