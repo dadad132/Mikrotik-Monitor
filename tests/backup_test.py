@@ -44,6 +44,20 @@ check("only configured paths are included",
 check("hub.json is derived alongside devices.db",
       paths["hub.json"] == os.path.join(tmp, "sub", "hub.json"))
 
+# alert_log_db (scheduled status reports' alert history) — confirmed missing
+# from backup_paths() entirely, meaning it silently never traveled to a new
+# server on migration/restore even though every other configured DB did.
+paths_no_alert_log = backup.backup_paths(
+    config_path=os.path.join(tmp, "config.yaml"))
+check("alert_log_db not configured -> not included, same as any other "
+      "unconfigured optional file", "alert_log.db" not in paths_no_alert_log)
+paths_with_alert_log = backup.backup_paths(
+    config_path=os.path.join(tmp, "config.yaml"),
+    alert_log_db=os.path.join(tmp, "alert_log.db"))
+check("alert_log_db, when configured, IS included in the backup",
+      paths_with_alert_log.get("alert_log.db") ==
+      os.path.join(tmp, "alert_log.db"))
+
 print("build_archive — missing files are skipped, not fatal:")
 data = backup.build_archive({"config.yaml": os.path.join(tmp, "nope.yaml")},
                             tmp_dir=tmp)

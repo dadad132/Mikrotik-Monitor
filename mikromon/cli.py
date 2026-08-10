@@ -287,9 +287,10 @@ def _push_device_cfgs(config):
 
 def _cmd_backup_server(args, config) -> int:
     """Bundle every configured mikromon data file (config, auth/devices/
-    billing/metrics/push-log DBs, the tunnel-IP registry, alert state) into
-    one archive — for moving the whole install to a new server. See
-    mikromon/backup.py for exactly what is (and isn't) included."""
+    billing/metrics/push-log/alert-history DBs, the tunnel-IP registry,
+    alert state) into one archive — for moving the whole install to a new
+    server. See mikromon/backup.py for exactly what is (and isn't)
+    included."""
     from .backup import backup_filename, backup_paths, build_archive_to_file
 
     paths = backup_paths(
@@ -298,7 +299,8 @@ def _cmd_backup_server(args, config) -> int:
         push_log_db=config.push_log_db,
         billing_db=(config.billing or {}).get("db"),
         state_file=config.state_file,
-        access_grants_file=(config.access or {}).get("grants_file"))
+        access_grants_file=(config.access or {}).get("grants_file"),
+        alert_log_db=config.alert_log_db)
     included = [name for name, path in paths.items() if os.path.isfile(path)]
     if not included:
         print("Nothing to back up — no configured data files were found.",
@@ -343,7 +345,8 @@ def _cmd_restore_server(args, config) -> int:
         push_log_db=config.push_log_db,
         billing_db=(config.billing or {}).get("db"),
         state_file=config.state_file,
-        access_grants_file=(config.access or {}).get("grants_file"))
+        access_grants_file=(config.access or {}).get("grants_file"),
+        alert_log_db=config.alert_log_db)
     if not args.apply:
         print("DRY RUN — would overwrite (stop the services, then re-run "
               "with --apply):")

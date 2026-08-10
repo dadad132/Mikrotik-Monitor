@@ -142,6 +142,26 @@ sudo systemctl enable --now mikromon                 # 2. start at boot
 journalctl -u mikromon -f                            # 3. watch it run
 ```
 
+### Upgrading (deploying a new version)
+
+`git pull` alone does **not** update the running service — `/opt/mikromon`
+is a deployment copy, not the git checkout itself (`install.sh` `rsync`s the
+`mikromon/` package into it and registers the systemd units; it doesn't run
+`pip install` of the package, so a plain `git pull` inside `/opt/mikromon`
+does nothing even if it succeeds). Always re-run the installer from the
+checkout you cloned in step 2 above — it's idempotent and safe to run
+repeatedly, and it restarts both services automatically at the end:
+
+```bash
+cd mikromon              # the directory you originally `git clone`d into,
+                          # NOT necessarily /opt/mikromon
+git pull
+sudo bash deploy/install.sh
+```
+
+To confirm an upgrade actually took effect: `cat /opt/mikromon/install-status.txt`
+shows the commit hash the running deployment was last installed from.
+
 ### Try it locally first (no router needed)
 
 Watch a **simulated** MikroTik go through a CPU spike, a WAN failover, traffic

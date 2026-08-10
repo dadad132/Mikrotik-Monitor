@@ -4424,7 +4424,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 push_log_db=push_log_db,
                 billing_db=billing_cfg.get("db"),
                 state_file=state_file,
-                access_grants_file=access_cfg.get("grants_file"))
+                access_grants_file=access_cfg.get("grants_file"),
+                alert_log_db=alert_log_db)
 
         def _serve_superadmin_backup_download(self, user, name):
             """Superadmin-only: download a previously-created backup archive

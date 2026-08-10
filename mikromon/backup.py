@@ -1,9 +1,10 @@
 """Full-server backup: bundle every configured mikromon data file (config,
-auth/devices/billing/metrics/push-log SQLite DBs, the tunnel-IP registry,
-alert dedup state) into one archive, so a superadmin can move the whole
-install to a new server. Backups are created into a persistent directory
-(so they can be listed and re-downloaded later, not just streamed once) and
-restored either from that list or from an uploaded file.
+auth/devices/billing/metrics/push-log/alert-history SQLite DBs, the
+tunnel-IP registry, alert dedup state) into one archive, so a superadmin can
+move the whole install to a new server. Backups are created into a
+persistent directory (so they can be listed and re-downloaded later, not
+just streamed once) and restored either from that list or from an uploaded
+file.
 
 NOT included — these live outside mikromon's own data files and need to be
 carried over separately when moving hosts:
@@ -44,7 +45,8 @@ def backups_dir_for(*, config_path=None, devices_db=None) -> str:
 
 def backup_paths(*, config_path=None, auth_db=None, devices_db=None,
                  metrics_db=None, push_log_db=None, billing_db=None,
-                 state_file=None, access_grants_file=None) -> dict:
+                 state_file=None, access_grants_file=None,
+                 alert_log_db=None) -> dict:
     """Map archive-member-name -> configured source path. Anything not
     configured (None/empty) is simply omitted from the mapping."""
     paths: dict = {}
@@ -67,6 +69,8 @@ def backup_paths(*, config_path=None, auth_db=None, devices_db=None,
         paths["state.json"] = state_file
     if access_grants_file:
         paths["access-grants.json"] = access_grants_file
+    if alert_log_db:
+        paths["alert_log.db"] = alert_log_db
     return paths
 
 
