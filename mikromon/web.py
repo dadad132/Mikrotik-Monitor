@@ -4112,10 +4112,29 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 self.send_header(k, v)
             self.end_headers()
 
+        def _request_is_https(self) -> bool:
+            """mikromon itself never terminates TLS — install.sh's domain
+            setup puts nginx in front for that, which always adds
+            X-Forwarded-Proto. So this is the only reliable way to tell
+            whether THIS particular request arrived over HTTPS (via the
+            domain, through nginx) or plain HTTP (e.g. straight to the
+            IP:8080, bypassing nginx entirely) — see _cookie_header."""
+            return self.headers.get(
+                "X-Forwarded-Proto", "").strip().lower() == "https"
+
         def _cookie_header(self, token, clear=False):
             attrs = f"{_COOKIE}={'' if clear else token}; HttpOnly; SameSite=Lax; Path=/"
             attrs += "; Max-Age=0" if clear else ""
-            if secure_cookies:
+            # secure_cookies (config) says "this server HAS HTTPS available at
+            # all"; whether THIS cookie gets marked Secure also depends on
+            # whether THIS request actually used it. A single global Secure
+            # flag would make login via the server's own IP:8080 permanently
+            # impossible even when a domain+HTTPS is also configured — the
+            # browser silently refuses to send a Secure cookie back over
+            # plain HTTP, which looks exactly like an endless login loop.
+            # Requiring both keeps a plain-IP-only server (secure_cookies
+            # never true) unaffected either way.
+            if secure_cookies and self._request_is_https():
                 attrs += "; Secure"
             return {"Set-Cookie": attrs}
 

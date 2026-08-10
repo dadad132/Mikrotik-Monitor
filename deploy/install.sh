@@ -727,16 +727,21 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Domain reverse proxy — point easymikrotik.com (or any domain) at this box.
-# Set DOMAIN= as an env var, e.g.:
+# Domain reverse proxy — point a domain (e.g. easymikrotik.com, or a
+# per-region hostname like us.easymikrotik.com) at THIS box. Off by default —
+# a fresh server must be told explicitly, so standing up a second/third/etc.
+# server (e.g. one per region) never silently tries to grab TLS for a domain
+# that isn't actually pointed at it. Set DOMAIN= as an env var, e.g.:
 #   DOMAIN=easymikrotik.com sudo bash deploy/install.sh
-# Or add  web.domain: easymikrotik.com  to config.yaml and re-run.
+# Or add  web.domain: easymikrotik.com  to config.yaml and re-run (that's
+# also how a re-run keeps using the domain a PREVIOUS run already set up).
 # The installer: installs nginx, gets a Let's Encrypt TLS cert for the domain,
 # writes an HTTPS reverse-proxy config (port 443 → localhost:8080), redirects
 # HTTP 80 → HTTPS, and sets web.secure_cookies: true in config.yaml.
-# Safe to re-run — idempotent.
+# Safe to re-run — idempotent. Login over the server's plain IP:8080 keeps
+# working even with a domain configured (see web.py's _cookie_header).
 # ---------------------------------------------------------------------------
-DOMAIN="${DOMAIN:-easymikrotik.com}"
+DOMAIN="${DOMAIN:-}"
 if [[ -z "${DOMAIN}" ]] && [[ -f "${APP_DIR}/config.yaml" ]] \
    && [[ -x "${APP_DIR}/.venv/bin/python" ]]; then
   DOMAIN="$("${APP_DIR}/.venv/bin/python" - "${APP_DIR}/config.yaml" <<'PY'

@@ -429,6 +429,79 @@ finally:
     srv0.shutdown()
     srv0.server_close()
 
+# ---- Secure-cookie flag matches the ACTUAL request, not a fixed setting ----
+# secure_cookies=True (set by install.sh once a domain+HTTPS is configured)
+# used to mark EVERY session cookie Secure, which made logging in over the
+# server's own plain-HTTP IP:8080 permanently impossible (a browser silently
+# refuses to send a Secure cookie back over non-HTTPS) — indistinguishable
+# from a broken login loop. Fixed: Secure is only added when THIS request
+# itself carries X-Forwarded-Proto: https (the header install.sh's nginx
+# domain proxy always adds; absent for a direct :8080 request).
+print("Secure cookie flag follows the actual request (X-Forwarded-Proto), "
+      "not a single fixed setting:")
+adb_sec = os.path.join(tmp, "sec.db")
+a_sec = AuthStore(adb_sec)
+a_sec.signup("owner@sec.test", "sekret12", "SecCo")
+a_sec.close()
+srv_sec = ThreadingHTTPServer(("127.0.0.1", 8100), web.make_handler(
+    mdb, sfile, AuthStore(adb_sec), web.SessionManager(), secure_cookies=True))
+threading.Thread(target=srv_sec.serve_forever, daemon=True).start()
+B_SEC = "http://127.0.0.1:8100"
+try:
+    def login_set_cookie(extra_headers=None):
+        # Must NOT follow the 303 redirect — the Set-Cookie header lives on
+        # THAT response; a followed opener would only see whatever page it
+        # redirects to (which sets no cookie of its own).
+        body = urllib.parse.urlencode(
+            {"email": "owner@sec.test", "password": "sekret12"}).encode()
+        try:
+            r = opener(redirect=False).open(urllib.request.Request(
+                B_SEC + "/login", data=body, headers=extra_headers or {}),
+                timeout=5)
+            return r.headers.get("Set-Cookie", "")
+        except urllib.error.HTTPError as e:
+            return e.headers.get("Set-Cookie", "")
+
+    check("secure_cookies=True but a PLAIN request (no X-Forwarded-Proto, "
+          "e.g. straight to IP:8080) does NOT get a Secure cookie — this is "
+          "the fix: it used to, and the browser would silently drop it",
+          "Secure" not in login_set_cookie())
+    check("secure_cookies=True and a request WITH X-Forwarded-Proto: https "
+          "(i.e. proxied through the domain's nginx) DOES get a Secure cookie",
+          "Secure" in login_set_cookie({"X-Forwarded-Proto": "https"}))
+    check("X-Forwarded-Proto is case-insensitive",
+          "Secure" in login_set_cookie({"X-Forwarded-Proto": "HTTPS"}))
+    check("a bogus X-Forwarded-Proto value is not mistaken for https",
+          "Secure" not in login_set_cookie({"X-Forwarded-Proto": "httpsx"}))
+finally:
+    srv_sec.shutdown()
+    srv_sec.server_close()
+
+adb_nosec = os.path.join(tmp, "nosec.db")
+a_nosec = AuthStore(adb_nosec)
+a_nosec.signup("owner@nosec.test", "sekret12", "NoSecCo")
+a_nosec.close()
+srv_nosec = ThreadingHTTPServer(("127.0.0.1", 8101), web.make_handler(
+    mdb, sfile, AuthStore(adb_nosec), web.SessionManager(), secure_cookies=False))
+threading.Thread(target=srv_nosec.serve_forever, daemon=True).start()
+try:
+    body = urllib.parse.urlencode(
+        {"email": "owner@nosec.test", "password": "sekret12"}).encode()
+    try:
+        r = opener(redirect=False).open(urllib.request.Request(
+            "http://127.0.0.1:8101/login", data=body,
+            headers={"X-Forwarded-Proto": "https"}), timeout=5)
+        set_cookie = r.headers.get("Set-Cookie", "")
+    except urllib.error.HTTPError as e:
+        set_cookie = e.headers.get("Set-Cookie", "")
+    check("secure_cookies=False (no domain configured at all) never marks "
+          "the cookie Secure, even if a request claims X-Forwarded-Proto: "
+          "https — a pure IP-only server is unaffected by this fix either way",
+          "Secure" not in set_cookie)
+finally:
+    srv_nosec.shutdown()
+    srv_nosec.server_close()
+
 # ---- live server (with the devices DB so org isolation is real) ------------
 srv = ThreadingHTTPServer(("127.0.0.1", 8098), web.make_handler(
     mdb, sfile, AuthStore(adb), web.SessionManager(),
