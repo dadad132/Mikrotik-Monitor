@@ -1234,6 +1234,18 @@ try:
           "created-profile-1" in box_after_enable
           and "my.nextdns.io/created-profile-1/setup" in box_after_enable)
 
+    print("  diagnostics report picks up the live NextDNS state:")
+    diag_report = web._build_nextdns_diagnostics_lines(
+        AuthStore(adb), wdb, DEF)
+    diag_text = "\n".join(diag_report)
+    check("report lists WebR1 (NextDNS enabled) with its assigned profile id",
+          "--- WebR1 ---" in diag_text and "created-profile-1" in diag_text)
+    check("report shows the platform API key as configured",
+          "platform API key: configured" in diag_text)
+    check("WebR1's host (9.9.9.9) is unreachable, so the report says so "
+          "instead of hanging or crashing",
+          "UNREACHABLE from this server right now" in diag_text)
+
     # Re-enabling (already enabled) must NOT create a second profile.
     orig_create = nextdns_mod.create_profile
     nextdns_mod.create_profile = _fake_create

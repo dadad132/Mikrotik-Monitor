@@ -392,6 +392,90 @@ def _build_vpn_router_diagnostics_lines(devices_db, defaults) -> list:
     return lines
 
 
+def _build_nextdns_diagnostics_lines(auth, devices_db, defaults) -> list:
+    """Live NextDNS diagnostics: the platform API key's configured/not
+    state, then for every device with NextDNS enabled, its assigned
+    profile id side by side with the router's actual live /ip/dns
+    use-doh-server value (read over the API) — the direct way to tell
+    "mikromon thinks it's enabled" from "the router genuinely has it".
+    Bounded per router (a quick reachability probe first) so one offline
+    router can't hang the whole report."""
+    from .config import build_device
+    from .device import DeviceError
+    from .push import PushError, rw_device
+    from .push.api import PushApi
+    from .push.features import _ros_version, _doh_supported
+
+    lines = ["", "=" * 70, "NextDNS: per-router live state", "=" * 70, ""]
+    nextdns_cfg = auth.get_nextdns() if auth else {}
+    lines.append(f"platform API key: "
+                f"{'configured' if nextdns_cfg.get('api_key') else 'NOT configured'}")
+    lines.append(f"template profile to clone: "
+                f"{nextdns_cfg.get('template_profile') or '(none)'}")
+    if not devices_db:
+        lines.append("(devices_db not configured — no routers to check)")
+        return lines
+
+    from .devices_store import DevicesStore
+    try:
+        ds = DevicesStore(devices_db)
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"(could not open devices.db: {exc})")
+        return lines
+
+    try:
+        names = [n for n in ds.names() if (ds.raw(n) or {}).get("nextdns_enabled")]
+        if not names:
+            lines.append("(no routers have NextDNS enabled)")
+            return lines
+        for name in names:
+            raw = ds.raw(name)
+            profile_id = raw.get("nextdns_profile_id", "")
+            lines.append(f"--- {name} ---")
+            lines.append(f"  mikromon's own record: enabled=True "
+                        f"profile_id={profile_id or '(none — inconsistent state)'}")
+            cfg = build_device(raw, defaults)
+            dev = rw_device(cfg)
+            try:
+                if not dev.reachable():
+                    lines.append("  UNREACHABLE from this server right now "
+                                 "— can't check its live DNS settings.")
+                    lines.append("")
+                    continue
+                api = PushApi(dev)
+                try:
+                    api.connect()
+                    major, minor, ver_str = _ros_version(api)
+                    dns = api.fetch(("ip", "dns"))
+                except (DeviceError, PushError) as exc:
+                    lines.append(f"  could not connect: {exc}")
+                    lines.append("")
+                    continue
+            finally:
+                dev.close()
+            lines.append(f"  RouterOS: {ver_str}")
+            if not _doh_supported(major, minor):
+                lines.append("  DNS-over-HTTPS: NOT SUPPORTED — needs "
+                             "RouterOS 7.1+. This is why the router's DNS "
+                             "was never actually changed even though the "
+                             "profile exists in NextDNS.")
+                lines.append("")
+                continue
+            live = str((dns[0] if dns else {}).get("use-doh-server", ""))
+            expected = f"https://dns.nextdns.io/{profile_id}" if profile_id else ""
+            lines.append(f"  live use-doh-server on the router: {live or '(empty)'}")
+            if live == expected and expected:
+                lines.append("  status: OK, matches the assigned profile.")
+            else:
+                lines.append(f"  status: MISMATCH — expected {expected or '(empty)'}. "
+                             f"Disable and re-enable NextDNS on this router's "
+                             f"DNS tab to retry the push.")
+            lines.append("")
+    finally:
+        ds.close()
+    return lines
+
+
 def _build_diagnostics_report(auth, devices_db, state_file, metrics_db,
                               defaults) -> str:
     """Plain-text dump of every device's live monitoring state, across every
@@ -400,15 +484,19 @@ def _build_diagnostics_report(auth, devices_db, state_file, metrics_db,
     _device_view so it can show the RAW condition fields (pending/pending_n/
     severity/since) that matter for debugging, not just the filtered
     "problems" list a dashboard would show. Also includes hub/tunnel-level
-    WireGuard diagnostics (_build_wg_diagnostics_lines) and, for every
-    router in a VPN group, a live expected-vs-actual comparison of its
-    routes/firewall rule (_build_vpn_router_diagnostics_lines) — everything
-    needed to debug "can't reach a device" and "VPN routing isn't working"
-    in one downloadable file, without needing SSH access."""
+    WireGuard diagnostics (_build_wg_diagnostics_lines), for every router in
+    a VPN group a live expected-vs-actual comparison of its routes/firewall
+    rule (_build_vpn_router_diagnostics_lines), and for every router with
+    NextDNS enabled a live expected-vs-actual comparison of its DNS
+    settings (_build_nextdns_diagnostics_lines) — everything needed to
+    debug "can't reach a device", "VPN routing isn't working", and
+    "NextDNS doesn't seem to be doing anything" in one downloadable file,
+    without needing SSH access."""
     lines = [f"mikromon diagnostics — {time.strftime('%Y-%m-%d %H:%M:%S %Z')}",
              "=" * 70, ""]
     lines.extend(_build_wg_diagnostics_lines(devices_db))
     lines.extend(_build_vpn_router_diagnostics_lines(devices_db, defaults))
+    lines.extend(_build_nextdns_diagnostics_lines(auth, devices_db, defaults))
     state = _load_state(state_file)
     devices_state = state.get("devices", {})
 
