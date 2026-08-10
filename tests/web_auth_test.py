@@ -294,6 +294,58 @@ try:
     check("a clear error when device management isn't enabled here, not a "
           "500", "Device management is not enabled" in body)
 
+    print("  regions (choose-your-region picker):")
+    _, sa_body = req(op_founder, "/superadmin", base=B0)
+    check("Regions box is on the superadmin page",
+          "Regions" in sa_body and "/superadmin/regions" in sa_body)
+    st, body = req(op_founder, "/regions", base=B0)
+    check("GET /regions works even with none configured yet",
+          st == 200 and "Choose your region" in body
+          and "This server" in body)
+    st, login_body = req(opener(), "/login", base=B0)
+    check("no region banner on /login before any regions are configured",
+          "Choose your region" not in login_body)
+
+    regions_text = ("South Africa|https://sa.easymikrotik.example\n"
+                    "USA|https://us.easymikrotik.example")
+    st, redirected = req(op_founder, "/superadmin/regions",
+                         {"csrf": sa_csrf, "regions": regions_text}, B0)
+    check("saving 2 regions redirects back with a confirmation",
+          st == 200 and "Saved 2 region" in redirected)
+
+    _, sa_body = req(op_founder, "/superadmin", base=B0)
+    check("saved regions round-trip into the textarea",
+          "sa.easymikrotik.example" in sa_body
+          and "us.easymikrotik.example" in sa_body)
+
+    st, pick_body = req(op_founder, "/regions?go=login", base=B0)
+    check("picker now lists both configured regions plus this server",
+          "South Africa" in pick_body and "USA" in pick_body
+          and "This server" in pick_body
+          and "https://sa.easymikrotik.example/login" in pick_body
+          and "https://us.easymikrotik.example/login" in pick_body)
+
+    st, login_body = req(opener(), "/login", base=B0)
+    check("region banner now shown on /login once regions exist",
+          "Choose your region" in login_body
+          and "/regions?go=login" in login_body)
+    st, signup_body = req(opener(), "/signup", base=B0)
+    check("region banner also shown on /signup",
+          "Choose your region" in signup_body
+          and "/regions?go=signup" in signup_body)
+
+    st, _ = req(op_helper, "/superadmin/regions",
+               {"csrf": "x", "regions": "X|https://evil.example"}, B0)
+    check("member blocked from saving regions (403)", st == 403)
+
+    st, _ = req(op_founder, "/superadmin/regions",
+               {"csrf": sa_csrf, "regions": ""}, B0)
+    check("clearing the textarea saves an empty region list",
+          st == 200)
+    _, pick_body = req(op_founder, "/regions", base=B0)
+    check("picker no longer lists the old regions once cleared",
+          "South Africa" not in pick_body and "USA" not in pick_body)
+
     print("  path-traversal protection:")
     for bad_name in ("../../etc/passwd", "/etc/passwd", "sub/dir.tar.gz"):
         try:

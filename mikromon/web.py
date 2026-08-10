@@ -42,7 +42,7 @@ from .web_auth import (
     _render_login, _render_signup, _render_account,
     _render_admin, _render_guide,
     _render_billing, _render_locked, _grace_banner_html,
-    _render_superadmin,
+    _render_superadmin, _render_region_picker, _parse_regions_text,
 )
 
 _CLIENT_SOURCES = ["bridge", "dhcp", "wireless", "arp", "hotspot"]
@@ -4125,13 +4125,23 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 allowed = sorted(known) if managed else None
                 return self._serve_data(path, url, user=None, allowed=allowed)
 
+            # "Choose your region" — other independent mikromon deployments a
+            # visitor can jump to, superadmin-configured (Platform admin).
+            # Public: shown before anyone's logged in, same as /signup/login.
+            if path == "/regions":
+                go = parse_qs(url.query).get("go", ["signup"])[0]
+                return self._send(200, _render_region_picker(
+                    auth.get_regions(), go, this_url="."),
+                    "text/html; charset=utf-8")
+
             # Open self-signup: anyone can create a company account.
             if path == "/signup":
                 if self._session():
                     return self._redirect("/")
                 err = parse_qs(url.query).get("error", [""])[0]
-                return self._send(200, _render_signup(err),
-                                  "text/html; charset=utf-8")
+                return self._send(200, _render_signup(
+                    err, has_regions=bool(auth.get_regions())),
+                    "text/html; charset=utf-8")
             # With no accounts yet, send first-time visitors to sign up.
             if auth.count_users() == 0 and path not in ("/login",):
                 return self._redirect("/signup")
@@ -4141,7 +4151,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._redirect("/")
                 err = {"1": "Invalid email or password."}.get(
                     parse_qs(url.query).get("error", [""])[0], "")
-                return self._send(200, _render_login(err), "text/html; charset=utf-8")
+                return self._send(200, _render_login(
+                    err, has_regions=bool(auth.get_regions())),
+                    "text/html; charset=utf-8")
             if path == "/logout":
                 sessions.destroy(self._token())
                 return self._redirect("/login", self._cookie_header("", clear=True))
@@ -4415,7 +4427,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 smtp=smtp_settings, billing_on=billing is not None,
                 billing_contact=auth.get_billing_contact() if auth else None,
                 hub_ip=hub_ip, hub_port=hub_port, router_count=router_count,
-                hub_pubkey=hub_pubkey_cur),
+                hub_pubkey=hub_pubkey_cur,
+                regions=auth.get_regions() if auth else []),
                 "text/html; charset=utf-8")
 
         def _backup_paths(self):
@@ -4544,6 +4557,26 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             auth.set_billing_contact(cfg)
             return self._redirect("/superadmin?ok=" +
                                   quote("Billing contact saved."))
+
+        def _post_superadmin_regions(self, user):
+            """Superadmin-only: save the list of other independent mikromon
+            deployments (e.g. one per geographic region) a visitor can pick
+            between on the signup/login page, for latency. Each region is a
+            fully separate install with its own accounts and data — this
+            just lets people find the right one."""
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if auth is None:
+                return self._redirect("/superadmin?error=" +
+                                      quote("Auth store is not enabled."))
+            regions = _parse_regions_text(flat.get("regions", ""))
+            auth.set_regions(regions)
+            return self._redirect("/superadmin?ok=" +
+                                  quote(f"Saved {len(regions)} region(s)."))
 
         def _post_superadmin_hub_endpoint(self, user):
             """Superadmin-only: change the address (and, for a full
@@ -6461,6 +6494,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_billing_contact(user)
             if path == "/superadmin/hub-endpoint":
                 return self._post_superadmin_hub_endpoint(user)
+            if path == "/superadmin/regions":
+                return self._post_superadmin_regions(user)
             # Everything below requires a logged-in user + a valid CSRF token.
             if not user:
                 return self._send(403, "forbidden")

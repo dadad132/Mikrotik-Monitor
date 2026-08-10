@@ -437,6 +437,18 @@ class AuthStore:
         d = self.get_setting("billing_contact")
         return d if isinstance(d, dict) and d.get("email") else None
 
+    def get_regions(self) -> list:
+        """Other independent mikromon deployments (each a fully separate
+        install — own companies, own billing, own superadmin) a visitor can
+        choose between on signup/login, e.g. one per geographic region for
+        latency. [] means this is a single-region (or not-yet-configured)
+        install and no picker should be shown. Each entry: {"name", "url"}."""
+        d = self.get_setting("regions")
+        return d if isinstance(d, list) else []
+
+    def set_regions(self, regions: list) -> None:
+        self.set_setting("regions", regions)
+
     def set_billing_contact(self, cfg: dict) -> None:
         self.set_setting("billing_contact", cfg)
 

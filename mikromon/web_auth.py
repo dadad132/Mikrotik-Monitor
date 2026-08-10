@@ -26,10 +26,18 @@ def _auth_page(title, body) -> str:
             f'{_AUTH_BRAND}<div class="box">{body}</div></div></body></html>')
 
 
-def _render_login(error: str = "") -> str:
+def _region_banner(has_regions: bool, go: str) -> str:
+    return (f'<p class="muted" style="margin:0 0 14px;text-align:center;'
+            f'font-size:12px">Not in the right place? '
+            f'<a href="/regions?go={go}">Choose your region</a></p>'
+            if has_regions else "")
+
+
+def _render_login(error: str = "", has_regions: bool = False) -> str:
     msg = (f'<p style="color:#dc2626;margin-top:0">{esc(error)}</p>'
            if error else "")
     return _auth_page("Sign in",
+            f'{_region_banner(has_regions, "login")}'
             f'<h2 style="margin-top:0">Sign in</h2>{msg}'
             f'<form method="POST" action="/login">'
             f'<p><input name="email" placeholder="Email" autofocus '
@@ -44,10 +52,11 @@ def _render_login(error: str = "") -> str:
             f'New here? <a href="/signup">Create a company account</a></p>')
 
 
-def _render_signup(error: str = "", values=None) -> str:
+def _render_signup(error: str = "", values=None, has_regions: bool = False) -> str:
     v = values or {}
     msg = (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
     return _auth_page("Create account",
+            f'{_region_banner(has_regions, "signup")}'
             f'<h2 style="margin-top:0">Create your company account</h2>'
             f'<p class="muted" style="margin-top:0">You\'ll be the owner: you can '
             f'invite team members and choose which devices each one can see.</p>{msg}'
@@ -548,6 +557,83 @@ def _billing_contact_box(contact, csrf) -> str:
         f'</form></div>')
 
 
+def _parse_regions_text(text: str) -> list:
+    """One region per line, "Name|https://url" — the textarea format
+    _regions_box's form submits and _post_superadmin_regions parses.
+    Blank lines are ignored; a line missing "|" or a http(s) URL is
+    dropped rather than saved half-broken (see the caller for surfacing
+    that as an error instead of silently losing it)."""
+    out = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        name, sep, url = line.partition("|")
+        name, url = name.strip(), url.strip().rstrip("/")
+        if sep and name and (url.startswith("http://") or url.startswith("https://")):
+            out.append({"name": name, "url": url})
+    return out
+
+
+def _regions_box(regions, csrf) -> str:
+    """Superadmin setting: other independent mikromon deployments (each a
+    separate, self-contained install) a visitor can choose between on
+    signup/login — e.g. one per geographic region, for latency. Each
+    regional server is set up exactly like this one (deploy/install.sh);
+    this list is ONLY what powers the "choose your region" picker, it
+    doesn't connect the servers to each other in any other way — every
+    region keeps its own companies/billing/users entirely independently."""
+    text = "\n".join(f'{r.get("name", "")}|{r.get("url", "")}' for r in regions)
+    return (
+        f'<div class="box"><h2>Regions</h2>'
+        f'<p class="muted">Other independent mikromon servers a visitor can '
+        f'choose between on the sign-up/sign-in pages — e.g. one server per '
+        f'geographic region, for latency. Each is a fully separate install '
+        f'(own companies, billing, users) set up the normal way '
+        f'(<code>deploy/install.sh</code>) — this list only powers the '
+        f'picker, it doesn\'t link the servers together otherwise. Leave '
+        f'empty for a single-region install (no picker shown). One per '
+        f'line: <code>Name|https://url</code></p>'
+        f'<form method="POST" action="/superadmin/regions">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<textarea name="regions" rows="4" style="width:100%;'
+        f'font-family:ui-monospace,monospace" '
+        f'placeholder="South Africa|https://sa.easymikrotik.com&#10;'
+        f'USA|https://us.easymikrotik.com">{esc(text)}</textarea>'
+        f'<div style="margin-top:10px"><button class="btn" type="submit">'
+        f'Save regions</button></div>'
+        f'</form></div>')
+
+
+def _render_region_picker(regions, go: str, this_url: str = "",
+                          this_name: str = "This server") -> str:
+    """Public "choose your region" page — linked from the signup/login
+    pages (and the marketing landing page) whenever 2+ regions are
+    configured. `go` is "signup" or "login": which page each region link
+    ultimately lands on. Includes THIS server itself as one of the
+    options (so clicking it just proceeds locally, no redirect loop to
+    reason about) alongside every other configured region."""
+    go = go if go in ("signup", "login") else "signup"
+    rows = ""
+    if this_url:
+        rows += (f'<a class="btn" style="display:block;margin-bottom:8px" '
+                 f'href="/{go}">{esc(this_name)} (this server)</a>')
+    for r in regions:
+        url = str(r.get("url", "")).rstrip("/")
+        name = r.get("name") or url
+        if not url:
+            continue
+        rows += (f'<a class="btn ghost" style="display:block;margin-bottom:8px" '
+                 f'href="{esc(url)}/{go}">{esc(name)}</a>')
+    if not rows:
+        rows = f'<a class="btn" href="/{go}">Continue</a>'
+    return _auth_page("Choose your region",
+            f'<h2 style="margin-top:0">Choose your region</h2>'
+            f'<p class="muted" style="margin-top:0">Pick whichever server is '
+            f'closest to your routers for the best performance.</p>'
+            f'{rows}')
+
+
 def _hub_endpoint_box(hub_ip, hub_port, router_count, csrf,
                       hub_pubkey_current="") -> str:
     """Superadmin setting: the address every router dials home to. Lets you
@@ -605,7 +691,8 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        msg: str = "", error: str = "", smtp=None,
                        billing_on: bool = False, billing_contact=None,
                        hub_ip: str = "", hub_port: str = "",
-                       router_count: int = 0, hub_pubkey: str = "") -> str:
+                       router_count: int = 0, hub_pubkey: str = "",
+                       regions=None) -> str:
     """Platform superadmin panel — shows all orgs, billing status, and device counts."""
     note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
            (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
@@ -764,6 +851,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
              f'{_smtp_settings_box(smtp, csrf)}'
              f'{_billing_contact_box(billing_contact, csrf)}'
              f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf, hub_pubkey)}'
+             f'{_regions_box(regions or [], csrf)}'
              f'{diagnostics_box}{backup_box}</div>')
     return _page("Platform Admin", _header(user, "/superadmin") + inner)
 
