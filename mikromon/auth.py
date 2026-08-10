@@ -199,7 +199,11 @@ class AuthStore:
         install), the new user becomes the platform superadmin immediately
         — the same "first one in" rule verify() applies on login, so a
         fresh server's very first signup reaches the Platform admin panel
-        without needing a separate login step first.
+        without needing a separate login step first. If a bootstrap email
+        was pre-configured (get_superadmin_bootstrap_email), only a signup
+        matching that exact email is eligible — everyone else just gets a
+        normal company account, closing the "whoever signs up first wins
+        superadmin" race on a server that's already publicly reachable.
 
         Returns the new org id.
         """
@@ -225,7 +229,8 @@ class AuthStore:
                  time.time()))
             # Inlined (not _grant_first_superadmin(), which takes this same
             # lock and would deadlock re-entering it here).
-            if not self.db.execute(
+            boot_email = self.get_setting("superadmin_bootstrap_email") or ""
+            if (not boot_email or boot_email == email) and not self.db.execute(
                     "SELECT 1 FROM users WHERE is_superadmin = 1 LIMIT 1"
             ).fetchone():
                 self.db.execute("UPDATE users SET is_superadmin = 1 WHERE id = ?",
@@ -449,6 +454,24 @@ class AuthStore:
     def set_regions(self, regions: list) -> None:
         self.set_setting("regions", regions)
 
+    def get_superadmin_bootstrap_email(self) -> str:
+        """If set, only THIS email may auto-become the platform superadmin
+        on a fresh server's first signup/login (see signup() and verify()).
+        Closes the race where, on a newly-installed server that's already
+        reachable, whoever visits and signs up FIRST — not necessarily the
+        intended admin — would otherwise win the platform superadmin seat.
+        Configure it once, before anyone signs up, via
+        `SUPERADMIN_EMAIL=you@example.com sudo bash deploy/install.sh`
+        (writes straight into auth.db — no console user-management command
+        needed). Empty string (the default) keeps the original "whoever's
+        first" rule, fine for a single trusted admin standing up a server
+        by hand."""
+        return self.get_setting("superadmin_bootstrap_email") or ""
+
+    def set_superadmin_bootstrap_email(self, email: str) -> None:
+        self.set_setting("superadmin_bootstrap_email",
+                         _norm_email(email) if email else "")
+
     def set_billing_contact(self, cfg: dict) -> None:
         self.set_setting("billing_contact", cfg)
 
@@ -526,9 +549,14 @@ class AuthStore:
             "SELECT 1 FROM users WHERE is_superadmin = 1 LIMIT 1"
         ).fetchone())
 
-    def _grant_first_superadmin(self, user_id: int) -> bool:
-        """Atomically promote user_id if and only if no superadmin exists yet.
-        The guarded UPDATE makes two simultaneous first logins race-safe."""
+    def _grant_first_superadmin(self, user_id: int, email: str = "") -> bool:
+        """Atomically promote user_id if and only if no superadmin exists yet
+        AND (no bootstrap email is configured, or this login's email matches
+        it — see get_superadmin_bootstrap_email). The guarded UPDATE makes
+        two simultaneous first logins race-safe."""
+        boot_email = self.get_setting("superadmin_bootstrap_email") or ""
+        if boot_email and _norm_email(email) != boot_email:
+            return False
         with self._lock:
             cur = self.db.execute(
                 "UPDATE users SET is_superadmin = 1 WHERE id = ? AND NOT "
@@ -578,9 +606,11 @@ class AuthStore:
             return None
         if _verify(password, user["salt"], user["pw_hash"], user["iterations"]):
             self._note_login_result(ident, True)
-            # First person ever to log in becomes the platform superadmin.
+            # First person ever to log in becomes the platform superadmin
+            # (or, if a bootstrap email is configured, only that email does).
             if (not user["is_superadmin"] and not self._has_superadmin()
-                    and self._grant_first_superadmin(user["id"])):
+                    and self._grant_first_superadmin(
+                        user["id"], user.get("email") or "")):
                 user["is_superadmin"] = True
             return user
         self._note_login_result(ident, False)

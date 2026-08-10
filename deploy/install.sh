@@ -210,6 +210,35 @@ PY
 fi
 
 # ---------------------------------------------------------------------------
+# Pin who's allowed to become this server's platform superadmin. Normally,
+# whoever signs up (or logs in) FIRST on a fresh server automatically gets
+# the superadmin seat — convenient, but only safe if you reach the new
+# server before anyone/anything else does. Set SUPERADMIN_EMAIL=you@x.com
+# to pre-register your email so only IT can claim the seat; everyone else
+# who signs up first just gets a normal (non-superadmin) company account.
+# Safe to re-run with a different address; leave unset to keep the original
+# "whoever's first" behavior.
+# ---------------------------------------------------------------------------
+if [[ -n "${SUPERADMIN_EMAIL:-}" ]]; then
+  step "Pinning platform superadmin to ${SUPERADMIN_EMAIL}"
+  "${APP_DIR}/.venv/bin/python" - "${AUTH_DB_CHECK}" "${SUPERADMIN_EMAIL}" <<'PY'
+import json, sqlite3, sys
+path, email = sys.argv[1], sys.argv[2].strip().lower()
+conn = sqlite3.connect(path)
+conn.execute("CREATE TABLE IF NOT EXISTS platform_settings ("
+             "key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+conn.execute(
+    "INSERT INTO platform_settings (key, value) VALUES (?, ?) "
+    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    ("superadmin_bootstrap_email", json.dumps(email)))
+conn.commit()
+conn.close()
+print("bootstrap superadmin email set to", email)
+PY
+  chown "${SERVICE_USER}:${SERVICE_USER}" "${AUTH_DB_CHECK}" 2>/dev/null || true
+fi
+
+# ---------------------------------------------------------------------------
 # 7. Web dashboard network binding
 # ---------------------------------------------------------------------------
 step "Configuring web dashboard (host 0.0.0.0, port ${WEB_PORT})"

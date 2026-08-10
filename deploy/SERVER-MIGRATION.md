@@ -13,18 +13,24 @@ reason to keep the identical key.
 nothing to edit):
 
 ```bash
-git clone <your-repo> mikromon && cd mikromon
-sudo bash deploy/install.sh
+SUPERADMIN_EMAIL=you@example.com sudo bash deploy/install.sh
 ```
 
 This sets everything up, including a **brand-new** WireGuard identity for
 this server (no key ever needs to travel between hosts by hand).
+`SUPERADMIN_EMAIL` pins the platform-superadmin seat to your own address —
+normally whoever signs up *first* on a fresh server gets it, which is fine
+when you're sitting at the keyboard signing up immediately, but not once
+the server is reachable ahead of that (e.g. standing up several region
+servers in a row). Safe to skip if you know you'll be the very first
+visitor. See the "Upgrading mikromon itself" section of the main
+`README.md` for more on this.
 
 **In the browser, on the new server's dashboard** (`http://<new-server>:8080`):
-sign up with any email — this account becomes a superadmin automatically,
-just to unlock the panel; it gets replaced when you restore your real data
-in a moment. Open **Platform admin** and note this server's own public key
-under **"Hub endpoint"** — you'll copy that in a later step.
+sign up with that same email — this account becomes a superadmin
+automatically, just to unlock the panel; it gets replaced when you restore
+your real data in a moment. Open **Platform admin** and note this server's
+own public key under **"Hub endpoint"** — you'll copy that in a later step.
 
 **On the OLD server's dashboard**: Platform admin → **Server backup** →
 Create new backup → Download it.

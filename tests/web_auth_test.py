@@ -148,6 +148,32 @@ check("effective_smtp now prefers the DB relay over config",
       and eff.use_tls and not eff.use_ssl and eff.password == "sekret")
 a.close()
 
+print("Superadmin bootstrap-email pinning (closes the 'first signup wins' "
+      "race on an already-reachable fresh server):")
+boot_db = os.path.join(tmp, "boot.db")
+ab = AuthStore(boot_db)
+check("no bootstrap email configured by default",
+      ab.get_superadmin_bootstrap_email() == "")
+ab.set_superadmin_bootstrap_email("Keeper@Pinned.TEST")
+check("bootstrap email round-trips normalized (lowercased)",
+      ab.get_superadmin_bootstrap_email() == "keeper@pinned.test")
+
+boot_org = ab.signup("first@intruder.test", "intruder1", "Intruder Co")
+check("a non-matching signup on a fresh server does NOT auto-grant "
+      "superadmin when a bootstrap email is pinned",
+      not ab.get_user("first@intruder.test")["is_superadmin"])
+
+ab.add_member(boot_org, "keeper@pinned.test", "keeper123", role="member")
+check("the pinned email still isn't superadmin until it actually logs in",
+      not ab.get_user("keeper@pinned.test")["is_superadmin"])
+u = ab.verify("keeper@pinned.test", "keeper123")
+check("the pinned email becomes superadmin on its first login, even "
+      "though it wasn't the first account created",
+      u is not None and u["is_superadmin"])
+check("the earlier non-matching signup is still not superadmin",
+      not ab.get_user("first@intruder.test")["is_superadmin"])
+ab.close()
+
 # ---- legacy -> multi-tenant migration --------------------------------------
 print("Legacy schema migration:")
 ldb = os.path.join(tmp, "legacy.db")

@@ -132,6 +132,20 @@ sudo bash deploy/install.sh
 
 The installer creates a `mikromon` system user, installs to `/opt/mikromon`,
 builds a virtualenv, installs dependencies, and registers a systemd service.
+
+By default, whoever **first** signs up on a brand-new server's dashboard
+automatically becomes its platform superadmin — convenient (no console
+step), but only safe if you get there before anyone/anything else does. If
+the server is going to be reachable before you've had a chance to sign up
+(e.g. provisioning several servers ahead of a bulk rollout), pin the seat to
+your own email first so a stranger signing up first can't claim it:
+
+```bash
+SUPERADMIN_EMAIL=you@example.com sudo bash deploy/install.sh
+```
+
+Safe to omit for a single server you're setting up interactively right now.
+
 Then:
 
 ```bash
