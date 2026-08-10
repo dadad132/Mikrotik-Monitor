@@ -1154,10 +1154,15 @@ def _render_guide(user, tab_intro: dict) -> str:
                 "risky changes — see the section above."),
         ("Hub", "This dashboard's own WireGuard server that every "
                 "router dials home to."),
-        ("Superadmin", "The platform-level account (not tied to any one "
-                "company) that manages billing, backups and server-wide "
-                "settings for every company on this install."),
     ]
+    if user.get("is_superadmin"):
+        # Platform-internal concept — only relevant (and only ever visible)
+        # to whoever manages the server itself, not every company's users.
+        glossary_terms.append(
+            ("Superadmin", "The platform-level account (not tied to any "
+                    "one company) that manages billing, backups and "
+                    "server-wide settings for every company on this "
+                    "install."))
     glossary_rows = "".join(
         f'<tr><td style="white-space:nowrap;vertical-align:top"><b>{esc(term)}</b></td>'
         f'<td>{esc(defn)}</td></tr>'

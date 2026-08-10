@@ -313,6 +313,19 @@ try:
     except urllib.error.HTTPError as e:
         check("member blocked from diagnostics download (403)", e.code == 403)
 
+    print("  Guide page glossary — 'Superadmin' term only shown to a "
+          "superadmin, not every company's users:")
+    _, guide_body_sa = req(op_founder, "/guide", base=B0)
+    check("superadmin sees the 'Superadmin' glossary entry",
+          "Superadmin</b>" in guide_body_sa
+          and "platform-level account" in guide_body_sa)
+    _, guide_body_member = req(op_helper, "/guide", base=B0)
+    check("a regular (non-superadmin) member does NOT see it",
+          "Superadmin</b>" not in guide_body_member
+          and "platform-level account" not in guide_body_member)
+    check("the rest of the glossary is still shown to everyone",
+          "WireGuard</b>" in guide_body_member)
+
     print("  hub endpoint (no devices_db configured on this server):")
     st, body = req(op_founder, "/superadmin/hub-endpoint",
                    {"csrf": sa_csrf, "hub_ip": "hub.example.com",
