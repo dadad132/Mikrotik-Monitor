@@ -966,7 +966,7 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
 
 # Flat tabs on the device bar.
 _DEVICE_TABS = ["Overview", "Provision", "Routes", "WAN", "Security",
-                "DNS", "NextDNS", "Queues", "Port forwarding",
+                "DNS", "Queues", "Port forwarding",
                 "VPN", "Scripts"]
 _MAINT_ITEMS = [("Update", "update"), ("Backups", "backups"),
                 ("Restrict access", "harden"), ("Remote access", "remote"),
@@ -975,7 +975,7 @@ _MAINT_ITEMS = [("Update", "update"), ("Backups", "backups"),
 _LIVE_TABS = {"Overview": "", "Provision": "provision",
               "Routes": "routes", "WAN": "wan",
               "Security": "security", "Restrict access": "harden",
-              "DNS": "nextdns", "NextDNS": "nextdns_svc",
+              "DNS": "nextdns",
               "Queues": "qos", "QoS": "qos", "Port forwarding": "portfwd",
               "Interfaces": "interfaces", "Remote access": "remote",
               "VPN": "tunnel", "Scripts": "scripts",
@@ -983,7 +983,7 @@ _LIVE_TABS = {"Overview": "", "Provision": "provision",
               "Temp Access": "tempaccess"}
 # tabs that WRITE to the router (admins only); Overview is read-only
 _ADMIN_TABS = {"provision", "routes", "wan", "security", "harden", "nextdns",
-               "nextdns_svc", "qos", "portfwd", "remote", "tunnel", "scripts",
+               "qos", "portfwd", "remote", "tunnel", "scripts",
                "update", "backups", "tempaccess", "interfaces"}
 
 
@@ -2155,11 +2155,13 @@ def _vpn_group_box(name, devices_db, org_id, csrf) -> str:
 
 
 def _nextdns_box(name, cfg, csrf, nextdns_configured: bool) -> str:
-    """The NextDNS tab's enable/disable control. Enabling auto-creates a
-    fresh NextDNS.io profile for THIS router via the API (see
-    web.py's _device_nextdns_post) and pushes the router's DNS to it
-    immediately — no separate Preview/Apply step, same reasoning as the VPN
-    tab's grouping controls (see _vpn_group_box)."""
+    """The DNS tab's NextDNS enable/disable control — a separate, real
+    NextDNS.io cloud profile per router, alongside that tab's own local
+    filter presets/blocklists above it. Enabling auto-creates a fresh
+    NextDNS.io profile for THIS router via the API (see web.py's
+    _device_nextdns_post) and pushes the router's DNS to it immediately —
+    no separate Preview/Apply step, same reasoning as the VPN tab's
+    grouping controls (see _vpn_group_box)."""
     q = esc(name)
     if not nextdns_configured:
         return (f'<div class="box"><h2>NextDNS</h2>'
@@ -2563,7 +2565,7 @@ def _render_device_backups(name, user, facts, csrf, *, backups=None,
     return _page(esc(name) + " · Backups", _header(user, "/") + inner)
 
 
-# ---- generic feature tabs (SD-WAN / Security / NextDNS / QoS / …) ----------
+# ---- generic feature tabs (SD-WAN / Security / DNS / QoS / …) ----------
 _FEATURE_JS = """
 <script>
  function pushAddRow(name){
@@ -3403,11 +3405,10 @@ _TAB_INTRO = {
     "harden": "Stop brute-force attacks: lock API/Winbox/SSH to your trusted IPs, "
               "disable insecure services, and block attacker IPs. ⚠ Include this "
               "server's IP in the allowed list so you don't lock easymikrotik out.",
-    "nextdns": "Point DNS at a filtering service and list any IPs that bypass it.",
-    "nextdns_svc": "Give this router its own NextDNS.io profile — separate "
-                   "blocklists, allowlists and query logs from every other "
-                   "router, managed in NextDNS's own dashboard. Different "
-                   "from the DNS tab's built-in filtering above.",
+    "nextdns": "Point DNS at a filtering service and list any IPs that bypass it. "
+               "The NextDNS box below is separate — it gives this router its own "
+               "real NextDNS.io profile (blocklists, allowlists, query logs kept "
+               "apart from every other router), managed in NextDNS's own dashboard.",
     "qos": "Cap upload/download speed for a subnet or interface (simple queues). "
            "Add a row, then Preview.",
     "portfwd": "Forward an external port to an internal device, or adopt forwards "
@@ -3638,13 +3639,15 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                      f'<ul style="margin:0 0 0 18px">{sm}</ul></div>')
         else:
             state = ""
-        if fields is not None and slug in ("tunnel", "nextdns_svc"):
+        if fields is not None and slug == "tunnel":
             # VPN grouping (make-main/add-member/remove-member/stop-main,
-            # in extra_html) already pushes routes automatically, and
-            # NextDNS's enable/disable button (also in extra_html) pushes
-            # its own DNS change immediately — neither tab has anything
-            # left to fill in, so a Preview/Apply button here would only
-            # confuse people into thinking they need to click it.
+            # in extra_html) already pushes routes automatically — this tab
+            # has nothing left to fill in, so a Preview/Apply button here
+            # would only confuse people into thinking they need to click it.
+            # (The DNS tab's own NextDNS box, also extra_html, pushes its
+            # own change immediately too — but that tab's OTHER fields, the
+            # local filter presets/blocklists, still need the normal
+            # Preview/Apply flow below, so it isn't included here.)
             ff = "".join(_field_html(d) for d in fields)
             form = (f'<div class="box"><h2>{esc(feature["title"])}</h2>'
                     f'<div class="fields">{ff}</div></div>')
@@ -5253,7 +5256,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if audit:
                     audit.close()
 
-        # ---- generic feature tabs (SD-WAN/Security/NextDNS/QoS/…) ----
+        # ---- generic feature tabs (SD-WAN/Security/DNS/QoS/…) ----
         def _auditlog(self):
             if not push_log_db:
                 return None
@@ -5352,7 +5355,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     elif slug == "tunnel":
                         extra_html = _vpn_group_box(
                             name, devices_db, (user or {}).get("org_id"), csrf)
-                    elif slug == "nextdns_svc":
+                    elif slug == "nextdns":
                         extra_html = _nextdns_box(
                             name, cfg, csrf,
                             bool(auth and auth.get_nextdns().get("api_key")))
@@ -6367,7 +6370,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             enable = flat.get("enable") == "1"
             if enable and not api_key:
                 return self._redirect(
-                    f"/device?name={q}&tab=nextdns_svc&error=" +
+                    f"/device?name={q}&tab=nextdns&error=" +
                     quote("NextDNS isn't set up on this server yet — a "
                           "superadmin needs to add an API key first "
                           "(Platform admin -> NextDNS)."))
@@ -6380,7 +6383,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                             clone_from=nextdns_cfg.get("template_profile", ""))
                     except nextdns_client.NextDnsError as exc:
                         return self._redirect(
-                            f"/device?name={q}&tab=nextdns_svc&error=" +
+                            f"/device?name={q}&tab=nextdns&error=" +
                             quote(f"Could not create a NextDNS profile: {exc}"))
                     raw["nextdns_enabled"] = True
                     raw["nextdns_profile_id"] = profile_id
@@ -6423,14 +6426,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     plan = nextdns_cloud_ops(
                         pusher, cfg.nextdns_profile_id if cfg.nextdns_enabled else "")
                     if not plan.empty:
-                        pusher.apply(plan, feature="nextdns_svc")
+                        pusher.apply(plan, feature="nextdns-cloud")
             except (DeviceError, PushError) as exc:
                 msg += f" Push failed: {exc}"
             finally:
                 dev.close()
                 if audit:
                     audit.close()
-            return self._redirect(f"/device?name={q}&tab=nextdns_svc&msg=" + quote(msg))
+            return self._redirect(f"/device?name={q}&tab=nextdns&msg=" + quote(msg))
 
         def _hub_reload_peers_post(self, flat, user):
             """Rebuild wg-peers.conf from hub.json leases and write it.

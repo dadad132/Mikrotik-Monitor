@@ -1843,45 +1843,6 @@ def nextdns_cloud_ops(pusher, profile_id: str) -> Plan:
     return Plan(pusher.cfg.name, plan.ops, summary="nextdns")
 
 
-def nextdns_cloud_read(pusher, cfg):
-    major, minor, ver_str = _ros_version(pusher.api)
-    dns = pusher.api.fetch(_DNS)
-    row = dns[0] if dns else {}
-    return {"version": ver_str, "supported": _doh_supported(major, minor),
-            "use_doh_server": str(row.get("use-doh-server", ""))}
-
-
-def nextdns_cloud_form(current, cfg):
-    fields: list[dict] = []
-    if not current.get("supported", True):
-        fields.append({"type": "static", "label": "RouterOS version",
-                       "value": f"{current.get('version', '?')} — "
-                                "DNS-over-HTTPS needs RouterOS 7.1+; a "
-                                "per-router NextDNS profile isn't possible "
-                                "on this router yet."})
-    if cfg.nextdns_enabled and cfg.nextdns_profile_id:
-        expected = f"https://dns.nextdns.io/{cfg.nextdns_profile_id}"
-        live = current.get("use_doh_server", "")
-        fields.append({"type": "static", "label": "Status",
-                       "value": ("Enabled — pushed to the router." if live == expected
-                                 else "Enabled here, but not yet pushed to the "
-                                      "router — use the button below to retry.")})
-    else:
-        fields.append({"type": "static", "label": "Status",
-                       "value": "Not enabled for this router."})
-    return fields
-
-
-def nextdns_cloud_plan(pusher, cfg, flat, multi):
-    """Reflects cfg's current enabled/profile state onto the router — the
-    actual enable/disable + profile create/delete happens in the web layer
-    (see web.py's NextDNS box), not here. Only reached if something POSTs
-    to the generic /device/push endpoint for this feature directly; the
-    tab itself has no such form (mirrors the VPN tab)."""
-    return nextdns_cloud_ops(
-        pusher, cfg.nextdns_profile_id if cfg.nextdns_enabled else "")
-
-
 def _detect_lan_subnets(pusher, cfg) -> list:
     """Candidate LAN subnets for the VPN tab's subnet picker: every IP
     address configured on this router except ones on a configured WAN
@@ -2840,9 +2801,6 @@ FEATURES = {
     "nextdns": {"title": "DNS", "write": True,
                 "read": nextdns_read, "summary": nextdns_summary,
                 "form": nextdns_form, "plan": nextdns_plan},
-    "nextdns_svc": {"title": "NextDNS", "write": True,
-                    "read": nextdns_cloud_read,
-                    "form": nextdns_cloud_form, "plan": nextdns_cloud_plan},
     "qos": {"title": "Queues", "write": True, "read": qos_read,
             "summary": qos_summary, "form": qos_form, "plan": qos_plan,
             "unmanaged": qos_unmanaged, "adopt": True, "path": _QUEUE,
@@ -2870,7 +2828,6 @@ FEATURES = {
 # tab label -> url slug (Overview/Backups handled elsewhere)
 TAB_SLUGS = {"Routes": "routes", "WAN": "wan", "Security": "security",
              "Restrict access": "harden", "DNS": "nextdns",
-             "NextDNS": "nextdns_svc",
              "QoS": "qos", "Port forwarding": "portfwd", "Interfaces": "interfaces",
              "Remote access": "remote", "VPN": "tunnel",
              "Scripts": "scripts", "Update": "update"}
