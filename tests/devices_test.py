@@ -927,6 +927,16 @@ try:
                                   "tab=tunnel", "tab=update",
                                   "tab=provision")))
     check("Hub tunnel tab removed", "tab=hubtunnel" not in body)
+    # A POST handler that redirects to /device?...&tab=X&error=... (rather
+    # than folding the failure into &msg=...) used to have that error text
+    # silently dropped — the generic /device GET route only ever read msg=
+    # from the query string, never error=, so _feature_tab_page always saw
+    # error="" regardless of what was actually in the URL.
+    st, body = get(admin, "/device?name=WebR1&tab=wan&error="
+                          "a+distinctive+test+error+xyz123")
+    check("an error= query param on a generic feature tab actually renders "
+          "(regression: used to be silently dropped)",
+          "a distinctive test error xyz123" in body)
     # --- VPN tab site-to-site grouping: guard paths that don't need a live
     # router connection (the actual subnet-detection paths are covered
     # offline, in the "Site-to-site VPN" unit tests above) ---
@@ -1195,6 +1205,32 @@ try:
           web._nextdns_box("WebR1", build_device({"name": "WebR1",
                                                    "host": "9.9.9.9"}, DEF),
                            csrf, True))
+
+    # A failure creating the profile (e.g. NextDNS account plan/profile
+    # limit reached) must show up in the redirect's own message, not
+    # silently vanish (an earlier bug: this used a separate error= query
+    # param that the /device GET route never actually read, so the
+    # message disappeared entirely — looked exactly like "nothing happens").
+    def _fake_create_fails(api_key, name, clone_from=""):
+        raise nextdns_mod.NextDnsError("simulated: profile limit reached")
+
+    orig_create = nextdns_mod.create_profile
+    nextdns_mod.create_profile = _fake_create_fails
+    try:
+        st, loc = post_loc(admin, "/device/nextdns",
+                           {"csrf": csrf, "device": "WebR1", "enable": "1"})
+    finally:
+        nextdns_mod.create_profile = orig_create
+    check("a failed profile creation shows the reason in the redirect "
+          "(not a silent no-op)",
+          "Could not create a NextDNS profile" in loc
+          and "profile limit reached" in loc)
+    ds_after_failed_create = DevicesStore(wdb)
+    raw_after_failed_create = ds_after_failed_create.raw("WebR1")
+    ds_after_failed_create.close()
+    check("nothing is saved as enabled when profile creation fails",
+          not raw_after_failed_create.get("nextdns_enabled")
+          and not raw_after_failed_create.get("nextdns_profile_id"))
 
     # Enable: a fresh NextDNS profile is created via the (mocked) API,
     # cloning the configured template, and the router is pushed to use it —

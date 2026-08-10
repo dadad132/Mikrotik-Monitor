@@ -4427,7 +4427,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         from .push import FEATURES
                         if tab in FEATURES:
                             return self._feature_tab_page(
-                                dev, user, tab, msg=q.get("msg", [""])[0])
+                                dev, user, tab, msg=q.get("msg", [""])[0],
+                                error=q.get("error", [""])[0])
                     sess = self._session()
                     csrf = sess["csrf"] if sess else ""
                     # Diagnosis inputs: when did this device last change, and how
@@ -6458,7 +6459,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             enable = flat.get("enable") == "1"
             if enable and not api_key:
                 return self._redirect(
-                    f"/device?name={q}&tab=nextdns&error=" +
+                    f"/device?name={q}&tab=nextdns&msg=" +
                     quote("NextDNS isn't set up on this server yet — a "
                           "superadmin needs to add an API key first "
                           "(Platform admin -> NextDNS)."))
@@ -6471,7 +6472,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                             clone_from=nextdns_cfg.get("template_profile", ""))
                     except nextdns_client.NextDnsError as exc:
                         return self._redirect(
-                            f"/device?name={q}&tab=nextdns&error=" +
+                            f"/device?name={q}&tab=nextdns&msg=" +
                             quote(f"Could not create a NextDNS profile: {exc}"))
                     raw["nextdns_enabled"] = True
                     raw["nextdns_profile_id"] = profile_id
