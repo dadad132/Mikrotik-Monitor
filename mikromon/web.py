@@ -6425,7 +6425,19 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     api.connect()
                     plan = nextdns_cloud_ops(
                         pusher, cfg.nextdns_profile_id if cfg.nextdns_enabled else "")
-                    if not plan.empty:
+                    if plan.empty:
+                        # Empty can mean "already correct" (fine, no news) or
+                        # "RouterOS is too old for DNS-over-HTTPS" (silent
+                        # no-op otherwise — the profile was created but never
+                        # actually gets used on this router until it's
+                        # upgraded). Only the latter needs surfacing.
+                        if enable and "7.1" in plan.summary:
+                            msg += (" This router's RouterOS is too old for "
+                                    "DNS-over-HTTPS (needs 7.1+), so the DNS "
+                                    "change could not be pushed — the "
+                                    "profile was created and will start "
+                                    "being used once the router is upgraded.")
+                    else:
                         pusher.apply(plan, feature="nextdns-cloud")
             except (DeviceError, PushError) as exc:
                 msg += f" Push failed: {exc}"
