@@ -3719,7 +3719,12 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                 f'<a class="btn ghost" href="/device?name={q}&tab={slug}">Cancel'
                 f'</a></div></form></div>')
     elif error:
-        body = ""
+        # A failed *live read* of the router (e.g. this tab's own settings)
+        # must not also hide unrelated controls that don't need live router
+        # data to render — the NextDNS.io enable/disable box in particular
+        # (see _feature_tab_page, which hoists it out of the live-read try
+        # block for exactly this reason).
+        body = extra_html + _adopt_box(name, slug, feature, csrf, unmanaged)
     else:
         if summary_lines:
             sm = "".join(f'<li>{esc(s)}</li>' for s in summary_lines)
@@ -5385,6 +5390,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             cfg = build_device(raw, defaults)  # device metadata (no router needed)
             summary_lines = fields = unmanaged = None
             extra_html = extra_actions = ""
+            if slug == "nextdns":
+                # The real NextDNS.io cloud enable/disable box only needs
+                # local device state (cfg, the platform API key) — computed
+                # here, before the live-read try block below, so a failure
+                # reading THIS tab's own (unrelated) local DNS-filter
+                # settings from the router doesn't also hide this button.
+                extra_html = _nextdns_box(
+                    name, cfg, csrf,
+                    bool(auth and auth.get_nextdns().get("api_key")))
             # Fall back to interface names cached by the monitoring engine so
             # the WAN uplink dropdown works even when push credentials aren't set.
             cached_ifaces = [{"name": n} for n in (facts.get("interfaces") or [])]
@@ -5444,10 +5458,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     elif slug == "tunnel":
                         extra_html = _vpn_group_box(
                             name, devices_db, (user or {}).get("org_id"), csrf)
-                    elif slug == "nextdns":
-                        extra_html = _nextdns_box(
-                            name, cfg, csrf,
-                            bool(auth and auth.get_nextdns().get("api_key")))
+                    # "nextdns" is computed above, before this try block —
+                    # see the comment there.
                     elif slug == "remote":
                         extra_html = (
                             _remote_regenerate_box(name, current.get("users", []), csrf)
@@ -6709,6 +6721,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 "monitor_interfaces": csv(flat.get("monitor_interfaces")),
                 "client_count_sources": multi.get("sources") or ["bridge", "wireless"],
                 "checks": {k: (k in checks_sel) for k in DEFAULT_CHECKS},
+                # Not on this form — preserve whatever the device already has
+                # (so editing/saving it doesn't silently disable NextDNS and
+                # orphan its live NextDNS.io profile; see _device_nextdns_post).
+                "nextdns_enabled": orig_raw.get("nextdns_enabled", False),
+                "nextdns_profile_id": orig_raw.get("nextdns_profile_id", ""),
             }
 
         def _device_test(self, store, name, user):
@@ -6789,10 +6806,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_nextdns(user)
             # Everything below requires a logged-in user + a valid CSRF token.
             if not user:
-                return self._send(403, "forbidden")
+                # A stale/expired session (e.g. the in-memory session table
+                # was wiped by a server restart while this tab stayed open)
+                # used to dead-end here with a bare "forbidden" text body and
+                # no way back — send them to log in again instead, same as
+                # the GET-side "not logged in" handling above.
+                return self._redirect("/login")
             flat, multi = self._form()
             sess = self._session()
-            if sess is None or flat.get("csrf") != sess["csrf"]:
+            if sess is None:
+                return self._redirect("/login")
+            if flat.get("csrf") != sess["csrf"]:
                 return self._send(400, "bad csrf token")
             # Device-scoped management is open to the company OWNER (any of their
             # devices) AND a MEMBER the device is allocated to — members get

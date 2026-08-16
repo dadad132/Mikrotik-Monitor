@@ -44,6 +44,21 @@ def _request(method: str, path: str, api_key: str, body: dict | None = None) -> 
             + (f" — {detail}" if detail else "")) from exc
     except urllib.error.URLError as exc:
         raise NextDnsError(f"NextDNS API unreachable: {exc.reason}") from exc
+    except (OSError, TimeoutError) as exc:
+        # A stall/drop while *reading* the response (as opposed to
+        # connecting) surfaces as a raw OSError/TimeoutError, not URLError —
+        # urllib only wraps the connect phase. Left uncaught, this would
+        # propagate out of the web request handler unhandled (no response
+        # sent to the browser at all) instead of becoming the graceful
+        # "Could not create a NextDNS profile: ..." message the caller
+        # already redirects with.
+        raise NextDnsError(f"NextDNS API {method} {path} timed out or "
+                           f"dropped mid-response: {exc}") from exc
+    except ValueError as exc:
+        # json.loads on a non-JSON (or truncated) 200 body.
+        raise NextDnsError(
+            f"NextDNS API {method} {path} returned an unparseable "
+            f"response: {exc}") from exc
 
 
 def create_profile(api_key: str, name: str, clone_from: str = "") -> str:
