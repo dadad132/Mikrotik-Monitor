@@ -86,6 +86,38 @@ def create_profile(api_key: str, name: str, clone_from: str = "") -> str:
     return str(profile_id)
 
 
+def get_profile(api_key: str, profile_id: str) -> dict:
+    """The full profile config — security/privacy/parentalControl toggles,
+    denylist/allowlist entries — so the DNS tab can render and manage all
+    of it in-app instead of sending the customer to my.nextdns.io (which
+    would put them one click away from the shared platform account every
+    other router's profile also lives under)."""
+    resp = _request("GET", f"/profiles/{profile_id}", api_key)
+    return resp.get("data") or resp
+
+
+def update_section(api_key: str, profile_id: str, section: str,
+                   patch: dict) -> None:
+    """PATCH one top-level settings section — "security", "privacy", or
+    "parentalControl" — with just the changed fields."""
+    _request("PATCH", f"/profiles/{profile_id}/{section}", api_key, patch)
+
+
+def add_list_entry(api_key: str, profile_id: str, list_name: str,
+                   domain: str) -> None:
+    """Add a domain to the profile's "denylist" or "allowlist"."""
+    _request("POST", f"/profiles/{profile_id}/{list_name}", api_key,
+             {"id": domain, "active": True})
+
+
+def remove_list_entry(api_key: str, profile_id: str, list_name: str,
+                      domain: str) -> None:
+    """Remove a domain previously added to "denylist" or "allowlist"."""
+    _request("DELETE",
+             f"/profiles/{profile_id}/{list_name}/"
+             f"{urllib.parse.quote(domain, safe='')}", api_key)
+
+
 def delete_profile(api_key: str, profile_id: str) -> None:
     """Delete a profile that's no longer needed (NextDNS disabled for that
     router, or the router removed from mikromon). Best-effort by design at

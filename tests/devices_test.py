@@ -1266,9 +1266,10 @@ try:
 
     box_after_enable = web._nextdns_box(
         "WebR1", build_device(raw_after_enable, DEF), csrf, True)
-    check("_nextdns_box now shows the assigned profile + a link into NextDNS",
+    check("_nextdns_box now shows the assigned profile, with everything "
+          "managed in-app instead of a link out to NextDNS.io",
           "created-profile-1" in box_after_enable
-          and "my.nextdns.io/created-profile-1/setup" in box_after_enable)
+          and "my.nextdns.io" not in box_after_enable)
 
     print("  diagnostics report picks up the live NextDNS state:")
     diag_report = web._build_nextdns_diagnostics_lines(

@@ -2341,10 +2341,10 @@ def _nextdns_box(name, cfg, csrf, nextdns_configured: bool) -> str:
         return (
             f'<div class="box"><h2>NextDNS</h2>'
             f'<p>Enabled — this router has its own profile, '
-            f'<code>{esc(pid)}</code>. '
-            f'<a href="https://my.nextdns.io/{esc(pid)}/setup" '
-            f'target="_blank" rel="noopener">Open in NextDNS</a> to manage '
-            f'its blocklists, allowlists, and query log.</p>'
+            f'<code>{esc(pid)}</code>. Manage its blocked/allowed domains, '
+            f'security, parental control, and privacy settings below — '
+            f'everything for this router stays in this dashboard, nothing '
+            f'to sign into on NextDNS.io.</p>'
             f'<form method="POST" action="/device/nextdns">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="device" value="{q}">'
@@ -2365,6 +2365,200 @@ def _nextdns_box(name, cfg, csrf, nextdns_configured: bool) -> str:
         f'<input type="hidden" name="enable" value="1">'
         f'<button class="btn" type="submit">Enable NextDNS for this router'
         f'</button></form></div>')
+
+
+def _humanize_id(s: str) -> str:
+    """'socialNetworks' -> 'Social Networks' — best-effort label for a
+    NextDNS category/service/blocklist id that isn't in a curated name map.
+    NextDNS's API returns these as plain ids with no display name attached."""
+    words = re.findall(r'[A-Z]?[a-z0-9]+|[A-Z]+(?=[A-Z]|$)', s or "")
+    return " ".join(w.capitalize() for w in words) if words else s
+
+
+def _nextdns_list_box(name, csrf, title, list_name, entries: list) -> str:
+    """One box for either the denylist or the allowlist — same shape for
+    both, just a different NextDNS list name and page title."""
+    q = esc(name)
+    rows = "".join(
+        f'<div class="linkrow"><span style="flex:1">{esc(e.get("id", ""))}</span>'
+        f'<form method="POST" action="/device/nextdns-list" class="inline">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="device" value="{q}">'
+        f'<input type="hidden" name="list" value="{list_name}">'
+        f'<input type="hidden" name="action" value="remove">'
+        f'<input type="hidden" name="domain" value="{esc(e.get("id", ""))}">'
+        f'<button class="btn ghost" type="submit" style="padding:4px 10px">'
+        f'Remove</button></form></div>'
+        for e in entries) or '<p class="muted">Nothing here yet.</p>'
+    return (
+        f'<div class="box"><h2>{esc(title)}</h2>{rows}'
+        f'<form method="POST" action="/device/nextdns-list" style="margin-top:10px">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="device" value="{q}">'
+        f'<input type="hidden" name="list" value="{list_name}">'
+        f'<input type="hidden" name="action" value="add">'
+        f'<div class="actions">'
+        f'<input type="text" name="domain" placeholder="example.com" style="flex:1">'
+        f'<button class="btn ghost" type="submit">Add</button></div></form></div>')
+
+
+# The security section's fields are stable/well-documented NextDNS API
+# names — "csam" is deliberately excluded, it isn't a togglable setting.
+_NEXTDNS_SECURITY_FIELDS = [
+    ("threatIntelligenceFeeds", "Threat intelligence feeds",
+     "Blocks domains known to host malware, phishing, and other active threats."),
+    ("aiThreatDetection", "AI threat detection",
+     "Machine-learning detection of malicious domains not yet on any blocklist."),
+    ("googleSafeBrowsing", "Google Safe Browsing",
+     "Blocks sites flagged by Google's Safe Browsing service."),
+    ("cryptojacking", "Cryptojacking protection",
+     "Blocks domains used to mine cryptocurrency in a browser without consent."),
+    ("dnsRebinding", "DNS rebinding protection",
+     "Blocks DNS responses resolving to private/local IPs — a common attack technique."),
+    ("idnHomographs", "Homograph protection",
+     "Blocks look-alike domains that use lookalike Unicode characters."),
+    ("typosquatting", "Typosquatting protection",
+     "Blocks domains registered to catch common typos of popular sites."),
+    ("dga", "Domain generation algorithm (DGA) protection",
+     "Blocks algorithmically-generated domains used by botnet malware."),
+    ("nrd", "Newly registered domains",
+     "Blocks domains registered in roughly the last 30 days — a common phishing pattern."),
+    ("ddns", "Dynamic DNS",
+     "Blocks dynamic DNS hostnames, often abused for command-and-control traffic."),
+    ("parking", "Parked domains",
+     "Blocks expired/parked domains that often serve ads or malware."),
+]
+
+
+def _nextdns_toggle_rows(prefix, fields, current: dict) -> str:
+    return "".join(
+        f'<label class="chk" style="display:flex;margin:6px 0">'
+        f'<input type="checkbox" name="{prefix}_{key}" value="1" class="switch"'
+        f'{" checked" if current.get(key) else ""}> '
+        f'<span><b>{esc(label)}</b><br><span class="muted">{esc(help_)}</span></span>'
+        f'</label>'
+        for key, label, help_ in fields)
+
+
+def _nextdns_security_box(name, csrf, security: dict) -> str:
+    return (
+        f'<div class="box"><h2>NextDNS — Security</h2>'
+        f'<form method="POST" action="/device/nextdns-security">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="device" value="{esc(name)}">'
+        f'{_nextdns_toggle_rows("f", _NEXTDNS_SECURITY_FIELDS, security)}'
+        f'<div class="actions" style="margin-top:12px">'
+        f'<button class="btn" type="submit">Save</button></div></form></div>')
+
+
+# NextDNS profiles don't expose an "all possible bool fields" catalog for
+# parental control the way security does — these three are the well-
+# documented top-level toggles; categories/services below are rendered
+# from whatever the live profile itself returns, not a hardcoded id list,
+# since guessing category/service ids wrong would silently do nothing.
+_NEXTDNS_PARENTAL_BOOLS = [
+    ("safeSearch", "Force Safe Search",
+     "Forces safe/moderated search results on Google, Bing, DuckDuckGo, and others."),
+    ("youtubeRestrictedMode", "YouTube Restricted Mode",
+     "Forces YouTube's own restricted-content mode."),
+    ("blockBypass", "Block bypass methods",
+     "Blocks known VPN/proxy services that would otherwise bypass this filtering."),
+]
+
+
+def _nextdns_checklist(prefix, items: list, active_ids: set) -> str:
+    return "".join(
+        f'<label class="chk" style="display:inline-flex;margin:3px 14px 3px 0">'
+        f'<input type="checkbox" name="{prefix}_{esc(iid)}" value="1" class="switch"'
+        f'{" checked" if iid in active_ids else ""}> {esc(label)}</label>'
+        for iid, label in items)
+
+
+def _nextdns_parental_box(name, csrf, pc: dict) -> str:
+    categories = pc.get("categories") or []
+    services = pc.get("services") or []
+    cat_items = sorted(((c.get("id"), _humanize_id(c.get("id") or ""))
+                        for c in categories if c.get("id")), key=lambda t: t[1])
+    svc_items = sorted(((s.get("id"), _humanize_id(s.get("id") or ""))
+                        for s in services if s.get("id")), key=lambda t: t[1])
+    cat_active = {c.get("id") for c in categories if c.get("active")}
+    svc_active = {s.get("id") for s in services if s.get("active")}
+    cats_html = (f'<h3 style="font-size:13px;margin:14px 0 6px">Categories</h3>'
+                f'{_nextdns_checklist("cat", cat_items, cat_active)}'
+                if cat_items else "")
+    svcs_html = (f'<h3 style="font-size:13px;margin:14px 0 6px">Services</h3>'
+                f'{_nextdns_checklist("svc", svc_items, svc_active)}'
+                if svc_items else "")
+    return (
+        f'<div class="box"><h2>NextDNS — Parental Control</h2>'
+        f'<form method="POST" action="/device/nextdns-parental">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="device" value="{esc(name)}">'
+        f'{_nextdns_toggle_rows("b", _NEXTDNS_PARENTAL_BOOLS, pc)}'
+        f'{cats_html}{svcs_html}'
+        f'<div class="actions" style="margin-top:12px">'
+        f'<button class="btn" type="submit">Save</button></div></form></div>')
+
+
+_NEXTDNS_PRIVACY_BOOLS = [
+    ("disguisedTrackers", "Block disguised third-party trackers",
+     "Blocks trackers that disguise themselves as first-party requests (CNAME cloaking)."),
+    ("allowAffiliate", "Allow affiliate &amp; tracking links",
+     "Exempts affiliate/referral links from blocklists so purchase tracking still works."),
+]
+
+# A handful of widely-known blocklist ids, shown as a hint next to the
+# "add" field — best-effort. NextDNS's API doesn't publish a full catalog,
+# so this isn't exhaustive; any exact id (from a blocklist's own listing
+# page) can be typed in directly regardless of whether it's in this map.
+_NEXTDNS_KNOWN_BLOCKLISTS = {
+    "nextdns-recommended": "NextDNS Recommended",
+    "oisd": "OISD",
+    "oisd-nsfw": "OISD NSFW",
+    "1hosts-lite": "1Hosts (Lite)",
+    "1hosts-pro": "1Hosts (Pro)",
+    "steven-black": "Steven Black's Hosts",
+    "hagezi-pro": "HaGeZi Pro",
+}
+
+
+def _nextdns_privacy_box(name, csrf, privacy: dict) -> str:
+    q = esc(name)
+    blocklists = privacy.get("blocklists") or []
+    rows = "".join(
+        f'<div class="linkrow"><span style="flex:1">'
+        f'{esc(_NEXTDNS_KNOWN_BLOCKLISTS.get(b.get("id", ""), _humanize_id(b.get("id") or "")))}'
+        f' <span class="muted">({esc(b.get("id", ""))})</span></span>'
+        f'<form method="POST" action="/device/nextdns-blocklist" class="inline">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="device" value="{q}">'
+        f'<input type="hidden" name="action" value="remove">'
+        f'<input type="hidden" name="blocklist" value="{esc(b.get("id", ""))}">'
+        f'<button class="btn ghost" type="submit" style="padding:4px 10px">'
+        f'Remove</button></form></div>'
+        for b in blocklists) or '<p class="muted">No blocklists added yet.</p>'
+    known_hint = ", ".join(f'{v} ({k})' for k, v in _NEXTDNS_KNOWN_BLOCKLISTS.items())
+    return (
+        f'<div class="box"><h2>NextDNS — Privacy &amp; Blocklists</h2>'
+        f'<h3 style="font-size:13px;margin:0 0 6px">Active blocklists</h3>'
+        f'{rows}'
+        f'<form method="POST" action="/device/nextdns-blocklist" style="margin-top:10px">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="device" value="{q}">'
+        f'<input type="hidden" name="action" value="add">'
+        f'<div class="actions">'
+        f'<input type="text" name="blocklist" placeholder="Blocklist id, e.g. oisd" '
+        f'style="flex:1">'
+        f'<button class="btn ghost" type="submit">Add</button></div>'
+        f'<p class="muted" style="margin-top:6px">Popular ones: {esc(known_hint)}.</p>'
+        f'</form>'
+        f'<h3 style="font-size:13px;margin:16px 0 6px">Other privacy settings</h3>'
+        f'<form method="POST" action="/device/nextdns-privacy-settings">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="device" value="{q}">'
+        f'{_nextdns_toggle_rows("b", _NEXTDNS_PRIVACY_BOOLS, privacy)}'
+        f'<div class="actions" style="margin-top:10px">'
+        f'<button class="btn" type="submit">Save</button></div></form></div>')
 
 
 def _remote_regenerate_box(name, users, csrf) -> str:
@@ -5496,9 +5690,42 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # here, before the live-read try block below, so a failure
                 # reading THIS tab's own (unrelated) local DNS-filter
                 # settings from the router doesn't also hide this button.
-                extra_html = _nextdns_box(
-                    name, cfg, csrf,
-                    bool(auth and auth.get_nextdns().get("api_key")))
+                nd_api_key = (auth.get_nextdns() if auth else {}).get("api_key", "")
+                extra_html = _nextdns_box(name, cfg, csrf, bool(nd_api_key))
+                # The full settings panels (denylist/allowlist, security,
+                # parental control, privacy/blocklists) are a SEPARATE live
+                # call to NextDNS's own API — independent of the router
+                # being reachable, so it's fetched here rather than inside
+                # the router live-read try block below, with its own error
+                # handling instead of being conflated with "could not reach
+                # the router". Kept in-app on purpose: a customer clicking
+                # through to my.nextdns.io would be one click from the
+                # shared platform account every other router's profile
+                # also lives under.
+                if cfg.nextdns_enabled and cfg.nextdns_profile_id and nd_api_key:
+                    from . import nextdns as nextdns_client
+                    try:
+                        nd_profile = nextdns_client.get_profile(
+                            nd_api_key, cfg.nextdns_profile_id)
+                        extra_html += (
+                            _nextdns_list_box(
+                                name, csrf, "NextDNS — Blocked domains (denylist)",
+                                "denylist", nd_profile.get("denylist") or [])
+                            + _nextdns_list_box(
+                                name, csrf, "NextDNS — Allowed domains (allowlist)",
+                                "allowlist", nd_profile.get("allowlist") or [])
+                            + _nextdns_security_box(
+                                name, csrf, nd_profile.get("security") or {})
+                            + _nextdns_parental_box(
+                                name, csrf, nd_profile.get("parentalControl") or {})
+                            + _nextdns_privacy_box(
+                                name, csrf, nd_profile.get("privacy") or {}))
+                    except nextdns_client.NextDnsError as exc:
+                        extra_html += (
+                            f'<div class="box" style="border-left:4px solid '
+                            f'var(--danger)"><h2>NextDNS settings</h2>'
+                            f'<p>Could not load this profile\'s settings from '
+                            f'NextDNS: {esc(str(exc))}</p></div>')
             # Fall back to interface names cached by the monitoring engine so
             # the WAN uplink dropdown works even when push credentials aren't set.
             cached_ifaces = [{"name": n} for n in (facts.get("interfaces") or [])]
@@ -6648,6 +6875,144 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     audit.close()
             return self._redirect(f"/device?name={q}&tab=nextdns&msg=" + quote(msg))
 
+        def _nextdns_prereqs(self, flat, user):
+            """Common guard + lookup for every NextDNS settings-panel POST
+            below: CSRF, device ownership, and that this router actually has
+            an enabled profile + a configured platform API key. Returns
+            (api_key, profile_id, name, None) on success, or
+            (None, None, None, response) to return directly on failure."""
+            name = flat.get("device", "")
+            q = quote(name)
+            if not self._can_manage_device(user, name):
+                return None, None, None, self._send(403, "forbidden")
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return None, None, None, self._send(400, "bad csrf token")
+            raw = self._device_raw(name)
+            if raw is None:
+                return None, None, None, self._send(404, "not found")
+            from .config import build_device
+            cfg = build_device(raw, defaults)
+            api_key = (auth.get_nextdns() if auth else {}).get("api_key", "")
+            if not (cfg.nextdns_enabled and cfg.nextdns_profile_id and api_key):
+                return None, None, None, self._redirect(
+                    f"/device?name={q}&tab=nextdns&msg=" +
+                    quote("NextDNS isn't enabled for this router."))
+            return api_key, cfg.nextdns_profile_id, name, None
+
+        def _device_nextdns_security_post(self, flat, user):
+            api_key, pid, name, err = self._nextdns_prereqs(flat, user)
+            if err is not None:
+                return err
+            from . import nextdns as nextdns_client
+            patch = {key: (f"f_{key}" in flat)
+                    for key, _l, _h in _NEXTDNS_SECURITY_FIELDS}
+            try:
+                nextdns_client.update_section(api_key, pid, "security", patch)
+                msg = "Security settings saved."
+            except nextdns_client.NextDnsError as exc:
+                msg = f"Could not save security settings: {exc}"
+            return self._redirect(
+                f"/device?name={quote(name)}&tab=nextdns&msg=" + quote(msg))
+
+        def _device_nextdns_privacy_settings_post(self, flat, user):
+            api_key, pid, name, err = self._nextdns_prereqs(flat, user)
+            if err is not None:
+                return err
+            from . import nextdns as nextdns_client
+            patch = {key: (f"b_{key}" in flat)
+                    for key, _l, _h in _NEXTDNS_PRIVACY_BOOLS}
+            try:
+                nextdns_client.update_section(api_key, pid, "privacy", patch)
+                msg = "Privacy settings saved."
+            except nextdns_client.NextDnsError as exc:
+                msg = f"Could not save privacy settings: {exc}"
+            return self._redirect(
+                f"/device?name={quote(name)}&tab=nextdns&msg=" + quote(msg))
+
+        def _device_nextdns_parental_post(self, flat, user):
+            api_key, pid, name, err = self._nextdns_prereqs(flat, user)
+            if err is not None:
+                return err
+            from . import nextdns as nextdns_client
+            try:
+                # Checkboxes only submit what's CHECKED — rebuilding the
+                # full categories/services arrays needs the complete id
+                # list from the live profile, not just what came back in
+                # the form.
+                profile = nextdns_client.get_profile(api_key, pid)
+                pc = profile.get("parentalControl") or {}
+                categories = [
+                    {"id": c["id"], "active": f"cat_{c['id']}" in flat}
+                    for c in (pc.get("categories") or []) if c.get("id")]
+                services = [
+                    {"id": s["id"], "active": f"svc_{s['id']}" in flat}
+                    for s in (pc.get("services") or []) if s.get("id")]
+                patch = {"categories": categories, "services": services}
+                patch.update({key: (f"b_{key}" in flat)
+                              for key, _l, _h in _NEXTDNS_PARENTAL_BOOLS})
+                nextdns_client.update_section(api_key, pid, "parentalControl", patch)
+                msg = "Parental control settings saved."
+            except nextdns_client.NextDnsError as exc:
+                msg = f"Could not save parental control settings: {exc}"
+            return self._redirect(
+                f"/device?name={quote(name)}&tab=nextdns&msg=" + quote(msg))
+
+        def _device_nextdns_blocklist_post(self, flat, user):
+            api_key, pid, name, err = self._nextdns_prereqs(flat, user)
+            if err is not None:
+                return err
+            blocklist_id = (flat.get("blocklist") or "").strip()
+            action = flat.get("action", "")
+            if not blocklist_id:
+                return self._redirect(
+                    f"/device?name={quote(name)}&tab=nextdns&msg=" +
+                    quote("No blocklist id given."))
+            from . import nextdns as nextdns_client
+            try:
+                # No dedicated add/remove endpoint for blocklists (unlike
+                # denylist/allowlist below) — they're part of the "privacy"
+                # section's own array, so read-modify-PATCH the whole thing.
+                profile = nextdns_client.get_profile(api_key, pid)
+                blocklists = list(profile.get("privacy", {}).get("blocklists") or [])
+                if action == "add":
+                    if not any(b.get("id") == blocklist_id for b in blocklists):
+                        blocklists.append({"id": blocklist_id, "active": True})
+                else:
+                    blocklists = [b for b in blocklists if b.get("id") != blocklist_id]
+                nextdns_client.update_section(api_key, pid, "privacy",
+                                              {"blocklists": blocklists})
+                msg = (f"Blocklist '{blocklist_id}' "
+                      f"{'added' if action == 'add' else 'removed'}.")
+            except nextdns_client.NextDnsError as exc:
+                msg = f"Could not update blocklists: {exc}"
+            return self._redirect(
+                f"/device?name={quote(name)}&tab=nextdns&msg=" + quote(msg))
+
+        def _device_nextdns_list_post(self, flat, user):
+            api_key, pid, name, err = self._nextdns_prereqs(flat, user)
+            if err is not None:
+                return err
+            list_name = flat.get("list", "")
+            if list_name not in ("denylist", "allowlist"):
+                return self._send(400, "unknown list")
+            domain = (flat.get("domain") or "").strip().lower()
+            action = flat.get("action", "")
+            from . import nextdns as nextdns_client
+            try:
+                if action == "add" and domain:
+                    nextdns_client.add_list_entry(api_key, pid, list_name, domain)
+                    msg = f"'{domain}' added to the {list_name}."
+                elif action == "remove" and domain:
+                    nextdns_client.remove_list_entry(api_key, pid, list_name, domain)
+                    msg = f"'{domain}' removed from the {list_name}."
+                else:
+                    msg = "No domain given."
+            except nextdns_client.NextDnsError as exc:
+                msg = f"Could not update the {list_name}: {exc}"
+            return self._redirect(
+                f"/device?name={quote(name)}&tab=nextdns&msg=" + quote(msg))
+
         def _hub_reload_peers_post(self, flat, user):
             """Rebuild wg-peers.conf from hub.json leases and write it.
             Writing the file triggers the mikromon-wg-reload.path unit to run
@@ -6929,6 +7294,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                              "/device/vpn-make-main", "/device/vpn-add-member",
                              "/device/vpn-remove-member", "/device/vpn-stop-main",
                              "/device/vpn-refresh", "/device/nextdns",
+                             "/device/nextdns-security", "/device/nextdns-parental",
+                             "/device/nextdns-privacy-settings",
+                             "/device/nextdns-blocklist", "/device/nextdns-list",
                              "/device/remote-regenerate", "/device/remote-test")
             if path in _DEVICE_WRITE:
                 if not self._can_manage_device(user, flat.get("device", "")):
@@ -6965,6 +7333,16 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._device_vpn_refresh_post(flat, user)
                 if path == "/device/nextdns":
                     return self._device_nextdns_post(flat, user)
+                if path == "/device/nextdns-security":
+                    return self._device_nextdns_security_post(flat, user)
+                if path == "/device/nextdns-parental":
+                    return self._device_nextdns_parental_post(flat, user)
+                if path == "/device/nextdns-privacy-settings":
+                    return self._device_nextdns_privacy_settings_post(flat, user)
+                if path == "/device/nextdns-blocklist":
+                    return self._device_nextdns_blocklist_post(flat, user)
+                if path == "/device/nextdns-list":
+                    return self._device_nextdns_list_post(flat, user)
                 if path == "/device/remote-regenerate":
                     return self._device_remote_regenerate_post(flat, user)
                 if path == "/device/remote-test":
