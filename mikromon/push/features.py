@@ -1853,7 +1853,32 @@ def nextdns_cloud_ops(pusher, profile_id: str) -> Plan:
         if _norm(cur.get("allow-remote-requests", "")) != "true":
             desired["allow-remote-requests"] = "true"
     plan = pusher.plan_settings(_DNS, desired, label="nextdns")
-    return Plan(pusher.cfg.name, plan.ops, summary="nextdns")
+    force_ops = []
+    if profile_id:
+        # allow-remote-requests only helps a client that actually ASKS the
+        # router for DNS — one with its own manually-set (or otherwise
+        # non-DHCP) resolver just never asks at all, and keeps using
+        # whatever it already had, bypassing NextDNS entirely. Force it:
+        # redirect every client's port-53 traffic to the router regardless
+        # of what resolver it thinks it's using. Same NAT rules (same tag)
+        # the DNS tab's own "Force all client DNS through this router"
+        # toggle manages — reusing that tag means the two stay reconciled
+        # against each other rather than fighting over ownership: this
+        # only ever ADDS them (via the same idempotent managed-list
+        # mechanism the other toggle uses to fully own the tag), and that
+        # toggle reads live state on every page load, so it always shows
+        # accurately checked and never accidentally clears them again on
+        # an unrelated save. Not reverted on disable — same reasoning as
+        # allow-remote-requests above.
+        force_desired = [{"chain": "dstnat", "protocol": proto, "dst-port": "53",
+                          "action": "redirect", "to-ports": "53",
+                          "comment": _DNSFORCE_TAG + proto}
+                         for proto in ("udp", "tcp")]
+        force_plan = pusher.plan_managed_list(
+            _NAT, "comment", force_desired,
+            owns=_prefix_owner(_DNSFORCE_TAG), label="dns redirect")
+        force_ops = force_plan.ops
+    return Plan(pusher.cfg.name, plan.ops + force_ops, summary="nextdns")
 
 
 def _detect_lan_subnets(pusher, cfg) -> list:
