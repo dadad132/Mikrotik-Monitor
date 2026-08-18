@@ -799,10 +799,16 @@ def _throughput_chart(rx_pts, tx_pts, width=284) -> str:
 # _PAGE_CSS, _nav, _who, _header, _page — imported from web_shared
 
 def _severity(d) -> str:
-    """Worst-first ordering key: offline = crit, any problem = warn, else ok."""
-    if not d["up"]:
-        return "crit"
-    return "warn" if d["problems"] else "ok"
+    """The headline device status: "crit" (shown as Offline) when the
+    device itself is unreachable, "ok" (Healthy) otherwise — deliberately
+    two-valued, not three. Individual problems (WAN failover, high CPU,
+    etc.) still surface as their own alerts/count elsewhere; they no
+    longer flip the main status to an alarming amber "Warning" just for
+    existing, since most of what lands there is the router behaving
+    correctly (e.g. failing over to backup) rather than something wrong
+    with the hardware — a warning here is a suggestion to go look, not a
+    verdict on the unit."""
+    return "crit" if not d["up"] else "ok"
 
 
 # How recent a config change must be to be blamed for a router going offline.
@@ -866,9 +872,8 @@ def _fleet_summary(devs) -> dict:
     total = len(devs)
     online = sum(1 for d in devs if d["up"])
     alerts = sum(len(d["problems"]) for d in devs)
-    critical = sum(1 for d in devs if _severity(d) == "crit")
     return {"total": total, "online": online, "offline": total - online,
-            "alerts": alerts, "critical": critical}
+            "alerts": alerts}
 
 
 def _stat_chip(num, lbl, cls="") -> str:
@@ -922,25 +927,23 @@ def _gauge(label, pct, unit="%", good_high=False) -> str:
 
 
 def _render_noc_charts(devs) -> str:
+    # Just Status (up/down) and Failover (WAN uplink health) — a separate
+    # "Health" donut used to sit between these, split Normal/Warning/Error,
+    # but severity is two-valued now (see _severity), which made it an
+    # exact duplicate of this Status chart.
     online = sum(1 for d in devs if d["up"])
     status = [("Online", online, "#16a34a"), ("Offline", len(devs) - online, "#dc2626")]
-    sev = {"ok": 0, "warn": 0, "crit": 0}
     wan = {"full": 0, "partial": 0, "down": 0}
     for d in devs:
-        sev[_severity(d)] += 1
         wan[d["wan_health"]] += 1
-    health = [("Normal", sev["ok"], "#16a34a"), ("Warning", sev["warn"], "#d97706"),
-              ("Error", sev["crit"], "#dc2626")]
     failover = [("Full WAN", wan["full"], "#16a34a"),
                 ("On backup", wan["partial"], "#d97706"),
                 ("No WAN", wan["down"], "#dc2626")]
     return (f'<div class="charts">{_donut("Status", status)}'
-            f'{_donut("Health", health)}'
             f'{_donut("Failover", failover)}</div>')
 
 
-_DASH_STATUS_BADGE = {"ok": ("ok", "Healthy"), "warn": ("warn", "Warning"),
-                      "crit": ("crit", "Offline")}
+_DASH_STATUS_BADGE = {"ok": ("ok", "Healthy"), "crit": ("crit", "Offline")}
 
 
 def _dash_device_rows(devs) -> str:
@@ -986,7 +989,7 @@ a{color:var(--accent);text-decoration:none}
 .chip-num{font-size:26px;font-weight:800;color:var(--text);line-height:1}
 .chip-lbl{font-size:11px;color:var(--text-faint);text-transform:uppercase;
   letter-spacing:.05em;margin-top:6px;font-weight:600}
-.chip.amber .chip-num{color:var(--warning)}
+.chip.info .chip-num{color:var(--accent)}
 .chip.red .chip-num{color:var(--danger)}
 /* ── donut chart cards ───────────────────────────── */
 .charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
@@ -1036,7 +1039,6 @@ a{color:var(--accent);text-decoration:none}
 .badge.crit{background:var(--danger-bg);color:var(--danger)}
 .alert-badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px}
 .alert-badge.ok{background:var(--surface-2);color:var(--text-faint)}
-.alert-badge.warn{background:var(--warning-bg);color:var(--warning)}
 .alert-badge.crit{background:var(--danger-bg);color:var(--danger)}
 @media(max-width:820px){
   .dash-main{padding:16px 16px 28px}
@@ -1078,14 +1080,14 @@ mmSetFilter(mmSaved);
 def _render_dashboard(store, state, user=None, allowed=None) -> str:
     devs = sorted((d for d in _all_devices(store, state, allowed)
                    if _device_has_data(d)),
-                  key=lambda d: ({"crit": 0, "warn": 1, "ok": 2}[_severity(d)],
+                  key=lambda d: ({"crit": 0, "ok": 1}[_severity(d)],
                                  d["device"].lower()))
     summary = _fleet_summary(devs)
     chips = (_stat_chip(summary["total"], "Devices")
-            + _stat_chip(summary["alerts"], "Alerts",
-                        "amber" if summary["alerts"] else "")
-            + _stat_chip(summary["critical"], "Critical",
-                        "red" if summary["critical"] else ""))
+            + _stat_chip(summary["alerts"], "Suggestions",
+                        "info" if summary["alerts"] else "")
+            + _stat_chip(summary["offline"], "Offline",
+                        "red" if summary["offline"] else ""))
     charts = _render_noc_charts(devs) if devs else ""
     rows = _dash_device_rows(devs)
     empty_msg = ("No devices to show." if not devs
@@ -1206,7 +1208,7 @@ def _render_inventory(store, state, user, allowed) -> str:
     for d in devs:
         f = d["facts"]
         sev = _severity(d)
-        dot = {"ok": "#16a34a", "warn": "#d97706", "crit": "#dc2626"}[sev]
+        dot = {"ok": "#16a34a", "crit": "#dc2626"}[sev]
         ver = f.get("version", "—")
         old = ver[:1] in ("5", "6")
         ver_html = (esc(ver) + (
@@ -1248,8 +1250,7 @@ def _render_device(store, state, name, user, csrf="",
     d = _device_view(store, state, name)
     f = d["facts"]
     sev = _severity(d)
-    badge = {"ok": ("ok", "Healthy"), "warn": ("warn", "Warning"),
-             "crit": ("crit", "Offline / Error")}[sev]
+    badge = {"ok": ("ok", "Healthy"), "crit": ("crit", "Offline")}[sev]
     m = d["metrics"]
     q = quote(name)
 
@@ -4107,7 +4108,7 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
         d = devs_by_name.get(n, {})
         f = d.get("facts") or {}
         sev = _severity(d) if d else "crit"
-        dot = {"ok": "#16a34a", "warn": "#d97706", "crit": "#dc2626"}[sev]
+        dot = {"ok": "#16a34a", "crit": "#dc2626"}[sev]
         ver = f.get("version", "—")
         old = ver[:1] in ("5", "6")
         ver_html = (esc(ver) + (
