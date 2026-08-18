@@ -2479,15 +2479,17 @@ check("disabling clears use-doh-server",
       and not any("verify-doh-cert" in o.params for o in disable_plan.ops))
 
 # Already in the desired state -> no ops (idempotent). Needs an existing
-# `servers` entry too — an empty one is exactly what the next check below
-# covers, and would no longer be a no-op.
+# `servers` entry AND allow-remote-requests already on — either being
+# empty/off is exactly what the next two checks below cover, and would no
+# longer be a no-op.
 nd_api3 = FakeApi({_NDRES: [{"version": "7.14.3"}],
                    DNS: [{".id": "*1", "use-doh-server":
                           "https://dns.nextdns.io/abc123",
                           "verify-doh-cert": "yes",
-                          "servers": "1.1.1.1,8.8.8.8"}]})
-check("already-enabled router with the same profile AND a working bootstrap "
-      "resolver -> empty plan",
+                          "servers": "1.1.1.1,8.8.8.8",
+                          "allow-remote-requests": "true"}]})
+check("already-enabled router with a working bootstrap resolver AND "
+      "allow-remote-requests already on -> empty plan",
       F.nextdns_cloud_ops(Pusher(nd_cfg, nd_api3, dry_run=True), "abc123").empty)
 
 # DoH needs an ordinary resolver to look up the DoH server's own hostname —
@@ -2517,13 +2519,39 @@ check("enabling with an existing resolver already configured doesn't "
       "touch it",
       not any("servers" in o.params for o in existing_servers_plan.ops))
 
-# Disabling never needs a bootstrap resolver — it isn't establishing a new
-# DoH connection, so this only applies when profile_id is set.
+# allow-remote-requests is what lets the router answer DNS queries FROM
+# LAN clients at all — without it, DoH is correctly configured but only
+# ever benefits the router itself; every client silently falls back to
+# its own/ISP DNS instead, looking exactly like "NextDNS isn't being
+# used" even though "enabling" reported success. Confirmed the actual
+# cause of a live report matching that description.
+nd_api_no_remote = FakeApi({_NDRES: [{"version": "7.14.3"}],
+                            DNS: [{".id": "*1", "servers": "1.1.1.1",
+                                   "allow-remote-requests": "false"}]})
+remote_plan = F.nextdns_cloud_ops(
+    Pusher(nd_cfg, nd_api_no_remote, dry_run=True), "abc123")
+check("enabling turns on allow-remote-requests when it's off",
+      any(o.params.get("allow-remote-requests") == "true"
+          for o in remote_plan.ops))
+nd_api_remote_already_on = FakeApi({_NDRES: [{"version": "7.14.3"}],
+                                    DNS: [{".id": "*1", "servers": "1.1.1.1",
+                                           "allow-remote-requests": "true"}]})
+already_on_plan = F.nextdns_cloud_ops(
+    Pusher(nd_cfg, nd_api_remote_already_on, dry_run=True), "abc123")
+check("enabling with allow-remote-requests already on doesn't re-set it",
+      not any("allow-remote-requests" in o.params for o in already_on_plan.ops))
+
+# Disabling never needs a bootstrap resolver or allow-remote-requests —
+# it isn't establishing a new DoH connection, so neither only-relevant-
+# when-enabling fix applies when profile_id is empty.
 disable_no_servers_plan = F.nextdns_cloud_ops(
     Pusher(nd_cfg, nd_api_nobootstrap, dry_run=True), "")
 check("disabling never adds a bootstrap resolver (only relevant when "
       "actually enabling DoH)",
       not any("servers" in o.params for o in disable_no_servers_plan.ops))
+check("disabling never touches allow-remote-requests either",
+      not any("allow-remote-requests" in o.params
+              for o in disable_no_servers_plan.ops))
 
 # RouterOS version gate: DoH needs 7.1+; older firmware -> no attempt at all
 # (there's no way to get a per-router NextDNS profile working without DoH).

@@ -1822,6 +1822,8 @@ def nextdns_cloud_ops(pusher, profile_id: str) -> Plan:
                "verify-doh-cert": "yes"} if profile_id
               else {"use-doh-server": ""})
     if profile_id:
+        current = _safe_fetch(pusher.api, _DNS)
+        cur = current[0] if current else {}
         # DoH still needs an ordinary DNS resolver to look up the DoH
         # server's OWN hostname in the first place — confirmed in
         # MikroTik's own documentation: "DoH server FQDN will be resolved
@@ -1833,10 +1835,23 @@ def nextdns_cloud_ops(pusher, profile_id: str) -> Plan:
         # connect." Only fills it in when it's genuinely empty; an
         # existing resolver (from the local filter tab's own DNS presets,
         # or whatever the router came with) is left alone.
-        current = _safe_fetch(pusher.api, _DNS)
-        cur_servers = str((current[0] if current else {}).get("servers", "")).strip()
+        cur_servers = str(cur.get("servers", "")).strip()
         if not cur_servers:
             desired["servers"] = "1.1.1.1,8.8.8.8"
+        # Confirmed live: this alone still isn't enough for anything BUT
+        # the router itself to actually use NextDNS — allow-remote-requests
+        # is what lets it answer DNS queries FROM LAN clients at all
+        # (RouterOS's own DNS tab makes this explicit: "Must be ON for the
+        # router to answer client DNS at all"). The one-click Enable button
+        # here never touched it, only the DNS tab's separate quick-provider
+        # form did — so a router that had never had THAT form applied kept
+        # silently NOT serving DNS to anyone, and every client fell back to
+        # its own/ISP-assigned resolver instead, looking exactly like
+        # "NextDNS isn't being used" even though DoH itself was configured
+        # correctly. Only turned on, never off, on disable — that's a
+        # separate, deliberate choice the other form still owns.
+        if _norm(cur.get("allow-remote-requests", "")) != "true":
+            desired["allow-remote-requests"] = "true"
     plan = pusher.plan_settings(_DNS, desired, label="nextdns")
     return Plan(pusher.cfg.name, plan.ops, summary="nextdns")
 

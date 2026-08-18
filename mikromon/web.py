@@ -2454,9 +2454,7 @@ def _nextdns_security_box(name, csrf, security: dict) -> str:
 
 # NextDNS profiles don't expose an "all possible bool fields" catalog for
 # parental control the way security does — these three are the well-
-# documented top-level toggles; categories/services below are rendered
-# from whatever the live profile itself returns, not a hardcoded id list,
-# since guessing category/service ids wrong would silently do nothing.
+# documented top-level toggles.
 _NEXTDNS_PARENTAL_BOOLS = [
     ("safeSearch", "Force Safe Search",
      "Forces safe/moderated search results on Google, Bing, DuckDuckGo, and others."),
@@ -2464,6 +2462,31 @@ _NEXTDNS_PARENTAL_BOOLS = [
      "Forces YouTube's own restricted-content mode."),
     ("blockBypass", "Block bypass methods",
      "Blocks known VPN/proxy services that would otherwise bypass this filtering."),
+]
+
+# Curated categories/services, so there's something to check on a FRESH
+# profile — confirmed live: NextDNS's GET /profiles/{id} only ever returns
+# entries that have already been added (empty on a new profile), unlike
+# the security section's fields (which are always present); rendering
+# only what the API returns meant an empty, unusable checklist for every
+# new router. Best-effort ids (not published as a fixed catalog by
+# NextDNS's API) — the "add another" field below covers anything missing
+# or misspelled here, same safety net as the blocklist box.
+_NEXTDNS_CATEGORIES = [
+    ("dating", "Dating"), ("gambling", "Gambling"), ("gaming", "Online Gaming"),
+    ("piracy", "Piracy"), ("pornography", "Pornography"),
+    ("social-networks", "Social Networks"),
+    ("video-streaming", "Video Streaming"),
+]
+_NEXTDNS_SERVICES = [
+    ("tiktok", "TikTok"), ("instagram", "Instagram"), ("facebook", "Facebook"),
+    ("snapchat", "Snapchat"), ("twitter", "Twitter / X"), ("youtube", "YouTube"),
+    ("reddit", "Reddit"), ("roblox", "Roblox"), ("telegram", "Telegram"),
+    ("whatsapp", "WhatsApp"), ("discord", "Discord"), ("netflix", "Netflix"),
+    ("twitch", "Twitch"), ("spotify", "Spotify"), ("minecraft", "Minecraft"),
+    ("fortnite", "Fortnite"), ("steam", "Steam"), ("pinterest", "Pinterest"),
+    ("tinder", "Tinder"), ("tumblr", "Tumblr"), ("messenger", "Messenger"),
+    ("prime-video", "Prime Video"), ("disney-plus", "Disney+"),
 ]
 
 
@@ -2475,28 +2498,47 @@ def _nextdns_checklist(prefix, items: list, active_ids: set) -> str:
         for iid, label in items)
 
 
+def _nextdns_parental_checklist_section(title, prefix, curated: list,
+                                        live_entries: list) -> str:
+    """Curated ids first (in their given order), then anything the live
+    profile already has that ISN'T in the curated list (e.g. added earlier
+    via a typed custom id, or from NextDNS's own site) — so nothing already
+    active ever silently disappears from view."""
+    curated_ids = {iid for iid, _label in curated}
+    active_ids = {e.get("id") for e in live_entries if e.get("active")}
+    extra = sorted(((e.get("id"), _humanize_id(e.get("id") or ""))
+                    for e in live_entries
+                    if e.get("id") and e.get("id") not in curated_ids),
+                   key=lambda t: t[1])
+    return (f'<h3 style="font-size:13px;margin:14px 0 6px">{esc(title)}</h3>'
+            f'{_nextdns_checklist(prefix, curated + extra, active_ids)}')
+
+
 def _nextdns_parental_box(name, csrf, pc: dict) -> str:
-    categories = pc.get("categories") or []
-    services = pc.get("services") or []
-    cat_items = sorted(((c.get("id"), _humanize_id(c.get("id") or ""))
-                        for c in categories if c.get("id")), key=lambda t: t[1])
-    svc_items = sorted(((s.get("id"), _humanize_id(s.get("id") or ""))
-                        for s in services if s.get("id")), key=lambda t: t[1])
-    cat_active = {c.get("id") for c in categories if c.get("active")}
-    svc_active = {s.get("id") for s in services if s.get("active")}
-    cats_html = (f'<h3 style="font-size:13px;margin:14px 0 6px">Categories</h3>'
-                f'{_nextdns_checklist("cat", cat_items, cat_active)}'
-                if cat_items else "")
-    svcs_html = (f'<h3 style="font-size:13px;margin:14px 0 6px">Services</h3>'
-                f'{_nextdns_checklist("svc", svc_items, svc_active)}'
-                if svc_items else "")
+    q = esc(name)
+    cats_html = _nextdns_parental_checklist_section(
+        "Categories", "cat", _NEXTDNS_CATEGORIES, pc.get("categories") or [])
+    svcs_html = _nextdns_parental_checklist_section(
+        "Websites, apps &amp; games", "svc", _NEXTDNS_SERVICES,
+        pc.get("services") or [])
     return (
         f'<div class="box"><h2>NextDNS — Parental Control</h2>'
         f'<form method="POST" action="/device/nextdns-parental">'
         f'<input type="hidden" name="csrf" value="{csrf}">'
-        f'<input type="hidden" name="device" value="{esc(name)}">'
+        f'<input type="hidden" name="device" value="{q}">'
         f'{_nextdns_toggle_rows("b", _NEXTDNS_PARENTAL_BOOLS, pc)}'
         f'{cats_html}{svcs_html}'
+        f'<div class="f full" style="margin-top:10px">'
+        f'<label class="f">Add another category or service by id</label>'
+        f'<div class="actions">'
+        f'<input type="text" name="add_category" placeholder="Category id, '
+        f'e.g. piracy" style="flex:1">'
+        f'<input type="text" name="add_service" placeholder="Service id, '
+        f'e.g. discord" style="flex:1"></div>'
+        f'<p class="muted" style="margin-top:6px">Not in the list above? '
+        f'Type its id here — usually just the lowercase name (discord, '
+        f'netflix, epic-games, and so on).</p>'
+        f'</div>'
         f'<div class="actions" style="margin-top:12px">'
         f'<button class="btn" type="submit">Save</button></div></form></div>')
 
@@ -6939,20 +6981,32 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if err is not None:
                 return err
             from . import nextdns as nextdns_client
+
+            def merge(curated, live_key, prefix, add_field):
+                # Checkboxes only submit what's CHECKED — the id universe to
+                # consider is curated ids (shown whether or not the profile
+                # has them yet) UNION whatever the live profile already has
+                # (so a manually-added id — via the field below, or from
+                # NextDNS's own site — never silently drops out) UNION a
+                # freshly-typed id from the "add another" field.
+                live = pc.get(live_key) or []
+                ids = {c["id"] for c in live if c.get("id")}
+                ids |= {iid for iid, _label in curated}
+                new_id = (flat.get(add_field) or "").strip().lower()
+                if new_id:
+                    ids.add(new_id)
+                return [{"id": iid, "active": f"{prefix}_{iid}" in flat
+                        or iid == new_id} for iid in sorted(ids)]
+
             try:
-                # Checkboxes only submit what's CHECKED — rebuilding the
-                # full categories/services arrays needs the complete id
-                # list from the live profile, not just what came back in
-                # the form.
                 profile = nextdns_client.get_profile(api_key, pid)
                 pc = profile.get("parentalControl") or {}
-                categories = [
-                    {"id": c["id"], "active": f"cat_{c['id']}" in flat}
-                    for c in (pc.get("categories") or []) if c.get("id")]
-                services = [
-                    {"id": s["id"], "active": f"svc_{s['id']}" in flat}
-                    for s in (pc.get("services") or []) if s.get("id")]
-                patch = {"categories": categories, "services": services}
+                patch = {
+                    "categories": merge(_NEXTDNS_CATEGORIES, "categories",
+                                        "cat", "add_category"),
+                    "services": merge(_NEXTDNS_SERVICES, "services",
+                                      "svc", "add_service"),
+                }
                 patch.update({key: (f"b_{key}" in flat)
                               for key, _l, _h in _NEXTDNS_PARENTAL_BOOLS})
                 nextdns_client.update_section(api_key, pid, "parentalControl", patch)
