@@ -10,20 +10,34 @@ import time
 from .auth import AuthStore
 from .billing import PLANS, GRACE_DAYS, FREE_DEVICES, TRIAL_DEVICES, _TRIAL_DAYS
 from .util import human_bytes
-from .web_shared import _BRAND, _PAGE_CSS, esc, _header, _page, _who
+from .web_shared import (
+    _BRAND, _PAGE_CSS, esc, _header, _page, _who,
+    _THEME_VARS, _THEME_INIT_JS, _THEME_TOGGLE_JS, _theme_toggle_btn,
+)
 
 
-_AUTH_BRAND = ('<div class="brand" style="justify-content:center;color:#0f172a;'
+_AUTH_BRAND = ('<div class="brand" style="justify-content:center;color:var(--text);'
                'font-size:22px;margin-bottom:6px">'
-               '<span class="logo" style="color:#2563eb">&#9670;</span>'
+               '<span class="logo" style="color:var(--accent)">&#9670;</span>'
                + _BRAND + '</div>')
 
 
 def _auth_page(title, body) -> str:
-    return (f'<!doctype html><html><head><meta charset="utf-8"><title>{esc(title)}'
-            f'</title><style>{_PAGE_CSS}</style></head><body>'
+    # This page has no logged-in user (no sidebar to carry _THEME_VARS along
+    # with it via _header/_page) — _PAGE_CSS now leans on those custom
+    # properties for nearly every color, so without defining them here too,
+    # var(--border)/var(--surface)/etc resolve to nothing: borders vanish
+    # (reset to the "none" initial value) and backgrounds go transparent.
+    # Confirmed live: exactly this — invisible input boxes, invisible button.
+    return (f'<!doctype html><html><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f'{_THEME_INIT_JS}<title>{esc(title)}</title>'
+            f'<style>{_THEME_VARS}{_PAGE_CSS}</style></head><body>'
             f'<div class="wrap" style="max-width:400px;margin-top:9vh">'
-            f'{_AUTH_BRAND}<div class="box">{body}</div></div></body></html>')
+            f'<div style="display:flex;justify-content:center;margin-bottom:6px">'
+            f'{_theme_toggle_btn()}</div>'
+            f'{_AUTH_BRAND}<div class="box">{body}</div></div>'
+            f'{_THEME_TOGGLE_JS}</body></html>')
 
 
 def _region_banner(has_regions: bool, go: str) -> str:
