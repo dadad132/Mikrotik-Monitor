@@ -1231,17 +1231,26 @@ def nextdns_read(pusher, cfg):
 
 
 def nextdns_summary(current, cfg):
-    dns = current.get("dns", {})
-    out = [f"DNS servers: {dns.get('servers', '(none)')}",
-           f"allow-remote-requests: {dns.get('allow-remote-requests', '?')}"]
-    out.append(f"{len(current.get('bypass', []))} bypass address(es)")
-    out.append("Force client DNS: " +
-               ("on" if current.get("forced") else "off"))
+    """Read-only now (see the FEATURES["nextdns"] comment) — silent unless
+    this router still has leftover state from the retired local-blocking
+    feature, so a router that never used it (the normal case going
+    forward, with NextDNS.io doing the filtering instead) shows nothing
+    here at all."""
     groups = sorted({str(r.get("comment", ""))[len(_DNSBLOCK_TAG):]
                      for r in current.get("static", [])})
+    forced = bool(current.get("forced"))
+    bypass_n = len(current.get("bypass", []))
+    if not (groups or forced or bypass_n):
+        return []
+    out = ["Legacy local blocking (no longer managed here — use NextDNS "
+          "above instead):"]
     if groups:
         labels = [_BLOCK_BY_KEY.get(g, (g, []))[0] for g in groups]
-        out.append("Blocking: " + ", ".join(labels))
+        out.append("Still blocking: " + ", ".join(labels))
+    if forced:
+        out.append("Force client DNS through this router: still on")
+    if bypass_n:
+        out.append(f"{bypass_n} bypass address(es) still configured")
     return out
 
 
@@ -1839,6 +1848,22 @@ def nextdns_cloud_ops(pusher, profile_id: str) -> Plan:
     desired = ({"use-doh-server": f"https://dns.nextdns.io/{profile_id}",
                "verify-doh-cert": "yes"} if profile_id
               else {"use-doh-server": ""})
+    if profile_id:
+        # DoH still needs an ordinary DNS resolver to look up the DoH
+        # server's OWN hostname in the first place — confirmed in
+        # MikroTik's own documentation: "DoH server FQDN will be resolved
+        # by regular DNS resolver." A router whose /ip/dns servers list has
+        # never been set (common on a fresh unit that's only ever had this
+        # single toggle pushed to it) has nothing to resolve
+        # dns.nextdns.io with, so DoH — and therefore ALL DNS — never
+        # comes up at all, which reads to a user as "NextDNS doesn't
+        # connect." Only fills it in when it's genuinely empty; an
+        # existing resolver (from the local filter tab's own DNS presets,
+        # or whatever the router came with) is left alone.
+        current = _safe_fetch(pusher.api, _DNS)
+        cur_servers = str((current[0] if current else {}).get("servers", "")).strip()
+        if not cur_servers:
+            desired["servers"] = "1.1.1.1,8.8.8.8"
     plan = pusher.plan_settings(_DNS, desired, label="nextdns")
     return Plan(pusher.cfg.name, plan.ops, summary="nextdns")
 
@@ -2798,9 +2823,21 @@ FEATURES = {
     "harden": {"title": "Restrict management access", "write": True,
                "read": harden_read, "summary": harden_summary,
                "form": harden_form, "plan": harden_plan},
-    "nextdns": {"title": "DNS", "write": True,
-                "read": nextdns_read, "summary": nextdns_summary,
-                "form": nextdns_form, "plan": nextdns_plan},
+    # Local DNS-sinkhole blocking (write:False, no form/plan) — retired in
+    # favor of the real NextDNS.io cloud integration (see nextdns_cloud_ops
+    # above and web.py's _nextdns_box/_nextdns_*_box panels, all rendered
+    # into this same tab via extra_html), which manages the SAME /ip/dns
+    # menu. Having both push to /ip/dns independently was never safe —
+    # confirmed as the actual cause of "NextDNS says enabled but doesn't
+    # connect": re-applying this form after NextDNS was already on would
+    # silently leave whatever it doesn't explicitly set alone, but it's
+    # exactly the kind of two-owners-one-resource setup that goes wrong the
+    # moment either side changes independently. read/summary stay so any
+    # already-applied local blocks are still visible (read-only) on a
+    # router that had them from before — nothing here can change them
+    # anymore, so there's nothing left to conflict.
+    "nextdns": {"title": "DNS", "write": False,
+                "read": nextdns_read, "summary": nextdns_summary},
     "qos": {"title": "Queues", "write": True, "read": qos_read,
             "summary": qos_summary, "form": qos_form, "plan": qos_plan,
             "unmanaged": qos_unmanaged, "adopt": True, "path": _QUEUE,

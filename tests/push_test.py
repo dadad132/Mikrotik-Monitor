@@ -2500,13 +2500,52 @@ check("disabling clears use-doh-server",
       any(o.params.get("use-doh-server") == "" for o in disable_plan.ops)
       and not any("verify-doh-cert" in o.params for o in disable_plan.ops))
 
-# Already in the desired state -> no ops (idempotent).
+# Already in the desired state -> no ops (idempotent). Needs an existing
+# `servers` entry too — an empty one is exactly what the next check below
+# covers, and would no longer be a no-op.
 nd_api3 = FakeApi({_NDRES: [{"version": "7.14.3"}],
                    DNS: [{".id": "*1", "use-doh-server":
                           "https://dns.nextdns.io/abc123",
-                          "verify-doh-cert": "yes"}]})
-check("already-enabled router with the same profile -> empty plan",
+                          "verify-doh-cert": "yes",
+                          "servers": "1.1.1.1,8.8.8.8"}]})
+check("already-enabled router with the same profile AND a working bootstrap "
+      "resolver -> empty plan",
       F.nextdns_cloud_ops(Pusher(nd_cfg, nd_api3, dry_run=True), "abc123").empty)
+
+# DoH needs an ordinary resolver to look up the DoH server's own hostname —
+# a router with use-doh-server already set but an EMPTY `servers` list has
+# nothing to resolve dns.nextdns.io with, so DNS never comes up at all even
+# though "enabling" appeared to succeed. Confirmed the actual cause of a
+# live "NextDNS says enabled but doesn't connect" report.
+nd_api_nobootstrap = FakeApi({_NDRES: [{"version": "7.14.3"}],
+                              DNS: [{".id": "*1", "use-doh-server":
+                                     "https://dns.nextdns.io/abc123",
+                                     "verify-doh-cert": "yes"}]})
+bootstrap_plan = F.nextdns_cloud_ops(
+    Pusher(nd_cfg, nd_api_nobootstrap, dry_run=True), "abc123")
+check("enabling with no existing DNS servers fills in a bootstrap resolver "
+      "so the DoH hostname itself can be resolved",
+      any(o.params.get("servers") == "1.1.1.1,8.8.8.8"
+          for o in bootstrap_plan.ops))
+
+# An existing (non-empty) resolver is left alone, whatever it is — no
+# reason to override a working choice just because NextDNS is being turned
+# on for the first time.
+nd_api_existing_servers = FakeApi({_NDRES: [{"version": "7.14.3"}],
+                                   DNS: [{".id": "*1", "servers": "9.9.9.9"}]})
+existing_servers_plan = F.nextdns_cloud_ops(
+    Pusher(nd_cfg, nd_api_existing_servers, dry_run=True), "abc123")
+check("enabling with an existing resolver already configured doesn't "
+      "touch it",
+      not any("servers" in o.params for o in existing_servers_plan.ops))
+
+# Disabling never needs a bootstrap resolver — it isn't establishing a new
+# DoH connection, so this only applies when profile_id is set.
+disable_no_servers_plan = F.nextdns_cloud_ops(
+    Pusher(nd_cfg, nd_api_nobootstrap, dry_run=True), "")
+check("disabling never adds a bootstrap resolver (only relevant when "
+      "actually enabling DoH)",
+      not any("servers" in o.params for o in disable_no_servers_plan.ops))
 
 # RouterOS version gate: DoH needs 7.1+; older firmware -> no attempt at all
 # (there's no way to get a per-router NextDNS profile working without DoH).

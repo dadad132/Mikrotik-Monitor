@@ -3767,10 +3767,10 @@ _TAB_INTRO = {
     "harden": "Stop brute-force attacks: lock API/Winbox/SSH to your trusted IPs, "
               "disable insecure services, and block attacker IPs. ⚠ Include this "
               "server's IP in the allowed list so you don't lock easymikrotik out.",
-    "nextdns": "Point DNS at a filtering service and list any IPs that bypass it. "
-               "The NextDNS box below is separate — it gives this router its own "
-               "real NextDNS.io profile (blocklists, allowlists, query logs kept "
-               "apart from every other router), managed in NextDNS's own dashboard.",
+    "nextdns": "Gives this router its own real NextDNS.io profile — security "
+               "protections, parental control, blocklists, and a custom "
+               "block/allow list — all managed right here, nothing to sign "
+               "into on NextDNS's own site.",
     "qos": "Cap upload/download speed for a subnet or interface (simple queues). "
            "Add a row, then Preview.",
     "portfwd": "Forward an external port to an internal device, or adopt forwards "
@@ -4011,10 +4011,10 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
             # in extra_html) already pushes routes automatically — this tab
             # has nothing left to fill in, so a Preview/Apply button here
             # would only confuse people into thinking they need to click it.
-            # (The DNS tab's own NextDNS box, also extra_html, pushes its
-            # own change immediately too — but that tab's OTHER fields, the
-            # local filter presets/blocklists, still need the normal
-            # Preview/Apply flow below, so it isn't included here.)
+            # (The DNS tab's own NextDNS panels, also extra_html, push their
+            # own changes immediately too, same reasoning — that tab has no
+            # "form" registered at all anymore, so fields is always None
+            # there and it never reaches this branch in the first place.)
             ff = "".join(_field_html(d) for d in fields)
             form = (f'<div class="box"><h2>{esc(feature["title"])}</h2>'
                     f'<div class="fields">{ff}</div></div>')
