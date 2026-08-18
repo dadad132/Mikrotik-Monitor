@@ -976,54 +976,30 @@ check("a human-made user (no mikromon:remote: comment) is never reported "
       not any("admin" in s["msg"] for s in rt_unmanaged))
 
 
-# ---- 14. NextDNS content blocking grid (DNS sinkhole) ----------------------
-print("nextdns content blocking grid:")
+# ---- 14. DNS tab: server selection + force-client-DNS ----------------------
+# The local sinkhole domain-blocking half of this tab (block groups,
+# block_ip) was retired in favor of the real NextDNS.io cloud integration's
+# own panels — nextdns_plan/_form no longer take or emit any of that, only
+# DNS server selection and force-client-DNS remain here.
+print("DNS tab (server selection + force-client-DNS; local sinkhole blocking "
+      "retired in favor of the NextDNS.io cloud panels):")
 nd_api = FakeApi({
     ("ip", "dns"): [{".id": "*0", "servers": "1.1.1.1",
                      "allow-remote-requests": "true"}],
-    ("ip", "firewall", "address-list"): [],
-    ("ip", "dns", "static"): []})
+    ("ip", "firewall", "address-list"): []})
 pn = Pusher(qcfg, nd_api, dry_run=True)
-plan = F.nextdns_plan(pn, qcfg, {"servers": "1.1.1.1", "bypass": ""},
-                      {"opt": ["allow_remote"], "block": ["app_tiktok", "social"]})
-static_adds = [o for o in plan.ops
-               if o.path == ("ip", "dns", "static") and o.action == "add"]
-check("enabling block groups adds tagged sinkhole entries (valid A address)",
-      static_adds and all(o.params.get("address") == "127.0.0.1"
-          and o.params.get("comment", "").startswith("mikromon:dnsblock:")
-          for o in static_adds))
-check("a custom sinkhole IP is honored",
-      all(o.params.get("address") == "192.0.2.1" for o in F.nextdns_plan(
-          pn, qcfg, {"servers": "1.1.1.1", "bypass": "", "block_ip": "192.0.2.1"},
-          {"block": ["app_facebook"]}).ops
-          if o.path == ("ip", "dns", "static") and o.action == "add"))
-check("the TikTok app block creates a regexp matching tiktok.com",
-      any("tiktok" in o.params.get("regexp", "") for o in static_adds))
-# disabling a group removes its sinkhole entries (reversible)
-nd_api2 = FakeApi({
-    ("ip", "dns"): [{".id": "*0", "servers": "1.1.1.1",
-                     "allow-remote-requests": "true"}],
-    ("ip", "firewall", "address-list"): [],
-    ("ip", "dns", "static"): [
-        {".id": "*9", "regexp": r".*tiktok\.com$", "address": "0.0.0.0",
-         "comment": "mikromon:dnsblock:app_tiktok"}]})
-plan2 = F.nextdns_plan(Pusher(qcfg, nd_api2, dry_run=True), qcfg,
-                       {"servers": "1.1.1.1", "bypass": ""},
-                       {"opt": ["allow_remote"], "block": []})
-rm = next((o for o in plan2.ops if o.path == ("ip", "dns", "static")
-           and o.action == "remove"), None)
-check("disabling a block group removes its dns-static entries",
-      rm is not None and rm.params.get(".id") == "*9"
-      and rm.inverse.action == "add")
+check("nextdns_plan no longer touches /ip/dns/static at all",
+      not any(o.path == ("ip", "dns", "static") for o in F.nextdns_plan(
+          pn, qcfg, {"servers": "1.1.1.1", "bypass": ""},
+          {"opt": ["allow_remote"]}).ops))
 # force-DNS: redirect client port-53 to the router (and imply allow-remote)
 nd_api3 = FakeApi({
     ("ip", "dns"): [{".id": "*0", "servers": "1.1.1.1",
                      "allow-remote-requests": "false"}],
     ("ip", "firewall", "address-list"): [],
-    ("ip", "firewall", "nat"): [],
-    ("ip", "dns", "static"): []})
+    ("ip", "firewall", "nat"): []})
 fp = F.nextdns_plan(Pusher(qcfg, nd_api3, dry_run=True), qcfg,
-                    {"bypass": ""}, {"opt": ["force_dns"], "block": []})
+                    {"bypass": ""}, {"opt": ["force_dns"]})
 nat_adds = [o for o in fp.ops if o.path == ("ip", "firewall", "nat")
             and o.action == "add"]
 check("forcing client DNS adds udp+tcp dstnat redirect rules on port 53",
@@ -1041,8 +1017,7 @@ check("forcing client DNS implies allow-remote-requests=true",
 # toggles are mutually exclusive and the form pre-switches the matching one on.
 ag_api = FakeApi({("ip", "dns"): [{".id": "*0", "servers": "8.8.8.8",
                                    "allow-remote-requests": "true"}],
-                  ("ip", "firewall", "address-list"): [],
-                  ("ip", "dns", "static"): []})
+                  ("ip", "firewall", "address-list"): []})
 
 
 def _dns_servers(flat_in, multi_in):
@@ -1075,6 +1050,9 @@ check("DNS form renders 6 mutually-exclusive provider toggles",
 check("DNS form switches on the toggle matching the live servers (Cloudflare)",
       next(f for f in ptoggles if f["value"] == "cloudflare")["on"] is True
       and all(not f["on"] for f in ptoggles if f["value"] != "cloudflare"))
+check("DNS form no longer renders the retired sinkhole block-group toggles "
+      "or the sinkhole-IP field",
+      not any(f.get("name") in ("block", "block_ip") for f in agform))
 
 
 def _active(servers, dynamic=""):

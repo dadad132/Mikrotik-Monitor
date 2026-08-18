@@ -3768,9 +3768,12 @@ _TAB_INTRO = {
     "harden": "Stop brute-force attacks: lock API/Winbox/SSH to your trusted IPs, "
               "disable insecure services, and block attacker IPs. ⚠ Include this "
               "server's IP in the allowed list so you don't lock easymikrotik out.",
-    "nextdns": "Gives this router its own real NextDNS.io profile — security "
-               "protections, parental control, blocklists, and a custom "
-               "block/allow list — all managed right here, nothing to sign "
+    "nextdns": "Point the router at a quick DNS provider (or NextDNS's own "
+               "servers, if enabled below) and optionally force every "
+               "client through it. The NextDNS box below is separate — it "
+               "gives this router its own real NextDNS.io profile (security "
+               "protections, parental control, blocklists, a custom "
+               "block/allow list), all managed right here, nothing to sign "
                "into on NextDNS's own site.",
     "qos": "Cap upload/download speed for a subnet or interface (simple queues). "
            "Add a row, then Preview.",

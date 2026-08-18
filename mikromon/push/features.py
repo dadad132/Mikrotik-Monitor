@@ -1298,18 +1298,15 @@ _BLOCK_BY_KEY = {k: (label, doms) for _g, items in _BLOCK_GROUPS
                  for k, label, doms in items}
 
 
-def _domain_regexp(domain):
-    """Match the domain and any subdomain (RouterOS POSIX regexp)."""
-    return r".*" + domain.replace(".", r"\.") + "$"
-
-
 def nextdns_form(current, cfg):
+    """DNS server selection + making sure clients actually use it — NOT the
+    retired local sinkhole blocking (that's now NextDNS.io's job, see the
+    panels above this form). "Force client DNS" still matters here: without
+    it, a device that hard-codes its own resolver (8.8.8.8, say) bypasses
+    whatever's chosen below — the quick preset OR the NextDNS profile —
+    entirely, which would also quietly defeat NextDNS's own filtering."""
     dns = current.get("dns", {})
     ips = "\n".join(r.get("address", "") for r in current.get("bypass", []))
-    blocked = {str(r.get("comment", ""))[len(_DNSBLOCK_TAG):]
-               for r in current.get("static", [])}
-    cur_ip = next((r.get("address") for r in current.get("static", [])
-                   if r.get("address")), "") or "127.0.0.1"
     cur_preset = _active_preset(dns)
     fields: list[dict] = [
         {"type": "static", "label": "Quick DNS provider",
@@ -1326,30 +1323,19 @@ def nextdns_form(current, cfg):
         {"type": "toggle", "name": "opt", "value": "allow_remote",
          "label": "Allow remote DNS requests",
          "on": _norm(dns.get("allow-remote-requests", "")) == "true",
-         "hint": "Must be ON for the router to answer client DNS — blocking does "
-                 "nothing without it. (Turned on automatically when you force "
-                 "client DNS below.)"},
+         "hint": "Must be ON for the router to answer client DNS at all. "
+                 "(Turned on automatically when you force client DNS below.)"},
         {"type": "toggle", "name": "opt", "value": "force_dns",
          "label": "Force all client DNS through this router",
          "on": bool(current.get("forced")),
-         "hint": "Redirects every client's port-53 traffic to the router (NAT) so "
-                 "a device hard-coded to 8.8.8.8 can't bypass the blocks. Needed "
-                 "for the filtering to actually take effect."},
+         "hint": "Redirects every client's port-53 traffic to the router (NAT) "
+                 "so a device hard-coded to someone else's resolver can't "
+                 "bypass the DNS chosen here — or NextDNS's filtering, if "
+                 "that's enabled above."},
         {"type": "textarea", "name": "bypass", "label": "Bypass IPs (one per line)",
-         "value": ips, "hint": "Hosts allowed to skip the filter."},
-        {"type": "text", "name": "block_ip",
-         "label": "Blocked domains resolve to (sinkhole IP)", "value": cur_ip,
-         "hint": "Where blocked names point. RouterOS rejects 0.0.0.0 here; "
-                 "127.0.0.1 is a safe blackhole. Use a block-page IP if you have "
-                 "one."},
+         "value": ips, "hint": "Hosts allowed to use their own DNS even when "
+                 "\"Force all client DNS\" above is on."},
     ]
-    for group, items in _BLOCK_GROUPS:
-        fields.append({"type": "static", "label": f"Block {group.lower()}",
-                       "value": "Answers these domains as 0.0.0.0 on the router "
-                                "(DNS sinkhole). Starter lists — extendable."})
-        for key, label, _doms in items:
-            fields.append({"type": "toggle", "name": "block", "value": key,
-                           "label": label, "on": key in blocked})
     return fields
 
 
@@ -1381,23 +1367,11 @@ def nextdns_plan(pusher, cfg, flat, multi):
         manage_tag="mikromon:dns-bypass",
         owns=lambda r: str(r.get("list", "")) == DNS_BYPASS_LIST,
         label="bypass")
-    # category / app DNS-sinkhole entries (0.0.0.0 is rejected by RouterOS as an
-    # A record, so use a real blackhole IP — 127.0.0.1 by default).
-    block_ip = (flat.get("block_ip", "") or "").strip() or "127.0.0.1"
-    enabled = set(multi.get("block", []))
-    static_desired = []
-    for key in enabled:
-        _label, doms = _BLOCK_BY_KEY.get(key, ("", []))
-        for d in doms:
-            static_desired.append({"regexp": _domain_regexp(d),
-                                   "address": block_ip,
-                                   "comment": _DNSBLOCK_TAG + key})
-    static_plan = pusher.plan_managed_list(
-        _DNS_STATIC, "regexp", static_desired,
-        owns=_prefix_owner(_DNSBLOCK_TAG), label="dns block")
-    # Force-DNS: redirect client port-53 traffic to the router so hard-coded
-    # resolvers can't slip past the sinkhole. dstnat/redirect only sees client
-    # (forwarded) traffic in prerouting, so the router's own DNS is untouched.
+    # Force-DNS: redirect client port-53 traffic to the router so a
+    # hard-coded resolver can't slip past whatever's chosen above (a quick
+    # preset, or NextDNS via the panels above this form). dstnat/redirect
+    # only sees client (forwarded) traffic in prerouting, so the router's
+    # own DNS is untouched.
     force_desired = []
     if force_dns:
         for proto in ("udp", "tcp"):
@@ -1408,9 +1382,8 @@ def nextdns_plan(pusher, cfg, flat, multi):
     force_plan = pusher.plan_managed_list(
         _NAT, "comment", force_desired,
         owns=_prefix_owner(_DNSFORCE_TAG), label="dns redirect")
-    return Plan(cfg.name,
-                plan.ops + list_plan.ops + static_plan.ops + force_plan.ops,
-                summary="dns filter")
+    return Plan(cfg.name, plan.ops + list_plan.ops + force_plan.ops,
+                summary="dns")
 
 
 # ===========================================================================
@@ -2823,21 +2796,21 @@ FEATURES = {
     "harden": {"title": "Restrict management access", "write": True,
                "read": harden_read, "summary": harden_summary,
                "form": harden_form, "plan": harden_plan},
-    # Local DNS-sinkhole blocking (write:False, no form/plan) — retired in
-    # favor of the real NextDNS.io cloud integration (see nextdns_cloud_ops
-    # above and web.py's _nextdns_box/_nextdns_*_box panels, all rendered
-    # into this same tab via extra_html), which manages the SAME /ip/dns
-    # menu. Having both push to /ip/dns independently was never safe —
-    # confirmed as the actual cause of "NextDNS says enabled but doesn't
-    # connect": re-applying this form after NextDNS was already on would
-    # silently leave whatever it doesn't explicitly set alone, but it's
-    # exactly the kind of two-owners-one-resource setup that goes wrong the
-    # moment either side changes independently. read/summary stay so any
-    # already-applied local blocks are still visible (read-only) on a
-    # router that had them from before — nothing here can change them
-    # anymore, so there's nothing left to conflict.
-    "nextdns": {"title": "DNS", "write": False,
-                "read": nextdns_read, "summary": nextdns_summary},
+    # DNS server selection (quick provider presets, force-client-DNS) still
+    # lives here and still writes to the router — only the local sinkhole
+    # domain-blocking half of this tab was retired (nextdns_form/_plan no
+    # longer touch /ip/dns/static or take a block_ip/block list at all),
+    # in favor of the real NextDNS.io cloud integration's own Security/
+    # Parental Control/Privacy panels (see nextdns_cloud_ops above and
+    # web.py's _nextdns_box/_nextdns_*_box, rendered into this same tab via
+    # extra_html) — cloud threat intelligence and real category/service
+    # toggles instead of a fixed local domain list, not a step down.
+    # summary still surfaces any block-group entries left over on a router
+    # from before this change, read-only (nothing here can touch them
+    # anymore).
+    "nextdns": {"title": "DNS", "write": True,
+                "read": nextdns_read, "summary": nextdns_summary,
+                "form": nextdns_form, "plan": nextdns_plan},
     "qos": {"title": "Queues", "write": True, "read": qos_read,
             "summary": qos_summary, "form": qos_form, "plan": qos_plan,
             "unmanaged": qos_unmanaged, "adopt": True, "path": _QUEUE,
