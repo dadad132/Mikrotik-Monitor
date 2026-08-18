@@ -48,23 +48,10 @@ _REVERT_MINUTES = 5
 
 _PAGE_CSS = """
  *{box-sizing:border-box}
- body{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f1f5f9;color:#0f172a}
- a{color:#2563eb}
+ body{font-family:Segoe UI,Arial,sans-serif;margin:0;background:var(--bg);
+   color:var(--text)}
+ a{color:var(--accent)}
  h1{font-size:22px;margin:0 0 16px}
- /* top nav */
- header{background:#0f172a;color:#fff;padding:0 20px;display:flex;align-items:center;
-   gap:6px;height:54px;box-shadow:0 1px 4px rgba(0,0,0,.2)}
- .brand{font-weight:700;font-size:17px;display:flex;align-items:center;gap:8px}
- .brand .logo{color:#38bdf8;font-size:18px}
- nav{display:flex;gap:4px;margin-left:20px}
- nav a{color:#cbd5e1;text-decoration:none;padding:8px 13px;border-radius:7px;
-   font-size:14px}
- nav a:hover{background:#1e293b;color:#fff}
- nav a.on{background:#2563eb;color:#fff}
- header .right{margin-left:auto;display:flex;align-items:center;gap:14px;font-size:13px}
- .who{display:flex;flex-direction:column;line-height:1.15;text-align:right}
- .who small{color:#94a3b8;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
- .logout{color:#93c5fd;text-decoration:none}.logout:hover{text-decoration:underline}
  /* device card grid */
  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));
    gap:16px;padding:18px 20px}
@@ -280,6 +267,101 @@ _THEME_VARS = """
 .theme-toggle:hover{color:var(--text);border-color:var(--accent)}
 """
 
+# ---------------------------------------------------------------------------
+# The persistent left sidebar (_header, below) — same chrome on every
+# authenticated page, not just the dashboard, so navigating between them
+# never swaps the look out from under you. Fixed-position + a body margin
+# (rather than a flex row) because the page content after it isn't
+# consistently a single wrapped element across every page in this app.
+# ---------------------------------------------------------------------------
+_SHELL_CSS = """
+.dash-side{position:fixed;top:0;left:0;bottom:0;width:230px;overflow-y:auto;
+  background:var(--surface);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;padding:18px 14px;z-index:50}
+.dash-logo{display:flex;align-items:center;gap:8px;font-weight:700;
+  font-size:16px;color:var(--text);padding:4px 8px 20px;text-decoration:none}
+.dash-logo .dot{color:var(--accent);font-size:17px}
+.dash-nav{display:flex;flex-direction:column;gap:2px;flex:1}
+.dash-nav a{display:flex;align-items:center;gap:10px;color:var(--text-muted);
+  padding:9px 10px;border-radius:8px;font-size:14px;font-weight:500;
+  text-decoration:none}
+.dash-nav a .ic{flex-shrink:0}
+.dash-nav a:hover{background:var(--surface-2);color:var(--text)}
+.dash-nav a.on{background:var(--accent-soft);color:var(--accent)}
+.dash-nav-sep{height:1px;background:var(--border);margin:10px 6px}
+.dash-side-foot{border-top:1px solid var(--border);padding-top:12px;
+  margin-top:12px;display:flex;flex-direction:column;gap:10px}
+.dash-side-foot-row{display:flex;align-items:center;justify-content:space-between;
+  gap:8px}
+.dash-who{font-size:12px;color:var(--text);line-height:1.3;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.dash-who small{display:block;color:var(--text-faint);font-size:11px}
+.dash-logout{font-size:12px;color:var(--text-faint);text-decoration:none;
+  flex-shrink:0}
+.dash-logout:hover{color:var(--accent)}
+body.has-sidebar{margin-left:230px;min-height:100vh}
+@media(max-width:820px){
+  .dash-side{position:static;width:100%;height:auto;flex-direction:row;
+    align-items:center;padding:10px 14px;gap:14px;border-right:0;
+    border-bottom:1px solid var(--border)}
+  .dash-logo{padding:0;flex-shrink:0}
+  .dash-nav{flex-direction:row;flex-wrap:nowrap;overflow-x:auto;flex:1;gap:2px;
+    -webkit-overflow-scrolling:touch;scrollbar-width:none}
+  .dash-nav::-webkit-scrollbar{display:none}
+  .dash-nav a{flex-shrink:0;padding:8px 10px;white-space:nowrap}
+  .dash-nav-sep{display:none}
+  .dash-side-foot{border-top:0;margin-top:0;padding-top:0;
+    flex-direction:row;flex-shrink:0}
+  .dash-side-foot .dash-who{display:none}
+  body.has-sidebar{margin-left:0}
+}
+"""
+
+# Inline SVG icon bodies for the sidebar, keyed by nav href — stroke=
+# "currentColor" so each one follows the link's own text color (inactive/
+# hover/active) in both themes, with no per-icon color logic. Plain
+# primitives (rect/circle/line/polyline), not glyph characters — a font's
+# Unicode dingbats render wildly inconsistently across OSes/browsers
+# (confirmed live: looked like blurry noise on mobile), where a small
+# hand-drawn SVG always renders crisp.
+_SIDE_ICONS = {
+    "/dashboard": '<rect x="2.5" y="2.5" width="6" height="6" rx="1.3"/>'
+                  '<rect x="11.5" y="2.5" width="6" height="6" rx="1.3"/>'
+                  '<rect x="2.5" y="11.5" width="6" height="6" rx="1.3"/>'
+                  '<rect x="11.5" y="11.5" width="6" height="6" rx="1.3"/>',
+    "/devices":   '<rect x="3" y="3" width="14" height="6" rx="1.5"/>'
+                  '<rect x="3" y="11" width="14" height="6" rx="1.5"/>'
+                  '<circle cx="6.3" cy="6" r=".9" fill="currentColor" stroke="none"/>'
+                  '<circle cx="6.3" cy="14" r=".9" fill="currentColor" stroke="none"/>',
+    "/logs":      '<polyline points="2.5,11 6,11 8,4.5 12,15.5 14,11 17.5,11"/>',
+    "/admin":     '<circle cx="10" cy="6.3" r="3.1"/>'
+                  '<path d="M3.7 17c0-3.9 2.9-6.3 6.3-6.3s6.3 2.4 6.3 6.3"/>',
+    "/billing":   '<rect x="2.5" y="4.7" width="15" height="10.6" rx="1.7"/>'
+                  '<line x1="2.5" y1="8.3" x2="17.5" y2="8.3"/>'
+                  '<line x1="5" y1="12.3" x2="9" y2="12.3"/>',
+    "/guide":     '<path d="M3 4.3c1.7-.9 3.8-.9 5.2 0v11.2c-1.4-.9-3.5-.9-5.2 0z"/>'
+                  '<path d="M17 4.3c-1.7-.9-3.8-.9-5.2 0v11.2c1.4-.9 3.5-.9 5.2 0z"/>',
+    "/account":   '<circle cx="10" cy="10" r="7.3"/>'
+                  '<circle cx="10" cy="8" r="2.3"/>'
+                  '<path d="M4.9 15.8c.9-2.5 2.8-3.8 5.1-3.8s4.2 1.3 5.1 3.8"/>',
+    "/superadmin": '<path d="M10 2.7l5.8 2.2v4.5c0 3.9-2.5 6.6-5.8 7.6-'
+                   '3.3-1-5.8-3.7-5.8-7.6V4.9z"/>',
+}
+
+
+def _dash_icon(href) -> str:
+    body = _SIDE_ICONS.get(href)
+    if not body:
+        return ""
+    return (f'<svg class="ic" width="18" height="18" viewBox="0 0 20 20" '
+            f'fill="none" stroke="currentColor" stroke-width="1.6" '
+            f'stroke-linecap="round" stroke-linejoin="round">{body}</svg>')
+
+
+# Nav items are grouped visually: Dashboard, then the owner-only fleet-
+# management cluster, then a divider before the personal/settings items.
+_SIDE_SEP_BEFORE = "/guide"
+
 # Runs before first paint (placed right after <meta charset> in <head>) so a
 # saved preference applies with no flash of the wrong theme.
 _THEME_INIT_JS = """<script>(function(){try{
@@ -332,14 +414,15 @@ def _nav_items(user) -> list:
     return items
 
 
-def _nav(user, active) -> str:
-    items = _nav_items(user)
-    if not items:
-        return ""
-    links = "".join(
-        f'<a href="{href}" class="{"on" if href == active else ""}">{label}</a>'
-        for href, label in items)
-    return f"<nav>{links}</nav>"
+def _sidebar_nav(user, active) -> str:
+    parts = []
+    for href, label in _nav_items(user):
+        if href == _SIDE_SEP_BEFORE:
+            parts.append('<div class="dash-nav-sep"></div>')
+        parts.append(
+            f'<a class="{"on" if href == active else ""}" href="{href}">'
+            f'{_dash_icon(href)}{esc(label)}</a>')
+    return f'<nav class="dash-nav">{"".join(parts)}</nav>'
 
 
 def _who(user) -> str:
@@ -349,20 +432,28 @@ def _who(user) -> str:
 
 
 def _header(user, active="/dashboard") -> str:
-    brand = (f'<div class="brand"><span class="logo">&#9670;</span>'
-             f'{esc(_BRAND)}</div>')
+    """The persistent left sidebar: logo, nav, and the account/theme footer.
+    Same markup on every authenticated page (via _page) and on the
+    dashboard itself, so the chrome never changes when you navigate."""
+    brand = (f'<a class="dash-logo" href="/dashboard">'
+             f'<span class="dot">&#9670;</span>{esc(_BRAND)}</a>')
     if not user:
-        return f"<header>{brand}</header>"
+        return f'<aside class="dash-side">{brand}</aside>'
     org = user.get("org_name", "")
     sub = f'{esc(org)} &middot; {esc(user["role"])}' if org else esc(user["role"])
-    chip = (f'<span class="who">{esc(_who(user))}'
-            f'<small>{sub}</small></span>')
-    return (f"<header>{brand}{_nav(user, active)}"
-            f'<div class="right">{chip}<a class="logout" href="/logout">Log out</a>'
-            f"</div></header>")
+    foot = (f'<div class="dash-side-foot">'
+            f'<div class="dash-who">{esc(_who(user))}<small>{sub}</small></div>'
+            f'<div class="dash-side-foot-row">{_theme_toggle_btn()}'
+            f'<a class="dash-logout" href="/logout">Log out</a></div>'
+            f'</div>')
+    return (f'<aside class="dash-side">{brand}{_sidebar_nav(user, active)}'
+            f'{foot}</aside>')
 
 
 def _page(title: str, body: str) -> str:
     return (f'<!doctype html><html><head><meta charset="utf-8">'
-            f'<title>{esc(title)}</title><style>{_PAGE_CSS}</style></head>'
-            f'<body>{body}</body></html>')
+            f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f'{_THEME_INIT_JS}'
+            f'<title>{esc(title)}</title>'
+            f'<style>{_THEME_VARS}{_SHELL_CSS}{_PAGE_CSS}</style></head>'
+            f'<body class="has-sidebar">{body}{_THEME_TOGGLE_JS}</body></html>')

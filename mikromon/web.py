@@ -34,9 +34,9 @@ from .config import DEFAULT_CHECKS
 from .metrics import MetricsStore
 from .util import human_bps
 from .web_shared import (
-    esc, _BRAND, _REVERT_MINUTES, _PAGE_CSS,
-    _header, _page, _who, _nav_items, parse_multipart_form,
-    _THEME_VARS, _THEME_INIT_JS, _THEME_TOGGLE_JS, _theme_toggle_btn,
+    esc, _BRAND, _REVERT_MINUTES, _PAGE_CSS, _SHELL_CSS,
+    _header, _page, parse_multipart_form,
+    _THEME_VARS, _THEME_INIT_JS, _THEME_TOGGLE_JS,
 )
 from .web_auth import (
     _render_login, _render_signup, _render_account,
@@ -939,24 +939,6 @@ def _render_noc_charts(devs) -> str:
             f'{_donut("Failover", failover)}</div>')
 
 
-# icon glyphs for the dashboard sidebar, keyed by nav href — purely
-# decorative, monochrome geometric shapes (not emoji) so they render
-# consistently regardless of the OS emoji font.
-_SIDE_ICONS = {
-    "/dashboard": "&#9638;", "/devices": "&#9636;", "/logs": "&#9639;",
-    "/admin": "&#9640;", "/billing": "&#9641;", "/guide": "&#9713;",
-    "/account": "&#9677;", "/superadmin": "&#9672;",
-}
-
-
-def _dash_sidebar(user, active) -> str:
-    links = "".join(
-        f'<a class="{"on" if href == active else ""}" href="{href}">'
-        f'<span class="ic">{_SIDE_ICONS.get(href, "&#9679;")}</span>{esc(label)}</a>'
-        for href, label in _nav_items(user))
-    return f'<nav class="dash-nav">{links}</nav>'
-
-
 _DASH_STATUS_BADGE = {"ok": ("ok", "Healthy"), "warn": ("warn", "Warning"),
                       "crit": ("crit", "Offline")}
 
@@ -987,30 +969,9 @@ body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:var(--bg);
   color:var(--text)}
 a{color:var(--accent);text-decoration:none}
 .muted{color:var(--text-faint);font-size:12px}
-.dash-shell{display:flex;min-height:100vh}
-/* ── sidebar ─────────────────────────────────────── */
-.dash-side{width:230px;flex-shrink:0;background:var(--surface);
-  border-right:1px solid var(--border);display:flex;flex-direction:column;
-  padding:18px 14px}
-.dash-logo{display:flex;align-items:center;gap:8px;font-weight:700;
-  font-size:16px;color:var(--text);padding:4px 8px 20px}
-.dash-logo .dot{color:var(--accent);font-size:17px}
-.dash-nav{display:flex;flex-direction:column;gap:2px;flex:1}
-.dash-nav a{display:flex;align-items:center;gap:10px;color:var(--text-muted);
-  padding:9px 10px;border-radius:8px;font-size:14px;font-weight:500}
-.dash-nav a .ic{font-size:13px;width:16px;text-align:center;flex-shrink:0}
-.dash-nav a:hover{background:var(--surface-2);color:var(--text)}
-.dash-nav a.on{background:var(--accent-soft);color:var(--accent)}
-.dash-side-foot{border-top:1px solid var(--border);padding-top:12px;
-  margin-top:12px;display:flex;align-items:center;justify-content:space-between;
-  gap:8px}
-.dash-who{font-size:12px;color:var(--text);line-height:1.3;overflow:hidden;
-  text-overflow:ellipsis;white-space:nowrap}
-.dash-who small{display:block;color:var(--text-faint);font-size:11px}
-.dash-logout{font-size:12px;color:var(--text-faint);flex-shrink:0}
-.dash-logout:hover{color:var(--accent)}
-/* ── main column ─────────────────────────────────── */
-.dash-main{flex:1;min-width:0;padding:22px 28px 40px}
+/* ── main column (the sidebar itself is _SHELL_CSS, shared with every
+   other page via _header/_page) ─────────────────── */
+.dash-main{padding:22px 28px 40px}
 .dash-topbar{display:flex;align-items:center;justify-content:space-between;
   gap:16px;margin-bottom:18px;flex-wrap:wrap}
 .dash-topbar h1{font-size:21px;margin:0;color:var(--text)}
@@ -1078,15 +1039,10 @@ a{color:var(--accent);text-decoration:none}
 .alert-badge.warn{background:var(--warning-bg);color:var(--warning)}
 .alert-badge.crit{background:var(--danger-bg);color:var(--danger)}
 @media(max-width:820px){
-  .dash-shell{flex-direction:column}
-  .dash-side{width:100%;flex-direction:row;align-items:center;
-    padding:12px 16px;gap:16px}
-  .dash-logo{padding:0}
-  .dash-nav{flex-direction:row;flex-wrap:wrap;flex:1}
-  .dash-side-foot{border-top:0;margin-top:0;padding-top:0}
-  .dash-who small{display:none}
-  .dash-main{padding:18px 16px 30px}
-  .dash-search{width:150px}
+  .dash-main{padding:16px 16px 28px}
+  .dash-topbar{gap:10px}
+  .dash-search{width:auto;flex:1;min-width:0}
+  .chip{padding:12px 16px;min-width:0;flex:1}
 }
 """
 
@@ -1152,38 +1108,24 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
         f'style="padding:0 18px 16px;{"" if devs else "display:"}'
         f'{"none" if devs else "block"}">{esc(empty_msg)}</p>'
         f'</div>')
-    org = (user or {}).get("org_name", "")
-    role = (user or {}).get("role", "")
-    who_sub = f'{esc(org)} &middot; {esc(role)}' if org else esc(role)
-    side_foot = (
-        f'<div class="dash-side-foot"><div class="dash-who">{esc(_who(user))}'
-        f'<small>{who_sub}</small></div>'
-        f'<a class="dash-logout" href="/logout">Log out</a></div>'
-    ) if user else ""
     brand = esc(_BRAND)
     return f"""<!doctype html>
 <html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 {_THEME_INIT_JS}
 <meta http-equiv="refresh" content="10">
 <title>{brand} &middot; Dashboard</title>
-<style>{_THEME_VARS}{_DASH_CSS}</style></head>
-<body>
-<div class="dash-shell">
-<aside class="dash-side">
-<a class="dash-logo" href="/dashboard"><span class="dot">&#9670;</span>{brand}</a>
-{_dash_sidebar(user, "/dashboard")}
-{side_foot}
-</aside>
-<main class="dash-main">
+<style>{_THEME_VARS}{_SHELL_CSS}{_DASH_CSS}</style></head>
+<body class="has-sidebar">
+{_header(user, "/dashboard")}
+<div class="dash-main">
 <div class="dash-topbar"><h1>Dashboard</h1>
 <div class="dash-top-right">
 <input id="q" class="dash-search" placeholder="Search devices…">
-{_theme_toggle_btn()}
 </div></div>
 <div class="dash-chips">{chips}</div>
 {charts}
 {table}
-</main>
 </div>
 {_THEME_TOGGLE_JS}
 {_DASH_JS}
@@ -4309,10 +4251,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
         # ---- low-level helpers ----
         def _send(self, code, body, ctype="text/plain; charset=utf-8", headers=None):
-            # Inject grace-period banner into HTML responses when set.
+            # Inject grace-period banner into HTML responses when set. A
+            # plain "<body>" match stopped firing once the sidebar redesign
+            # started giving the tag its own attribute (<body class=
+            # "has-sidebar">) — match any <body ...> opening tag instead.
             if (isinstance(body, str) and "text/html" in ctype
                     and getattr(self, "_grace_banner", "")):
-                body = body.replace("<body>", "<body>" + self._grace_banner, 1)
+                body = re.sub(r"<body[^>]*>",
+                              lambda m: m.group(0) + self._grace_banner,
+                              body, count=1)
             data = body.encode("utf-8") if isinstance(body, str) else body
             self.send_response(code)
             self.send_header("Content-Type", ctype)
