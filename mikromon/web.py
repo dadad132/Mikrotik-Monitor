@@ -461,7 +461,8 @@ def _build_nextdns_diagnostics_lines(auth, devices_db, defaults) -> list:
                              "profile exists in NextDNS.")
                 lines.append("")
                 continue
-            live = str((dns[0] if dns else {}).get("use-doh-server", ""))
+            row = dns[0] if dns else {}
+            live = str(row.get("use-doh-server", ""))
             expected = f"https://dns.nextdns.io/{profile_id}" if profile_id else ""
             lines.append(f"  live use-doh-server on the router: {live or '(empty)'}")
             if live == expected and expected:
@@ -470,6 +471,27 @@ def _build_nextdns_diagnostics_lines(auth, devices_db, defaults) -> list:
                 lines.append(f"  status: MISMATCH — expected {expected or '(empty)'}. "
                              f"Disable and re-enable NextDNS on this router's "
                              f"DNS tab to retry the push.")
+            # The three prerequisites confirmed live to each independently
+            # break "NextDNS says enabled but isn't actually used", even
+            # with use-doh-server itself matching above:
+            #   - verify-doh-cert=yes with no route to a trusted CA chain
+            #     for dns.nextdns.io silently fails the DoH connection
+            #     entirely (RouterOS refuses to fall back).
+            #   - an empty `servers` list leaves DoH with nothing to
+            #     resolve dns.nextdns.io's OWN hostname with.
+            #   - allow-remote-requests=false means only the router's own
+            #     queries ever use it — every LAN client falls back to its
+            #     own/ISP DNS, which is what NextDNS's setup-page checker
+            #     reports as "this device is not using NextDNS".
+            verify = str(row.get("verify-doh-cert", "")) or "(not set)"
+            servers = str(row.get("servers", "")).strip() or "(empty)"
+            remote = str(row.get("allow-remote-requests", "")) or "(not set)"
+            lines.append(f"  verify-doh-cert: {verify}")
+            lines.append(f"  servers (bootstrap resolver, needed to look up "
+                         f"dns.nextdns.io itself): {servers}")
+            lines.append(f"  allow-remote-requests (must be true/yes for LAN "
+                         f"clients, not just the router itself, to use this): "
+                         f"{remote}")
             lines.append("")
     finally:
         ds.close()

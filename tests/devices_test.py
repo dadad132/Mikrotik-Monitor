@@ -1283,6 +1283,56 @@ try:
           "instead of hanging or crashing",
           "UNREACHABLE from this server right now" in diag_text)
 
+    print("  diagnostics report surfaces the full DoH prerequisite state "
+          "for a REACHABLE router (not just use-doh-server):")
+
+    class _FakeRouterApi:
+        def __init__(self, data):
+            self.data = data
+
+        def path(self, *segments):
+            return self.data.get(segments, [])
+
+    class _FakeDevice:
+        def __init__(self, data):
+            self.api = _FakeRouterApi(data)
+
+        def reachable(self, timeout=None):
+            return True
+
+        def connect(self):
+            return self.api
+
+        def close(self):
+            pass
+
+    import mikromon.push as push_pkg
+    orig_rw_device = push_pkg.rw_device
+    push_pkg.rw_device = lambda cfg: _FakeDevice({
+        ("system", "resource"): [{"version": "7.14.3"}],
+        ("ip", "dns"): [{"use-doh-server": "https://dns.nextdns.io/created-profile-1",
+                         "verify-doh-cert": "yes", "servers": "",
+                         "allow-remote-requests": "false"}],
+    })
+    try:
+        reachable_report = "\n".join(web._build_nextdns_diagnostics_lines(
+            AuthStore(adb), wdb, DEF))
+    finally:
+        push_pkg.rw_device = orig_rw_device
+    check("use-doh-server matches -> reported OK",
+          "status: OK, matches the assigned profile." in reachable_report)
+    check("verify-doh-cert value is shown",
+          "verify-doh-cert: yes" in reachable_report)
+    check("an empty bootstrap servers list is called out as empty, not "
+          "silently omitted",
+          "servers (bootstrap resolver" in reachable_report
+          and "(empty)" in reachable_report)
+    check("allow-remote-requests=false is shown plainly (this is the field "
+          "that determines whether LAN clients — not just the router "
+          "itself — actually use NextDNS)",
+          "allow-remote-requests (must be true/yes for LAN clients, not "
+          "just the router itself, to use this): false" in reachable_report)
+
     # Re-enabling (already enabled) must NOT create a second profile.
     orig_create = nextdns_mod.create_profile
     nextdns_mod.create_profile = _fake_create
