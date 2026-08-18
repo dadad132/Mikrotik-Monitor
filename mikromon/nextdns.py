@@ -16,6 +16,14 @@ import urllib.request
 
 _API_BASE = "https://api.nextdns.io"
 _TIMEOUT = 10
+# Cloudflare sits in front of api.nextdns.io and its bot-management WAF
+# blocks the default "Python-urllib/3.x" User-Agent outright — confirmed
+# live: identical requests differing ONLY in this header get a Cloudflare
+# edge block (HTTP 403, "error code: 1010", plain-text body, no app-level
+# headers) with the default UA, vs. reaching the real NextDNS API (proper
+# JSON error body) with any ordinary one. Doesn't need to impersonate a
+# browser — any non-default value clears it.
+_USER_AGENT = "easymikrotik/1.0 (+https://easymikrotik.com)"
 
 
 class NextDnsError(Exception):
@@ -28,6 +36,7 @@ def _request(method: str, path: str, api_key: str, body: dict | None = None) -> 
     req = urllib.request.Request(url, data=data, method=method, headers={
         "X-Api-Key": api_key,
         "Content-Type": "application/json",
+        "User-Agent": _USER_AGENT,
     })
     try:
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
