@@ -224,8 +224,12 @@ srv0 = ThreadingHTTPServer(("127.0.0.1", 8097), web.make_handler(
 threading.Thread(target=srv0.serve_forever, daemon=True).start()
 B0 = "http://127.0.0.1:8097"
 try:
-    st, _ = req(opener(redirect=False), "/", base=B0)
-    check("no accounts -> / redirects to /signup", st == 303)
+    st, body = req(opener(redirect=False), "/", base=B0)
+    check("no accounts yet -> / still shows the public landing page "
+          "(not forced straight to a bare signup form)",
+          st == 200 and "free trial" in body.lower())
+    st, _ = req(opener(redirect=False), "/dashboard", base=B0)
+    check("no accounts -> /dashboard redirects to /signup", st == 303)
     st, body = req(opener(), "/signup", base=B0)
     check("/signup shows the create-company form",
           st == 200 and "company" in body.lower())
@@ -524,8 +528,11 @@ srv = ThreadingHTTPServer(("127.0.0.1", 8098), web.make_handler(
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 try:
     print("Unauthenticated:")
-    st, _ = req(opener(redirect=False), "/")
-    check("GET / -> redirect to login", st == 303)
+    st, body = req(opener(redirect=False), "/")
+    check("GET / (logged out) -> the public landing page, not forced to "
+          "/login", st == 200 and "free trial" in body.lower())
+    st, _ = req(opener(redirect=False), "/dashboard")
+    check("GET /dashboard (logged out) -> redirect to login", st == 303)
     st, body = req(opener(), "/login")
     check("GET /login -> form", st == 200 and "sign in" in body.lower())
     st, _ = req(opener(redirect=False), "/api/devices")

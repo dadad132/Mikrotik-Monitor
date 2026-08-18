@@ -235,10 +235,92 @@ _PAGE_CSS = """
 """
 
 
-def _nav(user, active) -> str:
+# ---------------------------------------------------------------------------
+# Light/dark theme: CSS custom properties + a persisted toggle. Opt-in per
+# page (the dashboard and the landing page use this; _PAGE_CSS above is the
+# older light-only stylesheet the rest of the app still uses, unchanged).
+# ---------------------------------------------------------------------------
+_THEME_VARS = """
+:root{
+  --bg:#f1f5f9;--surface:#ffffff;--surface-2:#f8fafc;--border:#e2e8f0;
+  --text:#0f172a;--text-muted:#475569;--text-faint:#94a3b8;
+  --accent:#2563eb;--accent-hover:#1d4ed8;--accent-soft:#eff6ff;
+  --success:#16a34a;--success-bg:#dcfce7;
+  --warning:#d97706;--warning-bg:#fef3c7;
+  --danger:#dc2626;--danger-bg:#fee2e2;
+  --shadow:0 1px 3px rgba(15,23,42,.08);
+  --shadow-md:0 8px 28px rgba(15,23,42,.10);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0b1220;--surface:#111827;--surface-2:#0d1526;--border:#1f2937;
+    --text:#e5e7eb;--text-muted:#94a3b8;--text-faint:#64748b;
+    --accent:#3b82f6;--accent-hover:#60a5fa;--accent-soft:#13213b;
+    --success:#22c55e;--success-bg:#052e16;
+    --warning:#f59e0b;--warning-bg:#3a2a06;
+    --danger:#ef4444;--danger-bg:#3a0d0d;
+    --shadow:0 1px 3px rgba(0,0,0,.5);
+    --shadow-md:0 8px 28px rgba(0,0,0,.5);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0b1220;--surface:#111827;--surface-2:#0d1526;--border:#1f2937;
+  --text:#e5e7eb;--text-muted:#94a3b8;--text-faint:#64748b;
+  --accent:#3b82f6;--accent-hover:#60a5fa;--accent-soft:#13213b;
+  --success:#22c55e;--success-bg:#052e16;
+  --warning:#f59e0b;--warning-bg:#3a2a06;
+  --danger:#ef4444;--danger-bg:#3a0d0d;
+  --shadow:0 1px 3px rgba(0,0,0,.5);
+  --shadow-md:0 8px 28px rgba(0,0,0,.5);
+}
+.theme-toggle{background:var(--surface-2);border:1px solid var(--border);
+  color:var(--text-muted);width:34px;height:34px;border-radius:9px;cursor:pointer;
+  font-size:15px;display:inline-flex;align-items:center;justify-content:center;
+  transition:.12s;flex-shrink:0}
+.theme-toggle:hover{color:var(--text);border-color:var(--accent)}
+"""
+
+# Runs before first paint (placed right after <meta charset> in <head>) so a
+# saved preference applies with no flash of the wrong theme.
+_THEME_INIT_JS = """<script>(function(){try{
+var t=localStorage.getItem('mm-theme');
+if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);
+}catch(e){}})();</script>"""
+
+# The toggle itself + setting the button's icon on load. Safe to place
+# anywhere in the page — onclick resolves mmToggleTheme() at click time.
+_THEME_TOGGLE_JS = """<script>
+function mmThemeIsDark(){
+  var t=document.documentElement.getAttribute('data-theme');
+  return t?t==='dark':matchMedia('(prefers-color-scheme:dark)').matches;
+}
+function mmSyncThemeBtn(){
+  var b=document.getElementById('mm-theme-btn');
+  if(b)b.textContent=mmThemeIsDark()?'\\u2600':'\\u263E';
+}
+function mmToggleTheme(){
+  var next=mmThemeIsDark()?'light':'dark';
+  document.documentElement.setAttribute('data-theme',next);
+  try{localStorage.setItem('mm-theme',next);}catch(e){}
+  mmSyncThemeBtn();
+}
+mmSyncThemeBtn();
+</script>"""
+
+
+def _theme_toggle_btn() -> str:
+    return ('<button type="button" id="mm-theme-btn" class="theme-toggle" '
+            'onclick="mmToggleTheme()" aria-label="Toggle dark mode" '
+            'title="Toggle light/dark theme">&#9789;</button>')
+
+
+def _nav_items(user) -> list:
+    """The app's nav destinations for this user, in order. Shared by the old
+    horizontal top-nav (_nav, below) and the dashboard's sidebar so the two
+    never drift apart."""
     if not user:
-        return ""
-    items = [("/", "Dashboard")]
+        return []
+    items = [("/dashboard", "Dashboard")]
     if user.get("role") == "owner":
         items += [("/devices", "Devices"), ("/logs", "Activity"),
                   ("/admin", "Users")]
@@ -247,6 +329,13 @@ def _nav(user, active) -> str:
     items += [("/guide", "Guide"), ("/account", "Account")]
     if user.get("is_superadmin"):
         items.append(("/superadmin", "Platform"))
+    return items
+
+
+def _nav(user, active) -> str:
+    items = _nav_items(user)
+    if not items:
+        return ""
     links = "".join(
         f'<a href="{href}" class="{"on" if href == active else ""}">{label}</a>'
         for href, label in items)
@@ -259,7 +348,7 @@ def _who(user) -> str:
             or user.get("login") or "")
 
 
-def _header(user, active="/") -> str:
+def _header(user, active="/dashboard") -> str:
     brand = (f'<div class="brand"><span class="logo">&#9670;</span>'
              f'{esc(_BRAND)}</div>')
     if not user:

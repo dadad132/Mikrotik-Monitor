@@ -17,7 +17,6 @@ Endpoints:
 """
 from __future__ import annotations
 
-import html
 import json
 import logging
 import math
@@ -36,7 +35,8 @@ from .metrics import MetricsStore
 from .util import human_bps
 from .web_shared import (
     esc, _BRAND, _REVERT_MINUTES, _PAGE_CSS,
-    _header, _page, parse_multipart_form,
+    _header, _page, _who, _nav_items, parse_multipart_form,
+    _THEME_VARS, _THEME_INIT_JS, _THEME_TOGGLE_JS, _theme_toggle_btn,
 )
 from .web_auth import (
     _render_login, _render_signup, _render_account,
@@ -862,25 +862,18 @@ def _wan_unhealthy(d) -> bool:
 
 
 def _fleet_summary(devs) -> dict:
-    """At-a-glance NOC counters derived from the live device views."""
+    """At-a-glance dashboard counters derived from the live device views."""
     total = len(devs)
     online = sum(1 for d in devs if d["up"])
     alerts = sum(len(d["problems"]) for d in devs)
-    wan_bad = sum(1 for d in devs if _wan_unhealthy(d))
-    lat = [d["metrics"]["latency_ms"] for d in devs if "latency_ms" in d["metrics"]]
-    vpns = [d["metrics"]["vpn_up"] for d in devs if "vpn_up" in d["metrics"]]
-    return {
-        "total": total, "online": online, "offline": total - online,
-        "alerts": alerts, "wan_ok": total - wan_bad, "wan_bad": wan_bad,
-        "latency": (sum(lat) / len(lat)) if lat else None,
-        "vpns": int(sum(vpns)) if vpns else None,
-    }
+    critical = sum(1 for d in devs if _severity(d) == "crit")
+    return {"total": total, "online": online, "offline": total - online,
+            "alerts": alerts, "critical": critical}
 
 
-def _tile(num, lbl, cls="", filt=None) -> str:
-    click = ' click" onclick="setf(\'%s\')' % filt if filt else ""
-    return (f'<div class="tile {cls}{click}"><div class="num">{num}</div>'
-            f'<div class="lbl">{lbl}</div></div>')
+def _stat_chip(num, lbl, cls="") -> str:
+    return (f'<div class="chip {cls}"><div class="chip-num">{num}</div>'
+            f'<div class="chip-lbl">{esc(lbl)}</div></div>')
 
 
 # ----- SVG charts (pure-stdlib, no JS libraries) ---------------------------
@@ -892,7 +885,7 @@ def _donut(title, segments, size=128) -> str:
     circ = 2 * math.pi * r
     arcs, offset = [], 0.0
     track = (f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" '
-             f'stroke="#e5e7eb" stroke-width="{sw}"/>')
+             f'stroke="var(--border)" stroke-width="{sw}"/>')
     for _label, val, color in segments:
         if val <= 0:
             continue
@@ -904,9 +897,9 @@ def _donut(title, segments, size=128) -> str:
             f'transform="rotate(-90 {cx} {cy})"/>')
         offset += dash
     center = (f'<text x="{cx}" y="{cy - 2}" text-anchor="middle" '
-              f'font-size="26" font-weight="700" fill="#0f172a">{total}</text>'
+              f'font-size="26" font-weight="700" fill="var(--text)">{total}</text>'
               f'<text x="{cx}" y="{cy + 16}" text-anchor="middle" font-size="10" '
-              f'fill="#64748b">total</text>')
+              f'fill="var(--text-muted)">total</text>')
     legend = "".join(
         f'<div class="lg"><span class="sw" style="background:{color}"></span>'
         f'{esc(lbl)} <b>{val}</b></div>' for lbl, val, color in segments)
@@ -928,26 +921,6 @@ def _gauge(label, pct, unit="%", good_high=False) -> str:
             f'</div></div>')
 
 
-def _version_panel(devs) -> str:
-    counts: dict[str, int] = {}
-    for d in devs:
-        ver = d["facts"].get("version") or "unknown"
-        counts[ver] = counts.get(ver, 0) + 1
-    total = sum(counts.values()) or 1
-    rows = []
-    for ver, n in sorted(counts.items(), key=lambda kv: kv[0], reverse=True):
-        old = ver[:1] in ("5", "6")  # pre-v7 → prompt upgrade
-        color = "#d97706" if old else "#2563eb"
-        tag = ' <span class="up">upgrade</span>' if old else ""
-        rows.append(
-            f'<div class="vrow"><div class="vlabel">RouterOS {esc(ver)}{tag}</div>'
-            f'<div class="vbar"><i style="width:{n / total * 100:.0f}%;'
-            f'background:{color}"></i></div><div class="vn">{n}</div></div>')
-    return (f'<div class="chart wide"><div class="ct">RouterOS versions</div>'
-            f'<div class="vlist">{"".join(rows) or "<p class=muted>No data yet</p>"}'
-            f'</div></div>')
-
-
 def _render_noc_charts(devs) -> str:
     online = sum(1 for d in devs if d["up"])
     status = [("Online", online, "#16a34a"), ("Offline", len(devs) - online, "#dc2626")]
@@ -961,57 +934,188 @@ def _render_noc_charts(devs) -> str:
     failover = [("Full WAN", wan["full"], "#16a34a"),
                 ("On backup", wan["partial"], "#d97706"),
                 ("No WAN", wan["down"], "#dc2626")]
-    return (f'<div class="charts">{_donut("Device status", status)}'
-            f'{_donut("Device health", health)}'
-            f'{_donut("Failover health", failover)}'
-            f'{_version_panel(devs)}</div>')
+    return (f'<div class="charts">{_donut("Status", status)}'
+            f'{_donut("Health", health)}'
+            f'{_donut("Failover", failover)}</div>')
 
 
-def _render_noc_bar(s) -> str:
-    health = "green" if s["wan_bad"] == 0 else ("red" if s["offline"] else "amber")
-    lat = f'{s["latency"]:.0f} ms' if s["latency"] is not None else "—"
-    vpns = s["vpns"] if s["vpns"] is not None else "—"
-    return (
-        '<div class="noc">'
-        + _tile(s["total"], "Devices", filt="all")
-        + _tile(s["online"], "Online", "green", filt="all")
-        + _tile(s["offline"], "Offline", "red" if s["offline"] else "", filt="offline")
-        + _tile(s["alerts"], "Active alerts",
-                "amber" if s["alerts"] else "", filt="problems")
-        + _tile(f'{s["wan_ok"]}/{s["total"]}', "WAN healthy", health)
-        + _tile(lat, "Avg latency",
-                "" if s["latency"] is not None else "planned")
-        + _tile(vpns, "VPN tunnels",
-                "green" if s["vpns"] else "planned")
-        + "</div>")
+# icon glyphs for the dashboard sidebar, keyed by nav href — purely
+# decorative, monochrome geometric shapes (not emoji) so they render
+# consistently regardless of the OS emoji font.
+_SIDE_ICONS = {
+    "/dashboard": "&#9638;", "/devices": "&#9636;", "/logs": "&#9639;",
+    "/admin": "&#9640;", "/billing": "&#9641;", "/guide": "&#9713;",
+    "/account": "&#9677;", "/superadmin": "&#9672;",
+}
 
+
+def _dash_sidebar(user, active) -> str:
+    links = "".join(
+        f'<a class="{"on" if href == active else ""}" href="{href}">'
+        f'<span class="ic">{_SIDE_ICONS.get(href, "&#9679;")}</span>{esc(label)}</a>'
+        for href, label in _nav_items(user))
+    return f'<nav class="dash-nav">{links}</nav>'
+
+
+_DASH_STATUS_BADGE = {"ok": ("ok", "Healthy"), "warn": ("warn", "Warning"),
+                      "crit": ("crit", "Offline")}
+
+
+def _dash_device_rows(devs) -> str:
+    rows = []
+    for d in devs:
+        sev = _severity(d)
+        cls, label = _DASH_STATUS_BADGE[sev]
+        n_alerts = len(d["problems"])
+        alert_html = (f'<span class="alert-badge {cls}">&#9650; {n_alerts}</span>'
+                      if n_alerts else '<span class="muted">&mdash;</span>')
+        link = f'/device?name={quote(d["device"])}'
+        rows.append(
+            f'<tr data-name="{esc(d["device"].lower())}" data-sev="{sev}">'
+            f'<td class="dt-name"><a href="{link}"><span class="dt-ic">'
+            f'&#9638;</span>{esc(d["device"])}</a></td>'
+            f'<td><span class="badge {cls}">{label}</span></td>'
+            f'<td>{alert_html}</td>'
+            f'<td class="dt-view"><a href="{link}">View &rarr;</a></td>'
+            f'</tr>')
+    return "".join(rows)
+
+
+_DASH_CSS = """
+*{box-sizing:border-box}
+body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:var(--bg);
+  color:var(--text)}
+a{color:var(--accent);text-decoration:none}
+.muted{color:var(--text-faint);font-size:12px}
+.dash-shell{display:flex;min-height:100vh}
+/* ── sidebar ─────────────────────────────────────── */
+.dash-side{width:230px;flex-shrink:0;background:var(--surface);
+  border-right:1px solid var(--border);display:flex;flex-direction:column;
+  padding:18px 14px}
+.dash-logo{display:flex;align-items:center;gap:8px;font-weight:700;
+  font-size:16px;color:var(--text);padding:4px 8px 20px}
+.dash-logo .dot{color:var(--accent);font-size:17px}
+.dash-nav{display:flex;flex-direction:column;gap:2px;flex:1}
+.dash-nav a{display:flex;align-items:center;gap:10px;color:var(--text-muted);
+  padding:9px 10px;border-radius:8px;font-size:14px;font-weight:500}
+.dash-nav a .ic{font-size:13px;width:16px;text-align:center;flex-shrink:0}
+.dash-nav a:hover{background:var(--surface-2);color:var(--text)}
+.dash-nav a.on{background:var(--accent-soft);color:var(--accent)}
+.dash-side-foot{border-top:1px solid var(--border);padding-top:12px;
+  margin-top:12px;display:flex;align-items:center;justify-content:space-between;
+  gap:8px}
+.dash-who{font-size:12px;color:var(--text);line-height:1.3;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.dash-who small{display:block;color:var(--text-faint);font-size:11px}
+.dash-logout{font-size:12px;color:var(--text-faint);flex-shrink:0}
+.dash-logout:hover{color:var(--accent)}
+/* ── main column ─────────────────────────────────── */
+.dash-main{flex:1;min-width:0;padding:22px 28px 40px}
+.dash-topbar{display:flex;align-items:center;justify-content:space-between;
+  gap:16px;margin-bottom:18px;flex-wrap:wrap}
+.dash-topbar h1{font-size:21px;margin:0;color:var(--text)}
+.dash-top-right{display:flex;align-items:center;gap:10px}
+.dash-search{font:inherit;padding:8px 12px;border:1px solid var(--border);
+  border-radius:9px;background:var(--surface);color:var(--text);width:220px}
+.dash-search:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+/* ── stat chips ──────────────────────────────────── */
+.dash-chips{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:18px}
+.chip{background:var(--surface);border:1px solid var(--border);
+  border-radius:12px;padding:14px 22px;box-shadow:var(--shadow);min-width:110px}
+.chip-num{font-size:26px;font-weight:800;color:var(--text);line-height:1}
+.chip-lbl{font-size:11px;color:var(--text-faint);text-transform:uppercase;
+  letter-spacing:.05em;margin-top:6px;font-weight:600}
+.chip.amber .chip-num{color:var(--warning)}
+.chip.red .chip-num{color:var(--danger)}
+/* ── donut chart cards ───────────────────────────── */
+.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+  gap:14px;margin-bottom:18px}
+.chart{background:var(--surface);border:1px solid var(--border);
+  border-radius:12px;padding:16px;box-shadow:var(--shadow);
+  display:flex;flex-direction:column;align-items:center}
+.chart .ct{font-size:11px;font-weight:700;color:var(--text-faint);
+  text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;
+  align-self:flex-start}
+.legend{margin-top:10px;width:100%}
+.lg{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-muted);
+  margin:3px 0}
+.sw{width:9px;height:9px;border-radius:2px;display:inline-block;flex-shrink:0}
+.lg b{margin-left:auto;color:var(--text)}
+/* ── device table card ───────────────────────────── */
+.dash-card{background:var(--surface);border:1px solid var(--border);
+  border-radius:12px;box-shadow:var(--shadow);overflow:hidden}
+.dash-card-head{display:flex;align-items:center;justify-content:space-between;
+  padding:16px 18px;gap:12px;flex-wrap:wrap}
+.dash-card-head h2{font-size:15px;margin:0;color:var(--text)}
+.dash-filters{display:flex;gap:6px}
+.fchip{background:var(--surface-2);border:1px solid var(--border);
+  color:var(--text-muted);padding:6px 13px;border-radius:999px;font-size:12px;
+  cursor:pointer;font-weight:600}
+.fchip:hover{color:var(--text)}
+.fchip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.dash-table-wrap{overflow-x:auto}
+.dash-table{width:100%;border-collapse:collapse;font-size:13px}
+.dash-table th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;
+  color:var(--text-faint);text-align:left;padding:9px 18px;
+  border-bottom:1px solid var(--border);border-top:1px solid var(--border)}
+.dash-table td{padding:11px 18px;border-bottom:1px solid var(--border);
+  vertical-align:middle}
+.dash-table tr:last-child td{border-bottom:0}
+.dt-name a{display:flex;align-items:center;gap:9px;color:var(--text);
+  font-weight:600}
+.dt-name a:hover{color:var(--accent)}
+.dt-ic{color:var(--text-faint);font-size:12px}
+.dt-view{text-align:right}
+.dt-view a{font-size:12px;color:var(--text-faint);font-weight:600}
+.dt-view a:hover{color:var(--accent)}
+.badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;
+  font-weight:700}
+.badge.ok{background:var(--success-bg);color:var(--success)}
+.badge.warn{background:var(--warning-bg);color:var(--warning)}
+.badge.crit{background:var(--danger-bg);color:var(--danger)}
+.alert-badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px}
+.alert-badge.ok{background:var(--surface-2);color:var(--text-faint)}
+.alert-badge.warn{background:var(--warning-bg);color:var(--warning)}
+.alert-badge.crit{background:var(--danger-bg);color:var(--danger)}
+@media(max-width:820px){
+  .dash-shell{flex-direction:column}
+  .dash-side{width:100%;flex-direction:row;align-items:center;
+    padding:12px 16px;gap:16px}
+  .dash-logo{padding:0}
+  .dash-nav{flex-direction:row;flex-wrap:wrap;flex:1}
+  .dash-side-foot{border-top:0;margin-top:0;padding-top:0}
+  .dash-who small{display:none}
+  .dash-main{padding:18px 16px 30px}
+  .dash-search{width:150px}
+}
+"""
 
 _DASH_JS = """
 <script>
- var q=document.getElementById('q');
- function apply(){
-   var t=(q&&q.value||'').toLowerCase();
-   var f=document.body.getAttribute('data-filter')||'all';
-   var n=0;
-   document.querySelectorAll('.card').forEach(function(c){
-     var nm=c.getAttribute('data-name'), sv=c.getAttribute('data-sev');
-     var show=!t||nm.indexOf(t)>=0;
-     if(show&&f==='problems') show=sv!=='ok';
-     if(show&&f==='offline') show=sv==='crit';
-     c.style.display=show?'':'none'; if(show)n++;
-   });
-   var e=document.getElementById('empty'); if(e)e.style.display=n?'none':'';
- }
- function setf(f){
-   document.body.setAttribute('data-filter',f);
-   try{sessionStorage.setItem('flt',f);}catch(e){}
-   document.querySelectorAll('.fbtn').forEach(function(b){
-     b.classList.toggle('on',b.getAttribute('data-f')===f);});
-   apply();
- }
- if(q) q.addEventListener('input',apply);
- var saved='all'; try{saved=sessionStorage.getItem('flt')||'all';}catch(e){}
- setf(saved);
+var mmQ=document.getElementById('q');
+function mmApplyFilter(){
+  var t=(mmQ&&mmQ.value||'').toLowerCase();
+  var f=document.body.getAttribute('data-filter')||'all';
+  var n=0;
+  document.querySelectorAll('.dash-table tbody tr').forEach(function(r){
+    var nm=r.getAttribute('data-name'), sv=r.getAttribute('data-sev');
+    var show=!t||nm.indexOf(t)>=0;
+    if(show&&f==='problems') show=sv!=='ok';
+    if(show&&f==='offline') show=sv==='crit';
+    r.style.display=show?'':'none'; if(show)n++;
+  });
+  var e=document.getElementById('dash-empty'); if(e)e.style.display=n?'none':'';
+}
+function mmSetFilter(f){
+  document.body.setAttribute('data-filter',f);
+  try{sessionStorage.setItem('mm-flt',f);}catch(e){}
+  document.querySelectorAll('.fchip').forEach(function(b){
+    b.classList.toggle('on',b.getAttribute('data-f')===f);});
+  mmApplyFilter();
+}
+if(mmQ) mmQ.addEventListener('input',mmApplyFilter);
+var mmSaved='all'; try{mmSaved=sessionStorage.getItem('mm-flt')||'all';}catch(e){}
+mmSetFilter(mmSaved);
 </script>"""
 
 
@@ -1021,35 +1125,69 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
                   key=lambda d: ({"crit": 0, "warn": 1, "ok": 2}[_severity(d)],
                                  d["device"].lower()))
     summary = _fleet_summary(devs)
-    cards = []
-    for d in devs:
-        up = d["up"]
-        sev = _severity(d)
-        dot = "#16a34a" if up else "#dc2626"
-        # Compact dashboard: just the device name + an online/offline dot. The
-        # full telemetry (CPU/RAM/throughput/problems) lives on the device page.
-        cls = "card name-only" + ("" if sev == "ok" else f" {sev}")
-        link = f'/device?name={quote(d["device"])}'
-        cards.append(f'<div class="{cls}" data-name="{html.escape(d["device"].lower())}"'
-                     f' data-sev="{sev}"><h2><span class="dot" style="background:'
-                     f'{dot}"></span><a href="{link}">{html.escape(d["device"])}</a>'
-                     f'<span class="state">'
-                     f'{"ONLINE" if up else "OFFLINE"}</span></h2></div>')
-    grid = "".join(cards) or "<p style='padding:20px'>No devices to show.</p>"
-    fbar = ('<div class="fbar"><input id="q" placeholder="Filter devices by name…">'
-            '<button class="fbtn" data-f="all" onclick="setf(\'all\')">All</button>'
-            '<button class="fbtn" data-f="problems" onclick="setf(\'problems\')">'
-            'Problems</button>'
-            '<button class="fbtn" data-f="offline" onclick="setf(\'offline\')">'
-            'Offline</button></div>') if devs else ""
-    empty = ('<p id="empty" class="muted" style="padding:0 20px;display:none">'
-             'No devices match this filter.</p>')
+    chips = (_stat_chip(summary["total"], "Devices")
+            + _stat_chip(summary["alerts"], "Alerts",
+                        "amber" if summary["alerts"] else "")
+            + _stat_chip(summary["critical"], "Critical",
+                        "red" if summary["critical"] else ""))
     charts = _render_noc_charts(devs) if devs else ""
-    return (f'<!doctype html><html><head><meta charset="utf-8">'
-            f'<meta http-equiv="refresh" content="10"><title>{esc(_BRAND)}</title>'
-            f'<style>{_PAGE_CSS}</style></head><body>{_header(user)}'
-            f'{_render_noc_bar(summary)}{charts}{fbar}'
-            f'<div class="grid">{grid}</div>{empty}{_DASH_JS}</body></html>')
+    rows = _dash_device_rows(devs)
+    empty_msg = ("No devices to show." if not devs
+                else "No devices match this filter.")
+    table = (
+        f'<div class="dash-card">'
+        f'<div class="dash-card-head"><h2>Devices</h2>'
+        f'<div class="dash-filters">'
+        f'<button class="fchip on" data-f="all" '
+        f'onclick="mmSetFilter(\'all\')">All</button>'
+        f'<button class="fchip" data-f="problems" '
+        f'onclick="mmSetFilter(\'problems\')">Problems</button>'
+        f'<button class="fchip" data-f="offline" '
+        f'onclick="mmSetFilter(\'offline\')">Offline</button>'
+        f'</div></div>'
+        f'<div class="dash-table-wrap"><table class="dash-table">'
+        f'<thead><tr><th>Name</th><th>Status</th><th>Alerts</th><th></th></tr>'
+        f'</thead><tbody>{rows}</tbody></table></div>'
+        f'<p id="dash-empty" class="muted" '
+        f'style="padding:0 18px 16px;{"" if devs else "display:"}'
+        f'{"none" if devs else "block"}">{esc(empty_msg)}</p>'
+        f'</div>')
+    org = (user or {}).get("org_name", "")
+    role = (user or {}).get("role", "")
+    who_sub = f'{esc(org)} &middot; {esc(role)}' if org else esc(role)
+    side_foot = (
+        f'<div class="dash-side-foot"><div class="dash-who">{esc(_who(user))}'
+        f'<small>{who_sub}</small></div>'
+        f'<a class="dash-logout" href="/logout">Log out</a></div>'
+    ) if user else ""
+    brand = esc(_BRAND)
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8">
+{_THEME_INIT_JS}
+<meta http-equiv="refresh" content="10">
+<title>{brand} &middot; Dashboard</title>
+<style>{_THEME_VARS}{_DASH_CSS}</style></head>
+<body>
+<div class="dash-shell">
+<aside class="dash-side">
+<a class="dash-logo" href="/dashboard"><span class="dot">&#9670;</span>{brand}</a>
+{_dash_sidebar(user, "/dashboard")}
+{side_foot}
+</aside>
+<main class="dash-main">
+<div class="dash-topbar"><h1>Dashboard</h1>
+<div class="dash-top-right">
+<input id="q" class="dash-search" placeholder="Search devices…">
+{_theme_toggle_btn()}
+</div></div>
+<div class="dash-chips">{chips}</div>
+{charts}
+{table}
+</main>
+</div>
+{_THEME_TOGGLE_JS}
+{_DASH_JS}
+</body></html>"""
 
 
 # Flat tabs on the device bar.
@@ -1488,9 +1626,9 @@ def _render_device(store, state, name, user, csrf="",
         f'<div style="display:flex;flex-direction:column;gap:16px">'
         f'{avail_box}{access_html}{probs_box}{diag_html or ""}{iface_card}</div>'
         f'</div>'
-        f'<p style="margin-top:16px"><a href="/">&larr; dashboard</a></p>'
+        f'<p style="margin-top:16px"><a href="/dashboard">&larr; dashboard</a></p>'
         f'</div>')
-    return _page(esc(name), _header(user, "/") + inner)
+    return _page(esc(name), _header(user, "/dashboard") + inner)
 
 
 def _access_box(name, csrf, hub_host, tunnel_ip, creds, grants) -> str:
@@ -1638,7 +1776,7 @@ def _render_offboard_page(name, result, back_url, user) -> str:
         f'<div class="actions" style="margin-top:20px">'
         f'<a class="btn" href="{esc(back_url)}">Done</a>'
         f'</div></div>')
-    return _page(f"{q} · Removed", _header(user, "/") + body)
+    return _page(f"{q} · Removed", _header(user, "/dashboard") + body)
 
 
 _PWALPHABET = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -2558,7 +2696,7 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
              f'{banner}{err}{form}{out}'
              f'<p><a href="/device?name={q}">&larr; overview</a></p></div>'
              f'{_REVEAL_JS}')
-    return _page(esc(name) + " · Provision", _header(user, "/") + inner)
+    return _page(esc(name) + " · Provision", _header(user, "/dashboard") + inner)
 
 
 def _fmt_backup_date(bname, ctime) -> str:
@@ -2650,7 +2788,7 @@ def _render_device_backups(name, user, facts, csrf, *, backups=None,
              f'<h1>{esc(name)} &middot; Backups</h1>{tabbar}'
              f'{_facts_strip(facts)}{banner}{err}{action}'
              f'<p><a href="/device?name={q}">&larr; overview</a></p></div>')
-    return _page(esc(name) + " · Backups", _header(user, "/") + inner)
+    return _page(esc(name) + " · Backups", _header(user, "/dashboard") + inner)
 
 
 # ---- generic feature tabs (SD-WAN / Security / DNS / QoS / …) ----------
@@ -3550,7 +3688,7 @@ def _render_confirm_page(name, user, slug, minutes, backup, hub_ip, csrf) -> str
         f'<a class="btn ghost" href="/device?name={q}&tab={slug}">Go to the tab</a>'
         f'</form></div></div>'
         f'{_CONFIRM_JS}')
-    return _page(esc(name) + " · Change armed", _header(user, "/") + inner)
+    return _page(esc(name) + " · Change armed", _header(user, "/dashboard") + inner)
 
 
 _CONFIRM_JS = """
@@ -3612,7 +3750,7 @@ def _render_temp_login_page(name, user, username, password, address, minutes) ->
         f'LAN) — this login alone doesn\'t provide that.</p>'
         f'<a class="btn" href="/device?name={q}&tab=remote">Done</a>'
         f'</div></div>')
-    return _page(esc(name) + " · Temporary login", _header(user, "/") + inner)
+    return _page(esc(name) + " · Temporary login", _header(user, "/dashboard") + inner)
 
 
 def _friendly_push_error(error: str) -> str:
@@ -3779,7 +3917,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
              f'router accepted or rejected.</p>'
              f'<p><a href="/device?name={q}">&larr; overview</a></p></div>')
     return _page(esc(name) + " · " + feature["title"],
-                 _header(user, "/") + inner + _FEATURE_JS)
+                 _header(user, "/dashboard") + inner + _FEATURE_JS)
 
 
 def _render_logs(user, push_rows, alert_rows) -> str:
@@ -4271,8 +4409,19 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if path == "/health":
                 return self._send(200, "ok")
 
-            # Preview the landing page without wiring it to /.
+            # Also reachable directly for previewing the landing page in
+            # isolation — the real entry point is "/" below.
             if path == "/landing":
+                from .web_landing import render_landing
+                return self._send(200, render_landing(), "text/html; charset=utf-8")
+
+            # "/" is the public marketing page (SaaS mode only — self-hosted/
+            # no-auth installs keep "/" as the dashboard, handled below).
+            # Someone already signed in gets sent straight to their dashboard
+            # instead of the pitch, same as the /login and /signup guards.
+            if path == "/" and auth is not None:
+                if self._session():
+                    return self._redirect("/dashboard")
                 from .web_landing import render_landing
                 return self._send(200, render_landing(), "text/html; charset=utf-8")
 
@@ -4302,7 +4451,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # Open self-signup: anyone can create a company account.
             if path == "/signup":
                 if self._session():
-                    return self._redirect("/")
+                    return self._redirect("/dashboard")
                 err = parse_qs(url.query).get("error", [""])[0]
                 return self._send(200, _render_signup(
                     err, has_regions=bool(auth.get_regions())),
@@ -4313,7 +4462,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
             if path == "/login":
                 if self._session():
-                    return self._redirect("/")
+                    return self._redirect("/dashboard")
                 err = {"1": "Invalid email or password."}.get(
                     parse_qs(url.query).get("error", [""])[0], "")
                 return self._send(200, _render_login(
@@ -4387,7 +4536,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             store = self._store()
             try:
                 state = _load_state(state_file)
-                if path == "/":
+                if path in ("/", "/dashboard"):
+                    # "/" only reaches here in no-auth (self-hosted) mode —
+                    # with auth configured, do_GET intercepts "/" earlier as
+                    # the public landing page and sends logged-in visitors to
+                    # /dashboard instead (see do_GET).
                     return self._send(200, _render_dashboard(store, state, user,
                                       allowed), "text/html; charset=utf-8")
                 # if path == "/inventory":
@@ -5764,7 +5917,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                        f'<a class="btn" href="/device?name={q}">Back to {esc(name)}'
                        f'</a></div>')
             return self._send(200, _page(esc(name) + " · Reboot",
-                              _header(user, "/") + f'<div class="wrap">{box}</div>'),
+                              _header(user, "/dashboard") + f'<div class="wrap">{box}</div>'),
                               "text/html; charset=utf-8")
 
         def _device_access_post(self, flat, user):
@@ -5845,7 +5998,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                    f'<a class="btn" href="/device?name={q}">Back to {esc(name)}</a>'
                    f'</div>')
             return self._send(200, _page(esc(name) + " · Confirm",
-                              _header(user, "/") + f'<div class="wrap">{box}</div>'),
+                              _header(user, "/dashboard") + f'<div class="wrap">{box}</div>'),
                               "text/html; charset=utf-8")
 
         def _device_forget_post(self, flat, user):
@@ -5857,7 +6010,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(403, "forbidden")
             name = flat.get("device", "")
             if not name:
-                return self._redirect("/")
+                return self._redirect("/dashboard")
             uname = (user or {}).get("login", "system")
             raw = None
             store = self._devstore()
@@ -6571,7 +6724,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if name:
                 return self._redirect(
                     f"/device?name={quote(name)}&tab=hubtunnel&msg=" + msg)
-            return self._redirect("/")
+            return self._redirect("/dashboard")
 
         def _serve_logs(self, user):
             if not AuthStore.is_admin(user):
@@ -6995,7 +7148,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             except Exception as exc:  # noqa: BLE001 — show the reason on the form
                 return self._redirect("/signup?error=" + quote(str(exc)))
             token = sessions.create(email)
-            return self._redirect("/", self._cookie_header(token))
+            return self._redirect("/dashboard", self._cookie_header(token))
 
         def _post_billing_itn(self):
             """PayFast Instant Transaction Notification handler.
@@ -7107,7 +7260,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 time.sleep(0.5)  # mild brute-force friction
                 return self._redirect("/login?error=1")
             token = sessions.create(user["login"])
-            return self._redirect("/", self._cookie_header(token))
+            return self._redirect("/dashboard", self._cookie_header(token))
 
         def _post_account(self):
             user = self._user()

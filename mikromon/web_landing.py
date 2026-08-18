@@ -9,7 +9,10 @@ by adding this before the auth gate in web.py do_GET:
 """
 from __future__ import annotations
 
-from .web_shared import _BRAND, esc
+from .web_shared import (
+    _BRAND, esc, _THEME_VARS, _THEME_INIT_JS, _THEME_TOGGLE_JS,
+    _theme_toggle_btn,
+)
 
 _TITLE = f"{_BRAND} — MikroTik Monitoring & Remote Management"
 
@@ -38,6 +41,10 @@ _FEATURES = [
      "Open WebFig or Winbox through the encrypted hub tunnel — time-limited and "
      "audited. No port forwarding, no exposed API port on the internet, works "
      "even behind double NAT."),
+    ("&#128737;", "DNS Content Filtering &amp; NextDNS",
+     "Block malware, ads, and adult content network-wide with built-in presets, "
+     "or give each router its own NextDNS.io profile — encrypted DNS-over-HTTPS, "
+     "custom blocklists, and per-router query logs — right from the DNS tab."),
     ("&#9737;", "WireGuard Dial-Home Tunnel",
      "Routers connect outbound to your server. No public IP required on the "
      "router side — ideal for CGNAT, home offices, LTE uplinks, and any site "
@@ -151,9 +158,9 @@ _ALL_TIERS = [
 _CSS = """
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html{scroll-behavior:smooth}
-body{font-family:Segoe UI,system-ui,Arial,sans-serif;color:#0f172a;
-  background:#fff;line-height:1.6;-webkit-font-smoothing:antialiased}
-a{color:#2563eb;text-decoration:none}
+body{font-family:Segoe UI,system-ui,Arial,sans-serif;color:var(--text);
+  background:var(--surface);line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
 
 /* ── nav ─────────────────────────────────────────── */
 .lnav{position:sticky;top:0;z-index:100;
@@ -168,6 +175,13 @@ a{color:#2563eb;text-decoration:none}
   transition:.12s}
 .lnav-links a:hover{background:#1e293b;color:#fff}
 .lnav-right{margin-left:auto;display:flex;gap:8px;align-items:center}
+/* the nav bar is always dark navy regardless of page theme, so the shared
+   .theme-toggle button (which uses the light/dark surface tokens) needs its
+   own light-on-dark styling here to stay legible in both themes. */
+.lnav .theme-toggle{background:rgba(255,255,255,.06);
+  border:1px solid rgba(255,255,255,.18);color:#e2e8f0}
+.lnav .theme-toggle:hover{background:rgba(255,255,255,.12);color:#fff;
+  border-color:rgba(255,255,255,.3)}
 .btn-nav-ghost{color:#e2e8f0;padding:8px 14px;border-radius:7px;font-size:14px;
   font-weight:500;border:1px solid rgba(255,255,255,.18);transition:.12s}
 .btn-nav-ghost:hover{background:rgba(255,255,255,.08);color:#fff}
@@ -207,87 +221,98 @@ a{color:#2563eb;text-decoration:none}
 .btn-hero-outline:hover{background:rgba(255,255,255,.07);color:#fff}
 
 /* ── proof bar ───────────────────────────────────── */
-.proof{background:#f8fafc;border-bottom:1px solid #e2e8f0;
+.proof{background:var(--surface-2);border-bottom:1px solid var(--border);
   padding:14px 24px;display:flex;justify-content:center;
   align-items:center;gap:28px;flex-wrap:wrap}
-.proof-item{font-size:13px;color:#475569;display:flex;align-items:center;gap:6px}
-.proof-item b{color:#0f172a}
+.proof-item{font-size:13px;color:var(--text-muted);display:flex;
+  align-items:center;gap:6px}
+.proof-item b{color:var(--text)}
 
 /* ── shared section styles ───────────────────────── */
 section{padding:76px 24px}
 .s-inner{max-width:1064px;margin:0 auto}
 .s-label{font-size:11px;font-weight:700;text-transform:uppercase;
-  letter-spacing:.09em;color:#2563eb;margin-bottom:10px}
-.s-title{font-size:clamp(22px,4vw,38px);font-weight:800;color:#0f172a;
+  letter-spacing:.09em;color:var(--accent);margin-bottom:10px}
+.s-title{font-size:clamp(22px,4vw,38px);font-weight:800;color:var(--text);
   margin-bottom:14px;line-height:1.15;letter-spacing:-.02em}
-.s-sub{font-size:15px;color:#475569;max-width:540px;line-height:1.65;
+.s-sub{font-size:15px;color:var(--text-muted);max-width:540px;line-height:1.65;
   margin-bottom:48px}
 
 /* ── feature cards ───────────────────────────────── */
 .feat-grid{display:grid;
   grid-template-columns:repeat(auto-fit,minmax(292px,1fr));gap:18px}
-.feat-card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;
-  padding:24px 22px;transition:box-shadow .15s,transform .15s}
-.feat-card:hover{box-shadow:0 8px 28px rgba(15,23,42,.09);
-  transform:translateY(-2px)}
-.feat-icon{font-size:24px;margin-bottom:14px;display:block;color:#2563eb}
-.feat-card h3{font-size:15px;font-weight:700;margin-bottom:7px;color:#0f172a}
-.feat-card p{font-size:13px;color:#475569;line-height:1.65}
+.feat-card{background:var(--surface-2);border:1px solid var(--border);
+  border-radius:12px;padding:24px 22px;transition:box-shadow .15s,transform .15s}
+.feat-card:hover{box-shadow:var(--shadow-md);transform:translateY(-2px)}
+.feat-icon{font-size:24px;margin-bottom:14px;display:block;color:var(--accent)}
+.feat-card h3{font-size:15px;font-weight:700;margin-bottom:7px;color:var(--text)}
+.feat-card p{font-size:13px;color:var(--text-muted);line-height:1.65}
 
 /* ── steps ───────────────────────────────────────── */
-.steps-bg{background:#f1f5f9}
+.steps-bg{background:var(--bg)}
 .steps-grid{display:grid;
   grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:36px}
 .step{display:flex;flex-direction:column;gap:12px}
-.step-num{width:40px;height:40px;border-radius:50%;background:#2563eb;
+.step-num{width:40px;height:40px;border-radius:50%;background:var(--accent);
   color:#fff;display:flex;align-items:center;justify-content:center;
   font-size:17px;font-weight:800;flex-shrink:0}
-.step h3{font-size:15px;font-weight:700;color:#0f172a;margin-top:4px}
-.step p{font-size:13px;color:#475569;line-height:1.65}
+.step h3{font-size:15px;font-weight:700;color:var(--text);margin-top:4px}
+.step p{font-size:13px;color:var(--text-muted);line-height:1.65}
 
 /* ── pricing cards ───────────────────────────────── */
 .price-grid{display:grid;
   grid-template-columns:repeat(auto-fit,minmax(228px,1fr));
   gap:20px;align-items:start;margin-bottom:36px}
-.price-card{border:1px solid #e2e8f0;border-radius:14px;
-  padding:28px 24px;display:flex;flex-direction:column;background:#fff}
+.price-card{border:1px solid var(--border);border-radius:14px;
+  padding:28px 24px;display:flex;flex-direction:column;background:var(--surface)}
 .price-card.highlight{background:#0f172a;border-color:#0f172a}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]) .price-card.highlight{
+    background:var(--surface-2);border-color:var(--accent)}
+}
+:root[data-theme="dark"] .price-card.highlight{
+  background:var(--surface-2);border-color:var(--accent)}
 .price-plan{font-size:11px;font-weight:700;text-transform:uppercase;
-  letter-spacing:.07em;color:#2563eb;margin-bottom:4px}
+  letter-spacing:.07em;color:var(--accent);margin-bottom:4px}
 .price-card.highlight .price-plan{color:#38bdf8}
-.price-devices{font-size:13px;color:#64748b;margin-bottom:6px}
+.price-devices{font-size:13px;color:var(--text-faint);margin-bottom:6px}
 .price-card.highlight .price-devices{color:#94a3b8}
 .price-amount{font-size:36px;font-weight:800;line-height:1;
-  color:#0f172a;margin-bottom:3px}
+  color:var(--text);margin-bottom:3px}
 .price-card.highlight .price-amount{color:#fff}
-.price-period{font-size:12px;color:#64748b;margin-bottom:22px}
+.price-period{font-size:12px;color:var(--text-faint);margin-bottom:22px}
 .price-card.highlight .price-period{color:#94a3b8}
 .price-items{list-style:none;flex:1;margin-bottom:24px}
 .price-items li{font-size:13px;padding:6px 0;
-  border-bottom:1px solid #f1f5f9;
-  display:flex;align-items:flex-start;gap:8px;color:#334155;line-height:1.4}
+  border-bottom:1px solid var(--border);
+  display:flex;align-items:flex-start;gap:8px;color:var(--text-muted);
+  line-height:1.4}
 .price-card.highlight .price-items li{
   color:#e2e8f0;border-bottom-color:rgba(255,255,255,.07)}
-.price-items li::before{content:"✓";color:#16a34a;font-weight:700;flex-shrink:0}
+.price-items li::before{content:"✓";color:var(--success);font-weight:700;
+  flex-shrink:0}
 .price-card.highlight .price-items li::before{color:#4ade80}
 .price-cta{display:block;text-align:center;padding:11px;border-radius:8px;
   font-size:14px;font-weight:600;transition:.12s}
-.price-cta.solid{background:#2563eb;color:#fff;border:2px solid #2563eb}
-.price-cta.solid:hover{background:#1d4ed8;border-color:#1d4ed8;color:#fff}
-.price-cta.ghost{background:#fff;color:#0f172a;border:2px solid #e2e8f0}
-.price-cta.ghost:hover{border-color:#94a3b8;background:#f8fafc}
+.price-cta.solid{background:var(--accent);color:#fff;border:2px solid var(--accent)}
+.price-cta.solid:hover{background:var(--accent-hover);border-color:var(--accent-hover);
+  color:#fff}
+.price-cta.ghost{background:var(--surface);color:var(--text);
+  border:2px solid var(--border)}
+.price-cta.ghost:hover{border-color:var(--text-faint);background:var(--surface-2)}
 
 /* ── all-tiers table ─────────────────────────────── */
 .tier-table{width:100%;border-collapse:collapse;font-size:13px;
-  background:#fff;border-radius:12px;overflow:hidden;
-  border:1px solid #e2e8f0;box-shadow:0 1px 3px rgba(0,0,0,.06)}
-.tier-table th{background:#f8fafc;font-size:11px;text-transform:uppercase;
-  letter-spacing:.05em;color:#64748b;padding:10px 16px;
-  border-bottom:1px solid #e2e8f0;text-align:left}
-.tier-table td{padding:10px 16px;border-bottom:1px solid #f1f5f9;color:#334155}
+  background:var(--surface);border-radius:12px;overflow:hidden;
+  border:1px solid var(--border);box-shadow:var(--shadow)}
+.tier-table th{background:var(--surface-2);font-size:11px;text-transform:uppercase;
+  letter-spacing:.05em;color:var(--text-faint);padding:10px 16px;
+  border-bottom:1px solid var(--border);text-align:left}
+.tier-table td{padding:10px 16px;border-bottom:1px solid var(--border);
+  color:var(--text-muted)}
 .tier-table tr:last-child td{border-bottom:0}
-.tier-table .usd{font-weight:700;color:#0f172a}
-.tier-table .per{color:#64748b}
+.tier-table .usd{font-weight:700;color:var(--text)}
+.tier-table .per{color:var(--text-faint)}
 
 /* ── CTA banner ──────────────────────────────────── */
 .cta-wrap{background:linear-gradient(135deg,#1e3a5f,#2563eb);
@@ -412,7 +437,8 @@ def render_landing() -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Monitor and manage every MikroTik router from one dashboard. Real-time alerts, WAN failover, safe config push, automated backups, and remote WebFig access — even behind NAT.">
   <title>{esc(_TITLE)}</title>
-  <style>{_CSS}</style>
+  {_THEME_INIT_JS}
+  <style>{_THEME_VARS}{_CSS}</style>
 </head>
 <body>
 
@@ -427,6 +453,7 @@ def render_landing() -> str:
     <a href="#pricing">Pricing</a>
   </div>
   <div class="lnav-right">
+    {_theme_toggle_btn()}
     <a class="btn-nav-ghost" href="/login">Sign in</a>
     <a class="btn-nav-primary" href="/signup">Start free trial</a>
   </div>
@@ -505,7 +532,7 @@ def render_landing() -> str:
     </div>
 
     <!-- Full tier table -->
-    <h3 style="font-size:16px;font-weight:700;margin-bottom:14px;color:#0f172a">
+    <h3 style="font-size:16px;font-weight:700;margin-bottom:14px;color:var(--text)">
       All plans include every feature — you only pay for more devices.
     </h3>
     <table class="tier-table">
@@ -514,7 +541,7 @@ def render_landing() -> str:
       </tr></thead>
       <tbody>{tier_rows}</tbody>
     </table>
-    <p style="font-size:12px;color:#94a3b8;margin-top:12px">
+    <p style="font-size:12px;color:var(--text-faint);margin-top:12px">
       Need more than 1 000 devices? <a href="/signup">Contact us</a> for a custom quote.
     </p>
   </div>
@@ -559,5 +586,6 @@ def render_landing() -> str:
   </div>
 </footer>
 
+{_THEME_TOGGLE_JS}
 </body>
 </html>"""
