@@ -2632,6 +2632,172 @@ old_clear = F.nextdns_cloud_ops(Pusher(nd_cfg, nd_api_old_set, dry_run=True), ""
 check("clearing an already-set use-doh-server still works even on RouterOS 6.x",
       any(o.params.get("use-doh-server") == "" for o in old_clear.ops))
 
+# ---------------------------------------------------------------------------
+# Multi-WAN NextDNS: one profile per uplink, and a router that follows the
+# uplink that is actually up.
+# ---------------------------------------------------------------------------
+print("nextdns_cloud_ops on a multi-WAN router (a profile per uplink, all on "
+      "identical settings — only which query log the traffic lands in "
+      "changes):")
+from mikromon.config import build_device as _build_device
+
+_ND_ROUTE = ("ip", "route")
+_ND_SCRIPT = ("system", "script")
+_ND_SCHED = ("system", "scheduler")
+_ND_NAT_OK = [
+    {".id": "*10", "chain": "dstnat", "protocol": "udp", "dst-port": "53",
+     "action": "redirect", "to-ports": "53", "comment": "mikromon:dnsforce:udp"},
+    {".id": "*11", "chain": "dstnat", "protocol": "tcp", "dst-port": "53",
+     "action": "redirect", "to-ports": "53", "comment": "mikromon:dnsforce:tcp"},
+]
+_ND_WAN_PROFILES = {"1": "backup-pid"}
+
+
+def _nd_multi_cfg(links=None):
+    return _build_device({
+        "name": "R1", "host": "10.0.0.1",
+        "wan": {"links": links if links is not None else [
+            {"name": "Vodacom", "interface": "ether1"},
+            {"name": "Telkom", "interface": "ether2"}]},
+        "nextdns_enabled": True, "nextdns_profile_id": "main-pid",
+        "nextdns_wan_profiles": dict(_ND_WAN_PROFILES)}, {})
+
+
+def _nd_state(active_iface, dns_row=None, extra=None):
+    """A two-uplink router where `active_iface` is the one carrying the
+    default route (the other one's route is present but inactive)."""
+    routes = []
+    for i, iface in enumerate(("ether1", "ether2")):
+        routes.append({
+            ".id": f"*r{i}", "dst-address": "0.0.0.0/0",
+            "gateway": f"10.{i + 1}.0.1", "distance": str(i + 1),
+            "immediate-gw": f"10.{i + 1}.0.1%{iface}",
+            "active": "true" if iface == active_iface else "false"})
+    state = {_NDRES: [{"version": "7.14.3"}],
+             DNS: [dns_row or {".id": "*1"}],
+             _ND_ROUTE: routes,
+             ("ip", "firewall", "nat"): [dict(r) for r in _ND_NAT_OK]}
+    state.update(extra or {})
+    return state
+
+
+nd_multi_cfg = _nd_multi_cfg()
+primary_up = F.nextdns_cloud_ops(
+    Pusher(nd_multi_cfg, FakeApi(_nd_state("ether1")), dry_run=True),
+    "main-pid", _ND_WAN_PROFILES)
+check("with the primary uplink up, DoH points at the MAIN profile",
+      any(o.params.get("use-doh-server") == "https://dns.nextdns.io/main-pid"
+          for o in primary_up.ops))
+
+failed_over = F.nextdns_cloud_ops(
+    Pusher(nd_multi_cfg, FakeApi(_nd_state("ether2")), dry_run=True),
+    "main-pid", _ND_WAN_PROFILES)
+check("with the primary down, DoH points at the BACKUP uplink's own profile "
+      "instead — RouterOS has exactly one use-doh-server field, so the live "
+      "uplink is the one that gets to own it",
+      any(o.params.get("use-doh-server") == "https://dns.nextdns.io/backup-pid"
+          for o in failed_over.ops))
+check("the plan says which uplink it picked, so the activity log records it",
+      "Telkom" in failed_over.summary)
+
+# The switcher is what makes later failovers seamless: mikromon pushing the
+# right profile once is no good if the line drops at 3am (and drops this
+# server's own reachability to the router along with it).
+switch_add = [o for o in failed_over.ops
+              if o.path == _ND_SCRIPT and o.action == "add"]
+sched_add = [o for o in failed_over.ops
+             if o.path == _ND_SCHED and o.action == "add"]
+check("a managed script is installed to re-point DoH on the router itself",
+      len(switch_add) == 1)
+check("...with a scheduler running it, so failover needs no interaction",
+      len(sched_add) == 1
+      and sched_add[0].params.get("on-event") ==
+      "/system script run mikromon-nextdns-wan")
+check("...and full script policy on creation, or the scheduler's run would "
+      "silently lack the rights to touch /ip (the same trap scripts_plan "
+      "documents)",
+      "write" in switch_add[0].params.get("policy", "")
+      and switch_add[0].params.get("dont-require-permissions") == "yes")
+src = switch_add[0].params.get("source", "")
+check("the script defaults to the main profile and only overrides it for an "
+      "uplink it positively recognises — an unmatched route leaves DNS "
+      "filtering through the main profile rather than through nothing",
+      src.count("https://dns.nextdns.io/main-pid") == 1
+      and ':local want "https://dns.nextdns.io/main-pid"' in src)
+check("the script only writes when the value actually differs, so the "
+      "router's log isn't filled with a DNS change every minute",
+      "!= $want" in src)
+check("the script matches an uplink by gateway, by interface (via "
+      "immediate-gw) AND by mikromon's own failover-route comment — a PPP "
+      "link's gateway is a remote address that matches none of the others",
+      'gateway="ether2"' in src and 'immediate-gw~"%ether2\\$"' in src
+      and 'comment="mikromon:failover:secondary"' in src)
+
+# Idempotence matters more than usual here: this plan is recomputed on every
+# DNS-tab load, and a field RouterOS reads back differently than it accepts
+# (policy order, line endings) would leave a change pending forever.
+applied = FakeApi(_nd_state("ether2", dns_row={
+    ".id": "*1", "use-doh-server": "https://dns.nextdns.io/backup-pid",
+    "verify-doh-cert": "no", "servers": "9.9.9.9,149.112.112.112",
+    "allow-remote-requests": "true"}, extra={
+        _ND_SCRIPT: [{".id": "*20", "name": "mikromon-nextdns-wan",
+                      "source": src,
+                      "comment": switch_add[0].params["comment"],
+                      "policy": "romon,sensitive,read,write"}],
+        _ND_SCHED: [{".id": "*21", "name": "mikromon-nextdns-wan",
+                     "interval": "00:01:00",
+                     "on-event": "/system script run mikromon-nextdns-wan",
+                     "comment": "mikromon:nextdns:wan-switch",
+                     "policy": "a,different,order"}]}))
+check("re-running against a router already in this state is a no-op — the "
+      "script's fingerprint lives in its comment so its source and policy "
+      "are never re-compared",
+      F.nextdns_cloud_ops(Pusher(nd_multi_cfg, applied, dry_run=True),
+                          "main-pid", _ND_WAN_PROFILES).empty)
+
+# Both ways out of multi-WAN have to take the switcher with them: a scheduler
+# nobody owns any more would keep rewriting use-doh-server every minute and
+# silently undo whatever was just done.
+disabled = F.nextdns_cloud_ops(Pusher(nd_multi_cfg, applied, dry_run=True),
+                               "", None)
+check("disabling NextDNS removes the switcher script and its scheduler too, "
+      "not just use-doh-server",
+      any(o.params.get("use-doh-server") == "" for o in disabled.ops)
+      and len([o for o in disabled.ops
+               if o.action == "remove" and o.path in (_ND_SCRIPT, _ND_SCHED)]) == 2)
+
+single_cfg = _nd_multi_cfg(links=[{"name": "Vodacom", "interface": "ether1"}])
+back_to_one = F.nextdns_cloud_ops(Pusher(single_cfg, applied, dry_run=True),
+                                  "main-pid", {})
+check("dropping back to one uplink removes the switcher and pins DoH back "
+      "to the main profile",
+      any(o.params.get("use-doh-server") == "https://dns.nextdns.io/main-pid"
+          for o in back_to_one.ops)
+      and len([o for o in back_to_one.ops
+               if o.action == "remove" and o.path in (_ND_SCRIPT, _ND_SCHED)]) == 2)
+
+# A router with several uplinks but no per-uplink profiles yet (NextDNS was
+# enabled before the second line was added) must NOT get a switcher — it would
+# only ever set the one profile it already has.
+no_profiles = F.nextdns_cloud_ops(
+    Pusher(nd_multi_cfg, FakeApi(_nd_state("ether1")), dry_run=True),
+    "main-pid", {})
+check("several uplinks but no per-uplink profiles yet -> plain single-profile "
+      "behaviour, no switcher",
+      not any(o.path in (_ND_SCRIPT, _ND_SCHED) for o in no_profiles.ops))
+
+# No active default route at all (the router is fully offline): there is no
+# live uplink to choose, so it must fall back to the main profile rather than
+# to an arbitrary one — or to none.
+all_down = _nd_state("nothing")
+all_down_plan = F.nextdns_cloud_ops(
+    Pusher(nd_multi_cfg, FakeApi(all_down), dry_run=True),
+    "main-pid", _ND_WAN_PROFILES)
+check("no active uplink at all -> falls back to the main profile, never to "
+      "an empty use-doh-server",
+      any(o.params.get("use-doh-server") == "https://dns.nextdns.io/main-pid"
+          for o in all_down_plan.ops))
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

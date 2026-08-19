@@ -146,6 +146,28 @@ except nextdns.NextDnsError:
     check("deleting an already-gone profile raises (caller decides to ignore it)", True)
 _unpatch_urlopen(orig)
 
+print("rename_profile (keeps a per-WAN profile's name tracking its uplink's "
+      "label without losing its query history to a recreate):")
+seen_requests.clear()
+orig = _patch_urlopen(_capture)
+nextdns.rename_profile("sekret-key", "abc123", "R1 - Telkom")
+_unpatch_urlopen(orig)
+check("PATCHes the profile itself",
+      seen_requests[-1].full_url == "https://api.nextdns.io/profiles/abc123"
+      and seen_requests[-1].get_method() == "PATCH")
+check("sends only the new name",
+      json.loads(seen_requests[-1].data.decode()) == {"name": "R1 - Telkom"})
+
+orig = _patch_urlopen(_FakeHTTPError(404))
+try:
+    nextdns.rename_profile("k", "gone", "whatever")
+    check("renaming a profile that no longer exists raises NextDnsError "
+          "(the caller decides whether that is fatal)", False)
+except nextdns.NextDnsError:
+    check("renaming a profile that no longer exists raises NextDnsError "
+          "(the caller decides whether that is fatal)", True)
+_unpatch_urlopen(orig)
+
 print("URL helpers:")
 check("doh_url embeds the profile id for RouterOS's use-doh-server field",
       nextdns.doh_url("abc123") == "https://dns.nextdns.io/abc123")

@@ -86,6 +86,14 @@ def create_profile(api_key: str, name: str, clone_from: str = "") -> str:
     return str(profile_id)
 
 
+def rename_profile(api_key: str, profile_id: str, name: str) -> None:
+    """Rename an existing profile. Used to keep a per-WAN profile's name
+    tracking its uplink's friendly label after that uplink is renamed on the
+    WAN tab — renaming rather than recreating means the profile keeps its
+    query log and analytics history instead of starting over."""
+    _request("PATCH", f"/profiles/{profile_id}", api_key, {"name": name})
+
+
 def get_profile(api_key: str, profile_id: str) -> dict:
     """The full profile config — security/privacy/parentalControl toggles,
     denylist/allowlist entries — so the DNS tab can render and manage all

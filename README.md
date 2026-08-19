@@ -460,6 +460,28 @@ access** (temporary allow rule) and **Backups**. Each write tab is admin-only,
 shows the current state, previews the **dry-run diff**, and applies on confirm.
 Add the device's **read-write push user** on the Devices page — no YAML editing.
 
+**NextDNS.io per-router profiles:** once a superadmin adds a NextDNS API key
+(Platform admin → NextDNS), the **DNS** tab can give any router its own real
+NextDNS.io profile in one click — its own blocklists, allow/deny lists,
+security, parental-control and privacy settings, and its own query log, all
+managed in this dashboard rather than on NextDNS's own site. Enabling points
+the router's `/ip/dns` at that profile over **DNS-over-HTTPS** (RouterOS 7.1+),
+fills in a bootstrap resolver, turns on `allow-remote-requests`, and redirects
+every client's port-53 traffic to the router so a device with its own hardcoded
+DNS can't quietly skip the filtering.
+
+**Multi-WAN:** a router with more than one internet line gets **one profile per
+line**, each cloned from the main one and kept on identical settings — every
+change you make is written to all of them, so what gets blocked never depends
+on which line is up; only which profile's query log the traffic lands in does.
+RouterOS has just one `use-doh-server` field, so mikromon installs a small
+managed script + scheduler that re-points it at the live line's profile within
+a minute of a failover — on the router itself, so it keeps working through
+exactly the outage that also cuts the router off from this server. Uplinks
+added or removed on the WAN tab provision or delete their profiles
+automatically; **Re-sync uplink profiles** on the DNS tab is the one-button
+repair if anything ever drifts.
+
 **Adopt existing config:** each managed tab shows an **“Existing on the router
 (unmanaged)”** list. For **QoS** and **Port-forwarding** an **Adopt** button
 brings a live rule under management — a single, previewed, reversible change
