@@ -471,12 +471,17 @@ def _build_nextdns_diagnostics_lines(auth, devices_db, defaults) -> list:
                 lines.append(f"  status: MISMATCH — expected {expected or '(empty)'}. "
                              f"Disable and re-enable NextDNS on this router's "
                              f"DNS tab to retry the push.")
-            # The three prerequisites confirmed live to each independently
-            # break "NextDNS says enabled but isn't actually used", even
-            # with use-doh-server itself matching above:
-            #   - verify-doh-cert=yes with no route to a trusted CA chain
-            #     for dns.nextdns.io silently fails the DoH connection
-            #     entirely (RouterOS refuses to fall back).
+            # Prerequisites confirmed live to each independently break
+            # "NextDNS says enabled but isn't actually used", even with
+            # use-doh-server itself matching above:
+            #   - verify-doh-cert=yes without the DoH server's full CA
+            #     chain manually imported into /certificate first (per
+            #     MikroTik's own docs — NextDNS needs FOUR certificates for
+            #     this) silently fails the DoH connection entirely, with NO
+            #     fallback once DoH is configured. mikromon pushes "no" for
+            #     exactly this reason (see nextdns_cloud_ops) — "yes" here
+            #     now means this router still has a STALE config from
+            #     before that fix and needs re-enabling.
             #   - an empty `servers` list leaves DoH with nothing to
             #     resolve dns.nextdns.io's OWN hostname with.
             #   - allow-remote-requests=false means only the router's own
@@ -486,7 +491,11 @@ def _build_nextdns_diagnostics_lines(auth, devices_db, defaults) -> list:
             verify = str(row.get("verify-doh-cert", "")) or "(not set)"
             servers = str(row.get("servers", "")).strip() or "(empty)"
             remote = str(row.get("allow-remote-requests", "")) or "(not set)"
-            lines.append(f"  verify-doh-cert: {verify}")
+            verify_flag = (" — STALE: re-enable to push verify-doh-cert=no "
+                          "(this needs a manually-imported CA chain to work "
+                          "as \"yes\", which nothing here ever set up)"
+                          if verify.lower() in ("yes", "true") else "")
+            lines.append(f"  verify-doh-cert: {verify}{verify_flag}")
             lines.append(f"  servers (bootstrap resolver, needed to look up "
                          f"dns.nextdns.io itself): {servers}")
             lines.append(f"  allow-remote-requests (must be true/yes for LAN "

@@ -2459,15 +2459,19 @@ _NDRES = ("system", "resource")
 DNS = ("ip", "dns")
 nd_cfg = types.SimpleNamespace(name="R1", nextdns_enabled=False, nextdns_profile_id="")
 
-# nextdns_cloud_ops: enabling with a profile id sets use-doh-server + verify-doh-cert.
+# nextdns_cloud_ops: enabling with a profile id sets use-doh-server.
 nd_api = FakeApi({_NDRES: [{"version": "7.14.3"}], DNS: [{".id": "*1"}]})
 nd_pusher = Pusher(nd_cfg, nd_api, dry_run=True)
 enable_plan = F.nextdns_cloud_ops(nd_pusher, "abc123")
 check("enabling sets use-doh-server to this router's own NextDNS profile URL",
       any(o.params.get("use-doh-server") == "https://dns.nextdns.io/abc123"
           for o in enable_plan.ops))
-check("enabling also turns on verify-doh-cert",
-      any(o.params.get("verify-doh-cert") == "yes" for o in enable_plan.ops))
+check("enabling leaves verify-doh-cert OFF — confirmed against MikroTik's "
+      "own docs: turning it on needs the DoH server's full CA chain "
+      "manually imported first (four certificates for NextDNS specifically), "
+      "which mikromon never did, so every connection was silently failing "
+      "cert verification with no fallback (DoH has none once configured)",
+      any(o.params.get("verify-doh-cert") == "no" for o in enable_plan.ops))
 
 # Disabling (empty profile_id) clears use-doh-server, touches nothing else.
 nd_api2 = FakeApi({_NDRES: [{"version": "7.14.3"}],
@@ -2485,7 +2489,7 @@ check("disabling clears use-doh-server",
 nd_api3 = FakeApi({_NDRES: [{"version": "7.14.3"}],
                    DNS: [{".id": "*1", "use-doh-server":
                           "https://dns.nextdns.io/abc123",
-                          "verify-doh-cert": "yes",
+                          "verify-doh-cert": "no",
                           "servers": "9.9.9.9,149.112.112.112",
                           "allow-remote-requests": "true"}],
                    ("ip", "firewall", "nat"): [

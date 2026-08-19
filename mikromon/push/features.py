@@ -1809,17 +1809,32 @@ def _doh_supported(major, minor):
 
 def nextdns_cloud_ops(pusher, profile_id: str) -> Plan:
     """Point /ip/dns at this router's own NextDNS profile via DNS-over-HTTPS
-    (empty profile_id clears it back to plain DNS). DoH embeds the profile
-    id directly in the request, so — unlike NextDNS's IP-linking method —
-    this works regardless of the router's public IP being stable, shared,
-    or behind NAT (the same reason mikromon's site-to-site VPN uses
-    WireGuard rather than depending on a fixed public IP)."""
+    (empty profile_id clears it back to plain DNS; DoT/DoQ aren't options —
+    confirmed against MikroTik's own docs, RouterOS's DNS client only ever
+    added DoH, nothing else). DoH embeds the profile id directly in the
+    request, so — unlike NextDNS's IP-linking method — this works
+    regardless of the router's public IP being stable, shared, or behind
+    NAT (the same reason mikromon's site-to-site VPN uses WireGuard rather
+    than depending on a fixed public IP).
+
+    verify-doh-cert is left OFF on purpose. Per MikroTik's own docs,
+    verify-doh-cert=yes requires manually importing the DoH server's full
+    root CA chain into /certificate first (NextDNS needs four certificates
+    for this) — mikromon never did that, so every connection was silently
+    failing certificate verification, and RouterOS has NO fallback once
+    DoH is configured (confirmed: "standard DNS servers ... will not be
+    used" once use-doh-server is set) — meaning DNS resolution was quietly
+    broken entirely, not just "not using NextDNS". The DoH connection is
+    still fully encrypted (plain HTTPS/TLS) without this — what's given up
+    is RouterOS independently confirming the cert wasn't forged by an
+    active MITM, a narrow attack that isn't worth re-breaking this the
+    next time NextDNS rotates its certificate chain."""
     major, minor, _ver = _ros_version(pusher.api)
     if profile_id and not _doh_supported(major, minor):
         return Plan(pusher.cfg.name, [],
                     summary="nextdns (RouterOS needs 7.1+ for DNS-over-HTTPS)")
     desired = ({"use-doh-server": f"https://dns.nextdns.io/{profile_id}",
-               "verify-doh-cert": "yes"} if profile_id
+               "verify-doh-cert": "no"} if profile_id
               else {"use-doh-server": ""})
     if profile_id:
         current = _safe_fetch(pusher.api, _DNS)
