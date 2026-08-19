@@ -404,8 +404,8 @@ def _build_nextdns_diagnostics_lines(auth, devices_db, defaults) -> list:
     from .device import DeviceError
     from .push import PushError, rw_device
     from .push.api import PushApi
-    from .push.features import (_DNSFORCE_TAG, _ND_SWITCH_NAME, _ND_TAG,
-                                _doh_supported, _ros_version)
+    from .push.features import (_DNSFORCE_TAG, _ND_TAG, _doh_supported,
+                                _ros_version)
 
     lines = ["", "=" * 70, "NextDNS: per-router live state", "=" * 70, ""]
     nextdns_cfg = auth.get_nextdns() if auth else {}
@@ -436,22 +436,13 @@ def _build_nextdns_diagnostics_lines(auth, devices_db, defaults) -> list:
             lines.append(f"  mikromon's own record: enabled=True "
                         f"profile_id={profile_id or '(none — inconsistent state)'}")
             cfg = build_device(raw, defaults)
-            links = list(cfg.wan.links)
-            # Which profile a multi-WAN router is SUPPOSED to be on depends on
-            # which uplink is live, so the check below has to accept any of
-            # them — comparing against the main profile alone would report a
-            # perfectly healthy router running on its backup line as broken.
-            profile_by_url = {f"https://dns.nextdns.io/{pid}": pid
-                              for pid in cfg.nextdns_all_profile_ids()}
-            if len(links) > 1:
-                for idx, ep in enumerate(links):
-                    own = (cfg.nextdns_wan_profiles or {}).get(str(idx), "")
-                    lines.append(
-                        f"  uplink {idx} \"{ep.label(idx)}\": "
-                        + (f"profile {own}" if own else
-                           ("main profile" if idx == 0 else
-                            "NO profile of its own (falls back to the main "
-                            "one — press Re-sync uplink profiles)")))
+            legacy = [p for p in cfg.nextdns_all_profile_ids()
+                      if p != profile_id]
+            if legacy:
+                lines.append(f"  leftover per-uplink profiles from the "
+                             f"retired multi-profile scheme: "
+                             f"{', '.join(legacy)} — press \"Re-apply to this "
+                             f"router\" on the DNS tab to delete them.")
             dev = rw_device(cfg)
             try:
                 if not dev.reachable():
@@ -509,30 +500,17 @@ def _build_nextdns_diagnostics_lines(auth, devices_db, defaults) -> list:
             lines.append(f"  live use-doh-server on the router: {live or '(empty)'}")
             if live == expected and expected:
                 lines.append("  status: OK, matches the assigned profile.")
-            elif live in profile_by_url:
-                lines.append(f"  status: OK — running on the profile for one "
-                             f"of this router's other uplinks "
-                             f"({profile_by_url[live]}), i.e. it has failed "
-                             f"over. Same settings either way.")
             else:
-                lines.append(f"  status: MISMATCH — expected {expected or '(empty)'}"
-                             + (f" (or any of {sorted(profile_by_url.values())})"
-                                if len(profile_by_url) > 1 else "") + ". "
-                             f"Disable and re-enable NextDNS on this router's "
-                             f"DNS tab to retry the push.")
-            if len(links) > 1:
-                # Without these two the router can never move off whichever
-                # profile it was last pushed, so a failover would quietly keep
-                # logging against the uplink that is down.
-                lines.append(f"  per-uplink DoH switcher script "
-                             f"('{_ND_SWITCH_NAME}'): "
-                             + ("present" if switcher else
-                                "MISSING — press Re-sync uplink profiles"))
-                lines.append(f"  its scheduler: "
-                             + ("present, every "
-                                + str(switch_sched[0].get("interval", "?"))
-                                if switch_sched else
-                                "MISSING — press Re-sync uplink profiles"))
+                lines.append(f"  status: MISMATCH — expected "
+                             f"{expected or '(empty)'}. Press \"Re-apply to "
+                             f"this router\" on the DNS tab to push it again.")
+            if switcher or switch_sched:
+                # Left over from the retired per-uplink scheme. Harmful, not
+                # merely untidy: it rewrites use-doh-server every minute.
+                lines.append("  RETIRED per-uplink DoH switcher still on this "
+                             "router — it rewrites use-doh-server every "
+                             "minute and will fight the setting above. Press "
+                             "\"Re-apply to this router\" to remove it.")
             # Prerequisites confirmed live to each independently break
             # "NextDNS says enabled but isn't actually used", even with
             # use-doh-server itself matching above:
@@ -2511,135 +2489,42 @@ def _vpn_group_box(name, devices_db, org_id, csrf) -> str:
             f'{table}{add_form}{refresh}{stop_form}</div>')
 
 
-# ===========================================================================
-# NextDNS on a multi-WAN router — one profile per uplink, kept identical
-# ===========================================================================
-# A router with several uplinks gets one NextDNS profile per uplink: the
-# "main" profile (nextdns_profile_id) belongs to the primary, and every backup
-# uplink gets its own, recorded in nextdns_wan_profiles keyed by that uplink's
-# index. Each extra profile is CLONED from the main one when it is created and
-# every settings change is written to all of them afterwards, so they never
-# diverge — the user still manages one set of blocklists, toggles and
-# allow/deny entries, and which uplink happens to be carrying traffic only
-# changes which profile's query log the traffic lands in. push/features.py's
-# nextdns_cloud_ops then puts a small script on the router that follows the
-# live uplink, so failover needs no interaction at all.
-# ===========================================================================
+def _nextdns_cleanup_legacy(api_key, raw) -> list:
+    """Delete the extra NextDNS profiles a router picked up while mikromon
+    briefly ran one profile per WAN uplink, and empty the field that held
+    them. Mutates `raw`; returns plain notes for the redirect message.
 
-def _nextdns_profile_name(device_name: str, links, idx: int) -> str:
-    """What a profile is called in the NextDNS account. Single-uplink routers
-    keep the bare device name they have always had; once there are several,
-    each profile is suffixed with its uplink so the account list stays
-    readable (and so does the profile picker on NextDNS's own site)."""
-    if len(links) <= 1:
-        return device_name
-    return f"{device_name} - {links[idx].label(idx)}"
-
-
-def _nextdns_reconcile_wan_profiles(api_key, raw, links) -> tuple:
-    """Bring `raw["nextdns_wan_profiles"]` in line with this device's uplink
-    list: create a cloned profile for every backup uplink that lacks one,
-    rename the ones that exist (so a renamed uplink keeps its query history
-    instead of being recreated from scratch), and delete profiles whose
-    uplink has been removed. Mutates `raw` in place; returns
-    (notes, errors) — both plain strings for the redirect message, since
-    nothing here is worth failing the whole action over.
-
-    A no-op when NextDNS is off for this device, so it is safe to call from
-    the ordinary device-save path where most devices have never touched it."""
+    A router is meant to have exactly one profile now, reached over DoH.
+    Leaving the extras behind would keep them on the NextDNS account for
+    nothing, counting against its profile limit and cluttering the profile
+    picker with names nothing refers to any more."""
     from . import nextdns as nextdns_client
 
-    name = str(raw.get("name", ""))
-    main_id = str(raw.get("nextdns_profile_id", "") or "")
-    profiles = {str(k): str(v) for k, v in
-                (raw.get("nextdns_wan_profiles") or {}).items() if v}
-    notes, errors = [], []
-    if not (api_key and main_id and raw.get("nextdns_enabled")):
-        return notes, errors
-    wanted = {str(i) for i in range(1, len(links))}
-    for key in sorted(set(profiles) - wanted,
-                      key=lambda k: int(k) if k.isdigit() else 0):
-        pid = profiles.pop(key)
+    legacy = {str(k): str(v) for k, v in
+              (raw.get("nextdns_wan_profiles") or {}).items() if v}
+    if not legacy:
+        return []
+    notes = []
+    for key in sorted(legacy):
+        pid = legacy[key]
         try:
             nextdns_client.delete_profile(api_key, pid)
-            notes.append(f"deleted the profile for an uplink that is no "
-                         f"longer configured ({pid})")
+            notes.append(f"removed the leftover per-uplink profile {pid}")
         except nextdns_client.NextDnsError as exc:
-            # Same call as the disable path: an orphaned profile is harmless,
-            # a device stuck pointing at a profile it no longer owns is not.
-            errors.append(f"could not delete the orphaned profile {pid}: {exc}")
-    for i in range(1, len(links)):
-        key, label = str(i), links[i].label(i)
-        want_name = _nextdns_profile_name(name, links, i)
-        if profiles.get(key):
-            try:
-                nextdns_client.rename_profile(api_key, profiles[key], want_name)
-            except nextdns_client.NextDnsError as exc:
-                errors.append(f'could not rename the profile for "{label}": {exc}')
-            continue
-        try:
-            new_id = nextdns_client.create_profile(api_key, want_name)
-        except nextdns_client.NextDnsError as exc:
-            errors.append(f'could not create a profile for "{label}": {exc}')
-            continue
-        profiles[key] = new_id
-        # A new profile starts blank — NextDNS has no server-side clone (see
-        # create_profile), so the copy is done here, with the same code that
-        # keeps every profile in step afterwards. A profile that exists but
-        # could not be filled in is worse than useless (it would filter
-        # nothing while looking set up), so a failure here is reported
-        # against the uplink rather than swallowed.
-        copy_errs = _nextdns_mirror_settings(api_key, main_id, [new_id])
-        if copy_errs:
-            errors.append(f'created a profile for "{label}" but could not '
-                          f'copy the main profile\'s settings onto it '
-                          f'({"; ".join(copy_errs)}) — press "Re-sync uplink '
-                          f'profiles" to finish it')
-        else:
-            notes.append(f'created a profile for "{label}"')
-    if len(links) > 1:
-        try:
-            nextdns_client.rename_profile(
-                api_key, main_id, _nextdns_profile_name(name, links, 0))
-        except nextdns_client.NextDnsError:
-            pass  # cosmetic only — never worth failing the action over
-    raw["nextdns_wan_profiles"] = profiles
-    return notes, errors
-
-
-def _nextdns_apply_all(pids, fn) -> str:
-    """Run `fn(profile_id)` against the main profile and then every per-uplink
-    profile, so one save leaves them all identical.
-
-    The MAIN profile's error propagates — that is the one each form's own
-    "Could not save ..." message already describes. A per-uplink profile
-    failing instead comes back as a warning suffix: the setting the user asked
-    for IS in effect on the primary, and the fix (Re-sync) is one button, so
-    reporting it as an outright failure would be wrong."""
-    from . import nextdns as nextdns_client
-
-    if not pids:
-        return ""
-    fn(pids[0])
-    stale = []
-    for pid in pids[1:]:
-        try:
-            fn(pid)
-        except nextdns_client.NextDnsError as exc:
-            stale.append(f"{pid} ({exc})")
-    if not stale:
-        return ""
-    return (" WARNING: the same change could not be applied to this router's "
-            "other uplink profile(s): " + "; ".join(stale) +
-            ' — use "Re-sync uplink profiles" below to bring them back in step.')
+            # Best-effort, exactly like the disable path: an orphaned profile
+            # is untidy, a device that will not let go of it is worse.
+            notes.append(f"could not delete the leftover profile {pid} "
+                         f"({exc}) - remove it on NextDNS by hand")
+    raw["nextdns_wan_profiles"] = {}
+    return notes
 
 
 def _nextdns_mirror_settings(api_key, main_id, wan_ids) -> list:
-    """Copy every setting mikromon manages from the main profile onto each
-    per-uplink profile — the repair path for a profile that drifted (a failed
-    fan-out earlier, a change made on NextDNS's own site, or an uplink added
-    after the settings were), and what makes "all uplinks behave identically"
-    something the user can re-assert rather than just hope for.
+    """Copy every setting mikromon manages from one profile onto others.
+    Now used only to apply the superadmin's optional template profile to a
+    freshly created one: NextDNS has no server-side clone (see
+    nextdns.create_profile), so a new profile starts blank and the template
+    has to be copied across afterwards.
 
     One PATCH per section rather than one combined call, for the same reason
     _device_nextdns_parental_post splits its own: a single id NextDNS rejects
@@ -2711,30 +2596,33 @@ def _nextdns_box(name, cfg, csrf, nextdns_configured: bool) -> str:
                 f'(Platform admin &rarr; NextDNS).</p></div>')
     if cfg.nextdns_enabled and cfg.nextdns_profile_id:
         pid = cfg.nextdns_profile_id
-        n_extra = len(cfg.nextdns_wan_profiles or {})
-        multi = (f' Its {n_extra} other uplink'
-                 f'{"s each have" if n_extra != 1 else " has"} a matching '
-                 f'profile of {"their" if n_extra != 1 else "its"} own — '
-                 f'everything you change below is applied to all of them, so '
-                 f'filtering is identical whichever line is carrying traffic.'
-                 if n_extra else '')
         return (
             f'<div class="box"><h2>NextDNS</h2>'
             f'<p>Enabled — this router has its own profile, '
-            f'<code>{esc(pid)}</code>.{multi} Manage its blocked/allowed '
-            f'domains, security, parental control, and privacy settings '
-            f'below — everything for this router stays in this dashboard, '
-            f'nothing to sign into on NextDNS.io.</p>'
+            f'<code>{esc(pid)}</code>, and resolves through it over '
+            f'DNS-over-HTTPS on whichever internet line is up. Manage its '
+            f'blocked/allowed domains, security, parental control and '
+            f'privacy settings below — everything for this router stays '
+            f'in this dashboard, nothing to sign into on NextDNS.io.</p>'
             f'<form method="POST" action="/device/nextdns">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="device" value="{q}">'
             f'<input type="hidden" name="enable" value="0">'
             f'<button class="btn ghost" type="submit">Disable &amp; delete '
             f'this profile</button></form>'
+            f'<form method="POST" action="/device/nextdns-reapply" '
+            f'style="margin-top:8px">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            f'<input type="hidden" name="device" value="{q}">'
+            f'<button class="btn ghost" type="submit">Re-apply to this router'
+            f'</button></form>'
             f'<p class="muted" style="margin-top:4px;font-size:12px">'
-            f'Deletes the profile in NextDNS too'
-            f'{" (and every per-uplink profile)" if n_extra else ""}, '
-            f'including its blocklist history for this router.</p></div>')
+            f'Pushes this profile to the router again. Safe to press any '
+            f'time — it only ever puts things back the way they should be.'
+            f'</p>'
+            f'<p class="muted" style="margin-top:4px;font-size:12px">'
+            f'Deletes the profile in NextDNS too, including its blocklist '
+            f'history for this router.</p></div>')
     return (
         f'<div class="box"><h2>NextDNS</h2>'
         f'<p class="muted">Give this router its own NextDNS profile — '
@@ -2752,102 +2640,6 @@ def _nextdns_box(name, cfg, csrf, nextdns_configured: bool) -> str:
         f'<input type="hidden" name="enable" value="1">'
         f'<button class="btn" type="submit">Enable NextDNS for this router'
         f'</button></form></div>')
-
-
-def _nextdns_wan_box(name, cfg, csrf) -> str:
-    """The DNS tab's multi-WAN panel: which NextDNS profile each uplink
-    resolves through, and one button to re-assert that they all carry the
-    main profile's settings.
-
-    Only rendered for a router that actually has more than one uplink — on a
-    single-WAN router there is nothing here that the NextDNS box above does
-    not already say. Also covers the "second line added later" case: an uplink
-    with no profile of its own yet is shown falling back to the main profile
-    (so it still filters — it just is not logged separately yet), and the same
-    button provisions it."""
-    links = list(cfg.wan.links)
-    if not (cfg.nextdns_enabled and cfg.nextdns_profile_id and len(links) > 1):
-        return ""
-    q = esc(name)
-    rows = ""
-    missing = 0
-    for idx, ep in enumerate(links):
-        own = str((cfg.nextdns_wan_profiles or {}).get(str(idx), "") or "")
-        if idx == 0:
-            note = "main profile"
-            pid = cfg.nextdns_profile_id
-        elif own:
-            note = "own profile, cloned from the main one"
-            pid = own
-        else:
-            note = "no profile yet — falls back to the main one"
-            pid = cfg.nextdns_profile_id
-            missing += 1
-        rows += (f'<tr><td>{esc(ep.label(idx))}</td>'
-                 f'<td class="muted">{"primary" if idx == 0 else f"backup {idx}"}'
-                 f'</td><td><code>{esc(pid)}</code></td>'
-                 f'<td class="muted">{esc(note)}</td></tr>')
-    warn = (f'<p class="muted" style="margin-top:8px">'
-            f'{missing} uplink(s) have no profile of their own yet — '
-            f're-syncing below creates them.</p>' if missing else '')
-    return (
-        f'<div class="box"><h2>NextDNS — uplink profiles</h2>'
-        f'<p class="muted">This router has more than one internet line, so '
-        f'each one gets its own NextDNS profile with its own query log — '
-        f'all cloned from the main profile and kept on identical settings, '
-        f'so what gets blocked never depends on which line is up. The router '
-        f'follows the live line on its own (a small mikromon-managed script '
-        f're-points its DNS-over-HTTPS within a minute of a failover), so '
-        f'there is nothing to switch by hand.</p>'
-        f'<table><thead><tr><th>Uplink</th><th>Role</th>'
-        f'<th>NextDNS profile</th><th></th></tr></thead>'
-        f'<tbody>{rows}</tbody></table>{warn}'
-        f'<form method="POST" action="/device/nextdns-wan-sync" '
-        f'style="margin-top:12px">'
-        f'<input type="hidden" name="csrf" value="{csrf}">'
-        f'<input type="hidden" name="device" value="{q}">'
-        f'<button class="btn ghost" type="submit">Re-sync uplink profiles'
-        f'</button></form>'
-        f'<p class="muted" style="margin-top:4px;font-size:12px">'
-        f'Creates any missing profile, copies the main profile\'s settings '
-        f'onto every one of them, and re-pushes the router\'s DNS. Safe to '
-        f'run any time — it only ever makes them match.</p></div>')
-
-
-# Blocked for the few seconds a router test takes, then removed again.
-# IANA reserves example.org for documentation, so nothing real ever
-# depends on it resolving - which is what makes it safe to block on a
-# live network.
-_NEXTDNS_PROBE_DOMAIN = "example.org"
-
-
-def _nextdns_test_box(name, csrf) -> str:
-    """The DNS tab's "is this router really using NextDNS?" button.
-
-    Exists because my.nextdns.io's own banner cannot answer that question: it
-    reports on the machine running the browser, so a PC with Secure DNS on in
-    Chrome/Edge shows "this device is not using NextDNS" whether the router is
-    filtering perfectly or not working at all. This asks the router directly,
-    over its own API, with no browser or client PC in the path."""
-    q = esc(name)
-    return (f'<div class="box"><h2>Is this router really using NextDNS?</h2>'
-            f'<p class="muted">Asks the <b>router itself</b> to resolve a '
-            f'domain from this profile\'s blocked list. If it comes back '
-            f'blocked, nothing but this NextDNS profile could have done that '
-            f'— so the router is connected and filtering, proven. '
-            f'The banner on NextDNS\'s own website can\'t tell you this: it '
-            f'reports on whichever computer is viewing it, so a PC with '
-            f'Secure DNS switched on in Chrome or Edge shows "not using '
-            f'NextDNS" even when this router is working perfectly.</p>'
-            f'<p class="muted">Nothing to set up first: if this profile '
-            f'has no blocked domains yet, the test blocks '
-            f'<code>{esc(_NEXTDNS_PROBE_DOMAIN)}</code> for the few seconds '
-            f'it runs and removes it again afterwards.</p>'
-            f'<form method="POST" action="/device/nextdns-test">'
-            f'<input type="hidden" name="csrf" value="{csrf}">'
-            f'<input type="hidden" name="device" value="{q}">'
-            f'<div class="actions"><button class="btn" type="submit">'
-            f'Test from this router</button></div></form></div>')
 
 
 def _humanize_id(s: str) -> str:
@@ -6257,8 +6049,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # reading THIS tab's own (unrelated) local DNS-filter
                 # settings from the router doesn't also hide this button.
                 nd_api_key = (auth.get_nextdns() if auth else {}).get("api_key", "")
-                extra_html = (_nextdns_box(name, cfg, csrf, bool(nd_api_key))
-                              + _nextdns_wan_box(name, cfg, csrf))
+                extra_html = _nextdns_box(name, cfg, csrf, bool(nd_api_key))
                 if cfg.nextdns_enabled and cfg.nextdns_profile_id and nd_api_key:
                     extra_html += _nextdns_test_box(name, csrf)
                 # The full settings panels (denylist/allowlist, security,
@@ -6381,34 +6172,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 detected_gateways=detected_gateways, can_manage=can_manage)
             return self._send(200, page, "text/html; charset=utf-8")
 
-        def _nextdns_track_uplinks(self, raw) -> bool:
-            """Keep a device's per-uplink NextDNS profiles in step with its
-            uplink list, whenever that list is edited. Returns whether the
-            profile set actually changed, so the caller knows if the router
-            needs re-pushing. Adding a second line to
-            a router that already has NextDNS on should just work — without
-            this the new line would silently share the primary's query log,
-            and a removed one would strand its profile on the account, with
-            nothing to tell the user to go and press Re-sync.
-
-            Best-effort and silent by design: a NextDNS API problem must never
-            block saving the device itself, and the DNS tab's "Re-sync uplink
-            profiles" button is the visible repair path when it could not
-            finish."""
-            if not (raw.get("nextdns_enabled") and auth):
-                return False
-            before = dict(raw.get("nextdns_wan_profiles") or {})
-            try:
-                from .config import build_device
-
-                _nextdns_reconcile_wan_profiles(
-                    auth.get_nextdns().get("api_key", ""), raw,
-                    list(build_device(raw, defaults).wan.links))
-            except Exception:  # noqa: BLE001
-                log.exception("NextDNS uplink-profile reconcile failed for %s",
-                              raw.get("name"))
-            return dict(raw.get("nextdns_wan_profiles") or {}) != before
-
         def _nextdns_push(self, cfg, user) -> str:
             """Push this router's NextDNS DNS settings — and, on a multi-WAN
             router, the uplink switcher that keeps them following the live
@@ -6434,8 +6197,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 pusher = Pusher(cfg, api, dry_run=False, audit=audit,
                                 user=(user or {}).get("login", ""))
                 api.connect()
-                plan = nextdns_cloud_ops(pusher, cfg.nextdns_profile_id,
-                                         cfg.nextdns_wan_profiles)
+                plan = nextdns_cloud_ops(pusher, cfg.nextdns_profile_id)
                 if not plan.empty:
                     pusher.apply(plan, feature="nextdns-cloud")
                 return ""
@@ -6481,7 +6243,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     links.append(entry)
             raw["wan"] = {"links": links,
                           "ping_targets": (raw.get("wan") or {}).get("ping_targets", [])}
-            nd_changed = self._nextdns_track_uplinks(raw)
             try:
                 store.upsert(raw, defaults, original_name=name)
             except Exception as exc:  # noqa: BLE001 — surface validation errors
@@ -6499,19 +6260,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     _ss.save()
                 except Exception:
                     pass
-            msg = "WAN uplinks saved."
-            if nd_changed:
-                # The uplink list is what the router's NextDNS switcher script
-                # is built from, so a line added or removed here has to reach
-                # the router now — otherwise the new line keeps resolving
-                # through the primary's profile until someone happens to open
-                # the DNS tab and press Re-sync.
-                from .config import build_device
-
-                msg += " NextDNS profiles updated to match."
-                msg += self._nextdns_push(build_device(raw, defaults), user)
             return self._redirect(f"/device?name={quote(name)}&tab=wan&msg=" +
-                                  quote(msg))
+                                  quote("WAN uplinks saved."))
 
         def _device_adopt_post(self, flat, user):
             from .config import build_device
@@ -7433,7 +7183,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             On a router with several uplinks this also provisions (or tears
             down) one cloned profile per extra uplink, so each internet line
             gets its own query log while filtering identically — see
-            _nextdns_reconcile_wan_profiles."""
+            _nextdns_cleanup_legacy."""
             name = flat.get("device", "")
             q = quote(name)
             if not self._can_manage_device(user, name):
@@ -7455,13 +7205,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                           "(Platform admin -> NextDNS)."))
             from .config import build_device
             from . import nextdns as nextdns_client
-            links = list(build_device(raw, defaults).wan.links)
             wan_notes, wan_errors = [], []
             if enable:
                 if not (raw.get("nextdns_enabled") and raw.get("nextdns_profile_id")):
                     try:
                         profile_id = nextdns_client.create_profile(
-                            api_key, _nextdns_profile_name(name, links, 0))
+                            api_key, name)
                     except nextdns_client.NextDnsError as exc:
                         return self._redirect(
                             f"/device?name={q}&tab=nextdns&msg=" +
@@ -7483,16 +7232,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                 "could not copy the template profile's "
                                 "settings onto the new profile: "
                                 + "; ".join(tmpl_errs))
-                # One profile per extra uplink, each filled in from the main
-                # one so it starts identical — a failure here is reported but
-                # does not undo the enable: the router still filters through
-                # the main profile on every uplink, which is the important
-                # part. Extended rather than reassigned: a template-copy
-                # problem recorded just above is just as much worth showing.
-                more_notes, more_errors = _nextdns_reconcile_wan_profiles(
-                    api_key, raw, links)
-                wan_notes += more_notes
-                wan_errors += more_errors
+                # A router that was provisioned while mikromon briefly ran
+                # a profile per uplink still carries the extras; enabling is
+                # as good a moment as any to let go of them.
+                wan_notes += _nextdns_cleanup_legacy(api_key, raw)
             else:
                 # Every profile this device owns, main first — leaving a
                 # per-uplink one behind would keep filtering (and billing
@@ -7518,10 +7261,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             msg = "NextDNS enabled for this router." if enable else \
                   "NextDNS disabled for this router."
             if wan_notes:
-                msg += " Per-uplink profiles: " + "; ".join(wan_notes) + "."
+                msg += " " + "; ".join(wan_notes) + "."
             if wan_errors:
-                msg += (" Some per-uplink profiles could not be set up: "
-                        + "; ".join(wan_errors) + ".")
+                msg += " " + "; ".join(wan_errors) + "."
             from .device import DeviceError
             from .push import Pusher, PushError, rw_device
             from .push.api import PushApi
@@ -7540,8 +7282,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     api.connect()
                     plan = nextdns_cloud_ops(
                         pusher,
-                        cfg.nextdns_profile_id if cfg.nextdns_enabled else "",
-                        cfg.nextdns_wan_profiles if cfg.nextdns_enabled else None)
+                        cfg.nextdns_profile_id if cfg.nextdns_enabled else "")
                     if plan.empty:
                         # Empty can mean "already correct" (fine, no news) or
                         # "RouterOS is too old for DNS-over-HTTPS" (silent
@@ -7568,13 +7309,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             """Common guard + lookup for every NextDNS settings-panel POST
             below: CSRF, device ownership, and that this router actually has
             an enabled profile + a configured platform API key. Returns
-            (api_key, profile_ids, name, None) on success, or
-            (None, None, None, response) to return directly on failure.
-
-            `profile_ids` is the main profile FIRST, then one per extra WAN
-            uplink — every panel writes to all of them (via _nextdns_apply_all)
-            so a multi-WAN router filters identically no matter which line is
-            up."""
+            (api_key, profile_id, name, None) on success, or
+            (None, None, None, response) to return directly on failure."""
             name = flat.get("device", "")
             q = quote(name)
             if not self._can_manage_device(user, name):
@@ -7592,42 +7328,40 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return None, None, None, self._redirect(
                     f"/device?name={q}&tab=nextdns&msg=" +
                     quote("NextDNS isn't enabled for this router."))
-            return api_key, cfg.nextdns_all_profile_ids(), name, None
+            return api_key, cfg.nextdns_profile_id, name, None
 
         def _device_nextdns_security_post(self, flat, user):
-            api_key, pids, name, err = self._nextdns_prereqs(flat, user)
+            api_key, pid, name, err = self._nextdns_prereqs(flat, user)
             if err is not None:
                 return err
             from . import nextdns as nextdns_client
             patch = {key: (f"f_{key}" in flat)
                     for key, _l, _h in _NEXTDNS_SECURITY_FIELDS}
             try:
-                msg = "Security settings saved." + _nextdns_apply_all(
-                    pids, lambda p: nextdns_client.update_section(
-                        api_key, p, "security", patch))
+                nextdns_client.update_section(api_key, pid, "security", patch)
+                msg = "Security settings saved."
             except nextdns_client.NextDnsError as exc:
                 msg = f"Could not save security settings: {exc}"
             return self._redirect(
                 f"/device?name={quote(name)}&tab=nextdns&msg=" + quote(msg))
 
         def _device_nextdns_privacy_settings_post(self, flat, user):
-            api_key, pids, name, err = self._nextdns_prereqs(flat, user)
+            api_key, pid, name, err = self._nextdns_prereqs(flat, user)
             if err is not None:
                 return err
             from . import nextdns as nextdns_client
             patch = {key: (f"b_{key}" in flat)
                     for key, _l, _h in _NEXTDNS_PRIVACY_BOOLS}
             try:
-                msg = "Privacy settings saved." + _nextdns_apply_all(
-                    pids, lambda p: nextdns_client.update_section(
-                        api_key, p, "privacy", patch))
+                nextdns_client.update_section(api_key, pid, "privacy", patch)
+                msg = "Privacy settings saved."
             except nextdns_client.NextDnsError as exc:
                 msg = f"Could not save privacy settings: {exc}"
             return self._redirect(
                 f"/device?name={quote(name)}&tab=nextdns&msg=" + quote(msg))
 
         def _device_nextdns_parental_post(self, flat, user):
-            api_key, pids, name, err = self._nextdns_prereqs(flat, user)
+            api_key, pid, name, err = self._nextdns_prereqs(flat, user)
             if err is not None:
                 return err
             from . import nextdns as nextdns_client
@@ -7656,7 +7390,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                        for iid in sorted(ids)]
 
             try:
-                profile = nextdns_client.get_profile(api_key, pids[0])
+                profile = nextdns_client.get_profile(api_key, pid)
                 pc = profile.get("parentalControl") or {}
             except nextdns_client.NextDnsError as exc:
                 msg = f"Could not read current parental control settings: {exc}"
@@ -7666,7 +7400,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # id rejected in categories must not also block services or the
             # plain boolean toggles from saving (confirmed live: it did,
             # every single time, as long as a bad id stayed on the form).
-            results, warnings = [], []
+            results = []
             for label, section_patch in (
                 ("booleans", {key: (f"b_{key}" in flat)
                              for key, _l, _h in _NEXTDNS_PARENTAL_BOOLS}),
@@ -7676,19 +7410,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     _NEXTDNS_SERVICES, "services", "svc", "add_service")}),
             ):
                 try:
-                    warnings.append(_nextdns_apply_all(
-                        pids, lambda p, sp=section_patch:
-                        nextdns_client.update_section(
-                            api_key, p, "parentalControl", sp)))
+                    nextdns_client.update_section(
+                        api_key, pid, "parentalControl", section_patch)
                     results.append(f"{label}: saved")
                 except nextdns_client.NextDnsError as exc:
                     results.append(f"{label}: FAILED ({exc})")
-            msg = "Parental control — " + "; ".join(results) + "".join(warnings)
+            msg = "Parental control — " + "; ".join(results)
             return self._redirect(
                 f"/device?name={quote(name)}&tab=nextdns&msg=" + quote(msg))
 
         def _device_nextdns_blocklist_post(self, flat, user):
-            api_key, pids, name, err = self._nextdns_prereqs(flat, user)
+            api_key, pid, name, err = self._nextdns_prereqs(flat, user)
             if err is not None:
                 return err
             blocklist_id = (flat.get("blocklist") or "").strip()
@@ -7702,25 +7434,24 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # No dedicated add/remove endpoint for blocklists (unlike
                 # denylist/allowlist below) — they're part of the "privacy"
                 # section's own array, so read-modify-PATCH the whole thing.
-                profile = nextdns_client.get_profile(api_key, pids[0])
+                profile = nextdns_client.get_profile(api_key, pid)
                 blocklists = list(profile.get("privacy", {}).get("blocklists") or [])
                 if action == "add":
                     if not any(b.get("id") == blocklist_id for b in blocklists):
                         blocklists.append({"id": blocklist_id, "active": True})
                 else:
                     blocklists = [b for b in blocklists if b.get("id") != blocklist_id]
+                nextdns_client.update_section(api_key, pid, "privacy",
+                                              {"blocklists": blocklists})
                 msg = (f"Blocklist '{blocklist_id}' "
-                      f"{'added' if action == 'add' else 'removed'}."
-                      + _nextdns_apply_all(
-                          pids, lambda p: nextdns_client.update_section(
-                              api_key, p, "privacy", {"blocklists": blocklists})))
+                      f"{'added' if action == 'add' else 'removed'}.")
             except nextdns_client.NextDnsError as exc:
                 msg = f"Could not update blocklists: {exc}"
             return self._redirect(
                 f"/device?name={quote(name)}&tab=nextdns&msg=" + quote(msg))
 
         def _device_nextdns_list_post(self, flat, user):
-            api_key, pids, name, err = self._nextdns_prereqs(flat, user)
+            api_key, pid, name, err = self._nextdns_prereqs(flat, user)
             if err is not None:
                 return err
             list_name = flat.get("list", "")
@@ -7731,15 +7462,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             from . import nextdns as nextdns_client
             try:
                 if action == "add" and domain:
-                    msg = f"'{domain}' added to the {list_name}." + \
-                        _nextdns_apply_all(pids, lambda p:
-                                           nextdns_client.add_list_entry(
-                                               api_key, p, list_name, domain))
+                    nextdns_client.add_list_entry(api_key, pid, list_name, domain)
+                    msg = f"'{domain}' added to the {list_name}."
                 elif action == "remove" and domain:
-                    msg = f"'{domain}' removed from the {list_name}." + \
-                        _nextdns_apply_all(pids, lambda p:
-                                           nextdns_client.remove_list_entry(
-                                               api_key, p, list_name, domain))
+                    nextdns_client.remove_list_entry(api_key, pid, list_name, domain)
+                    msg = f"'{domain}' removed from the {list_name}."
                 else:
                     msg = "No domain given."
             except nextdns_client.NextDnsError as exc:
@@ -7754,7 +7481,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             stored locally, so the test is checking what the profile ACTUALLY
             blocks right now — if those two ever disagree, that disagreement
             is itself the bug being hunted."""
-            api_key, pids, name, err = self._nextdns_prereqs(flat, user)
+            api_key, pid, name, err = self._nextdns_prereqs(flat, user)
             if err is not None:
                 return err
             from .config import build_device
@@ -7770,7 +7497,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             cfg = build_device(raw, defaults)
             denied, denied_err = [], ""
             try:
-                profile = nextdns_client.get_profile(api_key, pids[0])
+                profile = nextdns_client.get_profile(api_key, pid)
                 denied = [e.get("id") for e in (profile.get("denylist") or [])
                           if e.get("id")]
             except nextdns_client.NextDnsError as exc:
@@ -7786,7 +7513,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if not denied and not denied_err:
                 try:
                     nextdns_client.add_list_entry(
-                        api_key, pids[0], "denylist", _NEXTDNS_PROBE_DOMAIN)
+                        api_key, pid, "denylist", _NEXTDNS_PROBE_DOMAIN)
                     probe = _NEXTDNS_PROBE_DOMAIN
                     denied, tries = [probe], 4
                 except nextdns_client.NextDnsError as exc:
@@ -7811,7 +7538,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if probe:
                     try:
                         nextdns_client.remove_list_entry(
-                            api_key, pids[0], "denylist", probe)
+                            api_key, pid, "denylist", probe)
                     except nextdns_client.NextDnsError as exc:
                         steps.append({
                             "level": "warn",
@@ -7853,16 +7580,19 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 report_html=_nextdns_test_report_html(
                     {"status": status, "steps": steps}, name))
 
-        def _device_nextdns_wan_sync_post(self, flat, user):
-            """The DNS tab's Re-sync button: make the per-uplink profiles
-            exist and match the main one, then re-push the router's DNS.
+        def _device_nextdns_reapply_post(self, flat, user):
+            """The DNS tab's "Re-apply to this router" button: push this
+            router's one NextDNS profile to it again, and clear away anything
+            left over from the retired per-uplink scheme.
 
-            The single repair button for everything that can leave a multi-WAN
-            router half-set-up — an uplink added after NextDNS was turned on,
-            a fan-out that failed mid-save, a profile edited on NextDNS's own
-            site. Idempotent by construction (it only ever makes things
-            match), so it is safe to press at any time."""
-            api_key, _pids, name, err = self._nextdns_prereqs(flat, user)
+            Both halves matter. The push is the ordinary repair for a router
+            whose /ip/dns drifted, and it is also what removes the old DoH
+            switcher script and scheduler — left alone, that scheduler goes on
+            rewriting use-doh-server every minute and fights whatever this
+            sets. The cleanup deletes the extra NextDNS profiles that scheme
+            created, which nothing refers to any more. Idempotent: on a router
+            that never had any of it, this is just a re-push."""
+            api_key, _pid, name, err = self._nextdns_prereqs(flat, user)
             if err is not None:
                 return err
             from .config import build_device
@@ -7870,27 +7600,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             raw = self._device_raw(name)
             if raw is None:
                 return self._send(404, "not found")
-            links = list(build_device(raw, defaults).wan.links)
-            notes, errors = _nextdns_reconcile_wan_profiles(api_key, raw, links)
+            notes = _nextdns_cleanup_legacy(api_key, raw)
             store = self._devstore()
             if store is not None:
                 store.upsert(raw, defaults, org_id=None)
                 store.close()
             cfg = build_device(raw, defaults)
-            wan_ids = [i for i in cfg.nextdns_all_profile_ids()
-                       if i != cfg.nextdns_profile_id]
-            if wan_ids:
-                errors += _nextdns_mirror_settings(
-                    api_key, cfg.nextdns_profile_id, wan_ids)
-            msg = (f"Uplink profiles re-synced — {len(wan_ids)} extra "
-                   f"profile(s) now carry the main profile's settings.")
+            msg = "NextDNS re-applied to this router."
             if notes:
                 msg += " " + "; ".join(notes) + "."
-            if errors:
-                msg += " Problems: " + "; ".join(errors) + "."
-
-            # Re-push so the router's DoH switcher knows about any profile
-            # that was just created (and lands on the live uplink's one).
             msg += self._nextdns_push(cfg, user)
             return self._redirect(
                 f"/device?name={quote(name)}&tab=nextdns&msg=" + quote(msg))
@@ -7996,7 +7714,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         _hub_save(hub_file, hub)
                         raw["use_ssl"] = False
                         raw["api_port"] = 8728
-                    self._nextdns_track_uplinks(raw)
                     store.upsert(raw, defaults, original_name=orig,
                                  org_id=user["org_id"])
                     if provision_mode:
@@ -8074,6 +7791,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # orphan its live NextDNS.io profile; see _device_nextdns_post).
                 "nextdns_enabled": orig_raw.get("nextdns_enabled", False),
                 "nextdns_profile_id": orig_raw.get("nextdns_profile_id", ""),
+                # Retired feature, preserved only so _nextdns_cleanup_legacy
+                # can still find and delete the profiles it left behind.
                 "nextdns_wan_profiles": dict(
                     orig_raw.get("nextdns_wan_profiles") or {}),
             }
@@ -8182,7 +7901,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                              "/device/nextdns-security", "/device/nextdns-parental",
                              "/device/nextdns-privacy-settings",
                              "/device/nextdns-blocklist", "/device/nextdns-list",
-                             "/device/nextdns-wan-sync", "/device/nextdns-test",
+                             "/device/nextdns-reapply", "/device/nextdns-test",
                              "/device/remote-regenerate", "/device/remote-test")
             if path in _DEVICE_WRITE:
                 if not self._can_manage_device(user, flat.get("device", "")):
@@ -8229,8 +7948,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._device_nextdns_blocklist_post(flat, user)
                 if path == "/device/nextdns-list":
                     return self._device_nextdns_list_post(flat, user)
-                if path == "/device/nextdns-wan-sync":
-                    return self._device_nextdns_wan_sync_post(flat, user)
+                if path == "/device/nextdns-reapply":
+                    return self._device_nextdns_reapply_post(flat, user)
                 if path == "/device/nextdns-test":
                     return self._device_nextdns_test_post(flat, user)
                 if path == "/device/remote-regenerate":

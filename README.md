@@ -470,17 +470,13 @@ fills in a bootstrap resolver, turns on `allow-remote-requests`, and redirects
 every client's port-53 traffic to the router so a device with its own hardcoded
 DNS can't quietly skip the filtering.
 
-**Multi-WAN:** a router with more than one internet line gets **one profile per
-line**, each cloned from the main one and kept on identical settings — every
-change you make is written to all of them, so what gets blocked never depends
-on which line is up; only which profile's query log the traffic lands in does.
-RouterOS has just one `use-doh-server` field, so mikromon installs a small
-managed script + scheduler that re-points it at the live line's profile within
-a minute of a failover — on the router itself, so it keeps working through
-exactly the outage that also cuts the router off from this server. Uplinks
-added or removed on the WAN tab provision or delete their profiles
-automatically; **Re-sync uplink profiles** on the DNS tab is the one-button
-repair if anything ever drifts.
+**One profile per router, on every line.** A router with several internet
+lines still uses the single profile: the DoH URL carries the profile id, so it
+is the router that NextDNS identifies, not the line the query went out on, and
+filtering is unchanged across a failover. (An earlier build gave each uplink
+its own profile for separate query logs; that is gone. Enabling NextDNS — or
+**Re-apply to this router** on the DNS tab — deletes any profiles it left
+behind and removes the on-router switcher script that came with it.)
 
 **Adopt existing config:** each managed tab shows an **“Existing on the router
 (unmanaged)”** list. For **QoS** and **Port-forwarding** an **Adopt** button

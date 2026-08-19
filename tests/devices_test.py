@@ -1607,348 +1607,73 @@ try:
     st = post_status(nobody, "/device/wan",
                      {"csrf": bcsrf, "device": "WebR1", "link_iface": ["x"]})
     check("unallocated member blocked from editing WAN (403)", st == 403)
-    # --- NextDNS on a multi-WAN router: a profile per uplink -------------
-    # WebR1 now has two uplinks (Fibre / LTE, saved above), which is what
-    # makes this the interesting case: the user manages ONE set of settings
-    # and every uplink's profile has to end up carrying them, so what gets
-    # blocked never depends on which line happens to be up.
-    print("  NextDNS on a router with several uplinks:")
-    created = []
-    renamed = []
-    deleted = []
-    # A counter of its own, not len(created): `created` is cleared between the
-    # steps below, and reusing an id would make two different profiles look
-    # like one (which nextdns_all_profile_ids would then correctly collapse,
-    # hiding the very thing being tested).
-    pid_seq = [0]
+    # --- the retired per-uplink profiles get cleaned up ------------------
+    # A router provisioned while mikromon briefly ran one profile per WAN
+    # uplink still carries the extra profile ids. They refer to real profiles
+    # on the NextDNS account, so dropping the field without deleting them
+    # would strand them there with nothing left that knows their ids.
+    print("  leftover per-uplink profiles are deleted, not stranded:")
+    ds_legacy = DevicesStore(wdb)
+    raw_legacy = ds_legacy.raw("WebR1")
+    raw_legacy["nextdns_enabled"] = True
+    raw_legacy["nextdns_profile_id"] = "main-x"
+    raw_legacy["nextdns_wan_profiles"] = {"1": "backup-x", "2": "voip-x"}
+    ds_legacy.upsert(raw_legacy, DEF, org_id=None)
+    ds_legacy.close()
 
-    copied_onto = []
+    cfg_legacy = build_device(raw_legacy, DEF)
+    check("nextdns_all_profile_ids still finds the leftovers, which is the "
+          "only reason the field is kept at all",
+          cfg_legacy.nextdns_all_profile_ids()
+          == ["main-x", "backup-x", "voip-x"])
 
-    def _fake_create_multi(api_key, name):
-        created.append(name)
-        pid_seq[0] += 1
-        return f"profile-{pid_seq[0]}"
+    deleted_legacy = []
 
-    def _fake_get_profile_multi(api_key, pid):
-        return {"security": {"googleSafeBrowsing": True}, "privacy": {},
-                "parentalControl": {}, "denylist": [], "allowlist": []}
+    def _fake_delete_legacy(api_key, profile_id):
+        deleted_legacy.append(profile_id)
 
-    def _fake_update_section_multi(api_key, pid, section, patch):
-        copied_onto.append(pid)
-
-    def _fake_rename(api_key, profile_id, name):
-        renamed.append((profile_id, name))
-
-    def _fake_delete_multi(api_key, profile_id):
-        deleted.append(profile_id)
-
-    orig_create = nextdns_mod.create_profile
-    orig_rename = nextdns_mod.rename_profile
     orig_delete = nextdns_mod.delete_profile
-    orig_get = nextdns_mod.get_profile
-    orig_update = nextdns_mod.update_section
-
-    def _mock_nd():
-        nextdns_mod.create_profile = _fake_create_multi
-        nextdns_mod.rename_profile = _fake_rename
-        nextdns_mod.delete_profile = _fake_delete_multi
-        nextdns_mod.get_profile = _fake_get_profile_multi
-        nextdns_mod.update_section = _fake_update_section_multi
-
-    def _unmock_nd():
-        nextdns_mod.create_profile = orig_create
-        nextdns_mod.rename_profile = orig_rename
-        nextdns_mod.delete_profile = orig_delete
-        nextdns_mod.get_profile = orig_get
-        nextdns_mod.update_section = orig_update
-
-    _mock_nd()
+    nextdns_mod.delete_profile = _fake_delete_legacy
     try:
-        st, loc = post_loc(admin, "/device/nextdns",
-                           {"csrf": csrf, "device": "WebR1", "enable": "1"})
-    finally:
-        _unmock_nd()
-    check("enabling on a two-uplink router creates the main profile AND one "
-          "for the backup uplink", len(created) == 2)
-    check("the backup uplink's new profile has settings copied onto it — "
-          "NextDNS has no server-side clone, so a fresh profile starts blank "
-          "and would otherwise filter nothing while looking set up",
-          "profile-2" in copied_onto)
-    check("the platform template is applied the same way, onto the MAIN "
-          "profile — the old ?clone= route NextDNS rejects is gone from both "
-          "callers, not just the per-uplink one",
-          "profile-1" in copied_onto)
-    check("every managed section is copied, not just one",
-          copied_onto.count("profile-2") >= 3)
-    check("each profile is named after its own uplink, so the NextDNS "
-          "account list is readable",
-          created[0] == "WebR1 - Fibre" and created[1] == "WebR1 - LTE")
-    check("the enable message says what it provisioned",
-          "Per-uplink profiles" in loc and "LTE" in loc)
-    ds_multi = DevicesStore(wdb)
-    raw_multi = ds_multi.raw("WebR1")
-    ds_multi.close()
-    check("the per-uplink profile is persisted against its uplink's index "
-          "(index 0 — the primary — deliberately has none: it uses the main "
-          "profile)",
-          raw_multi.get("nextdns_wan_profiles") == {"1": "profile-2"})
-
-    cfg_multi = build_device(raw_multi, DEF)
-    check("nextdns_all_profile_ids lists the main profile first, then the "
-          "per-uplink ones — the order every settings save fans out in",
-          cfg_multi.nextdns_all_profile_ids() == ["profile-1", "profile-2"])
-    check("an uplink with no profile of its own falls back to the main one, "
-          "so it still filters rather than dropping off NextDNS",
-          cfg_multi.nextdns_profile_for_wan(0) == "profile-1"
-          and cfg_multi.nextdns_profile_for_wan(5) == "profile-1")
-
-    wan_box = web._nextdns_wan_box("WebR1", cfg_multi, csrf)
-    check("the DNS tab shows each uplink against the profile it resolves "
-          "through", "Fibre" in wan_box and "LTE" in wan_box
-          and "profile-2" in wan_box)
-    check("...and offers the one re-sync button that repairs all of it",
-          "/device/nextdns-wan-sync" in wan_box)
-    check("a single-uplink router gets no such box at all — nothing there "
-          "would say anything the NextDNS box above doesn't",
-          web._nextdns_wan_box(
-              "WebR1", build_device({**raw_multi, "wan": {"links": [
-                  {"name": "Fibre", "interface": "ether1"}]}}, DEF),
-              csrf) == "")
-
-    # The whole point: one save has to land on every profile.
-    print("  a settings save is written to every uplink's profile:")
-    section_targets = []
-
-    def _fanout_update(api_key, pid, section, patch):
-        section_targets.append((pid, section))
-
-    orig_update_section = nextdns_mod.update_section
-    nextdns_mod.update_section = _fanout_update
-    try:
-        st, loc = post_loc(admin, "/device/nextdns-security",
-                           {"csrf": csrf, "device": "WebR1",
-                            "f_googleSafeBrowsing": "1"})
-    finally:
-        nextdns_mod.update_section = orig_update_section
-    check("saving Security patches BOTH profiles with the same patch",
-          section_targets == [("profile-1", "security"),
-                              ("profile-2", "security")])
-    check("...and reports plain success, with no warning noise, when they "
-          "all took", "Security settings saved." in loc
-          and "WARNING" not in loc)
-
-    list_targets = []
-
-    def _fanout_add(api_key, pid, list_name, domain):
-        list_targets.append((pid, list_name, domain))
-
-    orig_add_entry = nextdns_mod.add_list_entry
-    nextdns_mod.add_list_entry = _fanout_add
-    try:
-        post_loc(admin, "/device/nextdns-list",
-                 {"csrf": csrf, "device": "WebR1", "list": "denylist",
-                  "action": "add", "domain": "bad.example"})
-    finally:
-        nextdns_mod.add_list_entry = orig_add_entry
-    check("a blocked domain is added to every uplink's profile, so it stays "
-          "blocked across a failover",
-          list_targets == [("profile-1", "denylist", "bad.example"),
-                           ("profile-2", "denylist", "bad.example")])
-
-    # A per-uplink profile failing is NOT the same as the save failing: what
-    # the user asked for is in effect on the primary, and the fix is one
-    # button — so it has to read as a warning, not as an error.
-    def _fanout_partial(api_key, pid, section, patch):
-        if pid != "profile-1":
-            raise nextdns_mod.NextDnsError("simulated: rate limited")
-
-    nextdns_mod.update_section = _fanout_partial
-    try:
-        st, loc = post_loc(admin, "/device/nextdns-security",
-                           {"csrf": csrf, "device": "WebR1"})
-    finally:
-        nextdns_mod.update_section = orig_update_section
-    check("a per-uplink profile that couldn't be kept in step is reported as "
-          "a warning against a save that still succeeded on the main profile",
-          "Security settings saved." in loc and "WARNING" in loc
-          and "Re-sync" in loc)
-
-    # The main profile failing IS a failed save — that message must not be
-    # softened into a warning.
-    def _fanout_main_fails(api_key, pid, section, patch):
-        raise nextdns_mod.NextDnsError("simulated: bad key")
-
-    nextdns_mod.update_section = _fanout_main_fails
-    try:
-        st, loc = post_loc(admin, "/device/nextdns-security",
-                           {"csrf": csrf, "device": "WebR1"})
-    finally:
-        nextdns_mod.update_section = orig_update_section
-    check("the MAIN profile failing is still reported as an outright failure",
-          "Could not save security settings" in loc)
-
-    print("  uplink changes and disabling keep the profiles in step:")
-    created.clear()
-    renamed.clear()
-    deleted.clear()
-    _mock_nd()
-    try:
-        # Adding a third uplink from the WAN tab must provision its profile
-        # then and there — the user should not have to know to go and press
-        # Re-sync afterwards.
-        post_status(admin, "/device/wan",
-                    {"csrf": csrf, "device": "WebR1",
-                     "link_name": ["Fibre", "LTE", "Starlink"],
-                     "link_iface": ["ether1", "lte1", "ether5"],
-                     "link_gw": ["", "", ""]})
-    finally:
-        _unmock_nd()
-    ds3 = DevicesStore(wdb)
-    raw3 = ds3.raw("WebR1")
-    ds3.close()
-    check("adding a third uplink provisions its profile on save, without "
-          "any extra step", len(created) == 1
-          and created[0] == "WebR1 - Starlink"
-          and sorted(raw3.get("nextdns_wan_profiles") or {}) == ["1", "2"])
-    check("the profiles that already existed are renamed rather than "
-          "recreated, so they keep their query history",
-          any(pid == "profile-2" for pid, _n in renamed))
-
-    created.clear()
-    deleted.clear()
-    _mock_nd()
-    try:
-        post_status(admin, "/device/wan",
-                    {"csrf": csrf, "device": "WebR1",
-                     "link_name": ["Fibre"], "link_iface": ["ether1"],
-                     "link_gw": [""]})
-    finally:
-        _unmock_nd()
-    ds4 = DevicesStore(wdb)
-    raw4 = ds4.raw("WebR1")
-    ds4.close()
-    check("removing uplinks deletes their profiles instead of stranding them "
-          "on the NextDNS account", len(deleted) == 2
-          and raw4.get("nextdns_wan_profiles") == {})
-
-    # Put the two uplinks back, then disable: every profile must go, not just
-    # the main one.
-    _mock_nd()
-    try:
-        post_status(admin, "/device/wan",
-                    {"csrf": csrf, "device": "WebR1",
-                     "link_name": ["Fibre", "LTE"],
-                     "link_iface": ["ether1", "lte1"], "link_gw": ["", ""]})
-    finally:
-        _unmock_nd()
-    deleted.clear()
-    nextdns_mod.delete_profile = _fake_delete_multi
-    try:
-        post_loc(admin, "/device/nextdns",
-                 {"csrf": csrf, "device": "WebR1", "enable": "0"})
+        notes = web._nextdns_cleanup_legacy("k", raw_legacy)
     finally:
         nextdns_mod.delete_profile = orig_delete
-    ds5 = DevicesStore(wdb)
-    raw5 = ds5.raw("WebR1")
-    ds5.close()
-    check("disabling deletes EVERY profile the router owns, not only the "
-          "main one (a leftover would keep filtering, and keep counting "
-          "against the account's profile limit)", len(deleted) == 2)
-    check("...and clears the per-uplink record along with the main one",
-          raw5.get("nextdns_wan_profiles") == {}
-          and raw5.get("nextdns_profile_id") == "")
+    check("every leftover profile is deleted from NextDNS",
+          sorted(deleted_legacy) == ["backup-x", "voip-x"])
+    check("...the main profile is NOT — it is the one the router uses",
+          "main-x" not in deleted_legacy)
+    check("...and the field is emptied so it never runs twice",
+          raw_legacy.get("nextdns_wan_profiles") == {})
+    check("what happened is reported back rather than done silently",
+          len(notes) == 2 and all("backup-x" in n or "voip-x" in n
+                                  for n in notes))
 
-    print("  \"Re-sync uplink profiles\" is the one repair path for every way "
-          "a multi-WAN router can end up half-set-up:")
-    # Simulate the state that actually strands people: NextDNS is on, the
-    # router has two uplinks, but the second one has no profile (its creation
-    # failed earlier, or NextDNS was configured before the line was added).
-    ds_pre = DevicesStore(wdb)
-    raw_pre = ds_pre.raw("WebR1")
-    raw_pre["nextdns_enabled"] = True
-    raw_pre["nextdns_profile_id"] = "main-x"
-    raw_pre["nextdns_wan_profiles"] = {}
-    raw_pre["wan"] = {"links": [{"name": "Fibre", "interface": "ether1"},
-                                {"name": "LTE", "interface": "lte1"}]}
-    ds_pre.upsert(raw_pre, DEF, org_id=None)
-    ds_pre.close()
+    def _delete_fails(api_key, profile_id):
+        raise nextdns_mod.NextDnsError("simulated: already gone")
 
-    main_profile = {
-        "security": {"googleSafeBrowsing": True, "cryptojacking": False},
-        "privacy": {"disguisedTrackers": True,
-                    "blocklists": [{"id": "oisd", "active": True}]},
-        "parentalControl": {"safeSearch": True,
-                            "categories": [{"id": "gambling", "active": True}],
-                            "services": []},
-        "denylist": [{"id": "bad.example", "active": True}],
-        "allowlist": [],
-    }
-    # The stale copy: missing the denied domain, carrying one that was
-    # removed from the main profile since.
-    stale_profile = {"security": {}, "privacy": {}, "parentalControl": {},
-                     "denylist": [{"id": "stale.example", "active": True}],
-                     "allowlist": []}
-    sync_sections, sync_adds, sync_removes, sync_created = [], [], [], []
-
-    def _sync_get(api_key, pid):
-        return main_profile if pid == "main-x" else stale_profile
-
-    def _sync_update(api_key, pid, section, patch):
-        sync_sections.append((pid, section, patch))
-
-    def _sync_add(api_key, pid, list_name, domain):
-        sync_adds.append((pid, list_name, domain))
-
-    def _sync_remove(api_key, pid, list_name, domain):
-        sync_removes.append((pid, list_name, domain))
-
-    def _sync_create(api_key, name):
-        sync_created.append(name)
-        return "lte-x"
-
-    saved_api = (nextdns_mod.get_profile, nextdns_mod.update_section,
-                 nextdns_mod.add_list_entry, nextdns_mod.remove_list_entry,
-                 nextdns_mod.create_profile, nextdns_mod.rename_profile)
-    (nextdns_mod.get_profile, nextdns_mod.update_section,
-     nextdns_mod.add_list_entry, nextdns_mod.remove_list_entry,
-     nextdns_mod.create_profile, nextdns_mod.rename_profile) = (
-        _sync_get, _sync_update, _sync_add, _sync_remove, _sync_create,
-        lambda *a, **k: None)
+    raw_legacy["nextdns_wan_profiles"] = {"1": "gone-x"}
+    nextdns_mod.delete_profile = _delete_fails
     try:
-        st, loc = post_loc(admin, "/device/nextdns-wan-sync",
-                           {"csrf": csrf, "device": "WebR1"})
+        notes = web._nextdns_cleanup_legacy("k", raw_legacy)
     finally:
-        (nextdns_mod.get_profile, nextdns_mod.update_section,
-         nextdns_mod.add_list_entry, nextdns_mod.remove_list_entry,
-         nextdns_mod.create_profile, nextdns_mod.rename_profile) = saved_api
-    check("re-syncing creates the missing uplink profile",
-          sync_created == ["WebR1 - LTE"])
-    ds_sync = DevicesStore(wdb)
-    raw_sync = ds_sync.raw("WebR1")
-    ds_sync.close()
-    check("...and records it against its uplink",
-          raw_sync.get("nextdns_wan_profiles") == {"1": "lte-x"})
-    check("...then copies the main profile's settings onto it — every "
-          "section, and only onto the uplink profile (the main one is the "
-          "source, never a target)",
-          {(pid, sec) for pid, sec, _p in sync_sections} ==
-          {("lte-x", "security"), ("lte-x", "privacy"),
-           ("lte-x", "parentalControl")}
-          and any(p.get("blocklists") == [{"id": "oisd", "active": True}]
-                  for _i, _s, p in sync_sections)
-          and any(p.get("googleSafeBrowsing") is True
-                  for _i, _s, p in sync_sections))
-    check("...and converges the blocked/allowed domains in BOTH directions: "
-          "adds what the main profile has, removes what it doesn't",
-          set(sync_adds) == {("lte-x", "denylist", "bad.example")}
-          and set(sync_removes) == {("lte-x", "denylist", "stale.example")})
-    check("the result is reported back to the user",
-          "re-synced" in loc)
+        nextdns_mod.delete_profile = orig_delete
+    check("a profile that cannot be deleted still gets let go of locally, and "
+          "says so — a device that will not release a stale id is worse than "
+          "an orphan on the account",
+          raw_legacy.get("nextdns_wan_profiles") == {}
+          and any("by hand" in n for n in notes))
 
-    st = post_status(nobody, "/device/nextdns-wan-sync",
-                     {"csrf": bcsrf, "device": "WebR1"})
-    check("unallocated member blocked from re-syncing a device they can't "
-          "manage (403)", st == 403)
+    check("a router that never had them is a no-op",
+          web._nextdns_cleanup_legacy("k", {"nextdns_wan_profiles": {}}) == [])
+
+    # Put WebR1 back the way the rest of the suite expects to find it.
+    ds_restore = DevicesStore(wdb)
+    raw_restore = ds_restore.raw("WebR1")
+    raw_restore["nextdns_enabled"] = False
+    raw_restore["nextdns_profile_id"] = ""
+    raw_restore["nextdns_wan_profiles"] = {}
+    ds_restore.upsert(raw_restore, DEF, org_id=None)
+    ds_restore.close()
 
     # --- Provision tab: generate a bootstrap script + save strong creds ---
     st, body = get(admin, "/device?name=WebR1&tab=provision")

@@ -1808,240 +1808,39 @@ def _doh_supported(major, minor):
 # already-created profile id, or clear it.
 # ===========================================================================
 
-# --- multi-WAN: one NextDNS profile per uplink -----------------------------
-# A router with several uplinks gets one profile per uplink (see config.py's
-# nextdns_wan_profiles), all cloned from — and kept on identical settings to —
-# the main one, so the only thing that changes with the live uplink is which
-# profile's query log the traffic lands in. RouterOS's /ip/dns has exactly ONE
-# use-doh-server field (confirmed against MikroTik's own docs — the DNS client
-# only ever gained DoH, and only one server), so the router cannot point at
-# several profiles at once. Instead mikromon installs a small managed script +
-# scheduler that re-points that single field at whichever uplink is actually
-# carrying the default route. Doing the switch ON the router (rather than from
-# a poll here) is what makes failover seamless: it keeps working during exactly
-# the outage that would also stop this server from reaching the router.
+# --- cleanup: the retired per-uplink DoH switcher --------------------------
+# A router briefly got one NextDNS profile per WAN uplink, with a managed
+# script + scheduler that re-pointed use-doh-server at whichever uplink was
+# live. That is gone: one router, one profile, reached over DoH. The removal
+# has to keep working long after the feature did, though — a scheduler left
+# behind on a router would go on rewriting use-doh-server every minute,
+# quietly undoing whatever the DNS tab last set. So every NextDNS push still
+# sweeps for these and takes them off.
 _ND_TAG = "mikromon:nextdns:"
-_ND_SWITCH_NAME = "mikromon-nextdns-wan"
 _SCHEDULER = ("system", "scheduler")
-# Every minute: cheap (a couple of route lookups), and the profiles are
-# identical anyway, so a minute of queries logged against the previous
-# uplink's profile after a failover costs nothing but tidiness.
-_ND_SWITCH_INTERVAL = "00:01:00"
 
 
-def _ros_str(s) -> str:
-    """A name safe to drop inside a RouterOS double-quoted string literal.
-    Strips the two characters that would end it or start a variable
-    expansion — no real interface or gateway name contains either, and
-    dropping them beats emitting a script that fails to parse."""
-    return str(s or "").replace('"', "").replace("$", "")
-
-
-def _ros_rx(s) -> str:
-    """Escape an interface name for embedding in a RouterOS `~` regex match:
-    regex metacharacters, on top of _ros_str's string-literal safety."""
-    return re.sub(r'([.\\\[\]()*+?{}|^$])', r'\\\1', _ros_str(s))
-
-
-def _active_wan_index(pusher, cfg):
-    """Which configured uplink is carrying the default route right now, or
-    None when that cannot be told (no active default route, or an active one
-    matching no configured uplink). Deliberately reuses checks/wan.py's
-    matching helpers rather than re-deriving them — those already carry three
-    fallbacks (gateway IP, interface via gateway-status/immediate-gw, and the
-    managed failover route's own comment) learned from real routers where any
-    one of them alone silently mis-identifies a healthy link."""
-    from ..checks.wan import (_fo_route_idx, _is_active, _is_default,
-                              _matches_endpoint)
-
-    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
-    if not links:
-        return None
-    defaults = [r for r in _safe_fetch(pusher.api, _ROUTE) if _is_default(r)]
-    active = [r for r in defaults if _is_active(r)]
-    if not active:
-        return None
-
-    def _dist(route):
-        try:
-            return int(str(route.get("distance", "1")).strip() or 1)
-        except (TypeError, ValueError):
-            return 1
-
-    dhcp_by_iface = {_norm_iface(c.get("interface", "")): c
-                     for c in _safe_fetch(pusher.api, _DHCP_CLIENT)
-                     if c.get("interface")}
-    current = min(active, key=_dist)
-    idx = next((i for i, ep in enumerate(links)
-                if _matches_endpoint(current, ep, dhcp_by_iface)), None)
-    if idx is None:
-        idx = _fo_route_idx(str(current.get("comment", "")), links)
-    return idx
-
-
-def _nextdns_switch_source(links, doh_for_idx) -> str:
-    """The RouterOS script that keeps use-doh-server on the live uplink's
-    profile. Starts from the primary's (the main) profile and lets each
-    higher-priority uplink override it, checked lowest-priority-first, so the
-    best uplink that is actually up wins — and anything unrecognised falls
-    through to the main profile rather than to no DoH at all. Every lookup is
-    wrapped in :do/on-error so a RouterOS build that does not expose one of
-    the route fields degrades to "stay on the main profile" instead of
-    erroring out with DNS half-configured."""
-    out = [
-        "# mikromon: point DNS-over-HTTPS at the NextDNS profile belonging to",
-        "# the WAN uplink that is currently carrying traffic. Written and kept",
-        "# up to date by mikromon - manual edits here get overwritten.",
-        ':local want "%s"' % doh_for_idx(0),
-    ]
-    for idx in range(len(links) - 1, 0, -1):
-        ep = links[idx]
-        tests = []
-        if getattr(ep, "gateway", ""):
-            tests.append('gateway="%s"' % _ros_str(ep.gateway))
-        if getattr(ep, "interface", ""):
-            # A PPPoE/LTE link's default route names the interface itself as
-            # its gateway; a DHCP link's names an IP and only mentions the
-            # interface in immediate-gw ("<ip>%<iface>").
-            tests.append('gateway="%s"' % _ros_str(ep.interface))
-            tests.append('immediate-gw~"%%%s\\$"' % _ros_rx(ep.interface))
-        # Last resort, and the only one that works for a PPP link whose
-        # gateway is an unpredictable remote address: mikromon's own Gateway
-        # Failover route for this uplink, matched by its comment.
-        tests.append('comment="%s%s"' % (_FAILOVER_TAG, _fo_role(idx)))
-        out.append(":do {")
-        out.append('  :if ([:len [/ip route find where dst-address="0.0.0.0/0"'
-                   ' && active=yes && (%s)]] > 0) do={:set want "%s"}'
-                   % (" || ".join(tests), doh_for_idx(idx)))
-        out.append("} on-error={}")
-    out += [
-        # Only write when it actually differs, so the router's own log is not
-        # filled with a DNS change every single minute.
-        #
-        # Wrapped like every lookup above: this runs unattended once a minute
-        # on customer routers, and a RouterOS build that dislikes any part of
-        # it must fail this one tick quietly rather than half-apply a DNS
-        # change. Leaving DNS exactly as it was is always the safe outcome
-        # here -- the value it would have written is the one already in place.
-        ':do {',
-        '  :if ([/ip dns get use-doh-server] != $want) do={',
-        '    /ip dns set use-doh-server=$want',
-        '    /ip dns cache flush',
-        '  }',
-        '} on-error={}',
-    ]
-    return "\r\n".join(out)
-
-
-def _nextdns_switch_ops(pusher, links, doh_for_idx, wanted: bool) -> list:
-    """Install (or remove) the per-uplink DoH switcher — the managed script
-    plus the scheduler that runs it.
-
-    Reconciled by hand rather than through plan_managed_list because both rows
-    carry fields RouterOS reads back in a different form than it accepts
-    (`policy` reorders, `source`/`on-event` can come back with normalised line
-    endings): re-comparing those every time would leave the DNS tab showing a
-    pending change that never goes away. Instead the desired source's
-    fingerprint is stamped into the comment, and the script is only rewritten
-    when that fingerprint changes."""
-    scripts = _safe_fetch(pusher.api, _SCRIPT)
-    scheds = _safe_fetch(pusher.api, _SCHEDULER)
+def _nextdns_remove_switcher(pusher) -> list:
+    """Remove the retired per-uplink DoH switcher script and its scheduler if
+    this router still has them. Returns [] on a router that never did."""
     ours = _prefix_owner(_ND_TAG)
-    mine_scripts = [r for r in scripts if ours(r)]
-    mine_scheds = [r for r in scheds if ours(r)]
     ops = []
-    if not wanted:
-        for row in mine_scripts:
+    for path, what in ((_SCRIPT, "script"), (_SCHEDULER, "schedule")):
+        for row in _safe_fetch(pusher.api, path):
+            if not ours(row):
+                continue
             ops.append(Operation(
-                "remove", _SCRIPT, {".id": row[".id"]},
-                desc=f"remove NextDNS uplink switcher script "
+                "remove", path, {".id": row[".id"]},
+                desc=f"remove the retired per-uplink DoH switcher {what} "
                      f"'{row.get('name', '')}'",
                 inverse=Operation(
-                    "add", _SCRIPT,
+                    "add", path,
                     {f: v for f, v in row.items() if f != ".id"},
-                    desc="restore NextDNS uplink switcher script")))
-        for row in mine_scheds:
-            ops.append(Operation(
-                "remove", _SCHEDULER, {".id": row[".id"]},
-                desc=f"remove NextDNS uplink switcher schedule "
-                     f"'{row.get('name', '')}'",
-                inverse=Operation(
-                    "add", _SCHEDULER,
-                    {f: v for f, v in row.items() if f != ".id"},
-                    desc="restore NextDNS uplink switcher schedule")))
-        return ops
-
-    source = _nextdns_switch_source(links, doh_for_idx)
-    stamp = hashlib.sha1(source.encode("utf-8")).hexdigest()[:12]
-    comment = f"{_ND_TAG}wan-switch:{stamp}"
-    existing = next((r for r in mine_scripts
-                     if r.get("name") == _ND_SWITCH_NAME), None)
-    for row in mine_scripts:
-        if row is not existing:
-            ops.append(Operation(
-                "remove", _SCRIPT, {".id": row[".id"]},
-                desc=f"remove stale NextDNS switcher script "
-                     f"'{row.get('name', '')}'"))
-    if existing is None:
-        ops.append(Operation(
-            "add", _SCRIPT,
-            {"name": _ND_SWITCH_NAME, "source": source, "comment": comment,
-             # A script created over the API otherwise inherits a restricted
-             # policy and silently cannot touch /ip when the scheduler fires
-             # it — the same trap scripts_plan documents.
-             "policy": _SCRIPT_POLICY, "dont-require-permissions": "yes"},
-            desc="add the NextDNS uplink switcher script",
-            inverse=Operation("remove", _SCRIPT, {},
-                              desc="remove the NextDNS uplink switcher script")))
-    elif str(existing.get("comment", "")) != comment:
-        ops.append(Operation(
-            "set", _SCRIPT,
-            {".id": existing[".id"], "source": source, "comment": comment},
-            desc="update the NextDNS uplink switcher script (uplinks or "
-                 "profiles changed)",
-            inverse=Operation(
-                "set", _SCRIPT,
-                {".id": existing[".id"], "source": existing.get("source", ""),
-                 "comment": existing.get("comment", "")},
-                desc="revert the NextDNS uplink switcher script")))
-
-    sched = next((r for r in mine_scheds
-                  if r.get("name") == _ND_SWITCH_NAME), None)
-    for row in mine_scheds:
-        if row is not sched:
-            ops.append(Operation(
-                "remove", _SCHEDULER, {".id": row[".id"]},
-                desc=f"remove stale NextDNS switcher schedule "
-                     f"'{row.get('name', '')}'"))
-    on_event = f"/system script run {_ND_SWITCH_NAME}"
-    if sched is None:
-        ops.append(Operation(
-            "add", _SCHEDULER,
-            {"name": _ND_SWITCH_NAME, "interval": _ND_SWITCH_INTERVAL,
-             "on-event": on_event, "comment": _ND_TAG + "wan-switch",
-             "policy": _SCRIPT_POLICY},
-            desc=f"run the NextDNS uplink switcher every "
-                 f"{_ND_SWITCH_INTERVAL} so failover re-points DNS on its own",
-            inverse=Operation(
-                "remove", _SCHEDULER, {},
-                desc="remove the NextDNS uplink switcher schedule")))
-    else:
-        changed = {f: v for f, v in
-                   (("interval", _ND_SWITCH_INTERVAL), ("on-event", on_event))
-                   if _norm(sched.get(f, "")) != _norm(v)}
-        if changed:
-            ops.append(Operation(
-                "set", _SCHEDULER, {".id": sched[".id"], **changed},
-                desc="repair the NextDNS uplink switcher schedule",
-                inverse=Operation(
-                    "set", _SCHEDULER,
-                    {".id": sched[".id"],
-                     **{f: sched.get(f, "") for f in changed}},
-                    desc="revert the NextDNS uplink switcher schedule")))
+                    desc=f"restore the per-uplink DoH switcher {what}")))
     return ops
 
 
-def nextdns_cloud_ops(pusher, profile_id: str, wan_profiles=None) -> Plan:
+def nextdns_cloud_ops(pusher, profile_id: str) -> Plan:
     """Point /ip/dns at this router's own NextDNS profile via DNS-over-HTTPS
     (empty profile_id clears it back to plain DNS; DoT/DoQ aren't options —
     confirmed against MikroTik's own docs, RouterOS's DNS client only ever
@@ -2064,32 +1863,14 @@ def nextdns_cloud_ops(pusher, profile_id: str, wan_profiles=None) -> Plan:
     active MITM, a narrow attack that isn't worth re-breaking this the
     next time NextDNS rotates its certificate chain.
 
-    `wan_profiles` (a device's nextdns_wan_profiles: {"1": id, "2": id, ...})
-    turns on the multi-WAN behaviour — see the _ND_TAG block above. The field
-    is pointed at the profile of whichever uplink is live *right now*, and the
-    managed switcher script keeps it there across later failovers on its own.
-    Empty, or a single-uplink router, is exactly the previous behaviour, and
-    additionally cleans up a switcher left behind by a router that used to
-    have several uplinks."""
-    cfg = pusher.cfg
-    links = list(getattr(getattr(cfg, "wan", None), "links", []) or [])
-    wan_profiles = {str(k): str(v) for k, v in (wan_profiles or {}).items()
-                    if str(v or "")}
-
-    def _doh_for(idx):
-        pid = wan_profiles.get(str(idx), "") if idx > 0 else ""
-        return f"https://dns.nextdns.io/{pid or profile_id}"
-
-    # Only meaningful with a backup uplink that actually has its own profile.
-    multi_wan = bool(profile_id and len(links) > 1
-                     and any(k != "0" for k in wan_profiles))
+    One profile per router, whichever uplink happens to be carrying traffic:
+    the DoH URL embeds the profile id, so it is the router that is identified,
+    not the line it went out on."""
     major, minor, _ver = _ros_version(pusher.api)
     if profile_id and not _doh_supported(major, minor):
         return Plan(pusher.cfg.name, [],
                     summary="nextdns (RouterOS needs 7.1+ for DNS-over-HTTPS)")
-    live_idx = _active_wan_index(pusher, cfg) if multi_wan else 0
-    live_doh = _doh_for(live_idx if live_idx is not None else 0)
-    desired = ({"use-doh-server": live_doh,
+    desired = ({"use-doh-server": f"https://dns.nextdns.io/{profile_id}",
                "verify-doh-cert": "no"} if profile_id
               else {"use-doh-server": ""})
     if profile_id:
@@ -2153,19 +1934,12 @@ def nextdns_cloud_ops(pusher, profile_id: str, wan_profiles=None) -> Plan:
         # ...and make sure clients are actually POINTED at the router in the
         # first place, rather than only being dragged back by the redirect.
         force_ops += _nextdns_dhcp_ops(pusher)
-    # Always reconciled, in both directions: turning NextDNS off — or dropping
-    # back to a single uplink — has to take the switcher back off the router
-    # too, otherwise a scheduler nobody owns any more keeps re-writing
-    # use-doh-server every minute and silently undoes the disable.
-    switch_ops = _nextdns_switch_ops(pusher, links, _doh_for, multi_wan)
-    summary = "nextdns"
-    if multi_wan:
-        live_name = (links[live_idx].label(live_idx)
-                     if live_idx is not None and live_idx < len(links)
-                     else "unknown uplink")
-        summary = f"nextdns (per-uplink profiles, live: {live_name})"
-    return Plan(pusher.cfg.name, plan.ops + force_ops + switch_ops,
-                summary=summary)
+    # Swept on every push, in both directions: a switcher left over from the
+    # retired per-uplink scheme would go on rewriting use-doh-server every
+    # minute, silently undoing whatever was just set here.
+    return Plan(pusher.cfg.name,
+                plan.ops + force_ops + _nextdns_remove_switcher(pusher),
+                summary="nextdns")
 
 
 # ===========================================================================

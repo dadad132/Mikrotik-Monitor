@@ -145,32 +145,19 @@ class DeviceConfig:
     # API), never hand-typed.
     nextdns_enabled: bool = False
     nextdns_profile_id: str = ""
-    # Extra NextDNS profiles for a multi-WAN router: one per BACKUP uplink
-    # (wan.links[1:]), keyed by that uplink's index as a string ("1", "2", …).
-    # The primary uplink (index 0) uses nextdns_profile_id above — "the main
-    # one" — and every extra profile is cloned from it and kept on identical
-    # settings, so which uplink is currently carrying traffic never changes
-    # what gets filtered, only which profile's query log the traffic lands
-    # in. Managed entirely by mikromon (web.py's
-    # _nextdns_reconcile_wan_profiles), never hand-typed.
+    # LEGACY, retained only so it can be cleaned up. A router briefly got one
+    # NextDNS profile per WAN uplink, keyed by uplink index; that is gone —
+    # one router, one profile, reached over DoH. The field stays because
+    # devices provisioned during that window still carry the extra profile
+    # ids, and dropping it outright would strand those profiles on the
+    # NextDNS account with nothing left that knows their ids. web.py's
+    # _nextdns_cleanup_legacy deletes them and empties this.
     nextdns_wan_profiles: dict = field(default_factory=dict)
 
-    def nextdns_profile_for_wan(self, idx: int) -> str:
-        """The profile this uplink resolves through. Falls back to the main
-        profile for the primary (index 0) and for any uplink that doesn't
-        have its own profile yet — never returns "" while NextDNS is on, so
-        a not-yet-provisioned uplink still filters instead of silently
-        dropping off NextDNS."""
-        if idx > 0:
-            own = str(self.nextdns_wan_profiles.get(str(idx), "") or "")
-            if own:
-                return own
-        return self.nextdns_profile_id
-
     def nextdns_all_profile_ids(self) -> list:
-        """Every NextDNS profile this device owns, main first — what a
-        settings change has to be written to for all of them to stay
-        identical, and what has to be deleted when NextDNS is turned off."""
+        """Every NextDNS profile this device owns, main first: normally just
+        the one, plus any left over from the retired per-uplink scheme. What
+        has to be deleted when NextDNS is turned off."""
         out = [self.nextdns_profile_id] if self.nextdns_profile_id else []
         for idx in sorted(self.nextdns_wan_profiles,
                           key=lambda k: int(k) if str(k).isdigit() else 0):
