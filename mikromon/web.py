@@ -2608,13 +2608,13 @@ def _nextdns_box(name, cfg, csrf, nextdns_configured: bool) -> str:
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="device" value="{q}">'
             f'<input type="hidden" name="enable" value="0">'
-            f'<button class="btn ghost" type="submit">Disable &amp; delete '
+            f'<button class="btn" type="submit">Disable &amp; delete '
             f'this profile</button></form>'
             f'<form method="POST" action="/device/nextdns-reapply" '
             f'style="margin-top:8px">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="device" value="{q}">'
-            f'<button class="btn ghost" type="submit">Re-apply to this router'
+            f'<button class="btn" type="submit">Re-apply to this router'
             f'</button></form>'
             f'<p class="muted" style="margin-top:4px;font-size:12px">'
             f'Pushes this profile to the router again. Safe to press any '
@@ -2674,7 +2674,7 @@ def _nextdns_list_box(name, csrf, title, list_name, entries: list) -> str:
         f'<input type="hidden" name="action" value="add">'
         f'<div class="actions">'
         f'<input type="text" name="domain" placeholder="example.com" style="flex:1">'
-        f'<button class="btn ghost" type="submit">Add</button></div></form></div>')
+        f'<button class="btn" type="submit">Add</button></div></form></div>')
 
 
 # The security section's fields are stable/well-documented NextDNS API
@@ -2866,7 +2866,7 @@ def _nextdns_privacy_box(name, csrf, privacy: dict) -> str:
         f'<div class="actions">'
         f'<input type="text" name="blocklist" placeholder="Blocklist id, e.g. oisd" '
         f'style="flex:1">'
-        f'<button class="btn ghost" type="submit">Add</button></div>'
+        f'<button class="btn" type="submit">Add</button></div>'
         f'<p class="muted" style="margin-top:6px">Popular ones: {esc(known_hint)}.</p>'
         f'</form>'
         f'<h3 style="font-size:13px;margin:16px 0 6px">Other privacy settings</h3>'
@@ -7206,6 +7206,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             from .config import build_device
             from . import nextdns as nextdns_client
             wan_notes, wan_errors = [], []
+            restore_from = {}
             if enable:
                 if not (raw.get("nextdns_enabled") and raw.get("nextdns_profile_id")):
                     try:
@@ -7250,6 +7251,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 raw["nextdns_enabled"] = False
                 raw["nextdns_profile_id"] = ""
                 raw["nextdns_wan_profiles"] = {}
+                # Read out before it is cleared: the push below needs it to
+                # put the customer's own resolvers back, and the stored copy
+                # has done its job once that lands.
+                restore_from = dict(raw.get("nextdns_dns_snapshot") or {})
+                raw["nextdns_dns_snapshot"] = {}
             store = self._devstore()
             if store is not None:
                 store.upsert(raw, defaults, org_id=None)
@@ -7271,6 +7277,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             cfg = build_device(raw, defaults)
             audit = self._auditlog()
             dev = rw_device(cfg)
+            snapshot_taken = False
             try:
                 if not dev.reachable():
                     msg += " Router unreachable right now — the DNS change " \
@@ -7280,9 +7287,24 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     pusher = Pusher(cfg, api, dry_run=False, audit=audit,
                                     user=(user or {}).get("login", ""))
                     api.connect()
-                    plan = nextdns_cloud_ops(
-                        pusher,
-                        cfg.nextdns_profile_id if cfg.nextdns_enabled else "")
+                    if enable:
+                        # Photograph what they had BEFORE anything is written,
+                        # so disabling can hand it back. Only on the first
+                        # enable: re-enabling an already-enabled router would
+                        # otherwise photograph mikromon's own settings and
+                        # call them the customer's.
+                        from .push.features import nextdns_snapshot
+
+                        if not (raw.get("nextdns_dns_snapshot") or {}):
+                            taken = nextdns_snapshot(api)
+                            if taken:
+                                raw["nextdns_dns_snapshot"] = taken
+                                snapshot_taken = True
+                        plan = nextdns_cloud_ops(pusher, cfg.nextdns_profile_id)
+                    else:
+                        from .push.features import nextdns_restore_ops
+
+                        plan = nextdns_restore_ops(pusher, restore_from)
                     if plan.empty:
                         # Empty can mean "already correct" (fine, no news) or
                         # "RouterOS is too old for DNS-over-HTTPS" (silent
@@ -7303,6 +7325,24 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 dev.close()
                 if audit:
                     audit.close()
+            if snapshot_taken:
+                # Second write, deliberately: the snapshot can only be read
+                # off the router, and it has to be read before the push
+                # overwrites what it is recording.
+                prev = (raw.get("nextdns_dns_snapshot", {})
+                        .get("dns", {}).get("servers", ""))
+                store = self._devstore()
+                if store is not None:
+                    store.upsert(raw, defaults, org_id=None)
+                    store.close()
+                msg += (f" Saved this router's previous DNS settings"
+                        + (f" (servers: {prev})" if prev else "")
+                        + " — disabling NextDNS will put them back.")
+            elif not enable:
+                msg += (" Its previous DNS settings were restored."
+                        if restore_from.get("dns") else
+                        " No saved previous settings for this router, so its "
+                        "DNS-over-HTTPS was simply cleared.")
             return self._redirect(f"/device?name={q}&tab=nextdns&msg=" + quote(msg))
 
         def _nextdns_prereqs(self, flat, user):

@@ -153,6 +153,13 @@ class DeviceConfig:
     # NextDNS account with nothing left that knows their ids. web.py's
     # _nextdns_cleanup_legacy deletes them and empties this.
     nextdns_wan_profiles: dict = field(default_factory=dict)
+    # What this router's DNS looked like BEFORE NextDNS was switched on, so
+    # turning it off puts back what the customer actually had — their own
+    # Google/Cloudflare/ISP resolvers, their own client-forcing rules —
+    # rather than leaving them on whatever mikromon happened to set. Captured
+    # once, at enable, and cleared on disable. See push/features.py's
+    # nextdns_snapshot()/nextdns_restore_ops().
+    nextdns_dns_snapshot: dict = field(default_factory=dict)
 
     def nextdns_all_profile_ids(self) -> list:
         """Every NextDNS profile this device owns, main first: normally just
@@ -358,6 +365,7 @@ def build_device(d: dict, defaults: dict, where: str = "device") -> DeviceConfig
         nextdns_wan_profiles={str(k): str(v) for k, v in
                               (d.get("nextdns_wan_profiles") or {}).items()
                               if str(v or "")},
+        nextdns_dns_snapshot=dict(d.get("nextdns_dns_snapshot") or {}),
     )
 
 
@@ -387,4 +395,5 @@ def device_to_dict(cfg: DeviceConfig) -> dict:
         "nextdns_enabled": cfg.nextdns_enabled,
         "nextdns_profile_id": cfg.nextdns_profile_id,
         "nextdns_wan_profiles": dict(cfg.nextdns_wan_profiles),
+        "nextdns_dns_snapshot": dict(cfg.nextdns_dns_snapshot),
     }

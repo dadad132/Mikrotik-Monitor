@@ -1808,6 +1808,85 @@ def _doh_supported(major, minor):
 # already-created profile id, or clear it.
 # ===========================================================================
 
+# --- what the router's DNS looked like before NextDNS took it over --------
+# Enabling NextDNS rewrites several things a customer may well have set
+# deliberately: their chosen resolvers (Google, Cloudflare, their ISP's),
+# whether the router answers DNS for clients at all, and whether client
+# port-53 traffic is forced through it. Turning NextDNS off used to leave all
+# of that on mikromon's values, which is not "off" in any sense the customer
+# would recognise — they came in on Cloudflare and left on Quad9.
+#
+# So the state is photographed once, at enable, and put back on disable.
+# Snapshot only what this feature actually changes: restoring a field mikromon
+# never touched would be its own kind of damage.
+_SNAPSHOT_DNS_FIELDS = ("servers", "use-doh-server", "verify-doh-cert",
+                        "allow-remote-requests")
+
+
+def nextdns_snapshot(api) -> dict:
+    """Photograph the DNS state NextDNS is about to take over. Read-only.
+
+    Returns {} only if /ip/dns itself cannot be read — an empty-but-present
+    field is recorded as "" and restored as "", which is the difference
+    between "they had nothing set" and "we never looked"."""
+    rows = _safe_fetch(api, _DNS)
+    if not rows:
+        return {}
+    cur = rows[0]
+    snap = {"dns": {f: str(cur.get(f, "") or "") for f in _SNAPSHOT_DNS_FIELDS}}
+    # Whether the client-forcing redirect was already there. Restoring means
+    # removing rules mikromon added, while leaving alone any the customer had
+    # before (they would have had the same tag only if mikromon put them
+    # there, which is exactly what makes this safe to reverse).
+    snap["dnsforce"] = sorted(
+        str(r.get("protocol", "")) for r in _safe_fetch(api, _NAT)
+        if str(r.get("comment", "")).startswith(_DNSFORCE_TAG))
+    # What each DHCP network handed clients as their resolver.
+    snap["dhcp"] = {str(n.get("address", "")): str(n.get("dns-server", "") or "")
+                    for n in _safe_fetch(api, _DHCP_NETWORK)
+                    if n.get("address")}
+    return snap
+
+
+def nextdns_restore_ops(pusher, snapshot: dict) -> Plan:
+    """Put the router's DNS back exactly as nextdns_snapshot() found it.
+
+    Falls back to simply clearing use-doh-server when there is no snapshot —
+    a device that had NextDNS switched on before this existed. That is the
+    old behaviour, and it is the honest one: without a record of what was
+    there, inventing a "default" to restore would be a guess dressed up as a
+    revert."""
+    if not snapshot or not snapshot.get("dns"):
+        return Plan(pusher.cfg.name,
+                    pusher.plan_settings(_DNS, {"use-doh-server": ""},
+                                         label="nextdns").ops,
+                    summary="nextdns off (no saved settings to restore)")
+    ops = list(pusher.plan_settings(
+        _DNS, dict(snapshot["dns"]), label="nextdns restore").ops)
+
+    # The client-forcing redirect: back to however many rules there were.
+    before = list(snapshot.get("dnsforce") or [])
+    desired = [{"chain": "dstnat", "protocol": proto, "dst-port": "53",
+                "action": "redirect", "to-ports": "53",
+                "comment": _DNSFORCE_TAG + proto} for proto in before]
+    ops += pusher.plan_managed_list(
+        _NAT, "comment", desired, owns=_prefix_owner(_DNSFORCE_TAG),
+        label="dns redirect").ops
+
+    # ...and what DHCP handed clients, per network.
+    saved_dhcp = snapshot.get("dhcp") or {}
+    if saved_dhcp:
+        for net in _safe_fetch(pusher.api, _DHCP_NETWORK):
+            cidr = str(net.get("address", "") or "")
+            if cidr not in saved_dhcp:
+                continue  # a network added since the snapshot; not ours to undo
+            was = saved_dhcp[cidr]
+            if _norm(net.get("dns-server", "") or "") != _norm(was):
+                ops.append(_set_field(_DHCP_NETWORK, net, "dns-server", was,
+                                      f"DHCP clients on {cidr}"))
+    return Plan(pusher.cfg.name, ops, summary="nextdns off (settings restored)")
+
+
 # --- cleanup: the retired per-uplink DoH switcher --------------------------
 # A router briefly got one NextDNS profile per WAN uplink, with a managed
 # script + scheduler that re-pointed use-doh-server at whichever uplink was

@@ -283,54 +283,60 @@ _THEME_VARS = """
 """
 
 # ---------------------------------------------------------------------------
-# The persistent left sidebar (_header, below) — same chrome on every
-# authenticated page, not just the dashboard, so navigating between them
-# never swaps the look out from under you. Fixed-position + a body margin
-# (rather than a flex row) because the page content after it isn't
-# consistently a single wrapped element across every page in this app.
+# The persistent top nav bar (_header, below) — same chrome on every
+# authenticated page, not just the dashboard, so navigating between them never
+# swaps the look out from under you. Fixed-position + a body margin (rather
+# than normal flow) because the page content after it isn't consistently a
+# single wrapped element across every page in this app.
+#
+# The markup is still the <aside class="dash-side"> the sidebar build emitted;
+# only the layout differs. Moving the nav is then a pure stylesheet change,
+# which is why the icons, the theme toggle and the account footer all keep
+# working untouched — and why putting the sidebar back later is the same
+# small edit in reverse.
 # ---------------------------------------------------------------------------
+_NAV_H = 54  # keep in step with body.has-sidebar's margin-top below
+
 _SHELL_CSS = """
-.dash-side{position:fixed;top:0;left:0;bottom:0;width:230px;overflow-y:auto;
-  background:var(--surface);border-right:1px solid var(--border);
-  display:flex;flex-direction:column;padding:18px 14px;z-index:50}
+.dash-side{position:fixed;top:0;left:0;right:0;height:%(h)spx;
+  background:var(--surface);border-bottom:1px solid var(--border);
+  display:flex;flex-direction:row;align-items:center;gap:16px;
+  padding:0 18px;z-index:50}
 .dash-logo{display:flex;align-items:center;gap:8px;font-weight:700;
-  font-size:16px;color:var(--text);padding:4px 8px 20px;text-decoration:none}
+  font-size:16px;color:var(--text);text-decoration:none;flex-shrink:0}
 .dash-logo .dot{color:var(--accent);font-size:17px}
-.dash-nav{display:flex;flex-direction:column;gap:2px;flex:1}
-.dash-nav a{display:flex;align-items:center;gap:10px;color:var(--text-muted);
-  padding:9px 10px;border-radius:8px;font-size:14px;font-weight:500;
-  text-decoration:none}
+.dash-nav{display:flex;flex-direction:row;align-items:center;gap:2px;flex:1;
+  min-width:0;overflow-x:auto;-webkit-overflow-scrolling:touch;
+  scrollbar-width:none}
+.dash-nav::-webkit-scrollbar{display:none}
+.dash-nav a{display:flex;align-items:center;gap:8px;color:var(--text-muted);
+  padding:8px 12px;border-radius:8px;font-size:14px;font-weight:500;
+  text-decoration:none;white-space:nowrap;flex-shrink:0}
 .dash-nav a .ic{flex-shrink:0}
 .dash-nav a:hover{background:var(--surface-2);color:var(--text)}
 .dash-nav a.on{background:var(--accent-soft);color:var(--accent)}
-.dash-nav-sep{height:1px;background:var(--border);margin:10px 6px}
-.dash-side-foot{border-top:1px solid var(--border);padding-top:12px;
-  margin-top:12px;display:flex;flex-direction:column;gap:10px}
-.dash-side-foot-row{display:flex;align-items:center;justify-content:space-between;
-  gap:8px}
+/* Vertical rule between nav groups now the bar runs horizontally. */
+.dash-nav-sep{width:1px;height:20px;background:var(--border);margin:0 8px;
+  flex-shrink:0}
+.dash-side-foot{display:flex;flex-direction:row;align-items:center;gap:12px;
+  flex-shrink:0;border-left:1px solid var(--border);padding-left:16px}
+.dash-side-foot-row{display:flex;align-items:center;gap:8px}
 .dash-who{font-size:12px;color:var(--text);line-height:1.3;overflow:hidden;
-  text-overflow:ellipsis;white-space:nowrap}
+  text-overflow:ellipsis;white-space:nowrap;max-width:190px}
 .dash-who small{display:block;color:var(--text-faint);font-size:11px}
 .dash-logout{font-size:12px;color:var(--text-faint);text-decoration:none;
   flex-shrink:0}
 .dash-logout:hover{color:var(--accent)}
-body.has-sidebar{margin-left:230px;min-height:100vh}
+body.has-sidebar{margin-top:%(h)spx;min-height:100vh}
 @media(max-width:820px){
-  .dash-side{position:static;width:100%;height:auto;flex-direction:row;
-    align-items:center;padding:10px 14px;gap:14px;border-right:0;
-    border-bottom:1px solid var(--border)}
-  .dash-logo{padding:0;flex-shrink:0}
-  .dash-nav{flex-direction:row;flex-wrap:nowrap;overflow-x:auto;flex:1;gap:2px;
-    -webkit-overflow-scrolling:touch;scrollbar-width:none}
-  .dash-nav::-webkit-scrollbar{display:none}
-  .dash-nav a{flex-shrink:0;padding:8px 10px;white-space:nowrap}
-  .dash-nav-sep{display:none}
-  .dash-side-foot{border-top:0;margin-top:0;padding-top:0;
-    flex-direction:row;flex-shrink:0}
+  /* Narrow: the account block is the first thing worth losing -- the nav
+     itself has to stay reachable, and it already scrolls horizontally. */
+  .dash-side{gap:10px;padding:0 12px}
+  .dash-side-foot{border-left:0;padding-left:0}
   .dash-side-foot .dash-who{display:none}
-  body.has-sidebar{margin-left:0}
+  .dash-nav a{padding:8px 10px}
 }
-"""
+""" % {"h": _NAV_H}
 
 # Inline SVG icon bodies for the sidebar, keyed by nav href — stroke=
 # "currentColor" so each one follows the link's own text color (inactive/

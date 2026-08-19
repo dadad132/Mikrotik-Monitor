@@ -2633,6 +2633,91 @@ check("clearing an already-set use-doh-server still works even on RouterOS 6.x",
       any(o.params.get("use-doh-server") == "" for o in old_clear.ops))
 
 # ---------------------------------------------------------------------------
+# Turning NextDNS OFF has to give the customer back what they actually had --
+# their own Google/Cloudflare/ISP resolvers -- not leave them on mikromon's.
+# ---------------------------------------------------------------------------
+print("nextdns_snapshot / nextdns_restore_ops (disable really means off):")
+_SNAP_NET = ("ip", "dhcp-server", "network")
+
+# A customer who arrived on Cloudflare, with no client-forcing of their own.
+_WAS = FakeApi({
+    DNS: [{".id": "*1", "servers": "1.1.1.1,1.0.0.1", "use-doh-server": "",
+           "verify-doh-cert": "no", "allow-remote-requests": "true"}],
+    ("ip", "firewall", "nat"): [],
+    _SNAP_NET: [{".id": "*5", "address": "192.168.88.0/24",
+                 "dns-server": "1.1.1.1"}]})
+was = F.nextdns_snapshot(_WAS)
+check("the snapshot records the resolvers they were actually on",
+      was["dns"]["servers"] == "1.1.1.1,1.0.0.1")
+check("...that they had no client-forcing redirect of their own",
+      was["dnsforce"] == [])
+check("...and what DHCP was handing their clients",
+      was["dhcp"] == {"192.168.88.0/24": "1.1.1.1"})
+
+# ...and the state after mikromon took it over.
+_NOW = FakeApi({
+    DNS: [{".id": "*1", "servers": "9.9.9.9,149.112.112.112",
+           "use-doh-server": "https://dns.nextdns.io/abc",
+           "verify-doh-cert": "no", "allow-remote-requests": "true"}],
+    ("ip", "firewall", "nat"): [
+        {".id": "*10", "chain": "dstnat", "protocol": "udp", "dst-port": "53",
+         "action": "redirect", "to-ports": "53",
+         "comment": "mikromon:dnsforce:udp"},
+        {".id": "*11", "chain": "dstnat", "protocol": "tcp", "dst-port": "53",
+         "action": "redirect", "to-ports": "53",
+         "comment": "mikromon:dnsforce:tcp"}],
+    _SNAP_NET: [{".id": "*5", "address": "192.168.88.0/24",
+                 "dns-server": "192.168.88.1"}]})
+restored = F.nextdns_restore_ops(Pusher(nd_cfg, _NOW, dry_run=True), was)
+check("disabling puts their own resolvers back, rather than leaving them on "
+      "whatever mikromon set -- coming in on Cloudflare and leaving on Quad9 "
+      "is not 'off' in any sense the customer would recognise",
+      any(o.params.get("servers") == "1.1.1.1,1.0.0.1" for o in restored.ops))
+check("...clears the DoH server along with it",
+      any(o.params.get("use-doh-server") == "" for o in restored.ops))
+check("...removes the client-forcing rules mikromon added, since they had "
+      "none before",
+      len([o for o in restored.ops if o.action == "remove"
+           and o.path == ("ip", "firewall", "nat")]) == 2)
+check("...and points DHCP back at what it used to hand out",
+      any(o.params.get("dns-server") == "1.1.1.1" for o in restored.ops))
+
+# Someone who ALREADY forced client DNS keeps that after disabling.
+had_forcing = dict(was, dnsforce=["tcp", "udp"])
+kept = F.nextdns_restore_ops(Pusher(nd_cfg, _NOW, dry_run=True), had_forcing)
+check("a customer who was ALREADY forcing client DNS keeps it -- restoring "
+      "means back to THEIR state, not back to bare",
+      not any(o.action == "remove" and o.path == ("ip", "firewall", "nat")
+              for o in kept.ops))
+
+# No snapshot: a device that had NextDNS on before this existed.
+none_saved = F.nextdns_restore_ops(Pusher(nd_cfg, _NOW, dry_run=True), {})
+check("with no saved snapshot it just clears DoH and says so, rather than "
+      "inventing a 'default' to restore and calling that a revert",
+      any(o.params.get("use-doh-server") == "" for o in none_saved.ops)
+      and "no saved settings" in none_saved.summary)
+check("...and touches nothing else, having no idea what else was theirs",
+      all(o.path == ("ip", "dns") for o in none_saved.ops))
+
+# A network added since the snapshot is not ours to rewrite.
+newer = F.nextdns_restore_ops(
+    Pusher(nd_cfg, FakeApi({
+        DNS: _NOW.state[DNS], ("ip", "firewall", "nat"): [],
+        _SNAP_NET: [{".id": "*9", "address": "10.9.9.0/24",
+                     "dns-server": "10.9.9.1"}]}), dry_run=True), was)
+check("a DHCP network created since the snapshot is left alone -- there is "
+      "no record of what it looked like before, so there is nothing to "
+      "restore it to",
+      not any(o.path == _SNAP_NET for o in newer.ops))
+
+check("an unreadable /ip/dns yields no snapshot at all, which is different "
+      "from an empty one -- 'they had nothing set' and 'we never looked' "
+      "must not restore the same way",
+      F.nextdns_snapshot(FakeApi({})) == {})
+
+print()
+
+# ---------------------------------------------------------------------------
 # The retired per-uplink scheme: a router that still carries its switcher must
 # be swept clean. Left alone, that scheduler rewrites use-doh-server every
 # minute and fights whatever the DNS tab last set -- so removal has to keep
