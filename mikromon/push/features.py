@@ -2150,6 +2150,9 @@ def nextdns_cloud_ops(pusher, profile_id: str, wan_profiles=None) -> Plan:
             _NAT, "comment", force_desired,
             owns=_prefix_owner(_DNSFORCE_TAG), label="dns redirect")
         force_ops = force_plan.ops
+        # ...and make sure clients are actually POINTED at the router in the
+        # first place, rather than only being dragged back by the redirect.
+        force_ops += _nextdns_dhcp_ops(pusher)
     # Always reconciled, in both directions: turning NextDNS off — or dropping
     # back to a single uplink — has to take the switcher back off the router
     # too, otherwise a scheduler nobody owns any more keeps re-writing
@@ -2208,6 +2211,67 @@ def _router_resolve(api, hostname: str) -> str:
         if host:
             return host
     return ""
+
+
+_DHCP_NETWORK = ("ip", "dhcp-server", "network")
+
+
+def _is_private_ip(addr: str) -> bool:
+    try:
+        return ipaddress.ip_address(addr).is_private
+    except ValueError:
+        return False
+
+
+def _nextdns_dhcp_ops(pusher) -> list:
+    """Hand the router itself out as the DNS server on every DHCP network.
+
+    Confirmed live on a router where everything else was already right: its
+    only DHCP network had dns-server unset, so clients were told nothing at
+    all and fell back to whatever resolver they happened to carry. The
+    port-53 redirect drags plain DNS back, but it cannot touch a client doing
+    DNS-over-HTTPS on its own — and a client that was never pointed at the
+    router in the first place has no reason not to.
+
+    Deliberately conservative about what it will overwrite:
+      * unset -> set it (the case above, and pure gain)
+      * a PUBLIC resolver (8.8.8.8, the ISP's) -> replace it, since that is
+        exactly the bypass NextDNS is meant to close
+      * another PRIVATE address -> left alone. That is almost always a
+        deliberate internal resolver (an AD domain controller, a Pi-hole),
+        and taking it over would break name resolution for the whole domain
+        to win a filtering argument.
+    """
+    nets = _safe_fetch(pusher.api, _DHCP_NETWORK)
+    addrs = [a for a in _safe_fetch(pusher.api, _IP_ADDRESS)
+             if str(a.get("disabled", "false")).lower() not in ("true", "yes")]
+    ops = []
+    for net in nets:
+        cidr = str(net.get("address", "") or "")
+        try:
+            subnet = ipaddress.ip_network(cidr, strict=False)
+        except ValueError:
+            continue
+        own = ""
+        for a in addrs:
+            try:
+                iface_ip = ipaddress.ip_interface(str(a.get("address", "")))
+            except ValueError:
+                continue
+            if iface_ip.ip in subnet:
+                own = str(iface_ip.ip)
+                break
+        if not own:
+            continue   # no address of ours in this subnet; not ours to touch
+        current = [x.strip() for x in
+                   str(net.get("dns-server", "") or "").split(",") if x.strip()]
+        if current == [own]:
+            continue
+        if current and all(_is_private_ip(x) and x != own for x in current):
+            continue   # someone else's internal resolver — leave it be
+        ops.append(_set_field(_DHCP_NETWORK, net, "dns-server", own,
+                              f"DHCP clients on {cidr}"))
+    return ops
 
 
 # The hostname RouterOS must look up, using the ORDINARY `servers` resolver,

@@ -2917,6 +2917,50 @@ check("RouterOS too old for DoH is reported as the real reason rather than "
       "as a NextDNS fault",
       _levels(old_ros) == ["error"] and "7.1+" in old_ros[0]["msg"])
 
+# Confirmed live: a router with everything else right still handed its clients
+# NO dns-server at all, so nothing ever pointed them at the router to begin
+# with -- the port-53 redirect was the only thing dragging them back, and it
+# cannot touch a client doing DoH on its own.
+print("nextdns DHCP dns-server handout:")
+_DHCP_NET = ("ip", "dhcp-server", "network")
+
+
+def _dhcp_ops(nets, addrs=None):
+    st = {_DHCP_NET: nets,
+          ("ip", "address"): addrs if addrs is not None
+          else [{"address": "10.0.2.1/24", "interface": "br-lan"}]}
+    return F._nextdns_dhcp_ops(Pusher(nd_cfg, FakeApi(st), dry_run=True))
+
+
+unset = _dhcp_ops([{".id": "*1", "address": "10.0.2.0/24"}])
+check("a DHCP network handing out NO dns-server is pointed at the router",
+      len(unset) == 1 and unset[0].params.get("dns-server") == "10.0.2.1")
+check("...reversibly, like every other managed change",
+      unset[0].inverse is not None
+      and unset[0].inverse.params.get("dns-server") == "")
+
+pub = _dhcp_ops([{".id": "*1", "address": "10.0.2.0/24",
+                  "dns-server": "8.8.8.8,8.8.4.4"}])
+check("a PUBLIC resolver handed to clients is replaced — that is precisely "
+      "the bypass NextDNS is meant to close",
+      len(pub) == 1 and pub[0].params.get("dns-server") == "10.0.2.1")
+
+priv = _dhcp_ops([{".id": "*1", "address": "10.0.2.0/24",
+                   "dns-server": "10.0.2.50"}])
+check("but another PRIVATE resolver is left alone — that is almost always a "
+      "deliberate internal DNS server (AD, Pi-hole), and taking it over "
+      "would break name resolution for a whole domain to win a filtering "
+      "argument", priv == [])
+
+check("a network already pointed at the router produces no churn",
+      _dhcp_ops([{".id": "*1", "address": "10.0.2.0/24",
+                  "dns-server": "10.0.2.1"}]) == [])
+check("a subnet the router has no address in is not ours to touch",
+      _dhcp_ops([{".id": "*1", "address": "192.168.99.0/24"}]) == [])
+check("a malformed network address is skipped rather than crashing the push",
+      _dhcp_ops([{".id": "*1", "address": "not-a-subnet"}]) == [])
+
+
 # The single most decisive check available, and it needs nothing blocked:
 # RouterOS must resolve dns.nextdns.io through the ordinary `servers` before it
 # can send even one DoH query, so the cache is a direct record of whether DoH
