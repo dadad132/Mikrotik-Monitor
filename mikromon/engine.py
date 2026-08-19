@@ -231,6 +231,8 @@ class Engine:
         if cfg.check_enabled("reachability"):
             up = device.reachable()
             ctx.sample("up", 1 if up else 0)
+            if device.last_probe_ms is not None:
+                ctx.sample("latency_ms", device.last_probe_ms)
             ctx.transition(
                 "reachability", healthy=up, severity=Severity.CRITICAL,
                 title="Device UNREACHABLE",

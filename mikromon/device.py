@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import socket
+import time
 
 import librouteros
 import librouteros.exceptions
@@ -111,6 +112,9 @@ class Device:
     def __init__(self, cfg):
         self.cfg = cfg
         self.api = None
+        # Milliseconds for the last successful reachability probe; None when
+        # the last one failed or none has run yet.
+        self.last_probe_ms = None
 
     @property
     def name(self) -> str:
@@ -118,14 +122,28 @@ class Device:
 
     # ----- connectivity -----------------------------------------------------
     def reachable(self, timeout: float | None = None) -> bool:
-        """Fast TCP check against the API port. No auth, no root needed."""
+        """Fast TCP check against the API port. No auth, no root needed.
+
+        Also times the handshake into `last_probe_ms`. That round trip is
+        already being paid for on every poll, so measuring it costs nothing —
+        and over the WireGuard tunnel it is a fair proxy for how far away a
+        router feels, which is exactly what a fleet view wants to show. It is
+        the SERVER-to-router path, not the router's own internet latency;
+        those are different numbers and only this one is free."""
         timeout = timeout if timeout is not None else min(self.cfg.timeout, 5)
+        started = time.monotonic()
         try:
             with socket.create_connection(
                 (self.cfg.host, self.cfg.api_port), timeout=timeout
             ):
+                self.last_probe_ms = round((time.monotonic() - started) * 1000, 1)
                 return True
         except OSError:
+            # Deliberately not recorded: a failed connect times how long the
+            # OS took to give up, which says nothing about latency and would
+            # drag a fleet average around by whatever the timeout happens to
+            # be set to.
+            self.last_probe_ms = None
             return False
 
     def connect(self):

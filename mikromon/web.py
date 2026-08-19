@@ -1033,13 +1033,73 @@ def _wan_unhealthy(d) -> bool:
     return (not d["up"]) or any("wan" in k or "internet" in k for k in keys)
 
 
+# Round-trip from THIS SERVER to a router, over the tunnel. Past this it is
+# worth saying out loud: a WireGuard hop inside one country lands well under
+# it, so a router sitting above this is either genuinely far away or its link
+# is struggling, and either way the routers under it are not comparable.
+_LATENCY_WARN_MS = 250
+
+
 def _fleet_summary(devs) -> dict:
     """At-a-glance dashboard counters derived from the live device views."""
     total = len(devs)
     online = sum(1 for d in devs if d["up"])
     alerts = sum(len(d["problems"]) for d in devs)
+    # Averaged over ONLINE routers only. An unreachable one has no latency to
+    # contribute -- folding in a zero would quietly pull the fleet average
+    # down at exactly the moment something is wrong.
+    lat = [d["metrics"]["latency_ms"] for d in devs
+           if d["up"] and d.get("metrics", {}).get("latency_ms") is not None]
+    slow = sorted(d["device"] for d in devs
+                  if d["up"]
+                  and (d.get("metrics", {}).get("latency_ms") or 0)
+                  >= _LATENCY_WARN_MS)
+    down = sorted(d["device"] for d in devs if not d["up"])
     return {"total": total, "online": online, "offline": total - online,
-            "alerts": alerts}
+            "alerts": alerts,
+            "latency_avg": round(sum(lat) / len(lat), 1) if lat else None,
+            "latency_worst": round(max(lat), 1) if lat else None,
+            "slow": slow, "down": down}
+
+
+def _fleet_status_strip(summary) -> str:
+    """The line across the top of the dashboard: how far away the fleet feels,
+    and whether anything is at risk right now.
+
+    Deliberately says something in the healthy case too. A strip that only
+    appears when there is bad news is a strip nobody learns to read, and its
+    silence is ambiguous -- "all clear" and "not measuring" look identical."""
+    avg = summary.get("latency_avg")
+    if avg is None:
+        lat = ('<span class="fs-lat fs-muted">latency: no readings yet</span>')
+    else:
+        worst = summary.get("latency_worst")
+        cls = "warn" if avg >= _LATENCY_WARN_MS else ""
+        lat = (f'<span class="fs-lat {cls}" title="Average round trip from '
+               f'this server to each online router, over the tunnel. '
+               f'Slowest right now: {worst:g} ms.">'
+               f'<b>{avg:g} ms</b> avg latency</span>')
+
+    risks = []
+    if summary.get("down"):
+        names = summary["down"]
+        risks.append(("crit", f"{len(names)} offline: "
+                      + ", ".join(esc(n) for n in names[:3])
+                      + ("…" if len(names) > 3 else "")))
+    if summary.get("slow"):
+        names = summary["slow"]
+        risks.append(("warn", f"{len(names)} slow (&ge;{_LATENCY_WARN_MS} ms): "
+                      + ", ".join(esc(n) for n in names[:3])
+                      + ("…" if len(names) > 3 else "")))
+    if risks:
+        level = "crit" if any(r[0] == "crit" for r in risks) else "warn"
+        body = " &middot; ".join(t for _l, t in risks)
+        risk = (f'<span class="fs-risk {level}">'
+                f'<span class="fs-dot"></span>{body}</span>')
+    else:
+        risk = ('<span class="fs-risk ok"><span class="fs-dot"></span>'
+                'No units at risk</span>')
+    return f'<div class="fleet-strip">{lat}{risk}</div>'
 
 
 def _stat_chip(num, lbl, cls="") -> str:
@@ -1143,7 +1203,25 @@ a{color:var(--accent);text-decoration:none}
 .dash-main{padding:22px 28px 40px}
 .dash-topbar{display:flex;align-items:center;justify-content:space-between;
   gap:16px;margin-bottom:18px;flex-wrap:wrap}
-.dash-topbar h1{font-size:21px;margin:0;color:var(--text)}
+.dash-topbar h1{font-size:21px;margin:0;color:var(--text);flex-shrink:0}
+/* The fleet strip fills the gap between the title and the search box. It is
+   allowed to shrink and hide its overflow rather than push the search off the
+   row -- on a narrow window the search box is the more useful of the two. */
+.fleet-strip{display:flex;align-items:center;gap:16px;flex:1;min-width:0;
+  overflow:hidden;font-size:13px;color:var(--text-muted);white-space:nowrap}
+.fleet-strip b{color:var(--text);font-weight:600}
+.fs-lat.warn b{color:var(--warn,#b45309)}
+.fs-lat.fs-muted{color:var(--text-faint)}
+.fs-risk{display:inline-flex;align-items:center;gap:7px;overflow:hidden;
+  text-overflow:ellipsis}
+.fs-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;
+  background:var(--text-faint)}
+.fs-risk.ok .fs-dot{background:#16a34a}
+.fs-risk.warn{color:#b45309}
+.fs-risk.warn .fs-dot{background:#d97706}
+.fs-risk.crit{color:#dc2626}
+.fs-risk.crit .fs-dot{background:#dc2626}
+@media(max-width:900px){.fleet-strip{display:none}}
 .dash-top-right{display:flex;align-items:center;gap:10px}
 .dash-search{font:inherit;padding:8px 12px;border:1px solid var(--border);
   border-radius:9px;background:var(--surface);color:var(--text);width:220px}
@@ -1254,6 +1332,7 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
                         "info" if summary["alerts"] else "")
             + _stat_chip(summary["offline"], "Offline",
                         "red" if summary["offline"] else ""))
+    strip = _fleet_status_strip(summary) if devs else ""
     charts = _render_noc_charts(devs) if devs else ""
     rows = _dash_device_rows(devs)
     empty_msg = ("No devices to show." if not devs
@@ -1288,6 +1367,7 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
 {_header(user, "/dashboard")}
 <div class="dash-main">
 <div class="dash-topbar"><h1>Dashboard</h1>
+{strip}
 <div class="dash-top-right">
 <input id="q" class="dash-search" placeholder="Search devices…">
 </div></div>

@@ -1607,6 +1607,57 @@ try:
     st = post_status(nobody, "/device/wan",
                      {"csrf": bcsrf, "device": "WebR1", "link_iface": ["x"]})
     check("unallocated member blocked from editing WAN (403)", st == 403)
+    print("  dashboard fleet strip (latency + what is at risk):")
+
+    def _fdev(name, up, lat):
+        return {"device": name, "up": up, "throughput": {}, "facts": {},
+                "problems": [],
+                "metrics": {"latency_ms": lat} if lat is not None else {}}
+
+    healthy = web._fleet_summary([_fdev("R1", 1, 12.4), _fdev("R2", 1, 31.0),
+                                  _fdev("R3", 1, 8.2)])
+    check("the fleet average is the mean round trip across online routers",
+          healthy["latency_avg"] == 17.2 and healthy["latency_worst"] == 31.0)
+    check("a healthy fleet still says so — a strip that only appears with bad "
+          "news is one nobody learns to read, and its silence cannot be told "
+          "apart from not measuring",
+          "No units at risk" in web._fleet_status_strip(healthy))
+
+    # The important one: an unreachable router has no latency to contribute.
+    with_down = web._fleet_summary([_fdev("R1", 1, 12.4),
+                                    _fdev("Howler", 0, None)])
+    check("an OFFLINE router does not drag the average down — counting it as "
+          "zero would make the fleet look faster at exactly the moment "
+          "something is wrong", with_down["latency_avg"] == 12.4)
+    check("...and it is named as at risk instead",
+          with_down["down"] == ["Howler"]
+          and "1 offline: Howler" in web._fleet_status_strip(with_down))
+
+    slow = web._fleet_summary([_fdev("R1", 1, 20.0), _fdev("Vryheid", 1, 410.0)])
+    check("a router past the latency threshold is called out by name",
+          slow["slow"] == ["Vryheid"]
+          and "Vryheid" in web._fleet_status_strip(slow))
+    check("...while routers under it are not",
+          "R1" not in web._fleet_status_strip(slow))
+
+    both = web._fleet_summary([_fdev("Howler", 0, None),
+                               _fdev("Vryheid", 1, 410.0), _fdev("R1", 1, 20.0)])
+    strip_both = web._fleet_status_strip(both)
+    check("offline and slow are reported together, at the more serious of the "
+          "two severities",
+          "1 offline" in strip_both and "1 slow" in strip_both
+          and 'fs-risk crit' in strip_both)
+
+    none_yet = web._fleet_summary([_fdev("R1", 1, None)])
+    check("a fleet with no readings yet says exactly that, rather than "
+          "showing a confident 0 ms",
+          none_yet["latency_avg"] is None
+          and "no readings yet" in web._fleet_status_strip(none_yet))
+
+    check("a device name is escaped where it goes into the strip",
+          "&lt;b&gt;" in web._fleet_status_strip(
+              web._fleet_summary([_fdev("<b>x", 0, None)])))
+
     # --- the retired per-uplink profiles get cleaned up ------------------
     # A router provisioned while mikromon briefly ran one profile per WAN
     # uplink still carries the extra profile ids. They refer to real profiles
