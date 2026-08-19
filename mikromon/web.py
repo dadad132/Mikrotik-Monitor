@@ -477,9 +477,10 @@ def _build_nextdns_diagnostics_lines(auth, devices_db, defaults) -> list:
                               if str(r.get("comment", "")).startswith(_DNSFORCE_TAG)]
                     dhcp_nets = api.fetch(("ip", "dhcp-server", "network"))
                     try:
-                        cache_n = len(api.fetch(("ip", "dns", "cache")))
+                        from .push.features import nextdns_doh_evidence
+                        doh_seen, cache_n = nextdns_doh_evidence(api)
                     except (DeviceError, PushError):
-                        cache_n = None
+                        doh_seen, cache_n = False, None
                 except (DeviceError, PushError) as exc:
                     lines.append(f"  could not connect: {exc}")
                     lines.append("")
@@ -608,6 +609,27 @@ def _build_nextdns_diagnostics_lines(auth, devices_db, defaults) -> list:
                                 "— EMPTY. Nothing has resolved through this "
                                 "router at all: either no client is asking "
                                 "it, or DoH itself is failing."))
+                # The single most decisive line in this whole report.
+                if doh_seen:
+                    lines.append("  has the router looked up dns.nextdns.io? "
+                                 "YES — it only ever does that in order to "
+                                 "send a DNS-over-HTTPS query, so it is "
+                                 "genuinely talking to NextDNS.")
+                elif cache_n > 20:
+                    lines.append(
+                        f"  has the router looked up dns.nextdns.io? NO, and "
+                        f"the cache holds {cache_n} other names. RouterOS "
+                        f"must resolve that hostname through the ordinary "
+                        f"`servers` before it can send a single DoH query, so "
+                        f"this proves DoH is NOT being used despite "
+                        f"use-doh-server being set — all {cache_n} answers "
+                        f"came from the bootstrap resolver "
+                        f"({str(row.get('servers', '')) or 'unset'}) instead. "
+                        f"This is a router-side fault, not a client one.")
+                else:
+                    lines.append("  has the router looked up dns.nextdns.io? "
+                                 "no, but the cache is too small to conclude "
+                                 "anything from that yet.")
             lines.append("  NOTE: my.nextdns.io's \"this device is not using "
                          "NextDNS\" banner tests the MACHINE RUNNING THE "
                          "BROWSER, not this router. A PC with Secure DNS on "

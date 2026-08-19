@@ -2210,6 +2210,28 @@ def _router_resolve(api, hostname: str) -> str:
     return ""
 
 
+# The hostname RouterOS must look up, using the ORDINARY `servers` resolver,
+# before it can send a single DNS-over-HTTPS query — confirmed in MikroTik's
+# own documentation: "DoH server FQDN will be resolved by regular DNS
+# resolver." That lookup lands in the router's own DNS cache like any other,
+# which makes the cache a direct record of whether DoH has ever actually been
+# attempted. A cache full of names WITHOUT this one means the router resolved
+# all of them some other way: it cannot have been using DoH, whatever
+# use-doh-server says.
+_ND_DOH_HOST = "dns.nextdns.io"
+
+
+def nextdns_doh_evidence(api) -> tuple:
+    """(has_evidence, cache_entries) — whether the router's DNS cache shows it
+    has actually contacted NextDNS, and how big the cache is.
+
+    Read-only and instant: no lookups, no config changes, nothing that could
+    disturb a router being diagnosed."""
+    rows = _safe_fetch(api, ("ip", "dns", "cache"))
+    seen = any(_ND_DOH_HOST in str(r.get("name", "")).lower() for r in rows)
+    return seen, len(rows)
+
+
 def nextdns_router_test(api, denied=(), settle_tries: int = 1,
                         sleep_fn=None) -> list:
     """Prove, from the router, whether it is resolving through its NextDNS
@@ -2255,7 +2277,36 @@ def nextdns_router_test(api, denied=(), settle_tries: int = 1,
                              "exactly what NextDNS reports as \"this device "
                              "is not using NextDNS\"."})
 
-    # Start from cold so nothing below is answered out of the router's cache.
+    # Cheap and decisive, and it does not depend on anything being blocked.
+    has_doh, cache_n = nextdns_doh_evidence(api)
+    if has_doh:
+        steps.append({
+            "level": "ok",
+            "msg": f"The router has looked up {_ND_DOH_HOST} — which it only "
+                   f"ever does in order to send a DNS-over-HTTPS query. It is "
+                   f"genuinely talking to NextDNS, not just configured to."})
+    elif cache_n > 20:
+        steps.append({
+            "level": "error",
+            "msg": f"The router's DNS cache holds {cache_n} names but NOT "
+                   f"{_ND_DOH_HOST}. RouterOS has to resolve that hostname "
+                   f"through the ordinary `servers` before it can send a "
+                   f"single DNS-over-HTTPS query, so a cache this full "
+                   f"without it means DoH has never been used at all — every "
+                   f"one of those {cache_n} answers came from the bootstrap "
+                   f"resolver instead. use-doh-server is set but RouterOS is "
+                   f"not honouring it."})
+    else:
+        steps.append({
+            "level": "warn",
+            "msg": f"The router's DNS cache holds only {cache_n} names and "
+                   f"none of them is {_ND_DOH_HOST}, which is too little to "
+                   f"conclude anything either way yet — it may simply not "
+                   f"have resolved anything since the last cache flush."})
+
+    # Only NOW flush: the check above reads the cache as a record of what
+    # this router has been doing, so flushing first would destroy the very
+    # evidence it depends on. Everything BELOW needs a cold cache instead.
     try:
         api.device.api.path("ip", "dns", "cache")("flush")
         steps.append({"level": "ok",
@@ -2281,6 +2332,7 @@ def nextdns_router_test(api, denied=(), settle_tries: int = 1,
     steps.append({"level": "ok",
                   "msg": f"The router resolved {_ND_TEST_CONTROL} to "
                          f"{control} — its own resolver is working."})
+
 
     domains = [d for d in list(denied)[:_ND_TEST_MAX_DOMAINS] if d]
     if not domains:

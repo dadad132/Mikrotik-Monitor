@@ -2917,6 +2917,50 @@ check("RouterOS too old for DoH is reported as the real reason rather than "
       "as a NextDNS fault",
       _levels(old_ros) == ["error"] and "7.1+" in old_ros[0]["msg"])
 
+# The single most decisive check available, and it needs nothing blocked:
+# RouterOS must resolve dns.nextdns.io through the ordinary `servers` before it
+# can send even one DoH query, so the cache is a direct record of whether DoH
+# has ever been attempted.
+_ND_BUSY_CACHE = [{"name": f"h{i}.example"} for i in range(692)]
+
+busy_no_doh = F.nextdns_router_test(
+    _NdTestApi({**_ND_OK_STATE, ("ip", "dns", "cache"): _ND_BUSY_CACHE},
+               _resolver({})), [])
+check("a big cache WITHOUT dns.nextdns.io proves DoH is not being used, "
+      "however correct use-doh-server looks — the router cannot have reached "
+      "NextDNS without first resolving its hostname",
+      any(x["level"] == "error" and "but NOT dns.nextdns.io" in x["msg"]
+          for x in busy_no_doh))
+
+busy_with_doh = F.nextdns_router_test(
+    _NdTestApi({**_ND_OK_STATE,
+                ("ip", "dns", "cache"): _ND_BUSY_CACHE
+                + [{"name": "dns.nextdns.io"}]},
+               _resolver({})), [])
+check("...and the same cache WITH it is positive proof the router really is "
+      "talking to NextDNS, not merely configured to",
+      any(x["level"] == "ok" and "genuinely talking to NextDNS" in x["msg"]
+          for x in busy_with_doh))
+
+check("a nearly-empty cache concludes nothing either way rather than "
+      "accusing a router that simply has not resolved anything yet",
+      any(x["level"] == "warn" and "too little to conclude" in x["msg"]
+          for x in F.nextdns_router_test(
+              _NdTestApi({**_ND_OK_STATE,
+                          ("ip", "dns", "cache"): [{"name": "a.example"}]},
+                         _resolver({})), [])))
+
+# Ordering matters more than it looks: the test flushes the cache so its own
+# lookups are live, and flushing first would destroy the evidence above.
+_ordered = F.nextdns_router_test(
+    _NdTestApi({**_ND_OK_STATE, ("ip", "dns", "cache"): _ND_BUSY_CACHE},
+               _resolver({})), [])
+_msgs = [x["msg"] for x in _ordered]
+check("the cache is read BEFORE it is flushed — reversed, the flush would "
+      "wipe the very history this check reads",
+      next(i for i, m in enumerate(_msgs) if "dns.nextdns.io" in m)
+      < next(i for i, m in enumerate(_msgs) if "Flushed" in m))
+
 # The caller can add a probe domain to the denylist and test immediately, so
 # a first lookup can legitimately race NextDNS applying the block. Retrying
 # only the NEGATIVE result keeps that from being reported as a failure,
