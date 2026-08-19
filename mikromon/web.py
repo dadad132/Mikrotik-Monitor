@@ -7009,36 +7009,55 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             from . import nextdns as nextdns_client
 
             def merge(curated, live_key, prefix, add_field):
-                # Checkboxes only submit what's CHECKED — the id universe to
-                # consider is curated ids (shown whether or not the profile
-                # has them yet) UNION whatever the live profile already has
-                # (so a manually-added id — via the field below, or from
-                # NextDNS's own site — never silently drops out) UNION a
-                # freshly-typed id from the "add another" field.
+                # Curated ids are best-effort guesses (NextDNS doesn't
+                # publish a fixed catalog) — confirmed live: an invalid one
+                # gets the WHOLE patch rejected by NextDNS's API (a single
+                # opaque "invalid" error, no indication which id). Only
+                # ever send a curated id when it's actually been CHECKED —
+                # never the full curated list regardless of state — so a
+                # bad id blocks just that one explicit action instead of
+                # silently blocking every future save forever (which is
+                # exactly what including all of them unconditionally did).
+                # Whatever the live profile already has is safe to always
+                # include (NextDNS gave us those ids itself), so those
+                # never silently drop out.
                 live = pc.get(live_key) or []
-                ids = {c["id"] for c in live if c.get("id")}
-                ids |= {iid for iid, _label in curated}
+                live_ids = {c["id"] for c in live if c.get("id")}
+                curated_ids = {iid for iid, _label in curated}
+                checked = {iid for iid in (live_ids | curated_ids)
+                          if f"{prefix}_{iid}" in flat}
                 new_id = (flat.get(add_field) or "").strip().lower()
-                if new_id:
-                    ids.add(new_id)
-                return [{"id": iid, "active": f"{prefix}_{iid}" in flat
-                        or iid == new_id} for iid in sorted(ids)]
+                ids = live_ids | checked | ({new_id} if new_id else set())
+                return [{"id": iid, "active": iid in checked or iid == new_id}
+                       for iid in sorted(ids)]
 
             try:
                 profile = nextdns_client.get_profile(api_key, pid)
                 pc = profile.get("parentalControl") or {}
-                patch = {
-                    "categories": merge(_NEXTDNS_CATEGORIES, "categories",
-                                        "cat", "add_category"),
-                    "services": merge(_NEXTDNS_SERVICES, "services",
-                                      "svc", "add_service"),
-                }
-                patch.update({key: (f"b_{key}" in flat)
-                              for key, _l, _h in _NEXTDNS_PARENTAL_BOOLS})
-                nextdns_client.update_section(api_key, pid, "parentalControl", patch)
-                msg = "Parental control settings saved."
             except nextdns_client.NextDnsError as exc:
-                msg = f"Could not save parental control settings: {exc}"
+                msg = f"Could not read current parental control settings: {exc}"
+                return self._redirect(
+                    f"/device?name={quote(name)}&tab=nextdns&msg=" + quote(msg))
+            # Three independent PATCH calls, not one combined one — a bad
+            # id rejected in categories must not also block services or the
+            # plain boolean toggles from saving (confirmed live: it did,
+            # every single time, as long as a bad id stayed on the form).
+            results = []
+            for label, section_patch in (
+                ("booleans", {key: (f"b_{key}" in flat)
+                             for key, _l, _h in _NEXTDNS_PARENTAL_BOOLS}),
+                ("categories", {"categories": merge(
+                    _NEXTDNS_CATEGORIES, "categories", "cat", "add_category")}),
+                ("services", {"services": merge(
+                    _NEXTDNS_SERVICES, "services", "svc", "add_service")}),
+            ):
+                try:
+                    nextdns_client.update_section(
+                        api_key, pid, "parentalControl", section_patch)
+                    results.append(f"{label}: saved")
+                except nextdns_client.NextDnsError as exc:
+                    results.append(f"{label}: FAILED ({exc})")
+            msg = "Parental control — " + "; ".join(results)
             return self._redirect(
                 f"/device?name={quote(name)}&tab=nextdns&msg=" + quote(msg))
 

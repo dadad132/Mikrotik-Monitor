@@ -1333,6 +1333,71 @@ try:
           "allow-remote-requests (must be true/yes for LAN clients, not "
           "just the router itself, to use this): false" in reachable_report)
 
+    print("  parental control save: a bad curated id must not silently "
+          "block every future save forever:")
+    section_calls = []
+
+    def _fake_get_profile(api_key, pid):
+        return {"parentalControl": {"categories": [], "services": []}}
+
+    def _fake_update_section(api_key, pid, section, patch):
+        section_calls.append(patch)
+        # Simulate NextDNS rejecting the WHOLE categories array over one
+        # bad id in it — confirmed live behavior: a single opaque 400
+        # "invalid" with no indication of which entry caused it.
+        if "categories" in patch and any(
+                c["id"] == "gambling" and c["active"] for c in patch["categories"]):
+            raise nextdns_mod.NextDnsError(
+                'simulated: PATCH /parentalControl failed: HTTP 400 — '
+                '{"errors":[{"code":"invalid"}]}')
+
+    orig_get_profile = nextdns_mod.get_profile
+    orig_update_section = nextdns_mod.update_section
+    nextdns_mod.get_profile = _fake_get_profile
+    nextdns_mod.update_section = _fake_update_section
+    try:
+        # Bug as reported: checking the (simulated-bad) "gambling" category
+        # must fail ONLY that save, not the booleans/services alongside it.
+        section_calls.clear()
+        st, loc = post_loc(admin, "/device/nextdns-parental",
+                           {"csrf": csrf, "device": "WebR1",
+                            "cat_gambling": "1", "b_safeSearch": "1"})
+        check("a rejected category patch is reported, but doesn't stop the "
+              "booleans and services patches from being attempted and "
+              "succeeding (three independent PATCH calls, not one "
+              "all-or-nothing one)",
+              "categories: FAILED" in loc and "booleans: saved" in loc
+              and "services: saved" in loc)
+
+        # The actual regression: an UNCHECKED curated category must never be
+        # submitted at all — confirmed live, including every curated id
+        # unconditionally on every save meant one bad id (whatever it was)
+        # permanently blocked ALL future saves, even ones that never
+        # touched it.
+        section_calls.clear()
+        st, loc = post_loc(admin, "/device/nextdns-parental",
+                           {"csrf": csrf, "device": "WebR1",
+                            "b_safeSearch": "1"})
+        cat_patch = next(p for p in section_calls if "categories" in p)
+        check("a save that never checks the bad curated category doesn't "
+              "include it at all, and succeeds",
+              cat_patch["categories"] == [] and "categories: saved" in loc
+              and "FAILED" not in loc)
+
+        # Checking a DIFFERENT (good) category sends only that one id, not
+        # the entire curated catalog.
+        section_calls.clear()
+        st, loc = post_loc(admin, "/device/nextdns-parental",
+                           {"csrf": csrf, "device": "WebR1",
+                            "cat_piracy": "1"})
+        cat_patch = next(p for p in section_calls if "categories" in p)
+        check("checking one category sends only that one id, not the "
+              "whole curated list",
+              cat_patch["categories"] == [{"id": "piracy", "active": True}])
+    finally:
+        nextdns_mod.get_profile = orig_get_profile
+        nextdns_mod.update_section = orig_update_section
+
     # Re-enabling (already enabled) must NOT create a second profile.
     orig_create = nextdns_mod.create_profile
     nextdns_mod.create_profile = _fake_create
