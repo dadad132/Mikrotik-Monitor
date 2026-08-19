@@ -404,8 +404,8 @@ def _build_nextdns_diagnostics_lines(auth, devices_db, defaults) -> list:
     from .device import DeviceError
     from .push import PushError, rw_device
     from .push.api import PushApi
-    from .push.features import (_ND_SWITCH_NAME, _ND_TAG, _doh_supported,
-                                _ros_version)
+    from .push.features import (_DNSFORCE_TAG, _ND_SWITCH_NAME, _ND_TAG,
+                                _doh_supported, _ros_version)
 
     lines = ["", "=" * 70, "NextDNS: per-router live state", "=" * 70, ""]
     nextdns_cfg = auth.get_nextdns() if auth else {}
@@ -468,6 +468,18 @@ def _build_nextdns_diagnostics_lines(auth, devices_db, defaults) -> list:
                                 if str(r.get("comment", "")).startswith(_ND_TAG)]
                     switch_sched = [r for r in api.fetch(("system", "scheduler"))
                                     if str(r.get("comment", "")).startswith(_ND_TAG)]
+                    # Everything above only proves the ROUTER resolves through
+                    # NextDNS. Whether its CLIENTS do is decided by these three,
+                    # and none of them were in this report before — which is
+                    # why "NextDNS says this device is not using NextDNS" kept
+                    # coming back with no way to tell what to look at.
+                    forced = [r for r in api.fetch(("ip", "firewall", "nat"))
+                              if str(r.get("comment", "")).startswith(_DNSFORCE_TAG)]
+                    dhcp_nets = api.fetch(("ip", "dhcp-server", "network"))
+                    try:
+                        cache_n = len(api.fetch(("ip", "dns", "cache")))
+                    except (DeviceError, PushError):
+                        cache_n = None
                 except (DeviceError, PushError) as exc:
                     lines.append(f"  could not connect: {exc}")
                     lines.append("")
@@ -542,6 +554,67 @@ def _build_nextdns_diagnostics_lines(auth, devices_db, defaults) -> list:
             lines.append(f"  allow-remote-requests (must be true/yes for LAN "
                          f"clients, not just the router itself, to use this): "
                          f"{remote}")
+
+            # ---- do this router's CLIENTS actually reach NextDNS? ---------
+            lines.append("  --- client side (the router itself can be perfect "
+                         "and clients still bypass it) ---")
+            enabled_forced = [r for r in forced
+                              if str(r.get("disabled", "false")).lower()
+                              not in ("true", "yes")]
+            protos = sorted(str(r.get("protocol", "?")) for r in enabled_forced)
+            if not forced:
+                lines.append("  force-client-DNS NAT redirect: MISSING — any "
+                             "client with its own resolver (handed out by "
+                             "DHCP, or set by hand) talks straight past this "
+                             "router and never touches NextDNS. Re-enable "
+                             "NextDNS on the DNS tab to put the rules back.")
+            elif not enabled_forced:
+                lines.append(f"  force-client-DNS NAT redirect: present but "
+                             f"DISABLED ({len(forced)} rule(s)) — same effect "
+                             f"as missing. Enable them on the router, or "
+                             f"re-enable NextDNS on the DNS tab.")
+            else:
+                lines.append(f"  force-client-DNS NAT redirect: present and "
+                             f"enabled ({', '.join(protos)} port 53)")
+            # A DHCP-served resolver that is not the router means every client
+            # ASKS somewhere else first; the redirect above is then the only
+            # thing dragging it back, and nothing at all catches DoH/DoT.
+            served = []
+            for net in dhcp_nets:
+                addr = str(net.get("address", "?"))
+                dns_srv = str(net.get("dns-server", "") or "").strip()
+                served.append(f"{addr} -> {dns_srv or '(none set)'}")
+            if served:
+                lines.append("  DHCP hands clients these DNS servers:")
+                for entry in served:
+                    lines.append(f"      {entry}")
+                offsite = [e for e in served
+                           if e.split("-> ")[-1] not in ("(none set)",)
+                           and not e.split("-> ")[-1].startswith(("10.", "192.168.",
+                                                                  "172."))]
+                if offsite:
+                    lines.append("      ^ at least one points at a PUBLIC "
+                                 "resolver, not this router. Clients obey it "
+                                 "unless the NAT redirect above catches them, "
+                                 "and nothing catches a client using "
+                                 "DNS-over-HTTPS/TLS on its own.")
+            else:
+                lines.append("  DHCP server networks: none configured on this "
+                             "router (clients get their DNS some other way).")
+            if cache_n is not None:
+                lines.append(f"  router's own DNS cache: {cache_n} entries "
+                             + ("— the resolver is answering queries."
+                                if cache_n > 0 else
+                                "— EMPTY. Nothing has resolved through this "
+                                "router at all: either no client is asking "
+                                "it, or DoH itself is failing."))
+            lines.append("  NOTE: my.nextdns.io's \"this device is not using "
+                         "NextDNS\" banner tests the MACHINE RUNNING THE "
+                         "BROWSER, not this router. A PC with Secure DNS on "
+                         "in Chrome/Edge, or Windows 11 DoH, resolves over "
+                         "port 443 and bypasses everything above. Check the "
+                         "profile's Logs tab instead: queries appearing there "
+                         "prove the router IS using NextDNS.")
             lines.append("")
     finally:
         ds.close()

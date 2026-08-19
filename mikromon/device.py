@@ -47,6 +47,42 @@ DATASETS = {
 }
 
 
+# Datasets whose VALUE is distorted by the act of collecting the others, so
+# they have to be read before mikromon has put any load on the box.
+#
+# /system/resource carries cpu-load, which RouterOS samples over roughly the
+# last second. Pulling /log, /system/history, /ip/arp and /interface/bridge/host
+# over the binary API is real work for the router's own CPU — on a small board
+# it is easily tens of percent while it lasts. Read after those, cpu-load
+# reports mikromon's own polling rather than the router's idle load, which is
+# exactly the "mikromon says 76%, Winbox says 5%" contradiction: both are
+# right, they are just measuring different moments.
+#
+# This used to be whatever order a set happened to iterate in. Python
+# randomises string hashing per process, so which position /system/resource
+# landed in was decided afresh at every restart and then stayed put for the
+# life of that process — a device could read high for weeks, get "fixed" by an
+# unrelated restart, and come back later. Fetch order is now fixed and
+# cheapest-first, so the reading means the same thing on every run.
+_FETCH_FIRST = ("resource", "health")
+
+# Big, slow menus — deliberately last, after every measurement has been taken.
+_FETCH_LAST = ("log", "history", "dhcp_lease", "arp", "bridge_host",
+               "wireless_reg", "wifi_reg", "hotspot_active", "queue_simple",
+               "kid_control")
+
+
+def _fetch_order(datasets):
+    """Deterministic collection order: measurements first, bulk menus last,
+    everything else in a stable middle. Accepts any iterable (the engine
+    passes a set) and never drops or duplicates a name."""
+    wanted = set(datasets)
+    first = [n for n in _FETCH_FIRST if n in wanted]
+    last = [n for n in _FETCH_LAST if n in wanted]
+    middle = sorted(wanted - set(first) - set(last))
+    return first + middle + last
+
+
 class DeviceError(Exception):
     """Raised when we cannot talk to a device."""
 
@@ -133,11 +169,15 @@ class Device:
         A menu that does not exist on a given board (e.g. /system/health on a
         CHR, or /ip/dhcp-server/lease with no DHCP server) is recorded as an
         error and returns no rows, rather than aborting the whole poll.
+
+        Collected in a fixed order (see _fetch_order): the datasets whose
+        values the collection itself would distort are read first, the
+        expensive bulk menus last.
         """
         if self.api is None:
             self.connect()
         snap = Snapshot(handle=self)
-        for name in datasets:
+        for name in _fetch_order(datasets):
             path = DATASETS.get(name)
             if path is None:
                 continue

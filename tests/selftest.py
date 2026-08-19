@@ -576,6 +576,34 @@ html = notifier._html(sample)
 check("plain text contains 'Why'", "Why" in text and "BACKUP" in text)
 check("html contains color-coded entry", "border-left" in html and "Router rebooted" in html)
 
+print("poll fetch order (a measurement must not be distorted by the act of "
+      "collecting everything else):")
+from mikromon.device import _FETCH_LAST, _fetch_order
+
+_poll = {"resource", "identity", "routerboard", "pkg_update", "route",
+         "interface", "ip_address", "health", "log", "history", "active",
+         "dhcp_client"}
+_order = _fetch_order(_poll)
+check("/system/resource is fetched FIRST -- cpu-load is a ~1s sample, so "
+      "reading it after /log and /system/history reports mikromon's own "
+      "polling load instead of the router's (the 'mikromon says 76%, Winbox "
+      "says 5%' contradiction: both true, different moments)",
+      _order[0] == "resource")
+check("the bulk menus are fetched LAST, after every measurement is taken",
+      all(_order.index(n) > _order.index("resource")
+          for n in _FETCH_LAST if n in _poll))
+check("ordering is deterministic -- it used to be set-iteration order, which "
+      "Python re-randomises per process, so a device could read high for "
+      "weeks, get 'fixed' by an unrelated restart, and regress later",
+      _fetch_order(_poll) == _fetch_order(set(reversed(sorted(_poll)))))
+check("no dataset is dropped or duplicated by the reordering",
+      sorted(_order) == sorted(_poll) and len(_order) == len(_poll))
+check("a caller asking for a subset gets only that subset",
+      _fetch_order({"log", "resource"}) == ["resource", "log"])
+check("an unknown dataset name is passed through rather than silently "
+      "swallowed (fetch() is what decides it has no menu)",
+      "made_up" in _fetch_order({"made_up", "resource"}))
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)} check(s): {', '.join(FAILS)}")

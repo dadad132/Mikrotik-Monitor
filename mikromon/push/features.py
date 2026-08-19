@@ -1917,10 +1917,18 @@ def _nextdns_switch_source(links, doh_for_idx) -> str:
     out += [
         # Only write when it actually differs, so the router's own log is not
         # filled with a DNS change every single minute.
-        ':if ([/ip dns get use-doh-server] != $want) do={',
-        '  /ip dns set use-doh-server=$want',
-        '  /ip dns cache flush',
-        '}',
+        #
+        # Wrapped like every lookup above: this runs unattended once a minute
+        # on customer routers, and a RouterOS build that dislikes any part of
+        # it must fail this one tick quietly rather than half-apply a DNS
+        # change. Leaving DNS exactly as it was is always the safe outcome
+        # here -- the value it would have written is the one already in place.
+        ':do {',
+        '  :if ([/ip dns get use-doh-server] != $want) do={',
+        '    /ip dns set use-doh-server=$want',
+        '    /ip dns cache flush',
+        '  }',
+        '} on-error={}',
     ]
     return "\r\n".join(out)
 

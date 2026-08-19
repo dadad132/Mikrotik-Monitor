@@ -1333,6 +1333,98 @@ try:
           "allow-remote-requests (must be true/yes for LAN clients, not "
           "just the router itself, to use this): false" in reachable_report)
 
+    print("  diagnostics answer the question that actually matters: is it the "
+          "ROUTER or the CLIENT that isn't using NextDNS?")
+    # The router perfect, the clients bypassing it. This is the state that
+    # produced "This device is not using NextDNS" on my.nextdns.io while every
+    # line of the old report said OK -- it had nothing to say about the client
+    # side at all.
+    push_pkg.rw_device = lambda cfg: _FakeDevice({
+        ("system", "resource"): [{"version": "7.14.3"}],
+        ("ip", "dns"): [{"use-doh-server":
+                         "https://dns.nextdns.io/created-profile-1",
+                         "verify-doh-cert": "false",
+                         "servers": "9.9.9.9,149.112.112.112",
+                         "allow-remote-requests": "true"}],
+        # no mikromon:dnsforce: rules, and DHCP hands out Google
+        ("ip", "dhcp-server", "network"): [
+            {"address": "192.168.88.0/24", "dns-server": "8.8.8.8,8.8.4.4"}],
+        ("ip", "dns", "cache"): [],
+    })
+    try:
+        bypass_report = "\n".join(web._build_nextdns_diagnostics_lines(
+            AuthStore(adb), wdb, DEF))
+    finally:
+        push_pkg.rw_device = orig_rw_device
+    check("a missing force-client-DNS redirect is called out -- without it a "
+          "client with its own resolver never touches NextDNS, which the "
+          "router-side settings alone can never reveal",
+          "force-client-DNS NAT redirect: MISSING" in bypass_report)
+    check("DHCP handing clients a PUBLIC resolver is shown, and flagged",
+          "8.8.8.8" in bypass_report
+          and "points at a PUBLIC resolver" in bypass_report)
+    check("an empty router DNS cache is reported as nothing having resolved "
+          "through it, rather than left unmentioned",
+          "router's own DNS cache: 0 entries" in bypass_report
+          and "EMPTY" in bypass_report)
+    check("the report states plainly that my.nextdns.io's banner tests the "
+          "BROWSER's machine, not the router -- the single most repeated "
+          "source of confusion here",
+          "MACHINE RUNNING THE BROWSER" in bypass_report
+          and "Logs tab" in bypass_report)
+
+    # The healthy case must NOT cry wolf.
+    push_pkg.rw_device = lambda cfg: _FakeDevice({
+        ("system", "resource"): [{"version": "7.14.3"}],
+        ("ip", "dns"): [{"use-doh-server":
+                         "https://dns.nextdns.io/created-profile-1",
+                         "verify-doh-cert": "false",
+                         "servers": "9.9.9.9,149.112.112.112",
+                         "allow-remote-requests": "true"}],
+        ("ip", "firewall", "nat"): [
+            {"chain": "dstnat", "protocol": "udp", "dst-port": "53",
+             "action": "redirect", "comment": "mikromon:dnsforce:udp"},
+            {"chain": "dstnat", "protocol": "tcp", "dst-port": "53",
+             "action": "redirect", "comment": "mikromon:dnsforce:tcp"}],
+        ("ip", "dhcp-server", "network"): [
+            {"address": "192.168.88.0/24", "dns-server": "192.168.88.1"}],
+        ("ip", "dns", "cache"): [{"name": "example.com"}, {"name": "a.b"}],
+    })
+    try:
+        healthy_report = "\n".join(web._build_nextdns_diagnostics_lines(
+            AuthStore(adb), wdb, DEF))
+    finally:
+        push_pkg.rw_device = orig_rw_device
+    check("a correctly-forced router reports the redirect as present, for "
+          "both protocols, with no warning",
+          "force-client-DNS NAT redirect: present and enabled" in healthy_report
+          and "tcp" in healthy_report and "udp" in healthy_report)
+    check("DHCP pointing clients at the router itself is not flagged as public",
+          "points at a PUBLIC resolver" not in healthy_report)
+    check("a populated DNS cache is reported as the resolver working",
+          "the resolver is answering queries" in healthy_report)
+
+    # Rules present but disabled is the same outcome as absent, and is easy to
+    # miss by eye on the router.
+    push_pkg.rw_device = lambda cfg: _FakeDevice({
+        ("system", "resource"): [{"version": "7.14.3"}],
+        ("ip", "dns"): [{"use-doh-server":
+                         "https://dns.nextdns.io/created-profile-1",
+                         "allow-remote-requests": "true"}],
+        ("ip", "firewall", "nat"): [
+            {"chain": "dstnat", "protocol": "udp", "dst-port": "53",
+             "action": "redirect", "disabled": "true",
+             "comment": "mikromon:dnsforce:udp"}],
+    })
+    try:
+        disabled_report = "\n".join(web._build_nextdns_diagnostics_lines(
+            AuthStore(adb), wdb, DEF))
+    finally:
+        push_pkg.rw_device = orig_rw_device
+    check("a redirect rule that exists but is DISABLED is reported as such, "
+          "not counted as present",
+          "present but DISABLED" in disabled_report)
+
     print("  parental control save: a bad curated id must not silently "
           "block every future save forever:")
     section_calls = []
