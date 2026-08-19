@@ -1827,17 +1827,18 @@ def nextdns_cloud_ops(pusher, profile_id: str) -> Plan:
         # DoH still needs an ordinary DNS resolver to look up the DoH
         # server's OWN hostname in the first place — confirmed in
         # MikroTik's own documentation: "DoH server FQDN will be resolved
-        # by regular DNS resolver." A router whose /ip/dns servers list has
-        # never been set (common on a fresh unit that's only ever had this
-        # single toggle pushed to it) has nothing to resolve
-        # dns.nextdns.io with, so DoH — and therefore ALL DNS — never
-        # comes up at all, which reads to a user as "NextDNS doesn't
-        # connect." Only fills it in when it's genuinely empty; an
-        # existing resolver (from the local filter tab's own DNS presets,
-        # or whatever the router came with) is left alone.
-        cur_servers = str(cur.get("servers", "")).strip()
-        if not cur_servers:
-            desired["servers"] = "1.1.1.1,8.8.8.8"
+        # by regular DNS resolver." Always forced to a neutral pair when
+        # enabling now (not just filled in when empty) — confirmed live:
+        # leaving an existing Quick DNS provider preset in place (e.g.
+        # AdGuard) was confusing in practice even though it should only
+        # ever be used to bootstrap-resolve dns.nextdns.io itself — that
+        # preset's own toggle stayed showing "on" on the DNS tab, reading
+        # as two DNS providers fighting each other rather than NextDNS
+        # being the only thing actually in effect. Quad9 doesn't overlap
+        # any of _DNS_PRESET_SERVERS' own IPs, so this also clears every
+        # quick-provider toggle back off (_active_preset stops matching)
+        # instead of just leaving one confusingly still lit up.
+        desired["servers"] = "9.9.9.9,149.112.112.112"
         # Confirmed live: this alone still isn't enough for anything BUT
         # the router itself to actually use NextDNS — allow-remote-requests
         # is what lets it answer DNS queries FROM LAN clients at all

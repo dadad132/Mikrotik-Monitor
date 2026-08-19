@@ -2486,7 +2486,7 @@ nd_api3 = FakeApi({_NDRES: [{"version": "7.14.3"}],
                    DNS: [{".id": "*1", "use-doh-server":
                           "https://dns.nextdns.io/abc123",
                           "verify-doh-cert": "yes",
-                          "servers": "1.1.1.1,8.8.8.8",
+                          "servers": "9.9.9.9,149.112.112.112",
                           "allow-remote-requests": "true"}],
                    ("ip", "firewall", "nat"): [
                        {".id": "*10", "chain": "dstnat", "protocol": "udp",
@@ -2514,19 +2514,29 @@ bootstrap_plan = F.nextdns_cloud_ops(
     Pusher(nd_cfg, nd_api_nobootstrap, dry_run=True), "abc123")
 check("enabling with no existing DNS servers fills in a bootstrap resolver "
       "so the DoH hostname itself can be resolved",
-      any(o.params.get("servers") == "1.1.1.1,8.8.8.8"
+      any(o.params.get("servers") == "9.9.9.9,149.112.112.112"
           for o in bootstrap_plan.ops))
 
-# An existing (non-empty) resolver is left alone, whatever it is — no
-# reason to override a working choice just because NextDNS is being turned
-# on for the first time.
+# An existing Quick DNS provider preset (e.g. AdGuard) is now OVERRIDDEN,
+# not left alone — confirmed live: leaving it in place still left that
+# preset's own toggle showing "on" on the DNS tab, reading as if it and
+# NextDNS were two competing providers rather than NextDNS being the only
+# thing actually in effect once enabled.
 nd_api_existing_servers = FakeApi({_NDRES: [{"version": "7.14.3"}],
-                                   DNS: [{".id": "*1", "servers": "9.9.9.9"}]})
+                                   DNS: [{".id": "*1",
+                                          "servers": "94.140.14.14,94.140.15.15"}]})
 existing_servers_plan = F.nextdns_cloud_ops(
     Pusher(nd_cfg, nd_api_existing_servers, dry_run=True), "abc123")
-check("enabling with an existing resolver already configured doesn't "
-      "touch it",
-      not any("servers" in o.params for o in existing_servers_plan.ops))
+check("enabling overrides an existing Quick DNS provider preset with the "
+      "neutral bootstrap pair",
+      any(o.params.get("servers") == "9.9.9.9,149.112.112.112"
+          for o in existing_servers_plan.ops))
+check("that neutral bootstrap pair doesn't overlap ANY Quick DNS preset's "
+      "own IPs, so enabling also clears every preset's toggle back off "
+      "(none of them would still show as active on the DNS tab)",
+      not ({"9.9.9.9", "149.112.112.112"} &
+           frozenset().union(*(set(s.split(","))
+                               for s in F._DNS_PRESET_SERVERS.values()))))
 
 # allow-remote-requests is what lets the router answer DNS queries FROM
 # LAN clients at all — without it, DoH is correctly configured but only
