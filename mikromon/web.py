@@ -2757,6 +2757,34 @@ def _nextdns_wan_box(name, cfg, csrf) -> str:
         f'run any time — it only ever makes them match.</p></div>')
 
 
+def _nextdns_test_box(name, csrf) -> str:
+    """The DNS tab's "is this router really using NextDNS?" button.
+
+    Exists because my.nextdns.io's own banner cannot answer that question: it
+    reports on the machine running the browser, so a PC with Secure DNS on in
+    Chrome/Edge shows "this device is not using NextDNS" whether the router is
+    filtering perfectly or not working at all. This asks the router directly,
+    over its own API, with no browser or client PC in the path."""
+    q = esc(name)
+    return (f'<div class="box"><h2>Is this router really using NextDNS?</h2>'
+            f'<p class="muted">Asks the <b>router itself</b> to resolve a '
+            f'domain from this profile\'s blocked list. If it comes back '
+            f'blocked, nothing but this NextDNS profile could have done that '
+            f'— so the router is connected and filtering, proven. '
+            f'The banner on NextDNS\'s own website can\'t tell you this: it '
+            f'reports on whichever computer is viewing it, so a PC with '
+            f'Secure DNS switched on in Chrome or Edge shows "not using '
+            f'NextDNS" even when this router is working perfectly.</p>'
+            f'<p class="muted">Add a domain under <b>Blocked domains</b> '
+            f'below first (facebook.com works well) — that is what makes the '
+            f'result conclusive.</p>'
+            f'<form method="POST" action="/device/nextdns-test">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            f'<input type="hidden" name="device" value="{q}">'
+            f'<div class="actions"><button class="btn" type="submit">'
+            f'Test from this router</button></div></form></div>')
+
+
 def _humanize_id(s: str) -> str:
     """'socialNetworks' -> 'Social Networks' — best-effort label for a
     NextDNS category/service/blocklist id that isn't in a curated name map.
@@ -3803,6 +3831,41 @@ _REMOTE_TEST_STYLE = {
     "attention": ("#d97706", "⚠ Needs attention"),
     "failed":    ("#dc2626", "✗ Found the problem"),
 }
+
+
+_NEXTDNS_TEST_STYLE = {
+    "healthy":   ("#16a34a", "✓ This router IS using NextDNS"),
+    "attention": ("#d97706", "⚠ Inconclusive — see below"),
+    "failed":    ("#dc2626", "✗ This router is NOT using NextDNS"),
+}
+
+
+def _nextdns_test_report_html(report, name) -> str:
+    """Render the router-side NextDNS proof. Deliberately states what the
+    result does and does not cover: a green verdict here says the ROUTER is
+    filtering, which is a different question from whether the PC you are
+    reading this on is — and conflating the two is what sent this round in
+    circles in the first place."""
+    color, title = _NEXTDNS_TEST_STYLE.get(report.get("status"),
+                                           ("#334155", "NextDNS test"))
+    items = []
+    for st in report.get("steps", []):
+        icon, c = _WG_STEP.get(st.get("level"), ("•", "#334155"))
+        items.append(f'<li style="margin:6px 0"><span style="color:{c};'
+                     f'font-weight:bold">{icon}</span> {esc(st.get("msg", ""))}</li>')
+    footer = ("This was asked of the router itself over its own API — no "
+              "browser and no client PC in the path. If it passes here but "
+              "your own computer still reaches a blocked site, the router is "
+              "fine and that computer is bypassing it: switch off Secure DNS "
+              "in Chrome/Edge (Settings → Privacy and security → Use secure "
+              "DNS) and Windows 11's own DoH, then flush its cache with "
+              "ipconfig /flushdns.")
+    return (f'<div class="box" style="border-left:4px solid {color}">'
+            f'<h2 style="margin-top:0;color:{color}">{esc(title)}</h2>'
+            f'<p class="muted" style="margin:0 0 8px">{esc(name)} — '
+            f'{esc(footer)}</p>'
+            f'<ul style="list-style:none;padding:0;margin:0">{"".join(items)}</ul>'
+            f'</div>')
 
 
 def _remote_test_report_html(report, tunnel_ip) -> str:
@@ -6131,6 +6194,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 nd_api_key = (auth.get_nextdns() if auth else {}).get("api_key", "")
                 extra_html = (_nextdns_box(name, cfg, csrf, bool(nd_api_key))
                               + _nextdns_wan_box(name, cfg, csrf))
+                if cfg.nextdns_enabled and cfg.nextdns_profile_id and nd_api_key:
+                    extra_html += _nextdns_test_box(name, csrf)
                 # The full settings panels (denylist/allowlist, security,
                 # parental control, privacy/blocklists) are a SEPARATE live
                 # call to NextDNS's own API — independent of the router
@@ -7599,6 +7664,73 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._redirect(
                 f"/device?name={quote(name)}&tab=nextdns&msg=" + quote(msg))
 
+        def _device_nextdns_test_post(self, flat, user):
+            """Run the router-side proof and show it on the DNS tab.
+
+            The denylist comes from the NextDNS API rather than from anything
+            stored locally, so the test is checking what the profile ACTUALLY
+            blocks right now — if those two ever disagree, that disagreement
+            is itself the bug being hunted."""
+            api_key, pids, name, err = self._nextdns_prereqs(flat, user)
+            if err is not None:
+                return err
+            from .config import build_device
+            from .device import DeviceError
+            from . import nextdns as nextdns_client
+            from .push import PushError, rw_device
+            from .push.api import PushApi
+            from .push.features import nextdns_router_test
+
+            raw = self._device_raw(name)
+            if raw is None:
+                return self._send(404, "not found")
+            cfg = build_device(raw, defaults)
+            denied, denied_err = [], ""
+            try:
+                profile = nextdns_client.get_profile(api_key, pids[0])
+                denied = [e.get("id") for e in (profile.get("denylist") or [])
+                          if e.get("id")]
+            except nextdns_client.NextDnsError as exc:
+                denied_err = str(exc)
+
+            dev = rw_device(cfg)
+            api = PushApi(dev)
+            steps, conn_err = [], None
+            try:
+                try:
+                    api.connect()
+                    steps = nextdns_router_test(api, denied)
+                except (DeviceError, PushError) as exc:
+                    conn_err = str(exc)
+            finally:
+                dev.close()
+            if conn_err is not None:
+                steps = [{"level": "error",
+                          "msg": f"Could not reach the router to test it: "
+                                 f"{conn_err}. That is a connectivity problem, "
+                                 f"not a NextDNS one — check the Host and the "
+                                 f"push login on the Devices page."}]
+            if denied_err:
+                steps.append({"level": "warn",
+                              "msg": f"Could not read this profile's blocked "
+                                     f"list from NextDNS ({denied_err}), so "
+                                     f"the test fell back to checking only "
+                                     f"that the router resolves at all."})
+            has_error = any(x["level"] == "error" for x in steps)
+            has_warn = any(x["level"] == "warn" for x in steps)
+            status = "failed" if has_error else "attention" if has_warn else "healthy"
+            audit = self._auditlog()
+            if audit:
+                audit.append(name, (user or {}).get("login", ""), "nextdns",
+                             "test", "ok" if status == "healthy" else status,
+                             "; ".join(x["msg"] for x in steps),
+                             "; ".join(x["msg"] for x in steps))
+                audit.close()
+            return self._feature_tab_page(
+                name, user, "nextdns",
+                report_html=_nextdns_test_report_html(
+                    {"status": status, "steps": steps}, name))
+
         def _device_nextdns_wan_sync_post(self, flat, user):
             """The DNS tab's Re-sync button: make the per-uplink profiles
             exist and match the main one, then re-push the router's DNS.
@@ -7928,7 +8060,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                              "/device/nextdns-security", "/device/nextdns-parental",
                              "/device/nextdns-privacy-settings",
                              "/device/nextdns-blocklist", "/device/nextdns-list",
-                             "/device/nextdns-wan-sync",
+                             "/device/nextdns-wan-sync", "/device/nextdns-test",
                              "/device/remote-regenerate", "/device/remote-test")
             if path in _DEVICE_WRITE:
                 if not self._can_manage_device(user, flat.get("device", "")):
@@ -7977,6 +8109,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._device_nextdns_list_post(flat, user)
                 if path == "/device/nextdns-wan-sync":
                     return self._device_nextdns_wan_sync_post(flat, user)
+                if path == "/device/nextdns-test":
+                    return self._device_nextdns_test_post(flat, user)
                 if path == "/device/remote-regenerate":
                     return self._device_remote_regenerate_post(flat, user)
                 if path == "/device/remote-test":

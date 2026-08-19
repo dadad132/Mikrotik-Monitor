@@ -2165,6 +2165,148 @@ def nextdns_cloud_ops(pusher, profile_id: str, wan_profiles=None) -> Plan:
                 summary=summary)
 
 
+# ===========================================================================
+# "Is this router actually using NextDNS?" — answered by the router itself
+# ===========================================================================
+# my.nextdns.io's own "this device is not using NextDNS" banner reports on the
+# machine running the BROWSER, not on the router: a PC with Secure DNS on in
+# Chrome/Edge resolves over port 443 and never touches the router at all, so
+# the banner can say "not using NextDNS" while the router is filtering
+# perfectly — and can equally say nothing useful when the router IS broken.
+# It cannot separate the two, which makes it the wrong instrument for the
+# question "is my MikroTik connected to NextDNS".
+#
+# This asks the router, over its own API, with no browser or client PC in the
+# path at all. The trick is that mikromon already knows what the profile is
+# supposed to block: resolve one of those domains FROM the router and the
+# answer is conclusive either way. A blocked answer can only have come from
+# this NextDNS profile.
+# ===========================================================================
+_ND_TEST_CONTROL = "example.com"   # never blocked anywhere; proves DNS works
+_ND_TEST_MAX_DOMAINS = 3           # keep the round trip short
+# What NextDNS hands back for a domain it is blocking.
+_ND_BLOCKED_ANSWERS = ("0.0.0.0", "::", "::0")
+
+
+def _router_resolve(api, hostname: str) -> str:
+    """Resolve a name FROM THE ROUTER using the router's own resolver, and
+    return the address it came back with ("" when it could not resolve at
+    all).
+
+    Goes through /ping because the binary API exposes no resolve command of
+    its own. Whether the host actually answers the ping is irrelevant and
+    deliberately ignored — a blocked domain resolves to 0.0.0.0 and of course
+    never replies. All that is wanted is the address RouterOS resolved to,
+    which ping reports in its own output."""
+    try:
+        rows = list(api.device.api.path("ping")(
+            "", address=str(hostname), count="1"))
+    except Exception:  # noqa: BLE001 — an unresolvable name traps; that IS a result
+        return ""
+    for r in rows:
+        host = str(r.get("host", "") or "").strip()
+        if host:
+            return host
+    return ""
+
+
+def nextdns_router_test(api, denied=()) -> list:
+    """Prove, from the router, whether it is resolving through its NextDNS
+    profile. Returns [{level, msg}] in the same shape remote_test() uses.
+
+    `denied` is the profile's own denylist, read from the NextDNS API by the
+    caller. It is what makes this conclusive rather than suggestive: any
+    domain on it must come back blocked, and nothing except this profile
+    would block it."""
+    steps = []
+    major, minor, ver = _ros_version(api)
+    if not _doh_supported(major, minor):
+        return [{"level": "error",
+                 "msg": f"RouterOS {ver} is too old for DNS-over-HTTPS (needs "
+                        f"7.1+), so this router cannot use a NextDNS profile "
+                        f"at all no matter what the dashboard shows. Upgrade "
+                        f"it, then re-enable NextDNS."}]
+
+    dns_rows = _safe_fetch(api, _DNS)
+    row = dns_rows[0] if dns_rows else {}
+    doh = str(row.get("use-doh-server", "") or "")
+    if not doh:
+        return [{"level": "error",
+                 "msg": "This router has no DNS-over-HTTPS server set at all "
+                        "(/ip/dns use-doh-server is empty), so it is "
+                        "definitely not using NextDNS. Turn NextDNS off and "
+                        "on again on this tab to push it."}]
+    steps.append({"level": "ok",
+                  "msg": f"Router's DNS-over-HTTPS server: {doh}"})
+    if _norm(row.get("allow-remote-requests", "")) != "true":
+        steps.append({"level": "error",
+                      "msg": "allow-remote-requests is OFF, so the router "
+                             "will not answer DNS for any client even though "
+                             "its own resolver works. Every device on the LAN "
+                             "falls back to its own resolver — which is "
+                             "exactly what NextDNS reports as \"this device "
+                             "is not using NextDNS\"."})
+
+    # Start from cold so nothing below is answered out of the router's cache.
+    try:
+        api.device.api.path("ip", "dns", "cache")("flush")
+        steps.append({"level": "ok",
+                      "msg": "Flushed the router's DNS cache, so every answer "
+                             "below is a fresh live lookup."})
+    except Exception:  # noqa: BLE001 — non-fatal, results are just less certain
+        steps.append({"level": "warn",
+                      "msg": "Could not flush the router's DNS cache — the "
+                             "answers below may be cached rather than fresh."})
+
+    control = _router_resolve(api, _ND_TEST_CONTROL)
+    if not control:
+        steps.append({"level": "error",
+                      "msg": f"The router could NOT resolve "
+                             f"{_ND_TEST_CONTROL} at all. Its DNS is broken "
+                             f"outright, not merely bypassing NextDNS — "
+                             f"RouterOS has no fallback once DNS-over-HTTPS "
+                             f"is set, so a failing DoH connection takes all "
+                             f"name resolution with it. Check verify-doh-cert "
+                             f"is off and that `servers` has a plain resolver "
+                             f"to look up dns.nextdns.io itself."})
+        return steps
+    steps.append({"level": "ok",
+                  "msg": f"The router resolved {_ND_TEST_CONTROL} to "
+                         f"{control} — its own resolver is working."})
+
+    domains = [d for d in list(denied)[:_ND_TEST_MAX_DOMAINS] if d]
+    if not domains:
+        steps.append({
+            "level": "warn",
+            "msg": "Nothing is on this profile's blocked-domains list yet, so "
+                   "there is no way to prove the answers are coming from "
+                   "NextDNS rather than from any other resolver. Add one "
+                   "(facebook.com is a good test) under \"Blocked domains\" "
+                   "on this tab, then run this again — that turns this from a "
+                   "hint into proof."})
+        return steps
+
+    for domain in domains:
+        got = _router_resolve(api, domain)
+        if not got or got in _ND_BLOCKED_ANSWERS:
+            steps.append({
+                "level": "ok",
+                "msg": f"{domain} came back "
+                       f"{got or 'unresolvable'} from the router — blocked, "
+                       f"exactly as this NextDNS profile says it should be. "
+                       f"Nothing but this profile would do that, so the "
+                       f"router IS connected to NextDNS and filtering."})
+        else:
+            steps.append({
+                "level": "error",
+                "msg": f"{domain} is on this profile's blocked list, but the "
+                       f"router resolved it to {got} — a real address. This "
+                       f"router is NOT filtering through this profile. Its "
+                       f"DNS works (see above), so it is resolving somewhere "
+                       f"other than NextDNS."})
+    return steps
+
+
 def _detect_lan_subnets(pusher, cfg) -> list:
     """Candidate LAN subnets for the VPN tab's subnet picker: every IP
     address configured on this router except ones on a configured WAN

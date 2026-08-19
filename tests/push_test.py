@@ -2798,6 +2798,138 @@ check("no active uplink at all -> falls back to the main profile, never to "
       any(o.params.get("use-doh-server") == "https://dns.nextdns.io/main-pid"
           for o in all_down_plan.ops))
 
+# ---------------------------------------------------------------------------
+# "Is this router actually using NextDNS?" — the question my.nextdns.io's own
+# banner cannot answer, because it reports on the browser's machine.
+# ---------------------------------------------------------------------------
+print("nextdns_router_test (asks the ROUTER, no browser or client PC in the "
+      "path):")
+
+
+class _NdTestApi:
+    """Fake router: fetch() for menus, plus a /ping that returns whatever the
+    supplied resolver says the name resolves to."""
+
+    def __init__(self, state, resolver):
+        self.state = state
+        self.resolver = resolver
+        self.flushed = False
+
+        outer = self
+
+        class _Inner:
+            def path(self, *seg):
+                if seg == ("ping",):
+                    return lambda _c="", **kw: outer.resolver(kw.get("address"))
+                if seg == ("ip", "dns", "cache"):
+                    def _flush(_c="", **kw):
+                        outer.flushed = True
+                        return []
+                    return _flush
+                return outer.state.get(seg, [])
+
+        self.device = types.SimpleNamespace(api=_Inner())
+
+    def fetch(self, path):
+        return [dict(r) for r in self.state.get(tuple(path), [])]
+
+
+_ND_OK_STATE = {
+    ("system", "resource"): [{"version": "7.21.4"}],
+    ("ip", "dns"): [{"use-doh-server": "https://dns.nextdns.io/46c4b3",
+                     "allow-remote-requests": "true"}],
+}
+
+
+def _resolver(mapping, default="93.184.216.34"):
+    return lambda addr: [{"host": mapping.get(addr, default)}]
+
+
+def _levels(steps):
+    return [x["level"] for x in steps]
+
+
+# The whole point: a domain the profile blocks must come back blocked.
+filtering = F.nextdns_router_test(
+    _NdTestApi(_ND_OK_STATE, _resolver({"facebook.com": "0.0.0.0"})),
+    ["facebook.com"])
+check("a blocked domain resolving to 0.0.0.0 FROM THE ROUTER is reported as "
+      "proof — nothing but this profile would answer that way",
+      "error" not in _levels(filtering)
+      and any("blocked, exactly as this NextDNS profile" in x["msg"]
+              for x in filtering))
+
+# The failure this is meant to catch, stated without hedging.
+not_filtering = F.nextdns_router_test(
+    _NdTestApi(_ND_OK_STATE, _resolver({"facebook.com": "157.240.1.35"})),
+    ["facebook.com"])
+check("a blocked domain resolving to a REAL address is an outright failure — "
+      "the router's DNS works, it is just not going through NextDNS",
+      "error" in _levels(not_filtering)
+      and any("NOT filtering through this profile" in x["msg"]
+              for x in not_filtering))
+
+# Broken DNS and bypassed DNS look identical from a browser but are different
+# problems with different fixes, so they must not be reported the same way.
+broken = F.nextdns_router_test(
+    _NdTestApi(_ND_OK_STATE, lambda addr: []), ["facebook.com"])
+check("a router that cannot resolve the control domain at all is called out "
+      "as DNS broken outright (RouterOS has no fallback once DoH is set), "
+      "not as 'bypassing NextDNS'",
+      "error" in _levels(broken)
+      and any("broken outright" in x["msg"] for x in broken))
+check("...and it stops there rather than reporting blocked-domain results "
+      "that could not mean anything",
+      not any("blocked list" in x["msg"] for x in broken))
+
+# Refusing to overclaim matters as much as the positive result.
+inconclusive = F.nextdns_router_test(
+    _NdTestApi(_ND_OK_STATE, _resolver({})), [])
+check("with an empty denylist the test says it cannot prove anything and "
+      "explains how to make it conclusive, rather than reporting a pass it "
+      "has not earned",
+      "warn" in _levels(inconclusive)
+      and "error" not in _levels(inconclusive)
+      and any("no way to prove" in x["msg"] for x in inconclusive))
+
+# Answers must be live, or a stale cache entry could fake either verdict.
+_flusher = _NdTestApi(_ND_OK_STATE, _resolver({"facebook.com": "0.0.0.0"}))
+F.nextdns_router_test(_flusher, ["facebook.com"])
+check("the router's DNS cache is flushed first, so every answer is a fresh "
+      "lookup rather than something cached from before the block was added",
+      _flusher.flushed)
+
+# Config-level failures should be caught before spending round trips.
+no_doh = F.nextdns_router_test(
+    _NdTestApi({("system", "resource"): [{"version": "7.21.4"}],
+                ("ip", "dns"): [{"use-doh-server": ""}]},
+               _resolver({})), ["facebook.com"])
+check("a router with no use-doh-server at all is reported as definitely not "
+      "using NextDNS, without any lookups",
+      _levels(no_doh) == ["error"]
+      and "definitely not using NextDNS" in no_doh[0]["msg"])
+
+old_ros = F.nextdns_router_test(
+    _NdTestApi({("system", "resource"): [{"version": "6.49.10"}],
+                ("ip", "dns"): [{"use-doh-server": ""}]},
+               _resolver({})), ["facebook.com"])
+check("RouterOS too old for DoH is reported as the real reason rather than "
+      "as a NextDNS fault",
+      _levels(old_ros) == ["error"] and "7.1+" in old_ros[0]["msg"])
+
+# allow-remote-requests off is the specific state that produces "this device
+# is not using NextDNS" while the router itself resolves perfectly.
+no_remote = F.nextdns_router_test(
+    _NdTestApi({("system", "resource"): [{"version": "7.21.4"}],
+                ("ip", "dns"): [{"use-doh-server":
+                                 "https://dns.nextdns.io/46c4b3",
+                                 "allow-remote-requests": "false"}]},
+               _resolver({"facebook.com": "0.0.0.0"})), ["facebook.com"])
+check("allow-remote-requests being off is flagged as an error even when the "
+      "router's own filtering is working — that is exactly the state where "
+      "every client silently falls back to its own resolver",
+      any("allow-remote-requests is OFF" in x["msg"] for x in no_remote))
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")
