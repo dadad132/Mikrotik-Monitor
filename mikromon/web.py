@@ -481,6 +481,14 @@ def _build_nextdns_diagnostics_lines(auth, devices_db, defaults) -> list:
                         doh_seen, cache_n = nextdns_doh_evidence(api)
                     except (DeviceError, PushError):
                         doh_seen, cache_n = False, None
+                    # If DoH turns out not to be running, the clock is the
+                    # first thing to look at: DoH is HTTPS, TLS refuses a
+                    # certificate that is not valid "now", and a router whose
+                    # clock is wrong fails every DoH connection silently while
+                    # plain DNS through `servers` carries on working — which
+                    # is precisely the shape of the problem being chased.
+                    clock = (api.fetch(("system", "clock")) or [{}])[0]
+                    ntp = (api.fetch(("system", "ntp", "client")) or [{}])[0]
                 except (DeviceError, PushError) as exc:
                     lines.append(f"  could not connect: {exc}")
                     lines.append("")
@@ -630,6 +638,19 @@ def _build_nextdns_diagnostics_lines(auth, devices_db, defaults) -> list:
                     lines.append("  has the router looked up dns.nextdns.io? "
                                  "no, but the cache is too small to conclude "
                                  "anything from that yet.")
+                rdate = str(clock.get("date", "") or "?")
+                rtime = str(clock.get("time", "") or "?")
+                ntp_on = str(ntp.get("enabled", "") or "not set")
+                ntp_status = str(ntp.get("status", "") or "")
+                lines.append(f"  router clock: {rdate} {rtime} "
+                             f"(NTP enabled={ntp_on}"
+                             + (f", status={ntp_status}" if ntp_status else "")
+                             + ") — DoH is HTTPS, and TLS rejects a "
+                               "certificate that is not valid at the router's "
+                               "own idea of 'now'. A clock that is out fails "
+                               "every DoH connection silently while plain DNS "
+                               "keeps working. Compare this against the "
+                               "report's own timestamp at the top.")
             lines.append("  NOTE: my.nextdns.io's \"this device is not using "
                          "NextDNS\" banner tests the MACHINE RUNNING THE "
                          "BROWSER, not this router. A PC with Secure DNS on "
