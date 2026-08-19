@@ -2535,11 +2535,25 @@ def _nextdns_reconcile_wan_profiles(api_key, raw, links) -> tuple:
                 errors.append(f'could not rename the profile for "{label}": {exc}')
             continue
         try:
-            profiles[key] = nextdns_client.create_profile(
-                api_key, want_name, clone_from=main_id)
-            notes.append(f'created a profile for "{label}"')
+            new_id = nextdns_client.create_profile(api_key, want_name)
         except nextdns_client.NextDnsError as exc:
             errors.append(f'could not create a profile for "{label}": {exc}')
+            continue
+        profiles[key] = new_id
+        # A new profile starts blank — NextDNS has no server-side clone (see
+        # create_profile), so the copy is done here, with the same code that
+        # keeps every profile in step afterwards. A profile that exists but
+        # could not be filled in is worse than useless (it would filter
+        # nothing while looking set up), so a failure here is reported
+        # against the uplink rather than swallowed.
+        copy_errs = _nextdns_mirror_settings(api_key, main_id, [new_id])
+        if copy_errs:
+            errors.append(f'created a profile for "{label}" but could not '
+                          f'copy the main profile\'s settings onto it '
+                          f'({"; ".join(copy_errs)}) — press "Re-sync uplink '
+                          f'profiles" to finish it')
+        else:
+            notes.append(f'created a profile for "{label}"')
     if len(links) > 1:
         try:
             nextdns_client.rename_profile(
@@ -2757,6 +2771,13 @@ def _nextdns_wan_box(name, cfg, csrf) -> str:
         f'run any time — it only ever makes them match.</p></div>')
 
 
+# Blocked for the few seconds a router test takes, then removed again.
+# IANA reserves example.org for documentation, so nothing real ever
+# depends on it resolving - which is what makes it safe to block on a
+# live network.
+_NEXTDNS_PROBE_DOMAIN = "example.org"
+
+
 def _nextdns_test_box(name, csrf) -> str:
     """The DNS tab's "is this router really using NextDNS?" button.
 
@@ -2775,9 +2796,10 @@ def _nextdns_test_box(name, csrf) -> str:
             f'reports on whichever computer is viewing it, so a PC with '
             f'Secure DNS switched on in Chrome or Edge shows "not using '
             f'NextDNS" even when this router is working perfectly.</p>'
-            f'<p class="muted">Add a domain under <b>Blocked domains</b> '
-            f'below first (facebook.com works well) — that is what makes the '
-            f'result conclusive.</p>'
+            f'<p class="muted">Nothing to set up first: if this profile '
+            f'has no blocked domains yet, the test blocks '
+            f'<code>{esc(_NEXTDNS_PROBE_DOMAIN)}</code> for the few seconds '
+            f'it runs and removes it again afterwards.</p>'
             f'<form method="POST" action="/device/nextdns-test">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="device" value="{q}">'
@@ -7396,20 +7418,38 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if not (raw.get("nextdns_enabled") and raw.get("nextdns_profile_id")):
                     try:
                         profile_id = nextdns_client.create_profile(
-                            api_key, _nextdns_profile_name(name, links, 0),
-                            clone_from=nextdns_cfg.get("template_profile", ""))
+                            api_key, _nextdns_profile_name(name, links, 0))
                     except nextdns_client.NextDnsError as exc:
                         return self._redirect(
                             f"/device?name={q}&tab=nextdns&msg=" +
                             quote(f"Could not create a NextDNS profile: {exc}"))
                     raw["nextdns_enabled"] = True
                     raw["nextdns_profile_id"] = profile_id
-                # One profile per extra uplink, each cloned from the main one
-                # so it starts identical — a failure here is reported but does
-                # not undo the enable: the router still filters through the
-                # main profile on every uplink, which is the important part.
-                wan_notes, wan_errors = _nextdns_reconcile_wan_profiles(
+                    # The optional platform-wide template is applied the same
+                    # way the per-uplink profiles are: copied across after
+                    # creation, because NextDNS has no server-side clone (see
+                    # nextdns.create_profile). Best-effort — a router with a
+                    # working profile that merely started blank is a far
+                    # better outcome than a failed enable.
+                    template = (nextdns_cfg.get("template_profile", "") or "").strip()
+                    if template:
+                        tmpl_errs = _nextdns_mirror_settings(
+                            api_key, template, [profile_id])
+                        if tmpl_errs:
+                            wan_errors.append(
+                                "could not copy the template profile's "
+                                "settings onto the new profile: "
+                                + "; ".join(tmpl_errs))
+                # One profile per extra uplink, each filled in from the main
+                # one so it starts identical — a failure here is reported but
+                # does not undo the enable: the router still filters through
+                # the main profile on every uplink, which is the important
+                # part. Extended rather than reassigned: a template-copy
+                # problem recorded just above is just as much worth showing.
+                more_notes, more_errors = _nextdns_reconcile_wan_profiles(
                     api_key, raw, links)
+                wan_notes += more_notes
+                wan_errors += more_errors
             else:
                 # Every profile this device owns, main first — leaving a
                 # per-uplink one behind would keep filtering (and billing
@@ -7693,23 +7733,62 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             except nextdns_client.NextDnsError as exc:
                 denied_err = str(exc)
 
+            # An empty denylist used to make this come back "inconclusive" and
+            # hand the work back to the user, which is a poor answer to "just
+            # tell me whether it works". Block one throwaway domain for the
+            # few seconds the test takes, then put the list back exactly as it
+            # was. example.org is deliberate: IANA reserves it for
+            # documentation, so nothing real can depend on it resolving.
+            probe, tries = "", 1
+            if not denied and not denied_err:
+                try:
+                    nextdns_client.add_list_entry(
+                        api_key, pids[0], "denylist", _NEXTDNS_PROBE_DOMAIN)
+                    probe = _NEXTDNS_PROBE_DOMAIN
+                    denied, tries = [probe], 4
+                except nextdns_client.NextDnsError as exc:
+                    denied_err = f"could not add a temporary test domain ({exc})"
+
             dev = rw_device(cfg)
             api = PushApi(dev)
             steps, conn_err = [], None
             try:
                 try:
                     api.connect()
-                    steps = nextdns_router_test(api, denied)
+                    steps = nextdns_router_test(api, denied,
+                                                settle_tries=tries,
+                                                sleep_fn=time.sleep)
                 except (DeviceError, PushError) as exc:
                     conn_err = str(exc)
             finally:
                 dev.close()
+                # Always, even if the test blew up: leaving a domain blocked
+                # that the user never asked to block would be a worse bug than
+                # whatever this was diagnosing.
+                if probe:
+                    try:
+                        nextdns_client.remove_list_entry(
+                            api_key, pids[0], "denylist", probe)
+                    except nextdns_client.NextDnsError as exc:
+                        steps.append({
+                            "level": "warn",
+                            "msg": f"Could not remove the temporary test "
+                                   f"domain {probe} from this profile"
+                                   f"'s blocked list ({exc}) - remove it by "
+                                   f"hand under Blocked domains below."})
             if conn_err is not None:
                 steps = [{"level": "error",
                           "msg": f"Could not reach the router to test it: "
                                  f"{conn_err}. That is a connectivity problem, "
                                  f"not a NextDNS one — check the Host and the "
                                  f"push login on the Devices page."}]
+            if probe and not conn_err:
+                steps.append({
+                    "level": "ok",
+                    "msg": f"{probe} was blocked only for the duration of this "
+                           f"test and has been removed again - this profile"
+                           f"'s blocked-domains list is exactly as you left "
+                           f"it."})
             if denied_err:
                 steps.append({"level": "warn",
                               "msg": f"Could not read this profile's blocked "

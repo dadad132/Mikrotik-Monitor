@@ -2210,14 +2210,22 @@ def _router_resolve(api, hostname: str) -> str:
     return ""
 
 
-def nextdns_router_test(api, denied=()) -> list:
+def nextdns_router_test(api, denied=(), settle_tries: int = 1,
+                        sleep_fn=None) -> list:
     """Prove, from the router, whether it is resolving through its NextDNS
     profile. Returns [{level, msg}] in the same shape remote_test() uses.
 
     `denied` is the profile's own denylist, read from the NextDNS API by the
     caller. It is what makes this conclusive rather than suggestive: any
     domain on it must come back blocked, and nothing except this profile
-    would block it."""
+    would block it.
+
+    `settle_tries` re-checks a domain that comes back unblocked, for the case
+    where the caller has only just added it to the denylist and NextDNS has
+    not finished applying it. Only the negative result is retried: a domain
+    that already answers blocked is proof and needs no second look. Left at 1
+    for a denylist the user set up earlier, which has had all the time it
+    needs."""
     steps = []
     major, minor, ver = _ros_version(api)
     if not _doh_supported(major, minor):
@@ -2288,6 +2296,16 @@ def nextdns_router_test(api, denied=()) -> list:
 
     for domain in domains:
         got = _router_resolve(api, domain)
+        for _attempt in range(max(0, settle_tries - 1)):
+            if not got or got in _ND_BLOCKED_ANSWERS:
+                break
+            if sleep_fn is not None:
+                sleep_fn(2)
+            try:
+                api.device.api.path("ip", "dns", "cache")("flush")
+            except Exception:  # noqa: BLE001
+                pass
+            got = _router_resolve(api, domain)
         if not got or got in _ND_BLOCKED_ANSWERS:
             steps.append({
                 "level": "ok",

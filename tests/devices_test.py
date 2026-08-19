@@ -1240,8 +1240,8 @@ try:
     # created and the local enabled state saved.
     create_calls = []
 
-    def _fake_create(api_key, name, clone_from=""):
-        create_calls.append((api_key, name, clone_from))
+    def _fake_create(api_key, name):
+        create_calls.append((api_key, name))
         return "created-profile-1"
 
     orig_create = nextdns_mod.create_profile
@@ -1254,9 +1254,11 @@ try:
     check("enabling NextDNS reports success even though the router itself "
           "is unreachable right now",
           "NextDNS enabled for this router" in loc and "unreachable" in loc)
-    check("create_profile was called with the platform key, the device "
-          "name, and the configured template to clone",
-          create_calls == [("sekret-nextdns-key", "WebR1", "tmpl99")])
+    check("create_profile is called with just the platform key and the "
+          "device name — NEVER a clone id, which NextDNS rejects outright "
+          "(HTTP 400 'extraneous parameter clone'); a template profile is "
+          "copied across afterwards instead",
+          create_calls == [("sekret-nextdns-key", "WebR1")])
     ds_after_enable = DevicesStore(wdb)
     raw_after_enable = ds_after_enable.raw("WebR1")
     ds_after_enable.close()
@@ -1620,10 +1622,19 @@ try:
     # hiding the very thing being tested).
     pid_seq = [0]
 
-    def _fake_create_multi(api_key, name, clone_from=""):
-        created.append((name, clone_from))
+    copied_onto = []
+
+    def _fake_create_multi(api_key, name):
+        created.append(name)
         pid_seq[0] += 1
         return f"profile-{pid_seq[0]}"
+
+    def _fake_get_profile_multi(api_key, pid):
+        return {"security": {"googleSafeBrowsing": True}, "privacy": {},
+                "parentalControl": {}, "denylist": [], "allowlist": []}
+
+    def _fake_update_section_multi(api_key, pid, section, patch):
+        copied_onto.append(pid)
 
     def _fake_rename(api_key, profile_id, name):
         renamed.append((profile_id, name))
@@ -1634,25 +1645,44 @@ try:
     orig_create = nextdns_mod.create_profile
     orig_rename = nextdns_mod.rename_profile
     orig_delete = nextdns_mod.delete_profile
-    nextdns_mod.create_profile = _fake_create_multi
-    nextdns_mod.rename_profile = _fake_rename
-    nextdns_mod.delete_profile = _fake_delete_multi
+    orig_get = nextdns_mod.get_profile
+    orig_update = nextdns_mod.update_section
+
+    def _mock_nd():
+        nextdns_mod.create_profile = _fake_create_multi
+        nextdns_mod.rename_profile = _fake_rename
+        nextdns_mod.delete_profile = _fake_delete_multi
+        nextdns_mod.get_profile = _fake_get_profile_multi
+        nextdns_mod.update_section = _fake_update_section_multi
+
+    def _unmock_nd():
+        nextdns_mod.create_profile = orig_create
+        nextdns_mod.rename_profile = orig_rename
+        nextdns_mod.delete_profile = orig_delete
+        nextdns_mod.get_profile = orig_get
+        nextdns_mod.update_section = orig_update
+
+    _mock_nd()
     try:
         st, loc = post_loc(admin, "/device/nextdns",
                            {"csrf": csrf, "device": "WebR1", "enable": "1"})
     finally:
-        nextdns_mod.create_profile = orig_create
-        nextdns_mod.rename_profile = orig_rename
-        nextdns_mod.delete_profile = orig_delete
+        _unmock_nd()
     check("enabling on a two-uplink router creates the main profile AND one "
           "for the backup uplink", len(created) == 2)
-    check("the backup uplink's profile is cloned from the MAIN profile (not "
-          "from the platform template) — that is what makes it start on "
-          "identical settings instead of a blank slate",
-          created[1][1] == "profile-1")
+    check("the backup uplink's new profile has settings copied onto it — "
+          "NextDNS has no server-side clone, so a fresh profile starts blank "
+          "and would otherwise filter nothing while looking set up",
+          "profile-2" in copied_onto)
+    check("the platform template is applied the same way, onto the MAIN "
+          "profile — the old ?clone= route NextDNS rejects is gone from both "
+          "callers, not just the per-uplink one",
+          "profile-1" in copied_onto)
+    check("every managed section is copied, not just one",
+          copied_onto.count("profile-2") >= 3)
     check("each profile is named after its own uplink, so the NextDNS "
           "account list is readable",
-          created[0][0] == "WebR1 - Fibre" and created[1][0] == "WebR1 - LTE")
+          created[0] == "WebR1 - Fibre" and created[1] == "WebR1 - LTE")
     check("the enable message says what it provisioned",
           "Per-uplink profiles" in loc and "LTE" in loc)
     ds_multi = DevicesStore(wdb)
@@ -1761,9 +1791,7 @@ try:
     created.clear()
     renamed.clear()
     deleted.clear()
-    nextdns_mod.create_profile = _fake_create_multi
-    nextdns_mod.rename_profile = _fake_rename
-    nextdns_mod.delete_profile = _fake_delete_multi
+    _mock_nd()
     try:
         # Adding a third uplink from the WAN tab must provision its profile
         # then and there — the user should not have to know to go and press
@@ -1774,15 +1802,13 @@ try:
                      "link_iface": ["ether1", "lte1", "ether5"],
                      "link_gw": ["", "", ""]})
     finally:
-        nextdns_mod.create_profile = orig_create
-        nextdns_mod.rename_profile = orig_rename
-        nextdns_mod.delete_profile = orig_delete
+        _unmock_nd()
     ds3 = DevicesStore(wdb)
     raw3 = ds3.raw("WebR1")
     ds3.close()
     check("adding a third uplink provisions its profile on save, without "
           "any extra step", len(created) == 1
-          and created[0][0] == "WebR1 - Starlink"
+          and created[0] == "WebR1 - Starlink"
           and sorted(raw3.get("nextdns_wan_profiles") or {}) == ["1", "2"])
     check("the profiles that already existed are renamed rather than "
           "recreated, so they keep their query history",
@@ -1790,18 +1816,14 @@ try:
 
     created.clear()
     deleted.clear()
-    nextdns_mod.create_profile = _fake_create_multi
-    nextdns_mod.rename_profile = _fake_rename
-    nextdns_mod.delete_profile = _fake_delete_multi
+    _mock_nd()
     try:
         post_status(admin, "/device/wan",
                     {"csrf": csrf, "device": "WebR1",
                      "link_name": ["Fibre"], "link_iface": ["ether1"],
                      "link_gw": [""]})
     finally:
-        nextdns_mod.create_profile = orig_create
-        nextdns_mod.rename_profile = orig_rename
-        nextdns_mod.delete_profile = orig_delete
+        _unmock_nd()
     ds4 = DevicesStore(wdb)
     raw4 = ds4.raw("WebR1")
     ds4.close()
@@ -1811,16 +1833,14 @@ try:
 
     # Put the two uplinks back, then disable: every profile must go, not just
     # the main one.
-    nextdns_mod.create_profile = _fake_create_multi
-    nextdns_mod.rename_profile = _fake_rename
+    _mock_nd()
     try:
         post_status(admin, "/device/wan",
                     {"csrf": csrf, "device": "WebR1",
                      "link_name": ["Fibre", "LTE"],
                      "link_iface": ["ether1", "lte1"], "link_gw": ["", ""]})
     finally:
-        nextdns_mod.create_profile = orig_create
-        nextdns_mod.rename_profile = orig_rename
+        _unmock_nd()
     deleted.clear()
     nextdns_mod.delete_profile = _fake_delete_multi
     try:
@@ -1882,8 +1902,8 @@ try:
     def _sync_remove(api_key, pid, list_name, domain):
         sync_removes.append((pid, list_name, domain))
 
-    def _sync_create(api_key, name, clone_from=""):
-        sync_created.append((name, clone_from))
+    def _sync_create(api_key, name):
+        sync_created.append(name)
         return "lte-x"
 
     saved_api = (nextdns_mod.get_profile, nextdns_mod.update_section,
@@ -1902,7 +1922,7 @@ try:
          nextdns_mod.add_list_entry, nextdns_mod.remove_list_entry,
          nextdns_mod.create_profile, nextdns_mod.rename_profile) = saved_api
     check("re-syncing creates the missing uplink profile",
-          sync_created == [("WebR1 - LTE", "main-x")])
+          sync_created == ["WebR1 - LTE"])
     ds_sync = DevicesStore(wdb)
     raw_sync = ds_sync.raw("WebR1")
     ds_sync.close()
@@ -1920,8 +1940,8 @@ try:
                   for _i, _s, p in sync_sections))
     check("...and converges the blocked/allowed domains in BOTH directions: "
           "adds what the main profile has, removes what it doesn't",
-          sync_adds == [("lte-x", "denylist", "bad.example")]
-          and sync_removes == [("lte-x", "denylist", "stale.example")])
+          set(sync_adds) == {("lte-x", "denylist", "bad.example")}
+          and set(sync_removes) == {("lte-x", "denylist", "stale.example")})
     check("the result is reported back to the user",
           "re-synced" in loc)
 

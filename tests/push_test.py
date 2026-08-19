@@ -2917,6 +2917,63 @@ check("RouterOS too old for DoH is reported as the real reason rather than "
       "as a NextDNS fault",
       _levels(old_ros) == ["error"] and "7.1+" in old_ros[0]["msg"])
 
+# The caller can add a probe domain to the denylist and test immediately, so
+# a first lookup can legitimately race NextDNS applying the block. Retrying
+# only the NEGATIVE result keeps that from being reported as a failure,
+# without ever softening a real one.
+_slept = []
+
+
+class _LaggingApi(_NdTestApi):
+    """Blocked only from the 4th lookup onwards -- NextDNS still applying it."""
+
+    def __init__(self):
+        super().__init__(_ND_OK_STATE, None)
+        self.n = 0
+        outer = self
+
+        class _Inner:
+            def path(self, *seg):
+                if seg == ("ping",):
+                    def _p(_c="", **kw):
+                        outer.n += 1
+                        blocked = (kw.get("address") == "example.org"
+                                   and outer.n >= 4)
+                        return [{"host": "0.0.0.0" if blocked
+                                 else "93.184.216.34"}]
+                    return _p
+                if seg == ("ip", "dns", "cache"):
+                    return lambda _c="", **kw: []
+                return outer.state.get(seg, [])
+
+        self.device = types.SimpleNamespace(api=_Inner())
+
+
+lagging = F.nextdns_router_test(_LaggingApi(), ["example.org"],
+                                settle_tries=4, sleep_fn=_slept.append)
+check("a domain that is not blocked YET is re-checked rather than failed -- "
+      "the caller may have added it to the denylist seconds ago, and calling "
+      "that 'not using NextDNS' would send someone chasing a non-problem",
+      "error" not in _levels(lagging)
+      and any("blocked, exactly as" in x["msg"] for x in lagging))
+check("...with a pause between attempts rather than hammering the router",
+      _slept == [2, 2])
+
+never = F.nextdns_router_test(
+    _NdTestApi(_ND_OK_STATE, _resolver({"example.org": "93.184.216.34"})),
+    ["example.org"], settle_tries=4, sleep_fn=lambda _s: None)
+check("but a domain that never blocks is still an outright failure once the "
+      "retries are spent -- retrying must not soften a real negative",
+      "error" in _levels(never))
+
+_quick = []
+F.nextdns_router_test(
+    _NdTestApi(_ND_OK_STATE, _resolver({"example.org": "0.0.0.0"})),
+    ["example.org"], settle_tries=4, sleep_fn=_quick.append)
+check("a domain that is ALREADY blocked is proof on the first lookup and "
+      "never sleeps -- the retries cost nothing in the normal case",
+      _quick == [])
+
 # allow-remote-requests off is the specific state that produces "this device
 # is not using NextDNS" while the router itself resolves perfectly.
 no_remote = F.nextdns_router_test(

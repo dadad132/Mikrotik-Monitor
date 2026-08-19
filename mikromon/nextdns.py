@@ -70,15 +70,29 @@ def _request(method: str, path: str, api_key: str, body: dict | None = None) -> 
             f"response: {exc}") from exc
 
 
-def create_profile(api_key: str, name: str, clone_from: str = "") -> str:
-    """Create a new NextDNS profile (a Configuration ID), optionally cloning
-    the blocklist/security/privacy settings of an existing "template"
-    profile so every new router doesn't start from a blank slate. Returns
-    the new profile's id (e.g. "abc123")."""
-    path = "/profiles"
-    if clone_from:
-        path += f"?clone={urllib.parse.quote(clone_from, safe='')}"
-    resp = _request("POST", path, api_key, {"name": name})
+def create_profile(api_key: str, name: str) -> str:
+    """Create a new NextDNS profile (a Configuration ID). Returns the new
+    profile's id (e.g. "abc123").
+
+    Deliberately creates a BLANK profile with no server-side clone. This used
+    to take a `clone_from` and send it as `POST /profiles?clone=<id>`, which
+    NextDNS rejects outright — confirmed live:
+
+        HTTP 400 {"errors":[{"code":"extraneous",
+                             "source":{"parameter":"clone"}}]}
+
+    "extraneous" means the API does not know that parameter at all, so no
+    value would have worked. It went unnoticed for a long time because the
+    only caller passed a clone id from the superadmin's optional "template
+    profile" setting, which is normally blank — with it blank the parameter
+    was never appended and every profile created fine. The per-uplink
+    profiles were the first caller to pass one every time, which is what
+    finally surfaced it.
+
+    Callers that want a copy of another profile create one here and then copy
+    the settings across with web.py's _nextdns_mirror_settings, which uses
+    only endpoints known to work and produces the same end state."""
+    resp = _request("POST", "/profiles", api_key, {"name": name})
     profile_id = (resp.get("data") or {}).get("id") or resp.get("id")
     if not profile_id:
         raise NextDnsError(

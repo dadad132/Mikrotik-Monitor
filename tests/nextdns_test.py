@@ -81,11 +81,22 @@ check("request body carries the profile name",
 
 seen_requests.clear()
 orig = _patch_urlopen(_capture)
-nextdns.create_profile("sekret-key", "R2", clone_from="template99")
+nextdns.create_profile("sekret-key", "R2")
 _unpatch_urlopen(orig)
-check("clone_from is added as a ?clone= query param",
-      seen_requests[-1].full_url ==
-      "https://api.nextdns.io/profiles?clone=template99")
+check("NEVER sends a ?clone= query param — confirmed live, NextDNS rejects it "
+      "outright with HTTP 400 {\"code\":\"extraneous\",\"source\":"
+      "{\"parameter\":\"clone\"}}, i.e. it does not know that parameter at "
+      "all, so no value would have worked. Callers wanting a copy create a "
+      "blank profile here and copy the settings across afterwards",
+      seen_requests[-1].full_url == "https://api.nextdns.io/profiles"
+      and "clone" not in seen_requests[-1].full_url)
+try:
+    nextdns.create_profile("k", "R2b", clone_from="template99")
+    check("create_profile no longer accepts clone_from at all, so the broken "
+          "call shape cannot come back by accident", False)
+except TypeError:
+    check("create_profile no longer accepts clone_from at all, so the broken "
+          "call shape cannot come back by accident", True)
 
 orig = _patch_urlopen(lambda req: _FakeResponse({"id": "flat456"}))
 check("also accepts a flat (non-nested) {id: ...} response shape",
