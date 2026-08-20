@@ -1655,6 +1655,50 @@ try:
           "conclusion to draw",
           "does NOT rule the tunnel out" in silent)
 
+    print("  one physical router registered under two names is surfaced:")
+    import json as _json
+    import tempfile as _tf
+
+    _d = _tf.mkdtemp()
+    _st = os.path.join(_d, "dupstate.json")
+    _now = time.time()
+    _json.dump({"devices": {
+        "ECA Richards Bay": {
+            "facts": {"serial": "HFF09XYZ", "identity": "ECA Richardsbay",
+                      "updated": _now},
+            "conditions": {"reachability": {"status": "ok"},
+                           "api_error": {"status": "problem"}}},
+        "ECA Richardsbay": {
+            "facts": {"serial": "HFF09XYZ", "identity": "ECA Richardsbay",
+                      "updated": _now},
+            "conditions": {"reachability": {"status": "problem"}}},
+        "Unrelated": {"facts": {"serial": "OTHER123", "identity": "Unrelated",
+                                "updated": _now}, "conditions": {}},
+    }}, open(_st, "w"))
+    _rep = web._build_diagnostics_report(None, None, _st, None, DEF)
+    check("two entries sharing a SERIAL are reported as one router registered "
+          "twice — each carries its own tunnel IP, WireGuard key and login, "
+          "so provisioning one silently invalidates the other's credentials",
+          "SAME SERIAL HFF09XYZ" in _rep
+          and "ECA Richards Bay, ECA Richardsbay" in _rep)
+    check("...and the consequence is spelled out, not left to be inferred",
+          "no longer matches the" in _rep)
+    check("a router with a serial of its own is NOT dragged into it",
+          "OTHER123" not in _rep)
+
+    # No duplicates at all must not emit the section.
+    _st2 = os.path.join(_d, "clean.json")
+    _json.dump({"devices": {
+        "A": {"facts": {"serial": "S1", "identity": "A", "updated": _now},
+              "conditions": {}},
+        "B": {"facts": {"serial": "S2", "identity": "B", "updated": _now},
+              "conditions": {}},
+    }}, open(_st2, "w"))
+    check("a fleet with no duplicates gets no section at all, rather than an "
+          "empty heading to scroll past",
+          "Possible duplicate devices" not in
+          web._build_diagnostics_report(None, None, _st2, None, DEF))
+
     print("  dashboard fleet strip (latency + what is at risk):")
 
     def _fdev(name, up, lat):

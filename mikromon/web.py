@@ -753,6 +753,49 @@ def _build_diagnostics_report(auth, devices_db, state_file, metrics_db,
     orgs = auth.list_orgs_summary() if auth else []
     seen: set = set()
 
+    # Two device entries pointing at the same physical router is silently
+    # confusing in a way nothing here used to surface: each gets its own
+    # tunnel IP, its own WireGuard key and its own generated login, so
+    # provisioning one of them rewrites the credentials the OTHER one is
+    # still polling with -- and that entry then fails to log in forever, for
+    # no reason visible on its own page. Serial number is the reliable
+    # giveaway; identity is a softer hint (two routers can share a name).
+    def _duplicate_router_lines() -> list:
+        by_serial: dict = {}
+        by_identity: dict = {}
+        for dev_name, node in devices_state.items():
+            f = (node or {}).get("facts", {})
+            serial = str(f.get("serial", "") or "").strip()
+            ident = str(f.get("identity", "") or "").strip().lower()
+            if serial:
+                by_serial.setdefault(serial, []).append(dev_name)
+            if ident:
+                by_identity.setdefault(ident, []).append(dev_name)
+        out = []
+        for serial, names in sorted(by_serial.items()):
+            if len(names) > 1:
+                out.append(f"  SAME SERIAL {serial}: " + ", ".join(sorted(names)))
+        for ident, names in sorted(by_identity.items()):
+            if len(names) > 1 and not any(
+                    set(names) <= set(v) for v in by_serial.values()
+                    if len(v) > 1):
+                out.append(f"  same identity \"{ident}\": "
+                           + ", ".join(sorted(names)))
+        if not out:
+            return []
+        return (["", "=" * 70,
+                 "Possible duplicate devices (one router, two entries)",
+                 "=" * 70, ""] + out
+                + ["",
+                   "  Each entry has its own tunnel IP, WireGuard key and",
+                   "  generated login. Provisioning one of them resets the",
+                   "  router's password, which then no longer matches the",
+                   "  other entry — that entry fails to log in from then on.",
+                   "  Delete whichever is the stale one on the Devices page.",
+                   ""])
+
+    lines.extend(_duplicate_router_lines())
+
     def _dump_device(name: str, org_label: str) -> None:
         seen.add(name)
         lines.append(f"=== {name} ({org_label}) ===")
@@ -804,9 +847,36 @@ def _build_diagnostics_report(auth, devices_db, state_file, metrics_db,
                 lines.append(f"  (could not read metrics: {exc})")
 
         conditions = dnode.get("conditions", {})
-        reach = conditions.get("reachability", {})
-        if reach.get("status") == "problem" and cfg is not None and cfg.host:
-            lines.append("  --- why is it unreachable? (live probe) ---")
+        reach_bad = conditions.get("reachability", {}).get("status") == "problem"
+        auth_bad = conditions.get("api_error", {}).get("status") == "problem"
+        if (reach_bad or auth_bad) and cfg is not None and cfg.host:
+            lines.append("  --- why is this device not being polled? "
+                         "(live probe) ---")
+            if auth_bad and not reach_bad:
+                # A DIFFERENT failure from unreachable, and the one most
+                # easily misread as it: the tunnel is up and the API port is
+                # open, the router is simply refusing the login. Confirmed
+                # live from the router's own log --
+                #   "login failure for user <x> from 10.10.0.1 via api"
+                # -- while the dashboard showed the unit as a problem with no
+                # hint that credentials were the cause.
+                lines.append(f"  reachability is OK but the API is returning "
+                             f"an error, which means the router ANSWERED and "
+                             f"then rejected mikromon.")
+                lines.append(f"  stored login for this device: "
+                             f"{cfg.username or '(none set)'}"
+                             + (" (separate push user: " + cfg.push_username
+                                + ")" if cfg.push_username else ""))
+                lines.append("  VERDICT: this is an AUTHENTICATION failure, "
+                             "not a connectivity one. The password mikromon "
+                             "has for this device no longer matches the "
+                             "router. Check the router's own log for "
+                             "'login failure for user ... via api'. Re-run "
+                             "Provision from this device's page to reset the "
+                             "login on the router AND store the new one here "
+                             "in the same step — pasting an older saved "
+                             "script sets a password this dashboard no "
+                             "longer has.")
             try:
                 lines.extend(_why_unreachable(cfg.host, cfg.api_port))
             except Exception as exc:  # noqa: BLE001 — never break the report
