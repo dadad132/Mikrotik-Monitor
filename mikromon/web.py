@@ -642,6 +642,75 @@ def _build_nextdns_diagnostics_lines(auth, devices_db, defaults) -> list:
     return lines
 
 
+# Management ports a healthy RouterOS box answers on. Which of these respond
+# is what separates the three very different things "UNREACHABLE" can mean.
+_REACH_PORTS = [(8728, "API"), (8729, "API-SSL"), (8291, "Winbox"),
+                (22, "SSH"), (80, "WebFig"), (443, "WebFig HTTPS")]
+
+
+def _why_unreachable(host: str, api_port: int, timeout: float = 2.0) -> list:
+    """Work out WHY a device is unreachable, rather than only that it is.
+
+    "Device UNREACHABLE" on its own means one thing: a TCP connection to the
+    router's API port did not open. That covers three situations with nothing
+    in common except the symptom —
+
+      * the router is off, or its WireGuard tunnel to this hub is down, so
+        nothing at that address answers at all;
+      * the router is perfectly fine and reachable, but the API service
+        specifically is disabled or address-restricted;
+      * the address in mikromon is simply not this router any more.
+
+    Confirmed live: a customer logged into the router from its own LAN while
+    the dashboard called it offline, and there was no way to tell from here
+    which of those it was. Knocking on the other management ports settles it,
+    and needs no privileges — the reachability probe already opens exactly
+    this kind of connection.
+    """
+    import socket as _socket
+
+    ports = [(api_port, "API (configured)")] + [
+        (p, lbl) for p, lbl in _REACH_PORTS if p != api_port]
+    answered, refused, silent = [], [], []
+    for port, label in ports:
+        try:
+            with _socket.create_connection((host, port), timeout=timeout):
+                answered.append(f"{label}:{port}")
+        except ConnectionRefusedError:
+            # Something IS there and actively said no — the host is up and
+            # routable, this port just is not listening.
+            refused.append(f"{label}:{port}")
+        except OSError:
+            silent.append(f"{label}:{port}")
+
+    out = []
+    if answered:
+        out.append("  ports answering: " + ", ".join(answered))
+    if refused:
+        out.append("  ports refusing (host IS up and routable): "
+                   + ", ".join(refused))
+    if silent:
+        out.append("  ports silent (no reply at all): " + ", ".join(silent))
+
+    if answered or refused:
+        out.append("  VERDICT: the router IS reachable over the tunnel — "
+                   "something answered. So this is NOT a tunnel or power "
+                   "problem: the API port specifically is not accepting "
+                   "connections. Check /ip service on the router (is `api` "
+                   "disabled, on a different port, or restricted to an "
+                   "address range that excludes this hub?), and that the "
+                   "API port in mikromon matches.")
+    else:
+        out.append("  VERDICT: nothing at this address answers on any "
+                   "management port. The router is either off, or its "
+                   "WireGuard tunnel to this hub is down. Being able to log "
+                   "into it from its own LAN does NOT rule the tunnel out — "
+                   "that is a different path. Check the router's own "
+                   "/interface/wireguard peer: last handshake, and that its "
+                   "endpoint still points at this hub.")
+    return out
+
+
 def _build_diagnostics_report(auth, devices_db, state_file, metrics_db,
                               defaults) -> str:
     """Plain-text dump of every device's live monitoring state, across every
@@ -735,6 +804,13 @@ def _build_diagnostics_report(auth, devices_db, state_file, metrics_db,
                 lines.append(f"  (could not read metrics: {exc})")
 
         conditions = dnode.get("conditions", {})
+        reach = conditions.get("reachability", {})
+        if reach.get("status") == "problem" and cfg is not None and cfg.host:
+            lines.append("  --- why is it unreachable? (live probe) ---")
+            try:
+                lines.extend(_why_unreachable(cfg.host, cfg.api_port))
+            except Exception as exc:  # noqa: BLE001 — never break the report
+                lines.append(f"  (probe failed: {exc})")
         if not conditions:
             lines.append("  conditions: (empty — nothing has ever been "
                          "tracked for this device)")

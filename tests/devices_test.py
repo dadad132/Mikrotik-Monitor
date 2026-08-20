@@ -1607,6 +1607,54 @@ try:
     st = post_status(nobody, "/device/wan",
                      {"csrf": bcsrf, "device": "WebR1", "link_iface": ["x"]})
     check("unallocated member blocked from editing WAN (403)", st == 403)
+    print("  \"why is it unreachable\" separates the three things that used "
+          "to look identical:")
+    import socket as _sock
+    import threading as _thr
+
+    # A router answering on Winbox but not on the API port: reachable, with
+    # the API specifically shut. Confirmed live as indistinguishable from a
+    # dead router before this existed.
+    _srv = _sock.socket()
+    _srv.setsockopt(_sock.SOL_SOCKET, _sock.SO_REUSEADDR, 1)
+    _srv.bind(("127.0.0.1", 0))
+    _open_port = _srv.getsockname()[1]
+    _srv.listen(5)
+    _thr.Thread(target=lambda: [_srv.accept() for _ in range(4)],
+                daemon=True).start()
+    try:
+        orig_ports = web._REACH_PORTS
+        web._REACH_PORTS = [(_open_port, "Winbox")]
+        try:
+            reachable = web._why_unreachable("127.0.0.1", 1, timeout=0.4)
+        finally:
+            web._REACH_PORTS = orig_ports
+    finally:
+        _srv.close()
+    joined = "\n".join(reachable)
+    check("something answering on ANY management port proves the tunnel is "
+          "up, so the verdict points at the API service rather than at power "
+          "or WireGuard",
+          "router IS reachable over the tunnel" in joined
+          and "NOT a tunnel or power problem" in joined)
+    check("...and it names which port answered, so the finding is checkable "
+          "rather than asserted", f"Winbox:{_open_port}" in joined)
+
+    # Nothing answering anywhere: genuinely off, or the tunnel is down.
+    orig_ports = web._REACH_PORTS
+    web._REACH_PORTS = [(9, "discard")]
+    try:
+        silent = "\n".join(web._why_unreachable("127.0.0.1", 9, timeout=0.4))
+    finally:
+        web._REACH_PORTS = orig_ports
+    check("nothing answering anywhere gives the opposite verdict — off, or "
+          "the tunnel is down",
+          "either off, or its WireGuard tunnel" in silent)
+    check("...and says plainly that logging in from the router's own LAN "
+          "does not rule the tunnel out, which is exactly the wrong "
+          "conclusion to draw",
+          "does NOT rule the tunnel out" in silent)
+
     print("  dashboard fleet strip (latency + what is at risk):")
 
     def _fdev(name, up, lat):
