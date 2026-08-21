@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+import types
 import tempfile
 import threading
 import time
@@ -1698,6 +1699,35 @@ try:
           "empty heading to scroll past",
           "Possible duplicate devices" not in
           web._build_diagnostics_report(None, None, _st2, None, DEF))
+
+    print("  a single dropped probe must not read as offline:")
+
+    class _UpStore:
+        def __init__(self, up): self.up = up
+        def latest(self, _name):
+            return ({} if self.up is None
+                    else {("up", ""): {"value": self.up, "ts": 0}})
+
+    def _up_of(up_sample, reach_status):
+        conds = ({} if reach_status is None
+                 else {"reachability": {"status": reach_status}})
+        st = {"devices": {"R": {"conditions": conds, "facts": {"model": "x"}}}}
+        return web._device_view(_UpStore(up_sample), st, "R")["up"]
+
+    check("a probe that failed ONCE, while the debounce still says ok, reads "
+          "as ONLINE — the engine needs two consecutive failures before it "
+          "calls a device down, and the dashboard has to agree with the "
+          "alerting rather than flip on one lost packet",
+          _up_of(0.0, "ok") == 1)
+    check("a device the debounce has actually confirmed down reads as offline",
+          _up_of(0.0, "problem") == 0)
+    check("the confirmed verdict wins over a stale sample that still says up "
+          "— one source of truth, and it is the debounced one",
+          _up_of(1.0, "problem") == 0)
+    check("a healthy device is unaffected", _up_of(1.0, "ok") == 1)
+    check("with the reachability check switched off there is no condition to "
+          "consult, so the raw sample is still used",
+          _up_of(0.0, None) == 0 and _up_of(1.0, None) == 1)
 
     print("  dashboard fleet strip (latency + what is at risk):")
 

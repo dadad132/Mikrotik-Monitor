@@ -576,6 +576,88 @@ html = notifier._html(sample)
 check("plain text contains 'Why'", "Why" in text and "BACKUP" in text)
 check("html contains color-coded entry", "border-left" in html and "Router rebooted" in html)
 
+print("reachability probe (a dropped packet is not a dead router):")
+import socket as _s
+import types as _t
+
+from mikromon.device import (Device as _Device, _REACH_ATTEMPTS,
+                             _REACH_MIN_TIMEOUT)
+
+_tries = {"n": 0}
+_real_conn = _s.create_connection
+
+
+class _Conn:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _flaky(addr, timeout=None):
+    _tries["n"] += 1
+    if _tries["n"] == 1:
+        raise OSError("simulated dropped SYN")
+    return _Conn()
+
+
+_cfg = _t.SimpleNamespace(host="h", api_port=8728, timeout=5, name="R")
+_s.create_connection = _flaky
+try:
+    _ok = _Device(_cfg).reachable()
+finally:
+    _s.create_connection = _real_conn
+check("a dropped SYN followed by a good one still counts as reachable -- "
+      "these routers are reached over a UDP tunnel that drops the odd "
+      "packet, and asking only once cannot tell that from a dead router",
+      _ok is True and _tries["n"] == 2)
+
+_tries["n"] = 0
+
+
+def _always_down(addr, timeout=None):
+    _tries["n"] += 1
+    raise OSError("down")
+
+
+_s.create_connection = _always_down
+try:
+    _dev = _Device(_cfg)
+    _down = _dev.reachable(timeout=0.05)
+finally:
+    _s.create_connection = _real_conn
+check("a router that really is down is still reported down, after a bounded "
+      "number of attempts rather than retrying forever",
+      _down is False and _tries["n"] == _REACH_ATTEMPTS)
+check("...and contributes no latency reading, which would otherwise be the "
+      "OS giving-up time rather than a round trip",
+      _dev.last_probe_ms is None)
+
+# Retrying must not make a down device SLOWER to give up on. A poll cycle and
+# several web handlers walk whole fleets, and the down devices are exactly the
+# slow ones -- written naively, the retry doubled that and timed a handler out.
+_seen_timeouts = []
+
+
+def _record_timeout(addr, timeout=None):
+    _seen_timeouts.append(timeout)
+    raise OSError("down")
+
+
+_s.create_connection = _record_timeout
+try:
+    _Device(_t.SimpleNamespace(host="h", api_port=8728, timeout=60,
+                               name="R")).reachable()
+finally:
+    _s.create_connection = _real_conn
+check("the attempts SHARE the timeout budget rather than multiplying it, so "
+      "retrying costs no extra wall-clock on a device that is really down",
+      len(_seen_timeouts) == _REACH_ATTEMPTS
+      and abs(sum(_seen_timeouts) - 5.0) < 0.01)
+
+print()
+
 print("poll fetch order (a measurement must not be distorted by the act of "
       "collecting everything else):")
 from mikromon.device import _FETCH_LAST, _fetch_order

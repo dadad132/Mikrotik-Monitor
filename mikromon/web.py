@@ -84,10 +84,26 @@ def _device_view(store, state, name) -> dict:
             throughput.setdefault(label, {})[metric] = rec["value"]
         else:
             metrics[metric] = rec["value"]
-    up = metrics.get("up")
-    if up is None:
-        rc = conditions.get("reachability", {})
+    # Offline or not is taken from the DEBOUNCED reachability condition, not
+    # from the raw `up` sample.
+    #
+    # They are not the same thing, and the difference was showing. The engine
+    # only calls a device down after `confirmations` consecutive failed probes
+    # (2 by default) precisely because a single dropped SYN over a WireGuard
+    # tunnel is normal and means nothing. Alerting honoured that; this did
+    # not -- it read the last raw probe, so one lost packet turned the
+    # dashboard red while no alert fired and the condition still said ok with
+    # pending=problem(1). Reported as "it shows offline but the unit is
+    # online", and both halves were true.
+    #
+    # The raw sample is still the fallback for a device whose reachability
+    # check is switched off, where no condition is ever written.
+    rc = conditions.get("reachability") or {}
+    if rc.get("status") in ("problem", "ok"):
         up = 0 if rc.get("status") == "problem" else 1
+    else:
+        up = metrics.get("up")
+        up = 1 if up is None else up
     problems = _problems(conditions)
     keys = {p["key"] for p in problems}
     if not up or "internet_down" in keys:

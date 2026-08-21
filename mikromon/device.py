@@ -84,6 +84,13 @@ def _fetch_order(datasets):
     return first + middle + last
 
 
+# How many times the reachability probe tries before reporting a device
+# down, and the shortest each attempt may be given. The attempts share the
+# caller's timeout budget rather than multiplying it -- see Device.reachable().
+_REACH_ATTEMPTS = 2
+_REACH_MIN_TIMEOUT = 1.0
+
+
 class DeviceError(Exception):
     """Raised when we cannot talk to a device."""
 
@@ -131,20 +138,36 @@ class Device:
         the SERVER-to-router path, not the router's own internet latency;
         those are different numbers and only this one is free."""
         timeout = timeout if timeout is not None else min(self.cfg.timeout, 5)
-        started = time.monotonic()
-        try:
-            with socket.create_connection(
-                (self.cfg.host, self.cfg.api_port), timeout=timeout
-            ):
-                self.last_probe_ms = round((time.monotonic() - started) * 1000, 1)
-                return True
-        except OSError:
-            # Deliberately not recorded: a failed connect times how long the
-            # OS took to give up, which says nothing about latency and would
-            # drag a fleet average around by whatever the timeout happens to
-            # be set to.
-            self.last_probe_ms = None
-            return False
+        # Tried twice before giving up. These routers are reached across a
+        # WireGuard tunnel, so the probe rides on UDP that can and does drop
+        # the occasional packet -- and a lost SYN is indistinguishable from a
+        # dead router if you only ask once.
+        #
+        # The attempts SPLIT the existing budget rather than adding to it: two
+        # tries of half the timeout, not two of the whole one. Retrying was
+        # first written the naive way and immediately doubled how long an
+        # unreachable device ties the caller up, which matters -- a poll cycle
+        # and several web handlers walk whole fleets, and the devices that are
+        # down are exactly the slow ones. A floor keeps each attempt sane if
+        # someone configures a very short timeout.
+        per_try = max(_REACH_MIN_TIMEOUT, timeout / _REACH_ATTEMPTS)
+        for attempt in range(_REACH_ATTEMPTS):
+            started = time.monotonic()
+            try:
+                with socket.create_connection(
+                    (self.cfg.host, self.cfg.api_port), timeout=per_try
+                ):
+                    self.last_probe_ms = round(
+                        (time.monotonic() - started) * 1000, 1)
+                    return True
+            except OSError:
+                if attempt + 1 < _REACH_ATTEMPTS:
+                    continue
+        # Deliberately not recorded: a failed connect times how long the OS
+        # took to give up, which says nothing about latency and would drag a
+        # fleet average around by whatever the timeout happens to be set to.
+        self.last_probe_ms = None
+        return False
 
     def connect(self):
         if self.api is not None:
