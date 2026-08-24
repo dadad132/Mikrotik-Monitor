@@ -576,6 +576,80 @@ html = notifier._html(sample)
 check("plain text contains 'Why'", "Why" in text and "BACKUP" in text)
 check("html contains color-coded entry", "border-left" in html and "Router rebooted" in html)
 
+print("one stuck device must not freeze the whole fleet's state:")
+import time as _time
+import types as _ty
+from concurrent.futures import ThreadPoolExecutor as _TPE
+
+import mikromon.engine as _E
+from mikromon.config import AppConfig as _AppCfg
+
+_E._CYCLE_BUDGET_FLOOR = 0.4  # keep the test quick; behaviour is identical
+
+
+def _bare_engine():
+    e = _E.Engine.__new__(_E.Engine)
+    e.config = _AppCfg(poll_interval=1, state_file="./_t.json", devices=[])
+    e.now_fn = _time.time
+    e._in_flight = set()
+    e.state = _ty.SimpleNamespace(save=lambda: None, data={},
+                                  prune_unknown_devices=lambda *a: None)
+    e.devices_store = None
+    e.metrics = None
+    e.notifiers = []
+    e.dry_run = True
+    e._grace_seconds = 0
+    e._grace_resynced = True
+    e._start_ts = 0
+    e._pool = _TPE(max_workers=4)
+    e.dispatch = lambda b: None
+    e._maybe_resync_after_grace = lambda: None
+    e._check_scheduled_reports = lambda: None
+    return e
+
+
+_polled = []
+_eng = _bare_engine()
+
+
+def _poll(d):
+    if d.name == "Stuck":
+        _time.sleep(30)          # far beyond the cycle budget
+    _polled.append(d.name)
+    return []
+
+
+_eng._poll_device = _poll
+_D = lambda n: _ty.SimpleNamespace(name=n, cfg=_ty.SimpleNamespace(name=n))
+_eng.devices = [_D("Stuck"), _D("A"), _D("B")]
+
+_t0 = _time.time()
+_eng.run_once()
+_elapsed = _time.time() - _t0
+check("a cycle gives up on a device that never returns instead of waiting "
+      "forever -- state.json is only saved once the cycle ends, so one router "
+      "that accepts TCP and then stalls used to freeze the recorded state of "
+      "every OTHER device for as long as it hung",
+      _elapsed < 5)
+check("...while the healthy devices in that same cycle are still polled",
+      sorted(_polled) == ["A", "B"])
+check("...and the straggler is remembered as still running",
+      _eng._in_flight == {"Stuck"})
+
+_polled.clear()
+_t0 = _time.time()
+_eng.run_once()
+check("the next cycle SKIPS the device still stuck rather than stacking a "
+      "second poll on it -- re-submitting would pile up threads until the "
+      "pool had none left for the healthy routers",
+      _time.time() - _t0 < 1 and sorted(_polled) == ["A", "B"])
+
+check("a device that finishes releases its slot, so a one-off slow poll does "
+      "not lock that device out of every future cycle",
+      "A" not in _eng._in_flight and "B" not in _eng._in_flight)
+
+print()
+
 print("reachability probe (a dropped packet is not a dead router):")
 import socket as _s
 import types as _t

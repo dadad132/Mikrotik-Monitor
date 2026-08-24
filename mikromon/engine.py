@@ -6,6 +6,7 @@ import signal
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as _FutureTimeout
 
 from .alert import Severity
 from .checks import enabled_checks, required_datasets
@@ -17,6 +18,11 @@ from .notify import build_notifiers
 from .state import StateStore
 
 log = logging.getLogger(__name__)
+
+# Shortest a poll cycle will wait for its devices before carrying on without
+# the stragglers. Never below this even if poll_interval is tiny, so a fast
+# interval cannot start abandoning healthy-but-slow routers.
+_CYCLE_BUDGET_FLOOR = 30
 
 
 class Engine:
@@ -51,6 +57,9 @@ class Engine:
             self.metrics = MetricsStore(config.metrics_db)
             self.metrics.prune(getattr(config, "metrics_retention_days", 30))
         self._stop = threading.Event()
+        # Devices whose poll has been submitted and not yet returned. Guards
+        # against stacking a second poll on a router that is already stuck.
+        self._in_flight: set = set()
         # Poll devices concurrently (bounded), not one at a time — with many
         # devices, sequential polling could take far longer than
         # poll_interval to get through everyone, since a slow/unreachable
@@ -104,6 +113,15 @@ class Engine:
             log.info("Startup grace period ended; %d condition(s) still "
                      "unhealthy, alerting now", len(still_down))
             self.dispatch(still_down)
+
+    def _poll_and_release(self, device):
+        """Poll one device, always releasing its in-flight slot afterwards --
+        including when it fails or is abandoned by the cycle budget, or the
+        skip in run_once would lock that device out permanently."""
+        try:
+            return self._poll_device(device)
+        finally:
+            self._in_flight.discard(device.name)
 
     def _devices_from_store(self):
         return [Device(c) for c in
@@ -200,11 +218,42 @@ class Engine:
             if self.metrics is not None:
                 self.metrics.keep_only(known)
         batch = []
-        futures = [self._pool.submit(self._poll_device, device)
-                  for device in self.devices]
-        for fut in futures:
+        # A device already being polled from an earlier cycle is skipped
+        # rather than queued again: re-submitting one that is stuck would
+        # pile up threads until the pool had none left for the healthy
+        # routers, turning one sick device into a fleet-wide outage.
+        pending = []
+        for device in self.devices:
+            if device.name in self._in_flight:
+                log.warning("%s: previous poll still running, skipping this "
+                            "cycle", device.name)
+                continue
+            self._in_flight.add(device.name)
+            pending.append((device.name,
+                            self._pool.submit(self._poll_and_release, device)))
+
+        # Wait for the cycle, but not forever. A router that accepts a TCP
+        # connection and then never answers holds the API session open for
+        # the full per-device timeout on EVERY dataset, which runs to minutes
+        # -- and this loop used to wait for all of it. Nothing downstream ran
+        # in the meantime, including state.save(), so one sick device froze
+        # the recorded state of every other device on the dashboard. Seen
+        # live: eight routers polled fine and their samples landed, while
+        # state.json stayed pinned to the previous cycle for ten minutes
+        # because a ninth never returned.
+        deadline = self.now_fn() + max(_CYCLE_BUDGET_FLOOR,
+                                       int(self.config.poll_interval))
+        for name, fut in pending:
             try:
-                batch.extend(fut.result())
+                batch.extend(fut.result(
+                    timeout=max(0.0, deadline - self.now_fn())))
+            except _FutureTimeout:
+                # Left running deliberately -- cancelling mid-request would
+                # not free the socket any sooner. It releases itself, and the
+                # skip above keeps it from being doubled up next cycle.
+                log.warning("%s: poll exceeded the cycle budget; carrying on "
+                            "without it so the rest of the fleet still "
+                            "updates", name)
             except Exception:  # noqa: BLE001 — one device's crash must not
                 log.exception("Unexpected error polling a device")  # skip the rest
         self.dispatch(batch)

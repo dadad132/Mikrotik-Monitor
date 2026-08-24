@@ -708,7 +708,20 @@ def _why_unreachable(host: str, api_port: int, timeout: float = 2.0) -> list:
     if silent:
         out.append("  ports silent (no reply at all): " + ", ".join(silent))
 
-    if answered or refused:
+    api_answered = any(lbl.startswith("API (configured)") for lbl in answered)
+    if api_answered:
+        # Measured the API port open and then said it was shut. Whatever is
+        # wrong is past the TCP layer -- the login, or a session that opens
+        # and then stalls -- and neither is a connectivity problem.
+        out.append("  VERDICT: the configured API port ANSWERED, so this is "
+                   "not a connectivity problem at all — not the tunnel, not "
+                   "the router being off, and not the API being closed. "
+                   "Whatever is failing is past the TCP layer: the login is "
+                   "being rejected, or the session opens and then stalls. "
+                   "Check the router's own log for 'login failure ... via "
+                   "api', and re-run Provision to reset the credentials on "
+                   "both sides at once.")
+    elif answered or refused:
         out.append("  VERDICT: the router IS reachable over the tunnel — "
                    "something answered. So this is NOT a tunnel or power "
                    "problem: the API port specifically is not accepting "
