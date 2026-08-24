@@ -1700,6 +1700,42 @@ try:
           "Possible duplicate devices" not in
           web._build_diagnostics_report(None, None, _st2, None, DEF))
 
+    print("  a passing connection test clears a stale offline state:")
+    import json as _js
+    import tempfile as _tf2
+
+    _sd = _tf2.mkdtemp()
+    _sf = os.path.join(_sd, "state.json")
+
+    def _put_reach(status):
+        _js.dump({"devices": {"R": {"conditions": {"reachability": {
+            "status": status, "since": 1.0,
+            "pending": "ok", "pending_n": 1}}}}}, open(_sf, "w"))
+
+    def _reach():
+        return _js.load(open(_sf))["devices"]["R"]["conditions"]["reachability"]
+
+    _put_reach("problem")
+    check("a device still marked offline is cleared once a test actually "
+          "reaches it — being told SUCCESS while the same screen says "
+          "offline is what stops a dashboard being believed",
+          web._clear_stale_offline(_sf, "R") is True
+          and _reach()["status"] == "ok")
+    check("...and the debounce counters are reset with it, so the next poll "
+          "starts from a clean state rather than a half-counted flip",
+          _reach()["pending"] is None and _reach()["pending_n"] == 0)
+
+    _put_reach("ok")
+    check("a device already healthy is left alone — nothing to clear",
+          web._clear_stale_offline(_sf, "R") is False
+          and _reach()["status"] == "ok")
+    check("it only ever CLEARS, never marks a device down, so a test can "
+          "never manufacture a state it did not observe",
+          web._clear_stale_offline(_sf, "nosuchdevice") is False)
+    check("no state file configured is a quiet no-op, not an error that "
+          "would take the test result down with it",
+          web._clear_stale_offline("", "R") is False)
+
     print("  a single dropped probe must not read as offline:")
 
     class _UpStore:

@@ -5048,6 +5048,45 @@ def _mini_form(action, csrf, name, label, cls, confirm=None) -> str:
             f'<button class="{cls}" type="submit">{label}</button></form>')
 
 
+def _clear_stale_offline(state_file, name) -> bool:
+    """A successful hand-run connection test proves the device is up, so stop
+    showing it as offline.
+
+    The engine debounces reachability -- two consecutive good polls before a
+    router counts as recovered -- which is right for unattended polling and
+    wrong here. Someone who has just fixed a router, pressed Test and been
+    told SUCCESS should not go on reading "offline" on the same screen for
+    another two minutes; that contradiction is what makes a dashboard stop
+    being believed. Confirmed live: a router was reachable, its test passed,
+    and the inventory still called it offline.
+
+    This is not bypassing the debounce, it is satisfying it: an operator
+    pressing Test IS a confirmed observation of the same thing the probe
+    measures, and a more direct one. Only ever clears a stale problem -- it
+    never marks anything down, so a test cannot manufacture a false healthy
+    state for a device it did not actually reach.
+    """
+    if not state_file:
+        return False
+    try:
+        from .state import StateStore
+
+        st = StateStore(state_file).load()
+        cond = (st.data.get("devices", {}).get(name, {})
+                .get("conditions", {}).get("reachability"))
+        if not cond or cond.get("status") != "problem":
+            return False
+        cond["status"] = "ok"
+        cond["since"] = time.time()
+        cond["pending"] = None
+        cond["pending_n"] = 0
+        st.save()
+        return True
+    except Exception:  # noqa: BLE001 — a test result must never fail on this
+        log.exception("could not clear stale offline state for %s", name)
+        return False
+
+
 def _render_test_result(name, ok, detail, user) -> str:
     color = "#16a34a" if ok else "#dc2626"
     inner = (f'<div class="wrap"><h1>Connection test: {esc(name)}</h1>'
@@ -8206,6 +8245,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                           f"version={res.get('version', '?')}  "
                           f"uptime={res.get('uptime', '?')}  "
                           f"cpu={res.get('cpu-load', '?')}%")
+                if _clear_stale_offline(state_file, name):
+                    detail += ("   —   this device was still showing as "
+                               "offline from an earlier failure; that has "
+                               "been cleared, since this test just reached it.")
                 return self._send(200, _render_test_result(name, True, detail, user),
                                   "text/html; charset=utf-8")
             except DeviceError as exc:
