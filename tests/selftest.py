@@ -576,6 +576,54 @@ html = notifier._html(sample)
 check("plain text contains 'Why'", "Why" in text and "BACKUP" in text)
 check("html contains color-coded entry", "border-left" in html and "Router rebooted" in html)
 
+print("a dataset that could not be READ is not the same as bad news:")
+_wan_dev = DeviceConfig(
+    name="R", host="1.1.1.1",
+    wan=WanConfig(links=[WanEndpoint(name="ZWN 1", interface="ether1"),
+                         WanEndpoint(name="ZWN 2", interface="ether2")]),
+    checks=dict(DEFAULT_CHECKS), thresholds=dict(DEFAULT_THRESHOLDS))
+
+
+class _CountingCtx:
+    def __init__(self):
+        self.calls = []
+        self.store = type("S", (), {"data": {"devices": {}}})()
+        self.device = "R"
+        self.now = 0
+
+    def transition(self, key, healthy, **kw):
+        self.calls.append((key, healthy))
+
+    def sample(self, *a, **k):
+        pass
+
+    def memory(self, n):
+        return {}
+
+
+_failed = Snapshot()
+_failed.data["route"] = []
+_failed.data["dhcp_client"] = []
+_failed.errors["route"] = "timed out"
+_c1 = _CountingCtx()
+WanCheck().run(_failed, _wan_dev, _c1)
+check("a route table that could not be fetched says NOTHING, rather than "
+      "reading the empty result as 'this router has no default route' -- "
+      "which is how a router that was reachable, answering and routing fine "
+      "had every one of its uplinks declared offline",
+      _c1.calls == [])
+
+_really_empty = Snapshot()
+_really_empty.data["route"] = []
+_really_empty.data["dhcp_client"] = []
+_c2 = _CountingCtx()
+WanCheck().run(_really_empty, _wan_dev, _c2)
+check("...while a route table that really IS empty still reports internet "
+      "down, so suppressing the unknown case costs no real alert",
+      ("internet_down", False) in _c2.calls)
+
+print()
+
 print("one stuck device must not freeze the whole fleet's state:")
 import time as _time
 import types as _ty

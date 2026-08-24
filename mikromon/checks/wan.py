@@ -127,6 +127,18 @@ class WanCheck(Check):
     name = "wan"
 
     def run(self, snap, dev, ctx) -> None:
+        # A dataset that FAILED to fetch comes back as an empty list, which is
+        # indistinguishable here from a router that genuinely has no routes --
+        # and this check reads "no default route" as INTERNET DOWN. On a
+        # router whose API session opens and then stalls, the route fetch
+        # times out, every uplink is declared offline, and the one thing
+        # actually wrong (the stalling session) is never mentioned. Seen live
+        # on a router that was reachable, answering, and routing fine.
+        #
+        # Not knowing is not the same as knowing the worst: say nothing this
+        # poll and leave the existing conditions alone.
+        if "route" in snap.errors:
+            return
         defaults = [r for r in snap.rows("route") if _is_default(r)]
         want_failover = dev.check_enabled("wan_failover")
         want_down = dev.check_enabled("internet_down")
