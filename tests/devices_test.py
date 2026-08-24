@@ -1897,6 +1897,28 @@ try:
     check("provision script is guarded/idempotent (safe on configured units)",
           ":if ([:len [/user find name=mikromon]] = 0)" in body
           and '[/system identity get name] = &quot;MikroTik&quot;' in body)
+    # The handshake self-check only exists when a tunnel is actually being
+    # set up, so it is exercised against a script generated WITH hub keys --
+    # the POST above deliberately has no hub configured.
+    _tunnel_script = web._provision_script(
+        "ECA Richards Bay", {"host": "10.10.63.177"}, "mkmonitor", "pw",
+        hub_ip="38.54.63.107", hub_port="51820", hub_pubkey="HUBKEY=",
+        wg_priv="PRIVKEY=", tunnel_ip="10.10.63.177", subnet="10.10.0.0/16")
+    check("the script ends by reporting whether the tunnel actually came up "
+          "-- pasting it used to be silent about that, so a router whose "
+          "config is perfect but whose link blocks the tunnel looked exactly "
+          "like a success until the dashboard called it unreachable hours "
+          "later",
+          "waiting 6s for the WireGuard handshake" in _tunnel_script
+          and "last-handshake" in _tunnel_script)
+    check("...and says what a blank handshake means, since the router's own "
+          "config is not where the fault lies in that case",
+          "not getting out" in _tunnel_script
+          and "UDP" in _tunnel_script
+          and "38.54.63.107:51820" in _tunnel_script)
+    check("the self-check is emitted only when a tunnel is being set up, not "
+          "on a script that has no WireGuard section to report on",
+          "waiting 6s for the WireGuard handshake" not in body)
     check("WG hub not set up here -> prompts to run install.sh (no tunnel block)",
           "install.sh" in body and "/interface wireguard add" not in body)
     # enabling the API is OPTIONAL: leaving the box unchecked omits the line
