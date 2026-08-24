@@ -2884,6 +2884,41 @@ def _nextdns_box(name, cfg, csrf, nextdns_configured: bool) -> str:
         f'</button></form></div>')
 
 
+# Blocked for the few seconds a router test takes, then removed again. IANA
+# reserves example.org for documentation, so nothing real ever depends on it
+# resolving - which is what makes it safe to block on a live network.
+_NEXTDNS_PROBE_DOMAIN = "example.org"
+
+
+def _nextdns_test_box(name, csrf) -> str:
+    """The DNS tab's "is this router really using NextDNS?" button.
+
+    Exists because my.nextdns.io's own banner cannot answer that question: it
+    reports on the machine running the browser, so a PC with Secure DNS on in
+    Chrome/Edge shows "this device is not using NextDNS" whether the router is
+    filtering perfectly or not working at all. This asks the router directly,
+    over its own API, with no browser or client PC in the path."""
+    q = esc(name)
+    return (f'<div class="box"><h2>Is this router really using NextDNS?</h2>'
+            f'<p class="muted">Asks the <b>router itself</b> to resolve a '
+            f'domain from this profile\'s blocked list. If it comes back '
+            f'blocked, nothing but this NextDNS profile could have done that '
+            f'— so the router is connected and filtering, proven. '
+            f'The banner on NextDNS\'s own website can\'t tell you this: it '
+            f'reports on whichever computer is viewing it, so a PC with '
+            f'Secure DNS switched on in Chrome or Edge shows "not using '
+            f'NextDNS" even when this router is working perfectly.</p>'
+            f'<p class="muted">Nothing to set up first: if this profile has '
+            f'no blocked domains yet, the test blocks '
+            f'<code>{esc(_NEXTDNS_PROBE_DOMAIN)}</code> for the few seconds '
+            f'it runs and removes it again afterwards.</p>'
+            f'<form method="POST" action="/device/nextdns-test">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            f'<input type="hidden" name="device" value="{q}">'
+            f'<div class="actions"><button class="btn" type="submit">'
+            f'Test from this router</button></div></form></div>')
+
+
 def _humanize_id(s: str) -> str:
     """'socialNetworks' -> 'Social Networks' — best-effort label for a
     NextDNS category/service/blocklist id that isn't in a curated name map.

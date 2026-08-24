@@ -1780,6 +1780,38 @@ try:
           "&lt;b&gt;" in web._fleet_status_strip(
               web._fleet_summary([_fdev("<b>x", 0, None)])))
 
+    print("  the DNS tab still renders with NextDNS ENABLED:")
+    # Regression guard. The panels the tab assembles are only reachable once
+    # NextDNS is on, so a helper deleted in a refactor stayed invisible until
+    # a customer enabled it and the whole tab broke -- which is exactly what
+    # happened when the per-uplink work was reverted and took the router-test
+    # button out with it. Rendering every panel here fails loudly instead.
+    _nd_cfg = build_device({"name": "WebR1", "host": "10.0.0.1",
+                            "nextdns_enabled": True,
+                            "nextdns_profile_id": "abc123"}, DEF)
+    try:
+        _tab = (web._nextdns_box("WebR1", _nd_cfg, csrf, True)
+                + web._nextdns_test_box("WebR1", csrf)
+                + web._nextdns_list_box("WebR1", csrf, "Blocked", "denylist", [])
+                + web._nextdns_security_box("WebR1", csrf, {})
+                + web._nextdns_parental_box("WebR1", csrf, {})
+                + web._nextdns_privacy_box("WebR1", csrf, {}))
+        _err = ""
+    except Exception as exc:  # noqa: BLE001
+        _tab, _err = "", f"{type(exc).__name__}: {exc}"
+    check("every panel the DNS tab assembles when NextDNS is enabled still "
+          "exists and renders — a missing one takes the whole tab down, and "
+          "only for customers who have it switched on",
+          not _err and len(_tab) > 1000)
+    check("the router-test button is among them, pointing at its handler",
+          "/device/nextdns-test" in _tab)
+    check("the probe domain the test handler blocks is defined — it is "
+          "referenced from the handler, so losing it is a NameError nobody "
+          "sees until the button is pressed",
+          getattr(web, "_NEXTDNS_PROBE_DOMAIN", "") == "example.org")
+    check("...and the report renderer the handler returns through is present",
+          callable(getattr(web, "_nextdns_test_report_html", None)))
+
     # --- the retired per-uplink profiles get cleaned up ------------------
     # A router provisioned while mikromon briefly ran one profile per WAN
     # uplink still carries the extra profile ids. They refer to real profiles
