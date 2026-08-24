@@ -6184,10 +6184,35 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                  f"could not provision over the API: {err}", err)
                     audit.close()
                 store.close()
+                # WHY it could not connect decides what to do about it, and
+                # the two answers point in opposite directions. Zero-touch
+                # provisioning reaches the router over the very tunnel it is
+                # meant to set up, so on a router whose tunnel is down it can
+                # never succeed -- no amount of checking credentials will help,
+                # and the paste script (which needs no connection from here at
+                # all) is the only path that can work. Sending people to check
+                # the login first cost days on a live fleet.
+                hint = ("Check the device's Host and login on the Devices "
+                        "page, or use the paste-script fallback below.")
+                try:
+                    probe = _why_unreachable(cfg.host, cfg.api_port, timeout=1.5)
+                    if any("nothing at this address answers" in ln
+                           for ln in probe):
+                        hint = ("Nothing at " + str(cfg.host) + " answers on "
+                                "ANY management port, so its tunnel to this "
+                                "hub is down (or the router is off). "
+                                "Zero-touch provisioning connects over that "
+                                "same tunnel, so it cannot work until the "
+                                "tunnel is up — that is what the paste script "
+                                "below is for. Generate it here and paste it "
+                                "into the router from its own LAN (Winbox, "
+                                "WebFig or console); it needs no connection "
+                                "from this server.")
+                except Exception:  # noqa: BLE001 — the original error still stands
+                    pass
                 return self._device_provision_page(
                     name, user, error=f"Could not connect to the router to "
-                    f"provision it ({err}). Check the device's Host and login on "
-                    f"the Devices page, or use the paste-script fallback below.")
+                    f"provision it ({err}). {hint}")
             if audit:
                 audit.append(name, actor, "provision", "apply", "ok",
                              f"provisioned {uname}"
