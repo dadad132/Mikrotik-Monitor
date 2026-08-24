@@ -1919,6 +1919,30 @@ try:
     check("the self-check is emitted only when a tunnel is being set up, not "
           "on a script that has no WireGuard section to report on",
           "waiting 6s for the WireGuard handshake" not in body)
+
+    _keyed = web._provision_script(
+        "R", {"host": "1.1.1.1"}, "mkmonitor", "pw",
+        hub_ip="38.54.63.107", hub_port="51820", hub_pubkey="HUB=",
+        wg_priv="PRIV=", wg_pub="EXPECTEDPUBKEY=",
+        tunnel_ip="10.10.63.177", subnet="10.10.0.0/16")
+    check("the script compares the router's own WireGuard key against the one "
+          "the hub was given -- a mismatch makes the hub discard every "
+          "handshake in silence, which from the router is indistinguishable "
+          "from the packets never arriving (rx stays 0 while tx climbs)",
+          "EXPECTEDPUBKEY=" in _keyed
+          and "KEY MISMATCH" in _keyed
+          and "public-key" in _keyed)
+    check("...and it runs BEFORE the handshake wait, so a key problem is not "
+          "misread as a blocked link",
+          _keyed.index("KEY MISMATCH")
+          < _keyed.index("waiting 6s for the WireGuard handshake"))
+    check("a script generated without a registered public key omits the "
+          "comparison rather than checking against an empty string",
+          ":local mmwant" not in web._provision_script(
+              "R", {"host": "1.1.1.1"}, "mkmonitor", "pw",
+              hub_ip="38.54.63.107", hub_port="51820", hub_pubkey="HUB=",
+              wg_priv="PRIV=", tunnel_ip="10.10.63.177",
+              subnet="10.10.0.0/16"))
     check("WG hub not set up here -> prompts to run install.sh (no tunnel block)",
           "install.sh" in body and "/interface wireguard add" not in body)
     # enabling the API is OPTIONAL: leaving the box unchecked omits the line

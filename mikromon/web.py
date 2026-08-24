@@ -3197,8 +3197,8 @@ def _hub_peers_status(peers_path: str) -> dict:
 
 def _provision_script(name, raw, pwuser, pwd, *,
                       hub_ip="", hub_port="51820", hub_pubkey="", wg_priv="",
-                      tunnel_ip="", subnet="", harden=True, enable_api=True,
-                      lock_api=True) -> str:
+                      wg_pub="", tunnel_ip="", subnet="", harden=True,
+                      enable_api=True, lock_api=True) -> str:
     """A one-paste RouterOS bootstrap script that is SAFE on an already-configured
     router: every step is guarded so it only ADDS what is missing and never
     resets existing config. The WireGuard dial-home tunnel needs RouterOS 7.1+."""
@@ -3288,6 +3288,31 @@ def _provision_script(name, raw, pwuser, pwd, *,
         a("#     the failure only showed up later, in the dashboard, as")
         a("#     \"unreachable\" with nothing to point at.")
         a(':put ""')
+        # The hub silently discards a handshake from a public key it does
+        # not know, which looks from the router exactly like the packets
+        # never arriving: rx stays 0 while tx climbs. Seen live with
+        # tx=314KiB and rx=0. So check the key BEFORE blaming the link --
+        # mikromon knows precisely which public key it registered, and the
+        # router can read its own, so the two can simply be compared.
+        if wg_pub:
+            a(':put ""')
+            a(':local mmwant "' + wg_pub + '"')
+            a(':local mmhave ""')
+            a(':do { :set mmhave [/interface wireguard get '
+              "[find name=mikromon] public-key] } on-error={}")
+            a(":if ($mmhave = $mmwant) do={")
+            a('  :put "mikromon: key OK - this router\'s key matches the one '
+              'registered on the hub."')
+            a("} else={")
+            a('  :put "mikromon: KEY MISMATCH - the hub will silently ignore '
+              'this router."')
+            a('  :put ("  hub expects:  " . $mmwant)')
+            a('  :put ("  router has:   " . $mmhave)')
+            a('  :put "  The private-key line above did not take. Re-paste '
+              'the script,"')
+            a('  :put "  or set it by hand from the /interface wireguard '
+              'line in it."')
+            a("}")
         a(':put "mikromon: waiting 6s for the WireGuard handshake..."')
         a(":delay 6s")
         a('/interface wireguard peers print detail where comment="mikromon:tunnel:hub"')
@@ -6125,7 +6150,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 name, raw, uname, pwd,
                 hub_ip=hub_ip, hub_port=hub_port,
                 hub_pubkey=hub_pubkey if tunnel_ip else "", wg_priv=wg_priv,
-                tunnel_ip=tunnel_ip, subnet=hub.get("subnet"),
+                wg_pub=dev_pub, tunnel_ip=tunnel_ip, subnet=hub.get("subnet"),
                 harden=True,
                 enable_api=flat.get("enable_api") == "1", lock_api=lock_api)
             creds = {"user": uname, "pwd": pwd, "ip": tunnel_ip, "hub": hub_ip,
