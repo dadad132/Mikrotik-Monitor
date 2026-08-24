@@ -1961,6 +1961,17 @@ try:
         hub_ip="38.54.63.107", hub_port="51820", hub_pubkey="HUB=",
         wg_priv="PRIV=", wg_pub="EXPECTEDPUBKEY=",
         tunnel_ip="10.10.63.177", subnet="10.10.0.0/16")
+    check("the tunnel is pinned to an MTU every path can carry, on creation "
+          "AND on re-provision -- RouterOS defaults WireGuard to 1420, which "
+          "assumes 1500 underneath; on PPPoE/LTE/CGNAT the excess is dropped "
+          "in SILENCE because WireGuard sets DF, so small exchanges (login, "
+          "port probe, one-row resource read) succeed while the first larger "
+          "reply vanishes",
+          _tunnel_script.count(f"mtu={web._WG_TUNNEL_MTU}") == 2)
+    check("...and that MTU is the value IPv6 guarantees every path carries, "
+          "so it needs no knowledge of what is underneath",
+          web._WG_TUNNEL_MTU == 1280)
+
     check("the script compares the router's own WireGuard key against the one "
           "the hub was given -- a mismatch makes the hub discard every "
           "handshake in silence, which from the router is indistinguishable "

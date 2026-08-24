@@ -3208,6 +3208,25 @@ def _hub_peers_status(peers_path: str) -> dict:
     return {"ok": True, "error": "", "names": names}
 
 
+# MTU for the dial-home tunnel. RouterOS defaults a WireGuard interface to
+# 1420, which assumes a 1500-byte path underneath. A router on PPPoE (1492),
+# LTE or CGNAT has less than that, and WireGuard sets DF -- so anything over
+# the real path MTU is dropped in silence rather than fragmented.
+#
+# The failure that causes is genuinely confusing, because SMALL exchanges keep
+# working: the TCP handshake, the API login, a port probe and a one-row
+# /system/resource all fit, so "Test connection" passes and the router looks
+# healthy. The first larger response -- /ip/service, /ip/route, /interface --
+# silently vanishes and the read times out. Diagnosed live from
+# "read ip/service failed: timed out" arriving AFTER a successful login.
+#
+# 1280 is the floor IPv6 guarantees every path can carry, so it works
+# everywhere without needing to know what is underneath. It costs a little
+# throughput on the site-to-site tunnels that share this interface, which is
+# a fair price for a management path that actually works.
+_WG_TUNNEL_MTU = 1280
+
+
 def _provision_script(name, raw, pwuser, pwd, *,
                       hub_ip="", hub_port="51820", hub_pubkey="", wg_priv="",
                       wg_pub="", tunnel_ip="", subnet="", harden=True,
@@ -3264,10 +3283,11 @@ def _provision_script(name, raw, pwuser, pwd, *,
         a("# this script picks up a new key (generated each time you provision).")
         a(":if ([:len [/interface wireguard find name=mikromon]] = 0) do={")
         a('  /interface wireguard add name=mikromon listen-port=13231 '
-          'private-key="' + wg_priv + '" comment="mikromon:tunnel:if"')
+          'private-key="' + wg_priv + '" mtu=' + str(_WG_TUNNEL_MTU)
+          + ' comment="mikromon:tunnel:if"')
         a("}")
         a("/interface wireguard set [/interface wireguard find name=mikromon] "
-          'private-key="' + wg_priv + '"')
+          'private-key="' + wg_priv + '" mtu=' + str(_WG_TUNNEL_MTU))
         a(":if ([:len [/ip address find interface=mikromon]] = 0) do={")
         a("  /ip address add address=" + tunnel_ip + "/16 interface=mikromon "
           'comment="mikromon:tunnel:addr"')
@@ -6292,6 +6312,22 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # the login first cost days on a live fleet.
                 hint = ("Check the device's Host and login on the Devices "
                         "page, or use the paste-script fallback below.")
+                # "read ... failed: timed out" means the login SUCCEEDED and
+                # then a reply went missing -- a different fault from not
+                # connecting, and the one an unbounded MTU produces.
+                if "read " in str(err) and "timed out" in str(err):
+                    hint = ("The login SUCCEEDED and then a read timed out, so "
+                            "this is not the Host or the credentials. Small "
+                            "exchanges are getting through and larger replies "
+                            "are not, which is what an oversized tunnel MTU "
+                            "does: WireGuard sets DF, so anything above the "
+                            "real path MTU is dropped in silence. Re-generate "
+                            "and paste the script below — it now pins the "
+                            "tunnel to MTU " + str(_WG_TUNNEL_MTU) + ", which "
+                            "every path can carry.")
+                    return self._device_provision_page(
+                        name, user, error=f"Could not finish provisioning "
+                        f"({err}). {hint}")
                 try:
                     probe = _why_unreachable(cfg.host, cfg.api_port, timeout=1.5)
                     if any("nothing at this address answers" in ln
