@@ -222,7 +222,16 @@ class WanCheck(Check):
                         severity=Severity.WARNING,
                         title=f"Backup WAN uplink \"{link_name}\" is DOWN "
                               f"(primary is still up)",
-                        cause=(f"Gateway status: {gw_status}." if not link_up else ""),
+                        cause=((f"Gateway status: {gw_status}. This means the "
+                                f"uplink is not carrying a usable default "
+                                f"route right now — it is about internet "
+                                f"reachability through this link, not about "
+                                f"any service that happens to share its name. "
+                                f"A link that is not an internet uplink at "
+                                f"all (a dedicated provider line, say) should "
+                                f"not be listed under WAN uplinks, or it will "
+                                f"report DOWN permanently.")
+                               if not link_up else ""),
                         recovery_title=f"Backup WAN uplink \"{link_name}\" is back UP",
                         recovery_detail=f"Gateway: {gw_status}.",
                     )

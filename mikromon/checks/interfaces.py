@@ -93,8 +93,14 @@ class InterfaceCheck(Check):
                 severity=Severity.WARNING,
                 title=f"Interface {name} link DOWN",
                 detail=(f"Comment: {comment}" if comment else ""),
-                cause="The physical/logical link is down — cable, SFP, peer "
-                      "device, or upstream provider issue.",
+                cause=f"RouterOS reports this PORT as not running — cable, "
+                      f"SFP, peer device, or upstream provider. This is the "
+                      f"link state of {name} itself, not of anything running "
+                      f"over it: a service named after the port can be "
+                      f"perfectly fine while the port is dark, because its "
+                      f"traffic is taking another path. Confirmed live on a "
+                      f"port called \"voip\" whose phones were still working, "
+                      f"over the primary WAN.",
                 recovery_title=f"Interface {name} link UP",
             )
 
