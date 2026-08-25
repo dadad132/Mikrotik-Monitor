@@ -1707,7 +1707,8 @@ def _suggestion_items(devs, ignored_by_device=None) -> list:
     return items
 
 
-def _suggestion_panel(devs, csrf="", ignored_by_device=None) -> str:
+def _suggestion_panel(devs, csrf="", ignored_by_device=None,
+                      items=None) -> str:
     """The Suggestions list, collapsed behind the chip that counts it.
 
     Shown only when asked for. Open on every page load it is a wall of text
@@ -1715,7 +1716,11 @@ def _suggestion_panel(devs, csrf="", ignored_by_device=None) -> str:
     look at. Filtering is per device and done in the browser, so picking a
     router is instant and does not lose the rest of the page.
     """
-    items = _suggestion_items(devs, ignored_by_device)
+    # Taken from the caller when it has already worked them out, so the count
+    # on the chip and the rows behind it come from ONE list rather than two
+    # that could drift.
+    if items is None:
+        items = _suggestion_items(devs, ignored_by_device)
     ignored_by_device = ignored_by_device or {}
     n_ignored = sum(len(v or ()) for v in ignored_by_device.values())
 
@@ -1882,17 +1887,23 @@ def _render_dashboard(store, state, user=None, allowed=None, csrf="",
                   key=lambda d: ({"crit": 0, "ok": 1}[_severity(d)],
                                  d["device"].lower()))
     summary = _fleet_summary(devs)
+    # Counted from the same list the panel renders, with the ignored ones
+    # already removed. summary["alerts"] is the raw condition total and
+    # counts things this dashboard has been told not to show -- a chip
+    # reading 10 above a list of 8 just looks broken, and makes ignoring
+    # something feel like it did not work.
+    sugg = _suggestion_items(devs, ignored)
     chips = (_stat_chip(summary["total"], "Devices")
-            + _stat_chip(summary["alerts"], "Suggestions",
-                        "info" if summary["alerts"] else "",
+            + _stat_chip(len(sugg), "Suggestions",
+                        "info" if sugg else "",
                         onclick="mmSgToggle()")
             + _stat_chip(summary["offline"], "Offline",
                         "red" if summary["offline"] else "")
             + _fleet_traffic_chip(devs)
             + _firmware_chip(devs))
     strip = _fleet_status_strip(summary) if devs else ""
-    cards = _suggestion_panel(devs, csrf=csrf,
-                              ignored_by_device=ignored) if devs else ""
+    cards = _suggestion_panel(devs, csrf=csrf, ignored_by_device=ignored,
+                              items=sugg) if devs else ""
     charts = _render_noc_charts(devs) if devs else ""
     rows = _dash_device_rows(devs)
     empty_msg = ("No devices to show." if not devs

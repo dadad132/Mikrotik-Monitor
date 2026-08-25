@@ -24,13 +24,28 @@ log = logging.getLogger(__name__)
 # interval cannot start abandoning healthy-but-slow routers.
 _CYCLE_BUDGET_FLOOR = 30
 
-# How often each router is asked to check MikroTik's servers for a newer
-# RouterOS. /system/package/update reports latest-version as EMPTY until a
+# Each router is asked to check MikroTik's servers for a newer RouterOS once
+# per calendar day, on the first poll after local midnight.
+#
+# /system/package/update reports latest-version as EMPTY until a
 # check-for-updates has actually run, so simply reading the menu -- which is
 # all this ever did -- can never tell whether an update exists: the Devices
-# page showed "—" for every router forever. The check is a real request out to
-# MikroTik from each router, so it is deliberately rare rather than per poll.
-_UPDATE_CHECK_EVERY = 24 * 3600
+# page showed "—" for every router forever. The check is a real request out
+# from each router to MikroTik, so it is nightly rather than per poll.
+#
+# Deliberately a calendar-day comparison rather than "24 hours since the last
+# one": an elapsed-time rule drifts, so a fleet checked at 00:00 slips to
+# 00:07, then 00:15, and eventually lands in the working day. Anchoring to the
+# date keeps it at midnight indefinitely, and survives restarts because the
+# timestamp lives in the device's saved facts.
+
+
+def _local_day(ts: float) -> tuple:
+    """(year, day-of-year) in LOCAL time -- the unit "once a night" is
+    measured in. UTC would put the rollover in the middle of the afternoon
+    for some of the world."""
+    lt = time.localtime(ts)
+    return (lt.tm_year, lt.tm_yday)
 
 
 class Engine:
@@ -190,16 +205,23 @@ class Engine:
             pass
 
     def _maybe_check_updates(self, device, cfg, now) -> None:
-        """Ask this router to look for a newer RouterOS, at most daily.
+        """Ask this router to look for a newer RouterOS, once a night.
+
+        Fires on the first poll after local midnight, so the whole fleet's
+        update state is fresh before anyone looks at it in the morning, and
+        the checks land when nobody is using the links.
 
         Without this, latest-version stays empty and "update available" can
         never be answered for a router nobody has opened the Update tab on.
         The timestamp is recorded whether or not the command was accepted, so
         a router that refuses it (an older read-only monitor user) is asked
-        once a day rather than on every single poll."""
+        once a night rather than on every single poll."""
         facts = self.state.facts(cfg.name)
         last = facts.get("update_checked") or 0
-        if now - last < _UPDATE_CHECK_EVERY:
+        # Already asked today. A device that has never been checked (last=0,
+        # i.e. 1970) does not wait until the coming midnight -- a router added
+        # at 09:00 should report its update state the same morning.
+        if last and _local_day(last) == _local_day(now):
             return
         facts["update_checked"] = now
         if device.run_command(("system", "package", "update"),

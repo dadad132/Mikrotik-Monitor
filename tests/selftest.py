@@ -624,7 +624,8 @@ check("...while a route table that really IS empty still reports internet "
 
 print()
 
-print("\"update available\" needs the router to actually CHECK:")
+print("\"update available\" needs the router to actually CHECK, nightly:")
+import datetime as _dt
 import time as _time
 import types as _ty
 
@@ -650,34 +651,56 @@ class _FactStore:
         return self._f.setdefault(n, {})
 
 
+def _at(y, mo, d, h, mi):
+    return _time.mktime(_dt.datetime(y, mo, d, h, mi).timetuple())
+
+
 _ue = _E.Engine.__new__(_E.Engine)
 _ue.state = _FactStore()
 _ucfg = _ty.SimpleNamespace(name="R")
-_unow = _time.time()
-
 _ud = _CmdDev()
-_ue._maybe_check_updates(_ud, _ucfg, _unow)
-check("the router is asked to check for a newer RouterOS -- reading "
+
+_ue._maybe_check_updates(_ud, _ucfg, _at(2026, 8, 25, 9, 0))
+check("the router is ASKED to check for a newer RouterOS -- reading "
       "/system/package/update alone can never answer it, because RouterOS "
-      "leaves latest-version EMPTY until a check has run, which is why the "
+      "leaves latest-version empty until a check has run, which is why the "
       "Devices page showed a dash for every router",
       _ud.calls == [(("system", "package", "update"), "check-for-updates")])
-
-_ue._maybe_check_updates(_ud, _ucfg, _unow + 60)
-check("...but not again on the next poll -- the check is a real request out "
-      "to MikroTik from every router, so it is daily rather than per minute",
+check("...and a device added mid-morning is checked there and then, rather "
+      "than showing nothing until the coming midnight",
       len(_ud.calls) == 1)
 
-_ue._maybe_check_updates(_ud, _ucfg, _unow + _E._UPDATE_CHECK_EVERY + 1)
-check("...and it does run again a day later", len(_ud.calls) == 2)
+_ue._maybe_check_updates(_ud, _ucfg, _at(2026, 8, 25, 14, 30))
+_ue._maybe_check_updates(_ud, _ucfg, _at(2026, 8, 25, 23, 59))
+check("nothing more for the rest of that day -- the check is a real request "
+      "out to MikroTik from every router, not something to do per poll",
+      len(_ud.calls) == 1)
+
+_ue._maybe_check_updates(_ud, _ucfg, _at(2026, 8, 26, 0, 0))
+check("the first poll after local midnight checks again, so the whole "
+      "fleet's update state is fresh before anyone looks in the morning",
+      len(_ud.calls) == 2)
+
+_ue._maybe_check_updates(_ud, _ucfg, _at(2026, 8, 26, 12, 0))
+_ue._maybe_check_updates(_ud, _ucfg, _at(2026, 8, 27, 0, 0))
+check("...and it holds at midnight night after night, because the rule is a "
+      "calendar-day comparison and not '24 hours since the last one' -- "
+      "elapsed time drifts, and a fleet checked at 00:00 would creep into "
+      "the working day",
+      len(_ud.calls) == 3)
 
 _ue.state = _FactStore()
 _refuses = _CmdDev(ok=False)
-_ue._maybe_check_updates(_refuses, _ucfg, _unow)
-_ue._maybe_check_updates(_refuses, _ucfg, _unow + 60)
+_ue._maybe_check_updates(_refuses, _ucfg, _at(2026, 8, 25, 9, 0))
+_ue._maybe_check_updates(_refuses, _ucfg, _at(2026, 8, 25, 9, 1))
 check("a router that REFUSES the command (an older read-only monitor login) "
-      "is still only asked once a day, not hammered every poll",
+      "is still only asked once a night, not hammered every poll",
       len(_refuses.calls) == 1)
+
+check("the day is measured in LOCAL time -- in UTC the nightly rollover "
+      "would land in the middle of the afternoon for much of the world",
+      _E._local_day(_at(2026, 8, 25, 23, 59))
+      != _E._local_day(_at(2026, 8, 26, 0, 1)))
 
 print()
 

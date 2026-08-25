@@ -1903,6 +1903,27 @@ try:
           "Nothing needs attention" in web._suggestion_panel(
               [_sdev("Fine", 1, [], {})], csrf=csrf))
 
+    # The chip is the count of what the panel will actually show. A chip
+    # reading 10 above a list of 8 looks broken, and makes ignoring something
+    # feel like it did not take.
+    for _ig, _want in (({}, 4),
+                       ({"Busy Box": ["iface_down:ether3-voip"]}, 3),
+                       ({"Busy Box": ["iface_down:ether3-voip", "storage"]}, 2)):
+        _it = web._suggestion_items(_devs, _ig)
+        _pn = web._suggestion_panel(_devs, csrf=csrf, ignored_by_device=_ig,
+                                    items=_it)
+        check(f"with {sum(len(v) for v in _ig.values())} ignored, the count "
+              f"is {_want} and the panel renders exactly that many rows — "
+              f"the number and the list come from one place, so they cannot "
+              f"disagree",
+              len(_it) == _want and _pn.count("data-sgrow=") == _want)
+
+    check("ignoring something reduces the number on the chip — the raw "
+          "condition total keeps counting things the dashboard has been told "
+          "to hide, which is why it is no longer what gets displayed",
+          len(web._suggestion_items(_devs, {"Busy Box": ["storage"]}))
+          < len(web._suggestion_items(_devs, {})))
+
     print("  dashboard fleet strip (latency + what is at risk):")
 
     def _fdev(name, up, lat):
