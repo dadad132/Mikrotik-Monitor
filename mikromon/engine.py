@@ -24,6 +24,14 @@ log = logging.getLogger(__name__)
 # interval cannot start abandoning healthy-but-slow routers.
 _CYCLE_BUDGET_FLOOR = 30
 
+# How often each router is asked to check MikroTik's servers for a newer
+# RouterOS. /system/package/update reports latest-version as EMPTY until a
+# check-for-updates has actually run, so simply reading the menu -- which is
+# all this ever did -- can never tell whether an update exists: the Devices
+# page showed "—" for every router forever. The check is a real request out to
+# MikroTik from each router, so it is deliberately rare rather than per poll.
+_UPDATE_CHECK_EVERY = 24 * 3600
+
 
 class Engine:
     def __init__(self, config, dry_run: bool = False, devices=None,
@@ -181,6 +189,23 @@ class Engine:
         except (ValueError, TypeError):
             pass
 
+    def _maybe_check_updates(self, device, cfg, now) -> None:
+        """Ask this router to look for a newer RouterOS, at most daily.
+
+        Without this, latest-version stays empty and "update available" can
+        never be answered for a router nobody has opened the Update tab on.
+        The timestamp is recorded whether or not the command was accepted, so
+        a router that refuses it (an older read-only monitor user) is asked
+        once a day rather than on every single poll."""
+        facts = self.state.facts(cfg.name)
+        last = facts.get("update_checked") or 0
+        if now - last < _UPDATE_CHECK_EVERY:
+            return
+        facts["update_checked"] = now
+        if device.run_command(("system", "package", "update"),
+                              "check-for-updates"):
+            log.debug("%s: asked for a RouterOS update check", cfg.name)
+
     def _flush_metrics(self, ctx) -> None:
         if self.metrics and ctx.samples:
             self.metrics.record((ctx.now, ctx.device, m, lab, v)
@@ -336,6 +361,11 @@ class Engine:
         if snap.errors:
             log.debug("%s: datasets unavailable: %s", cfg.name, snap.errors)
         self._flush_metrics(ctx)
+        # Last, deliberately: this reaches out from the router to MikroTik and
+        # can be slow, so everything worth recording is already flushed before
+        # it runs. Its result lands in /system/package/update and is picked up
+        # by a later poll -- nothing here waits for an answer.
+        self._maybe_check_updates(device, cfg, ctx.now)
         return ctx.alerts
 
     # ----- dispatch ---------------------------------------------------------

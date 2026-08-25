@@ -230,6 +230,22 @@ class Device:
                 log.debug("%s: dataset %s unavailable: %s", self.name, name, exc)
         return snap
 
+    def run_command(self, path, cmd: str, **params) -> bool:
+        """Fire a non-CRUD RouterOS command (e.g. check-for-updates) and say
+        whether it was accepted. Best-effort by design: the monitor side is
+        read-only in spirit, so anything that fails -- an older install whose
+        monitor user genuinely lacks the rights, a menu that does not exist on
+        this board -- degrades to False rather than disturbing the poll."""
+        if self.api is None:
+            return False
+        try:
+            list(self.api.path(*path)(cmd, **params))
+            return True
+        except Exception:  # noqa: BLE001 — never let a nicety break a poll
+            log.debug("%s: command %s/%s not accepted", self.name,
+                      "/".join(path), cmd)
+            return False
+
     def ping(self, address: str, count: int = 3):
         """Best-effort ICMP ping FROM the router. Returns packet-loss % or None.
 

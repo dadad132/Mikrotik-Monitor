@@ -624,12 +624,66 @@ check("...while a route table that really IS empty still reports internet "
 
 print()
 
-print("one stuck device must not freeze the whole fleet's state:")
+print("\"update available\" needs the router to actually CHECK:")
 import time as _time
 import types as _ty
-from concurrent.futures import ThreadPoolExecutor as _TPE
 
 import mikromon.engine as _E
+
+
+class _CmdDev:
+    def __init__(self, ok=True):
+        self.name = "R"
+        self.ok = ok
+        self.calls = []
+
+    def run_command(self, path, cmd, **kw):
+        self.calls.append((path, cmd))
+        return self.ok
+
+
+class _FactStore:
+    def __init__(self):
+        self._f = {}
+
+    def facts(self, n):
+        return self._f.setdefault(n, {})
+
+
+_ue = _E.Engine.__new__(_E.Engine)
+_ue.state = _FactStore()
+_ucfg = _ty.SimpleNamespace(name="R")
+_unow = _time.time()
+
+_ud = _CmdDev()
+_ue._maybe_check_updates(_ud, _ucfg, _unow)
+check("the router is asked to check for a newer RouterOS -- reading "
+      "/system/package/update alone can never answer it, because RouterOS "
+      "leaves latest-version EMPTY until a check has run, which is why the "
+      "Devices page showed a dash for every router",
+      _ud.calls == [(("system", "package", "update"), "check-for-updates")])
+
+_ue._maybe_check_updates(_ud, _ucfg, _unow + 60)
+check("...but not again on the next poll -- the check is a real request out "
+      "to MikroTik from every router, so it is daily rather than per minute",
+      len(_ud.calls) == 1)
+
+_ue._maybe_check_updates(_ud, _ucfg, _unow + _E._UPDATE_CHECK_EVERY + 1)
+check("...and it does run again a day later", len(_ud.calls) == 2)
+
+_ue.state = _FactStore()
+_refuses = _CmdDev(ok=False)
+_ue._maybe_check_updates(_refuses, _ucfg, _unow)
+_ue._maybe_check_updates(_refuses, _ucfg, _unow + 60)
+check("a router that REFUSES the command (an older read-only monitor login) "
+      "is still only asked once a day, not hammered every poll",
+      len(_refuses.calls) == 1)
+
+print()
+
+print("one stuck device must not freeze the whole fleet's state:")
+from concurrent.futures import ThreadPoolExecutor as _TPE
+
 from mikromon.config import AppConfig as _AppCfg
 
 _E._CYCLE_BUDGET_FLOOR = 0.4  # keep the test quick; behaviour is identical
