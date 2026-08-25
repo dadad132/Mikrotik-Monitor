@@ -160,6 +160,13 @@ class DeviceConfig:
     # once, at enable, and cleared on disable. See push/features.py's
     # nextdns_snapshot()/nextdns_restore_ops().
     nextdns_dns_snapshot: dict = field(default_factory=dict)
+    # Dashboard suggestions this device should stop offering. Keyed exactly as
+    # the condition is ("wan_link:2", "iface_down:ether3-voip"), so dismissing
+    # a port that is dark on purpose does not also silence the port next to
+    # it. Only hides the SUGGESTION -- the condition is still tracked and
+    # still alerts, because a dashboard tidy-up must never quietly turn
+    # monitoring off.
+    ignored_suggestions: list = field(default_factory=list)
 
     def nextdns_all_profile_ids(self) -> list:
         """Every NextDNS profile this device owns, main first: normally just
@@ -366,6 +373,8 @@ def build_device(d: dict, defaults: dict, where: str = "device") -> DeviceConfig
                               (d.get("nextdns_wan_profiles") or {}).items()
                               if str(v or "")},
         nextdns_dns_snapshot=dict(d.get("nextdns_dns_snapshot") or {}),
+        ignored_suggestions=[str(x) for x in
+                             (d.get("ignored_suggestions") or []) if str(x)],
     )
 
 
@@ -396,4 +405,5 @@ def device_to_dict(cfg: DeviceConfig) -> dict:
         "nextdns_profile_id": cfg.nextdns_profile_id,
         "nextdns_wan_profiles": dict(cfg.nextdns_wan_profiles),
         "nextdns_dns_snapshot": dict(cfg.nextdns_dns_snapshot),
+        "ignored_suggestions": list(cfg.ignored_suggestions),
     }

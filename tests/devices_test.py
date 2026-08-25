@@ -1765,7 +1765,7 @@ try:
           "consult, so the raw sample is still used",
           _up_of(0.0, None) == 0 and _up_of(1.0, None) == 1)
 
-    print("  dashboard suggestion cards (the count, made actionable):")
+    print("  dashboard suggestions: collapsed, per-device, dismissable:")
     _now = time.time()
 
     def _sdev(n, up, probs, conds, facts=None):
@@ -1773,60 +1773,80 @@ try:
                 "facts": facts or {}, "metrics": {}, "throughput": {},
                 "wan_health": "full"}
 
-    _cards = web._suggestion_cards([
+    _devs = [
         _sdev("Down One", 0,
               [{"key": "reachability", "since": _now - 86400 * 4,
                 "level": "problem"}],
               {"reachability": {"title": "Device UNREACHABLE"}}),
-        _sdev("Full Disk", 1,
-              [{"key": "storage", "since": _now - 86400 * 14, "level": "crit"}],
-              {"storage": {}}),
+        _sdev("Busy Box", 1,
+              [{"key": "storage", "since": _now - 86400 * 14, "level": "crit"},
+               {"key": "iface_down:ether3-voip", "since": _now - 3600,
+                "level": "problem"}],
+              {"storage": {}, "iface_down:ether3-voip":
+               {"title": "Interface ether3-voip link DOWN"}}),
         _sdev("Old Firmware", 1, [], {},
               {"update_available": True, "version": "7.12.1"}),
-    ])
-    check("each suggestion names what it is, which router, and links to the "
-          "tab that fixes it — a bare count tells you there is work without "
-          "telling you what, where, or how",
-          "Cannot be reached" in _cards
-          and "Down One" in _cards
-          and "tab=provision" in _cards)
-    check("the condition's own recorded title is shown, rather than a second "
-          "description invented here that could drift from the alert",
-          "Device UNREACHABLE" in _cards)
-    check("a storage problem points at Backups, where the space is actually "
-          "reclaimed, not at a generic device page",
-          "tab=backups" in _cards)
-    check("an available RouterOS update is surfaced too — already collected "
-          "on every poll, and the thing a fleet owner most wants prompting "
-          "about", "RouterOS update available" in _cards
-          and "tab=update" in _cards)
+    ]
+    _panel = web._suggestion_panel(_devs, csrf=csrf)
 
-    _order = [_cards.index(x) for x in
-              ("Cannot be reached", "Storage is filling up",
-               "RouterOS update available")]
-    check("offline routers come first, then oldest fault first, and an item "
-          "with no timestamp sorts LAST rather than jumping the queue — an "
-          "update notice must not outrank a fault standing for a fortnight",
-          _order == sorted(_order))
+    check("the panel is CLOSED on load — the count is the button, and a list "
+          "this long is scrolled past when it is always on screen",
+          'id="sgPanel" hidden' in _panel)
+    check("the Suggestions chip is a real button that opens it",
+          "chip-btn" in web._stat_chip(3, "Suggestions", "info",
+                                       onclick="mmSgToggle()")
+          and "mmSgToggle()" in web._stat_chip(3, "S", "", onclick="mmSgToggle()"))
+    check("...and an ordinary counter chip stays a plain block, not a button",
+          "chip-btn" not in web._stat_chip(5, "Devices"))
 
-    check("a healthy fleet says so plainly instead of rendering an empty box",
-          "Nothing needs attention" in web._suggestion_cards(
-              [_sdev("Fine", 1, [], {})]))
+    check("opening it offers one filter per router that actually has "
+          "suggestions, plus All — so you pick whose list to read rather "
+          "than reading everyone's",
+          'data-sgdev=""' in _panel
+          and 'data-sgdev="Down One"' in _panel
+          and 'data-sgdev="Busy Box"' in _panel)
+    check("every row is tagged with its device so filtering happens in the "
+          "browser, without a reload that would lose the rest of the page",
+          _panel.count('data-sgrow=') == 4)
 
-    _many = [_sdev(f"R{i}", 1,
-                   [{"key": "cpu", "since": _now - i, "level": "warn"}],
-                   {"cpu": {}}) for i in range(30)]
-    _capped = web._suggestion_cards(_many, limit=5)
-    check("the list is capped and says how many more there are — forty rows "
-          "on a dashboard get read as wallpaper",
-          "and 25 more" in _capped and _capped.count("sg-row") == 5)
+    check("each suggestion can be ignored, scoped to that exact condition on "
+          "that one router",
+          _panel.count(">Ignore<") == 4
+          and 'name="key" value="iface_down:ether3-voip"' in _panel
+          and 'action="/dashboard/suggestion"' in _panel)
 
-    check("an unknown condition key still renders, with a readable label and "
-          "a link to the device, rather than being dropped",
-          "Some New Thing".lower().replace(" ", "_") and
-          "Open device" in web._suggestion_cards(
-              [_sdev("X", 1, [{"key": "some_new_thing", "since": _now,
-                               "level": "warn"}], {})]))
+    _ignored = web._suggestion_panel(
+        _devs, csrf=csrf,
+        ignored_by_device={"Busy Box": ["iface_down:ether3-voip"]})
+    check("an ignored suggestion drops out of the list",
+          "ether3-voip" not in _ignored.split("sg-ignored")[0])
+    check("...but only that one — the other suggestion on the SAME router "
+          "stays, so dismissing a port that is dark on purpose does not "
+          "silence the port beside it",
+          "Storage is filling up" in _ignored)
+    check("...and it is listed as ignored with a way to bring it back, "
+          "rather than vanishing with no trace",
+          "1 ignored suggestion(s)" in _ignored and ">Restore<" in _ignored)
+
+    check("ignoring is scoped per DEVICE: the same key ignored on one router "
+          "does not hide it on another",
+          "Device UNREACHABLE" in web._suggestion_panel(
+              _devs, csrf=csrf,
+              ignored_by_device={"Busy Box": ["reachability"]}))
+
+    _items = web._suggestion_items(_devs)
+    check("offline routers come first, then oldest-first, with items that "
+          "carry no timestamp last — an update notice must not outrank a "
+          "fortnight-old fault",
+          [i["device"] for i in _items][0] == "Down One"
+          and [i["key"] for i in _items][-1] == "update")
+
+    check("without a csrf token no Ignore button is rendered at all, rather "
+          "than one that would be rejected on submit",
+          ">Ignore<" not in web._suggestion_panel(_devs, csrf=""))
+    check("a healthy fleet says so plainly instead of an empty box",
+          "Nothing needs attention" in web._suggestion_panel(
+              [_sdev("Fine", 1, [], {})], csrf=csrf))
 
     print("  dashboard fleet strip (latency + what is at risk):")
 

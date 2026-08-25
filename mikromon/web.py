@@ -1280,7 +1280,15 @@ def _fleet_status_strip(summary) -> str:
     return f'<div class="fleet-strip">{lat}{risk}</div>'
 
 
-def _stat_chip(num, lbl, cls="") -> str:
+def _stat_chip(num, lbl, cls="", onclick="") -> str:
+    """One dashboard counter. With `onclick` it becomes a real button — used
+    by Suggestions, whose number is only useful if you can open what it is
+    counting."""
+    if onclick:
+        return (f'<button type="button" class="chip {cls} chip-btn" '
+                f'onclick="{onclick}" aria-expanded="false" id="sgChip">'
+                f'<div class="chip-num">{num}</div>'
+                f'<div class="chip-lbl">{esc(lbl)} &#9662;</div></button>')
     return (f'<div class="chip {cls}"><div class="chip-num">{num}</div>'
             f'<div class="chip-lbl">{esc(lbl)}</div></div>')
 
@@ -1452,6 +1460,21 @@ a{color:var(--accent);text-decoration:none}
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sg-why{font-size:11px;color:var(--text-faint);margin-top:2px}
 .sg-act{flex-shrink:0;text-decoration:none;font-size:12px;padding:6px 12px}
+.chip-btn{cursor:pointer;font:inherit;text-align:left}
+.chip-btn:hover{border-color:var(--accent)}
+.sg-panel{margin-bottom:14px}
+.sg-filters{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.sg-filter{cursor:pointer;font:inherit;font-size:12px;padding:4px 10px;
+  border-radius:999px;border:1px solid var(--border);
+  background:var(--surface);color:var(--text-muted)}
+.sg-filter:hover{color:var(--text)}
+.sg-filter.on{background:var(--accent-soft);color:var(--accent);
+  border-color:var(--accent)}
+.sg-ig{margin-left:6px}
+.sg-ignored{margin-top:12px;font-size:12px;color:var(--text-muted)}
+.sg-ignored summary{cursor:pointer}
+.sg-igrow{display:flex;align-items:center;justify-content:space-between;
+  gap:10px;padding:6px 0;border-top:1px solid var(--border)}
 @media(max-width:700px){
   .sg-row{flex-direction:column;align-items:stretch}
   .sg-act{text-align:center}
@@ -1496,6 +1519,41 @@ a{color:var(--accent);text-decoration:none}
 
 _DASH_JS = """
 <script>
+// Suggestions: the chip counts them, clicking it opens them. Kept shut on
+// load -- a list this long is scrolled past when it is always there, and read
+// when you asked for it. The open/shut choice is remembered for the session
+// so the ten-second auto-refresh does not keep closing it under you.
+function mmSgToggle(force){
+  var p=document.getElementById('sgPanel'), c=document.getElementById('sgChip');
+  if(!p) return;
+  var open = (force===undefined) ? p.hasAttribute('hidden') : !!force;
+  if(open){ p.removeAttribute('hidden'); } else { p.setAttribute('hidden',''); }
+  if(c) c.setAttribute('aria-expanded', open?'true':'false');
+  try{ sessionStorage.setItem('mmSgOpen', open?'1':'0'); }catch(e){}
+}
+// Filter to one router's suggestions. Done here rather than by reloading so
+// picking a device is instant and nothing else on the page is disturbed.
+function mmSgFilter(btn){
+  var want=btn.getAttribute('data-sgdev')||'';
+  var i,b=document.querySelectorAll('.sg-filter');
+  for(i=0;i<b.length;i++) b[i].classList.toggle('on', b[i]===btn);
+  var r=document.querySelectorAll('[data-sgrow]');
+  for(i=0;i<r.length;i++){
+    var mine=(r[i].getAttribute('data-sgrow')===want);
+    r[i].style.display=(!want||mine)?'':'none';
+  }
+  try{ sessionStorage.setItem('mmSgDev', want); }catch(e){}
+}
+(function(){
+  try{
+    if(sessionStorage.getItem('mmSgOpen')==='1') mmSgToggle(true);
+    var d=sessionStorage.getItem('mmSgDev');
+    if(d){
+      var b=document.querySelector('.sg-filter[data-sgdev="'+d+'"]');
+      if(b) mmSgFilter(b);
+    }
+  }catch(e){}
+})();
 var mmQ=document.getElementById('q');
 function mmApplyFilter(){
   var t=(mmQ&&mmQ.value||'').toLowerCase();
@@ -1592,86 +1650,136 @@ def _suggestion_meta(key: str):
     return key.replace("_", " ").capitalize(), "", "Open device", ""
 
 
-def _suggestion_cards(devs, limit=12) -> str:
-    """The Suggestions count, expanded into something you can act on.
+def _suggestion_items(devs, ignored_by_device=None) -> list:
+    """Every live suggestion across the fleet, worst-first.
 
-    Ordered worst-first and capped: a dashboard that lists forty things is
-    read as wallpaper, and the point is to be actionable rather than
-    complete. The full set stays on each device's own page.
-    """
+    Split out from the rendering so the ordering and the ignore filter can be
+    reasoned about (and tested) without going through HTML."""
+    ignored_by_device = ignored_by_device or {}
     items = []
     for d in devs:
         name = d["device"]
         conds = (d.get("_conditions") or {})
+        skip = set(ignored_by_device.get(name) or ())
         for prob in d.get("problems") or []:
             key = prob["key"]
+            if key in skip:
+                continue
             label, tab, action, why = _suggestion_meta(key)
-            title = str((conds.get(key) or {}).get("title") or "").strip()
             level = prob.get("level") or "problem"
             items.append({
                 "device": name, "key": key, "label": label, "why": why,
                 "tab": tab, "action": action, "since": prob.get("since"),
                 "crit": level in ("crit", "problem") and not d["up"],
-                "detail": title,
+                "detail": str((conds.get(key) or {}).get("title") or "").strip(),
             })
-        # Not a fault, but the most common thing a fleet owner actually wants
-        # prompting about, and it is already collected on every poll.
-        if (d.get("facts") or {}).get("update_available") is True:
+        if ((d.get("facts") or {}).get("update_available") is True
+                and "update" not in skip):
             items.append({
-                "device": name, "key": "update", "label": "RouterOS update "
-                "available", "why": "A newer RouterOS has been published for "
-                "this board.", "tab": "update", "action": "Review update",
-                "since": None, "crit": False,
-                "detail": f"Currently on {(d.get('facts') or {}).get('version', '?')}.",
+                "device": name, "key": "update",
+                "label": "RouterOS update available",
+                "why": "A newer RouterOS has been published for this board.",
+                "tab": "update", "action": "Review update", "since": None,
+                "crit": False,
+                "detail": f"Currently on "
+                          f"{(d.get('facts') or {}).get('version', '?')}.",
             })
-
-    if not items:
-        return ('<div class="dash-card"><div class="dash-card-head">'
-                '<h2>Suggestions</h2></div>'
-                '<p class="muted" style="margin:0">Nothing needs attention '
-                'right now.</p></div>')
-
-    # Offline routers first, then everything else oldest-first: something that
-    # has been wrong for a week matters more than something from a minute ago.
-    # No timestamp sorts LAST within its group, not first: an update notice
-    # carries no "since" and must not outrank a fault that has been standing
-    # for a fortnight.
+    # Offline routers first, then oldest-first: something wrong for a week
+    # matters more than something from a minute ago. No timestamp sorts LAST
+    # rather than jumping the queue, so an update notice cannot outrank a
+    # fortnight-old fault.
     items.sort(key=lambda it: (not it["crit"],
                                it.get("since") if it.get("since") else 1e18))
-    shown, extra = items[:limit], max(0, len(items) - limit)
-
-    rows = ""
-    for it in shown:
-        q = quote(it["device"])
-        href = f"/device?name={q}" + (f"&tab={it['tab']}" if it["tab"] else "")
-        age = ""
-        if it.get("since"):
-            age = f' &middot; {esc(human_duration(time.time() - it["since"]))}'
-        tone = "sg-crit" if it["crit"] else "sg-warn"
-        detail = f'<div class="sg-detail">{esc(it["detail"])}</div>' if it["detail"] else ""
-        rows += (
-            f'<div class="sg-row {tone}">'
-            f'<div class="sg-main">'
-            f'<div class="sg-top"><span class="sg-dot"></span>'
-            f'<b>{esc(it["label"])}</b>'
-            f'<a class="sg-dev" href="/device?name={q}">{esc(it["device"])}</a>'
-            f'<span class="sg-age">{age}</span></div>'
-            f'{detail}'
-            f'<div class="sg-why">{esc(it["why"])}</div>'
-            f'</div>'
-            f'<a class="btn ghost sg-act" href="{href}">{esc(it["action"])}</a>'
-            f'</div>')
-    more = (f'<p class="muted" style="margin:10px 0 0">and {extra} more — '
-            f'each router\'s own page lists all of its own.</p>'
-            if extra else "")
-    return (f'<div class="dash-card"><div class="dash-card-head">'
-            f'<h2>Suggestions</h2>'
-            f'<span class="muted" style="font-size:12px">'
-            f'{len(items)} to look at</span></div>'
-            f'<div class="sg-list">{rows}</div>{more}</div>')
+    return items
 
 
-def _render_dashboard(store, state, user=None, allowed=None) -> str:
+def _suggestion_panel(devs, csrf="", ignored_by_device=None) -> str:
+    """The Suggestions list, collapsed behind the chip that counts it.
+
+    Shown only when asked for. Open on every page load it is a wall of text
+    that gets scrolled past; behind its own count it is a list you chose to
+    look at. Filtering is per device and done in the browser, so picking a
+    router is instant and does not lose the rest of the page.
+    """
+    items = _suggestion_items(devs, ignored_by_device)
+    ignored_by_device = ignored_by_device or {}
+    n_ignored = sum(len(v or ()) for v in ignored_by_device.values())
+
+    if not items:
+        body = ('<p class="muted" style="margin:0">Nothing needs attention '
+                'right now.</p>')
+    else:
+        names = sorted({it["device"] for it in items}, key=str.lower)
+        chips = ('<button type="button" class="sg-filter on" '
+                 'data-sgdev="" onclick="mmSgFilter(this)">'
+                 f'All ({len(items)})</button>')
+        for nm in names:
+            cnt = sum(1 for it in items if it["device"] == nm)
+            chips += (f'<button type="button" class="sg-filter" '
+                      f'data-sgdev="{esc(nm)}" onclick="mmSgFilter(this)">'
+                      f'{esc(nm)} ({cnt})</button>')
+        rows = ""
+        for it in items:
+            q = quote(it["device"])
+            href = f"/device?name={q}" + (f"&tab={it['tab']}" if it["tab"] else "")
+            age = (f' &middot; {esc(human_duration(time.time() - it["since"]))}'
+                   if it.get("since") else "")
+            tone = "sg-crit" if it["crit"] else "sg-warn"
+            detail = (f'<div class="sg-detail">{esc(it["detail"])}</div>'
+                      if it["detail"] else "")
+            ignore = ""
+            if csrf:
+                ignore = (
+                    f'<form method="POST" action="/dashboard/suggestion" '
+                    f'class="inline sg-ig">'
+                    f'<input type="hidden" name="csrf" value="{csrf}">'
+                    f'<input type="hidden" name="device" value="{esc(it["device"])}">'
+                    f'<input type="hidden" name="key" value="{esc(it["key"])}">'
+                    f'<input type="hidden" name="action" value="ignore">'
+                    f'<button class="btn ghost sg-act" type="submit" '
+                    f'title="Stop offering this suggestion for this router. '
+                    f'It keeps being monitored and still alerts.">Ignore'
+                    f'</button></form>')
+            rows += (
+                f'<div class="sg-row {tone}" data-sgrow="{esc(it["device"])}">'
+                f'<div class="sg-main">'
+                f'<div class="sg-top"><span class="sg-dot"></span>'
+                f'<b>{esc(it["label"])}</b>'
+                f'<a class="sg-dev" href="/device?name={q}">'
+                f'{esc(it["device"])}</a>'
+                f'<span class="sg-age">{age}</span></div>'
+                f'{detail}'
+                f'<div class="sg-why">{esc(it["why"])}</div></div>'
+                f'<a class="btn ghost sg-act" href="{href}">'
+                f'{esc(it["action"])}</a>{ignore}</div>')
+        body = (f'<div class="sg-filters">{chips}</div>'
+                f'<div class="sg-list">{rows}</div>')
+
+    if n_ignored and csrf:
+        ig_rows = ""
+        for nm in sorted(ignored_by_device, key=str.lower):
+            for key in sorted(ignored_by_device[nm] or ()):
+                label, _t, _a, _w = _suggestion_meta(key)
+                ig_rows += (
+                    f'<div class="sg-igrow"><span>{esc(label)} '
+                    f'<span class="muted">({esc(key)})</span> — '
+                    f'{esc(nm)}</span>'
+                    f'<form method="POST" action="/dashboard/suggestion" '
+                    f'class="inline">'
+                    f'<input type="hidden" name="csrf" value="{csrf}">'
+                    f'<input type="hidden" name="device" value="{esc(nm)}">'
+                    f'<input type="hidden" name="key" value="{esc(key)}">'
+                    f'<input type="hidden" name="action" value="restore">'
+                    f'<button class="btn ghost sg-act" type="submit">Restore'
+                    f'</button></form></div>')
+        body += (f'<details class="sg-ignored"><summary>{n_ignored} ignored '
+                 f'suggestion(s)</summary>{ig_rows}</details>')
+
+    return f'<div class="dash-card sg-panel" id="sgPanel" hidden>{body}</div>'
+
+
+def _render_dashboard(store, state, user=None, allowed=None, csrf="",
+                      ignored=None) -> str:
     devs = sorted((d for d in _all_devices(store, state, allowed)
                    if _device_has_data(d)),
                   key=lambda d: ({"crit": 0, "ok": 1}[_severity(d)],
@@ -1679,11 +1787,13 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
     summary = _fleet_summary(devs)
     chips = (_stat_chip(summary["total"], "Devices")
             + _stat_chip(summary["alerts"], "Suggestions",
-                        "info" if summary["alerts"] else "")
+                        "info" if summary["alerts"] else "",
+                        onclick="mmSgToggle()")
             + _stat_chip(summary["offline"], "Offline",
                         "red" if summary["offline"] else ""))
     strip = _fleet_status_strip(summary) if devs else ""
-    cards = _suggestion_cards(devs) if devs else ""
+    cards = _suggestion_panel(devs, csrf=csrf,
+                              ignored_by_device=ignored) if devs else ""
     charts = _render_noc_charts(devs) if devs else ""
     rows = _dash_device_rows(devs)
     empty_msg = ("No devices to show." if not devs
@@ -5612,8 +5722,23 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     # with auth configured, do_GET intercepts "/" earlier as
                     # the public landing page and sends logged-in visitors to
                     # /dashboard instead (see do_GET).
-                    return self._send(200, _render_dashboard(store, state, user,
-                                      allowed), "text/html; charset=utf-8")
+                    _sess = self._session()
+                    _ig = {}
+                    _ds = self._devstore()
+                    if _ds is not None:
+                        try:
+                            for _n in (allowed if allowed is not None
+                                       else _ds.names()):
+                                _raw = _ds.raw(_n) or {}
+                                _keys = _raw.get("ignored_suggestions") or []
+                                if _keys:
+                                    _ig[_n] = list(_keys)
+                        finally:
+                            _ds.close()
+                    return self._send(200, _render_dashboard(
+                        store, state, user, allowed,
+                        csrf=(_sess["csrf"] if _sess else ""),
+                        ignored=_ig), "text/html; charset=utf-8")
                 # if path == "/inventory":
                 #     return self._send(200, _render_inventory(store, state, user,
                 #                       allowed), "text/html; charset=utf-8")
@@ -8266,6 +8391,43 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._redirect(
                 f"/device?name={quote(name)}&tab=nextdns&msg=" + quote(msg))
 
+        def _dashboard_suggestion_post(self, flat, user):
+            """Ignore (or restore) one suggestion for one router.
+
+            Scoped to the exact condition key, so dismissing a port that is
+            dark on purpose does not silence the port beside it. It hides the
+            SUGGESTION only -- the condition carries on being tracked and
+            still alerts. A dashboard tidy-up that quietly switched monitoring
+            off would be a trap, and the one thing nobody would expect from a
+            button labelled Ignore."""
+            name = flat.get("device", "")
+            key = (flat.get("key") or "").strip()
+            action = flat.get("action", "")
+            if not self._can_manage_device(user, name):
+                return self._send(403, "forbidden")
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if not key or action not in ("ignore", "restore"):
+                return self._redirect("/dashboard")
+            store = self._devstore()
+            if store is None:
+                return self._send(400, "device management not enabled")
+            try:
+                raw = store.raw(name)
+                if raw is None:
+                    return self._send(404, "no such device")
+                keys = [str(k) for k in (raw.get("ignored_suggestions") or [])]
+                if action == "ignore" and key not in keys:
+                    keys.append(key)
+                elif action == "restore":
+                    keys = [k for k in keys if k != key]
+                raw["ignored_suggestions"] = keys
+                store.upsert(raw, defaults, original_name=name)
+            finally:
+                store.close()
+            return self._redirect("/dashboard")
+
         def _hub_reload_peers_post(self, flat, user):
             """Rebuild wg-peers.conf from hub.json leases and write it.
             Writing the file triggers the mikromon-wg-reload.path unit to run
@@ -8559,6 +8721,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                              "/device/nextdns-privacy-settings",
                              "/device/nextdns-blocklist", "/device/nextdns-list",
                              "/device/nextdns-reapply", "/device/nextdns-test",
+                             "/dashboard/suggestion",
                              "/device/remote-regenerate", "/device/remote-test")
             if path in _DEVICE_WRITE:
                 if not self._can_manage_device(user, flat.get("device", "")):
@@ -8607,6 +8770,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._device_nextdns_list_post(flat, user)
                 if path == "/device/nextdns-reapply":
                     return self._device_nextdns_reapply_post(flat, user)
+                if path == "/dashboard/suggestion":
+                    return self._dashboard_suggestion_post(flat, user)
                 if path == "/device/nextdns-test":
                     return self._device_nextdns_test_post(flat, user)
                 if path == "/device/remote-regenerate":
