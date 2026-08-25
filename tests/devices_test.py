@@ -1765,6 +1765,61 @@ try:
           "consult, so the raw sample is still used",
           _up_of(0.0, None) == 0 and _up_of(1.0, None) == 1)
 
+    print("  dashboard fleet traffic + firmware blocks:")
+
+    def _tdev(n, up, tp, facts):
+        return {"device": n, "up": up, "throughput": tp, "facts": facts,
+                "problems": [], "_conditions": {}, "metrics": {},
+                "wan_health": "full"}
+
+    _tdevs = [
+        _tdev("Busy", 1, {"live": {"rx_bps": 20e6, "tx_bps": 5e6},
+                          "renamed-away": {"rx_bps": 500e6, "tx_bps": 0}},
+              {"version": "7.12.1 (stable)", "update_available": True,
+               "wan_traffic_interfaces": ["live"]}),
+        _tdev("Quiet", 1, {"live": {"rx_bps": 1e6, "tx_bps": 1e6}},
+              {"version": "7.23.2 (stable)",
+               "wan_traffic_interfaces": ["live"]}),
+        _tdev("Gone", 0, {"live": {"rx_bps": 900e6, "tx_bps": 900e6}},
+              {"version": "7.20.7 (long-term)", "update_available": True,
+               "wan_traffic_interfaces": ["live"]}),
+    ]
+    _traffic = web._fleet_traffic_chip(_tdevs)
+    check("an interface no longer being sampled is left out of the fleet "
+          "total — throughput keeps the last value ever seen per label, so a "
+          "renamed link would otherwise contribute its final reading forever",
+          "500" not in _traffic)
+    check("an OFFLINE router contributes nothing — its last reading is what "
+          "it was carrying before it went, and counting it would show "
+          "traffic for a site that is passing none",
+          "900" not in _traffic)
+    check("the busiest site is named and linked, so the number leads "
+          "somewhere", "Busy" in _traffic and "/device?name=Busy" in _traffic)
+    check("a fleet with no samples yet says so rather than claiming 0",
+          "No throughput samples yet" in web._fleet_traffic_chip(
+              [_tdev("New", 1, {}, {})]))
+
+    _fw = web._firmware_chip(_tdevs)
+    check("routers with an update waiting are counted — collected every poll "
+          "and, until now, only ever a column on the Devices page",
+          ">2<" in _fw and "Updates available" in _fw)
+    check("the oldest version in the fleet is named, comparing numerically "
+          "rather than as text so 7.9 does not look newer than 7.12",
+          "7.12.1" in _fw and "Busy" in _fw)
+    check("...and the channel suffix does not confuse that comparison",
+          web._version_key("7.12.1 (stable)")
+          < web._version_key("7.20.7 (long-term)"))
+    check("an unparseable version sorts NEWEST, so it is never wrongly "
+          "reported as the oldest thing in the fleet",
+          web._version_key("") > web._version_key("7.23.2"))
+    check("a fully patched fleet says so instead of showing a bare 0",
+          "All up to date" in web._firmware_chip(
+              [_tdev("OK", 1, {}, {"version": "7.23.2"})]))
+    check("with no versions recorded it says that, rather than picking an "
+          "oldest from nothing",
+          "No versions recorded" in web._firmware_chip(
+              [_tdev("New", 1, {}, {})]))
+
     print("  dashboard suggestions: collapsed, per-device, dismissable:")
     _now = time.time()
 

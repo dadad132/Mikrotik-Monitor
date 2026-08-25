@@ -1421,6 +1421,20 @@ a{color:var(--accent);text-decoration:none}
   letter-spacing:.05em;margin-top:6px;font-weight:600}
 .chip.info .chip-num{color:var(--accent)}
 .chip.red .chip-num{color:var(--danger)}
+/* The two wider blocks beside the counters. They carry a pair of values and
+   a caption rather than one big number, so they get their own sizing instead
+   of stretching the counter chips out of shape. */
+.chip-wide{flex:2;min-width:190px}
+.chip-link{text-decoration:none;display:block}
+.chip-link:hover{border-color:var(--accent)}
+.chip-pair{display:flex;gap:14px;align-items:baseline;font-size:17px;
+  font-weight:700;color:var(--text);line-height:1.1;margin-top:2px}
+.chip-dn{color:#2563eb}
+.chip-up{color:#16a34a}
+.chip-sub{font-size:11px;color:var(--text-faint);margin-top:4px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip-sub a{color:var(--accent);text-decoration:none}
+.chip-sub a:hover{text-decoration:underline}
 /* ── donut chart cards ───────────────────────────── */
 .charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
   gap:14px;margin-bottom:18px}
@@ -1778,6 +1792,89 @@ def _suggestion_panel(devs, csrf="", ignored_by_device=None) -> str:
     return f'<div class="dash-card sg-panel" id="sgPanel" hidden>{body}</div>'
 
 
+def _live_throughput(d) -> tuple:
+    """(rx_bps, tx_bps) a device is currently pushing across the interfaces
+    WanTrafficCheck is actually sampling.
+
+    Filtered by facts["wan_traffic_interfaces"] for the same reason the
+    per-device sparklines are: d["throughput"] keeps the last value ever seen
+    for a label, so an interface that was renamed or removed would otherwise
+    keep contributing its final reading to the fleet total forever. A missing
+    fact (engine has not re-polled since that was added) falls back to
+    counting everything, which is better than counting nothing.
+    """
+    live = (d.get("facts") or {}).get("wan_traffic_interfaces")
+    items = (d.get("throughput") or {})
+    if live is not None:
+        items = {k: v for k, v in items.items() if k in live}
+    rx = sum(float(v.get("rx_bps") or 0) for v in items.values())
+    tx = sum(float(v.get("tx_bps") or 0) for v in items.values())
+    return rx, tx
+
+
+def _fleet_traffic_chip(devs) -> str:
+    """What the whole fleet is moving right now, and which site is busiest.
+
+    Only ONLINE devices count. An unreachable router's last reading is
+    whatever it was managing before it went, and carrying that into a live
+    total would show traffic for a site that is not passing any."""
+    rows = [(d["device"], *_live_throughput(d)) for d in devs if d["up"]]
+    rx = sum(r for _n, r, _t in rows)
+    tx = sum(t for _n, _r, t in rows)
+    if not rows or (rx <= 0 and tx <= 0):
+        return ('<div class="chip chip-wide"><div class="chip-lbl">Fleet '
+                'traffic</div><div class="chip-sub">No throughput samples '
+                'yet</div></div>')
+    busiest = max(rows, key=lambda r: r[1] + r[2])
+    return (f'<div class="chip chip-wide"><div class="chip-lbl">Fleet traffic'
+            f'</div>'
+            f'<div class="chip-pair">'
+            f'<span class="chip-dn">&#8595; {esc(human_bps(rx))}</span>'
+            f'<span class="chip-up">&#8593; {esc(human_bps(tx))}</span></div>'
+            f'<div class="chip-sub">busiest: '
+            f'<a href="/device?name={quote(busiest[0])}">'
+            f'{esc(busiest[0])}</a></div></div>')
+
+
+def _version_key(ver: str):
+    """Sortable form of a RouterOS version. The string carries a channel too
+    ("7.20.8 (long-term)"), so only the leading numeric part is compared, and
+    anything unparseable sorts newest so it is never named as the oldest."""
+    nums = re.match(r"\s*(\d+(?:\.\d+)*)", str(ver or ""))
+    if not nums:
+        return (9999,)
+    return tuple(int(x) for x in nums.group(1).split("."))
+
+
+def _firmware_chip(devs) -> str:
+    """How many routers have a RouterOS update waiting, and the oldest version
+    in the fleet.
+
+    Both are collected on every poll and, until now, only ever appeared as a
+    column on the Devices page -- so nothing on the dashboard ever prompted
+    anyone to go and look."""
+    known = [d for d in devs if (d.get("facts") or {}).get("version")]
+    pending = [d["device"] for d in devs
+               if (d.get("facts") or {}).get("update_available") is True]
+    if not known:
+        return ('<div class="chip chip-wide"><div class="chip-lbl">Firmware'
+                '</div><div class="chip-sub">No versions recorded yet</div>'
+                '</div>')
+    oldest = min(known, key=lambda d: _version_key(d["facts"]["version"]))
+    if pending:
+        head = (f'<div class="chip-num" style="color:var(--accent)">'
+                f'{len(pending)}</div>'
+                f'<div class="chip-lbl">Update'
+                f'{"s" if len(pending) != 1 else ""} available</div>')
+    else:
+        head = ('<div class="chip-lbl">Firmware</div>'
+                '<div class="chip-pair"><span>All up to date</span></div>')
+    return (f'<a class="chip chip-wide chip-link" href="/devices">{head}'
+            f'<div class="chip-sub">oldest: '
+            f'{esc(str(oldest["facts"]["version"]).split(" ")[0])} '
+            f'({esc(oldest["device"])})</div></a>')
+
+
 def _render_dashboard(store, state, user=None, allowed=None, csrf="",
                       ignored=None) -> str:
     devs = sorted((d for d in _all_devices(store, state, allowed)
@@ -1790,7 +1887,9 @@ def _render_dashboard(store, state, user=None, allowed=None, csrf="",
                         "info" if summary["alerts"] else "",
                         onclick="mmSgToggle()")
             + _stat_chip(summary["offline"], "Offline",
-                        "red" if summary["offline"] else ""))
+                        "red" if summary["offline"] else "")
+            + _fleet_traffic_chip(devs)
+            + _firmware_chip(devs))
     strip = _fleet_status_strip(summary) if devs else ""
     cards = _suggestion_panel(devs, csrf=csrf,
                               ignored_by_device=ignored) if devs else ""
