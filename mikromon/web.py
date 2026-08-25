@@ -32,7 +32,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from .auth import AuthStore
 from .config import DEFAULT_CHECKS
 from .metrics import MetricsStore
-from .util import human_bps
+from .util import human_bps, human_duration
 from .web_shared import (
     esc, _BRAND, _REVERT_MINUTES, _PAGE_CSS, _SHELL_CSS,
     _header, _page, parse_multipart_form,
@@ -114,7 +114,10 @@ def _device_view(store, state, name) -> dict:
         wan_health = "full"
     return {"device": name, "up": int(up), "metrics": metrics,
             "throughput": throughput, "problems": problems,
-            "facts": facts, "wan_health": wan_health}
+            "facts": facts, "wan_health": wan_health,
+            # Kept for the dashboard's suggestion cards, which show each
+            # condition's own recorded title rather than re-deriving one.
+            "_conditions": conditions}
 
 
 def _known_devices(store, state) -> list:
@@ -1430,6 +1433,30 @@ a{color:var(--accent);text-decoration:none}
 .dash-card-head{display:flex;align-items:center;justify-content:space-between;
   padding:16px 18px;gap:12px;flex-wrap:wrap}
 .dash-card-head h2{font-size:15px;margin:0;color:var(--text)}
+/* Suggestion cards: the Suggestions count, expanded into things you can act
+   on. One row per item, with the fix a click away on the right. */
+.sg-list{display:flex;flex-direction:column;gap:8px}
+.sg-row{display:flex;align-items:center;gap:12px;padding:10px 12px;
+  border-radius:8px;border:1px solid var(--border);background:var(--surface-2)}
+.sg-row.sg-crit{border-color:#fecaca;background:rgba(220,38,38,0.06)}
+.sg-main{flex:1;min-width:0}
+.sg-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px;
+  color:var(--text)}
+.sg-dot{width:8px;height:8px;border-radius:50%;background:#d97706;
+  flex-shrink:0}
+.sg-row.sg-crit .sg-dot{background:#dc2626}
+.sg-dev{font-size:12px;color:var(--accent);text-decoration:none}
+.sg-dev:hover{text-decoration:underline}
+.sg-age{font-size:11px;color:var(--text-faint)}
+.sg-detail{font-size:12px;color:var(--text-muted);margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sg-why{font-size:11px;color:var(--text-faint);margin-top:2px}
+.sg-act{flex-shrink:0;text-decoration:none;font-size:12px;padding:6px 12px}
+@media(max-width:700px){
+  .sg-row{flex-direction:column;align-items:stretch}
+  .sg-act{text-align:center}
+  .sg-detail{white-space:normal}
+}
 .dash-filters{display:flex;gap:6px}
 .fchip{background:var(--surface-2);border:1px solid var(--border);
   color:var(--text-muted);padding:6px 13px;border-radius:999px;font-size:12px;
@@ -1496,6 +1523,154 @@ mmSetFilter(mmSaved);
 </script>"""
 
 
+# What each kind of suggestion actually means and where it gets fixed. Keyed
+# by the condition key's prefix, longest match first, so "wan_link:2" is
+# matched by "wan_link" and not by a bare fallback.
+#
+# The count alone was never actionable: "8 Suggestions" tells you there is
+# work without telling you what, on which router, or where to go. Every entry
+# here names the fix and links straight to the tab that performs it.
+_SUGGESTION_META = [
+    ("reachability", "Cannot be reached", "provision",
+     "Open Provision",
+     "mikromon can't open a connection to this router. Re-provisioning "
+     "resets the tunnel and login together."),
+    ("api_error", "API is refusing or stalling", "provision",
+     "Re-provision",
+     "The router answers but the API session fails. Usually the stored "
+     "login no longer matches, or replies are being lost."),
+    ("internet_down", "No internet on any uplink", "wan",
+     "Check WAN uplinks",
+     "No uplink is carrying a usable default route right now."),
+    ("wan_failover", "Running on a backup line", "wan",
+     "Check WAN uplinks",
+     "The primary uplink is down and traffic has moved to a backup. "
+     "Working, but not on the line you pay most for."),
+    ("wan_link", "A backup uplink is down", "wan",
+     "Check WAN uplinks",
+     "A backup line is unavailable, so there is less to fall back on if "
+     "the primary fails."),
+    ("iface_down", "A port has no link", "wan",
+     "Check interfaces",
+     "RouterOS reports this port as not running - cable, SFP, or the "
+     "device on the other end."),
+    ("storage", "Storage is filling up", "backups",
+     "Manage backups",
+     "Low free space stops backups, logging and upgrades. Old backups on "
+     "the router are the usual thing to clear."),
+    ("temperature", "Running hot", "",
+     "Open device",
+     "Sustained heat shortens hardware life - check airflow and ambient "
+     "temperature."),
+    ("memory_anomaly", "Memory unusually high", "",
+     "Open device",
+     "Memory use is well above this router's own normal for the time of "
+     "day. Often a leak or unusual traffic."),
+    ("memory", "Low free memory", "",
+     "Open device",
+     "Low free RAM causes dropped connections and instability."),
+    ("cpu_anomaly", "CPU unusually high", "",
+     "Open device",
+     "CPU is well above this router's own normal for the time of day."),
+    ("cpu", "High CPU", "",
+     "Open device",
+     "Sustained high CPU - traffic spike, a script, or an undersized "
+     "device."),
+    ("wan_traffic", "Unusual throughput", "",
+     "Open device",
+     "Throughput on this interface is well above its own normal. Often "
+     "legitimate, worth a look if unexpected."),
+]
+
+
+def _suggestion_meta(key: str):
+    """(label, tab, action, why) for a condition key, longest prefix first."""
+    for prefix, label, tab, action, why in sorted(
+            _SUGGESTION_META, key=lambda m: -len(m[0])):
+        if key.split(":")[0] == prefix or key.startswith(prefix):
+            return label, tab, action, why
+    return key.replace("_", " ").capitalize(), "", "Open device", ""
+
+
+def _suggestion_cards(devs, limit=12) -> str:
+    """The Suggestions count, expanded into something you can act on.
+
+    Ordered worst-first and capped: a dashboard that lists forty things is
+    read as wallpaper, and the point is to be actionable rather than
+    complete. The full set stays on each device's own page.
+    """
+    items = []
+    for d in devs:
+        name = d["device"]
+        conds = (d.get("_conditions") or {})
+        for prob in d.get("problems") or []:
+            key = prob["key"]
+            label, tab, action, why = _suggestion_meta(key)
+            title = str((conds.get(key) or {}).get("title") or "").strip()
+            level = prob.get("level") or "problem"
+            items.append({
+                "device": name, "key": key, "label": label, "why": why,
+                "tab": tab, "action": action, "since": prob.get("since"),
+                "crit": level in ("crit", "problem") and not d["up"],
+                "detail": title,
+            })
+        # Not a fault, but the most common thing a fleet owner actually wants
+        # prompting about, and it is already collected on every poll.
+        if (d.get("facts") or {}).get("update_available") is True:
+            items.append({
+                "device": name, "key": "update", "label": "RouterOS update "
+                "available", "why": "A newer RouterOS has been published for "
+                "this board.", "tab": "update", "action": "Review update",
+                "since": None, "crit": False,
+                "detail": f"Currently on {(d.get('facts') or {}).get('version', '?')}.",
+            })
+
+    if not items:
+        return ('<div class="dash-card"><div class="dash-card-head">'
+                '<h2>Suggestions</h2></div>'
+                '<p class="muted" style="margin:0">Nothing needs attention '
+                'right now.</p></div>')
+
+    # Offline routers first, then everything else oldest-first: something that
+    # has been wrong for a week matters more than something from a minute ago.
+    # No timestamp sorts LAST within its group, not first: an update notice
+    # carries no "since" and must not outrank a fault that has been standing
+    # for a fortnight.
+    items.sort(key=lambda it: (not it["crit"],
+                               it.get("since") if it.get("since") else 1e18))
+    shown, extra = items[:limit], max(0, len(items) - limit)
+
+    rows = ""
+    for it in shown:
+        q = quote(it["device"])
+        href = f"/device?name={q}" + (f"&tab={it['tab']}" if it["tab"] else "")
+        age = ""
+        if it.get("since"):
+            age = f' &middot; {esc(human_duration(time.time() - it["since"]))}'
+        tone = "sg-crit" if it["crit"] else "sg-warn"
+        detail = f'<div class="sg-detail">{esc(it["detail"])}</div>' if it["detail"] else ""
+        rows += (
+            f'<div class="sg-row {tone}">'
+            f'<div class="sg-main">'
+            f'<div class="sg-top"><span class="sg-dot"></span>'
+            f'<b>{esc(it["label"])}</b>'
+            f'<a class="sg-dev" href="/device?name={q}">{esc(it["device"])}</a>'
+            f'<span class="sg-age">{age}</span></div>'
+            f'{detail}'
+            f'<div class="sg-why">{esc(it["why"])}</div>'
+            f'</div>'
+            f'<a class="btn ghost sg-act" href="{href}">{esc(it["action"])}</a>'
+            f'</div>')
+    more = (f'<p class="muted" style="margin:10px 0 0">and {extra} more — '
+            f'each router\'s own page lists all of its own.</p>'
+            if extra else "")
+    return (f'<div class="dash-card"><div class="dash-card-head">'
+            f'<h2>Suggestions</h2>'
+            f'<span class="muted" style="font-size:12px">'
+            f'{len(items)} to look at</span></div>'
+            f'<div class="sg-list">{rows}</div>{more}</div>')
+
+
 def _render_dashboard(store, state, user=None, allowed=None) -> str:
     devs = sorted((d for d in _all_devices(store, state, allowed)
                    if _device_has_data(d)),
@@ -1508,6 +1683,7 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
             + _stat_chip(summary["offline"], "Offline",
                         "red" if summary["offline"] else ""))
     strip = _fleet_status_strip(summary) if devs else ""
+    cards = _suggestion_cards(devs) if devs else ""
     charts = _render_noc_charts(devs) if devs else ""
     rows = _dash_device_rows(devs)
     empty_msg = ("No devices to show." if not devs
@@ -1547,6 +1723,7 @@ def _render_dashboard(store, state, user=None, allowed=None) -> str:
 <input id="q" class="dash-search" placeholder="Search devices…">
 </div></div>
 <div class="dash-chips">{chips}</div>
+{cards}
 {charts}
 {table}
 </div>
