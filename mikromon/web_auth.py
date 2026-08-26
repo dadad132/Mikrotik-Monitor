@@ -624,18 +624,36 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
     return _page("Billing", _header(user, "/billing") + inner)
 
 
-def _render_locked(user, contact: dict | None = None) -> str:
-    """Full-page lockout shown when an org's grace period has expired."""
+def _render_locked(user, contact: dict | None = None,
+                   manual: bool = False) -> str:
+    """Full-page lockout shown when an org has lost access.
+
+    The reason is stated because the two paths here need different actions
+    from the customer. A lapsed subscription is fixed by paying; a suspension
+    an admin applied by hand is fixed by talking to someone, and telling that
+    customer to "reactivate" would send them round a loop that cannot work.
+    """
     line = _contact_line(contact)
     contact_p = f'<p style="margin-top:14px">{line}</p>' if line else ""
+    if manual:
+        why = ('<p>Your account has been suspended pending payment. '
+               'Monitoring, alerts and remote access are paused until the '
+               'outstanding balance is settled.</p>'
+               '<p class="muted" style="font-size:13px">Your devices and '
+               'settings are untouched — everything comes straight back on '
+               'once payment is confirmed.</p>')
+    else:
+        why = (f'<p>Your subscription has lapsed and the {GRACE_DAYS}-day '
+               f'grace period has expired. All access has been suspended.</p>')
     inner = (f'<div class="wrap" style="max-width:560px;margin-top:10vh;text-align:center">'
              f'<div class="box">'
              f'<h1 style="color:#dc2626;margin-bottom:8px">Account Suspended</h1>'
-             f'<p>Your subscription has lapsed and the {GRACE_DAYS}-day grace period '
-             f'has expired. All access has been suspended.</p>'
+             f'{why}'
              f'{contact_p}'
-             f'<p><a class="btn" href="/billing">Reactivate your account</a></p>'
-             f'<p class="muted" style="margin-top:18px">'
+             + (f'<p><a class="btn" href="/billing">View payment details</a></p>'
+                if manual else
+                f'<p><a class="btn" href="/billing">Reactivate your account</a></p>')
+             + f'<p class="muted" style="margin-top:18px">'
              f'<a href="/logout">Log out</a></p>'
              f'</div></div>')
     return _page("Account Suspended", _header(user, "") + inner)
@@ -648,9 +666,35 @@ _STATUS_COLOR = {
     "grace":    ("#d97706", "Grace"),
     "canceled": ("#dc2626", "Lapsed"),
     "locked":   ("#dc2626", "Locked"),
+    "suspended": ("#dc2626", "Suspended"),
     "inactive": ("#64748b", "Free"),
     "none":     ("#64748b", "Free"),
 }
+
+
+def _suspend_button(org_id, status: str, csrf: str) -> str:
+    """Cut a company off, or let them back in.
+
+    One button with two states rather than a dropdown: this gets reached for
+    when an invoice has gone unpaid for weeks, and the admin should not have
+    to pick the right value from a list. Suspending confirms first because
+    the company loses the site the moment it is clicked; restoring does not,
+    because letting a paying customer back in is never the risky direction.
+    """
+    suspended = status == "suspended"
+    action = "restore" if suspended else "suspend"
+    confirm = ("" if suspended else
+               ' onclick="return confirm('
+               "'Suspend this company? They lose access to the site and stop "
+               "receiving alert emails until you restore them.')\"")
+    style = ("padding:5px 12px;margin-top:6px;width:100%"
+             + ("" if suspended else ";color:#dc2626;border-color:#dc2626"))
+    return (f'<form method="POST" action="/superadmin/{action}" '
+            f'style="margin-top:6px">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="org_id" value="{int(org_id or 0)}">'
+            f'<button class="btn ghost" type="submit" style="{style}"{confirm}>'
+            f'{"Restore access" if suspended else "Suspend"}</button></form>')
 
 
 def _plan_select(org_id, current_plan, csrf) -> str:
@@ -1036,7 +1080,8 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
             f'{"" if active_count == device_count else f" <span class=\"muted\" style=\"font-size:11px\">({device_count} total)</span>"}'
             f' / {device_limit if device_limit else "∞"}</td>'
             f'<td>{created_str}</td>'
-            + (f'<td>{_plan_select(r.get("id"), plan, csrf)}</td>'
+            + (f'<td>{_plan_select(r.get("id"), plan, csrf)}'
+               f'{_suspend_button(r.get("id"), status, csrf)}</td>'
                if billing_on else "")
             + '</tr>'
         )

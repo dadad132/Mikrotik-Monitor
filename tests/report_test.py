@@ -193,6 +193,37 @@ try:
           len(sent) == 2)
     check("the recovery email's subject is tagged RESOLVED, not a severity "
           "label", "RESOLVED" in sent[1]["Subject"])
+
+    # Alert email is the part of this product customers actually feel. A
+    # suspension that left it running would be one they never notice: locked
+    # out of the site, still being told their WAN dropped.
+    from mikromon.billing import BillingStore
+    bdb = os.path.join(tmp2, "billing.db")
+    bstore = BillingStore(bdb)
+    bstore.set_plan(org_id, "d5")
+    billed = OrgEmailNotifier(smtp_cfg, adb, wdb, billing_db=bdb)
+    billed.send([problem_alert])
+    check("a company in good standing still gets its alerts when billing is "
+          "wired in", len(sent) == 3)
+
+    bstore.suspend(org_id)
+    billed.send([problem_alert])
+    check("a suspended company stops receiving alerts, so the suspension is "
+          "something they actually notice",
+          len(sent) == 3)
+
+    bstore.unsuspend(org_id)
+    billed.send([problem_alert])
+    check("...and alerts resume the moment they are restored, with no "
+          "reconfiguration", len(sent) == 4)
+
+    bstore.suspend(org_id)
+    bstore.db.close()
+    os.remove(bdb)
+    billed.send([problem_alert])
+    check("if the billing db cannot be read the alert still goes out -- a "
+          "real outage is worth more than this filter",
+          len(sent) == 5)
 finally:
     org_email._smtp_send = _orig_smtp_send
 

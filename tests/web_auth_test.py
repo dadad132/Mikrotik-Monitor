@@ -585,6 +585,39 @@ try:
     check("...and nothing of theirs is filed",
           len(_chk2.quote_requests()) == 1)
     _chk2.db.close()
+    print("Suspending a company for non-payment:")
+    _sb = _BS(_bdb)
+    _a = AuthStore(adb)
+    _oid = _a.get_user("admin@acme.test")["org_id"]
+    _a.close()
+    _sb.set_plan(_oid, "d25")
+    st, body = req(qo, "/dashboard", base=QBASE)
+    check("a company in good standing reaches the dashboard",
+          st == 200 and "Suspended" not in body)
+
+    _sb.suspend(_oid)
+    st, body = req(qo, "/dashboard", base=QBASE)
+    check("once suspended, every page lands on the account-suspended notice "
+          "instead -- the features stop, which is the point of the button",
+          "Account Suspended" in body or "suspended" in body.lower())
+    check("...and the notice says it is pending payment rather than telling "
+          "them a subscription lapsed, which would send them round a loop "
+          "they cannot fix by paying online",
+          "pending payment" in body.lower())
+    check("...while telling them their data is intact, so they are not "
+          "left wondering whether paying is even worth it",
+          "untouched" in body.lower())
+    st, abody = req(qo, "/api/devices", base=QBASE)
+    check("the API refuses them outright with 402 and a machine-readable "
+          "reason -- redirecting a script to an HTML billing page would have "
+          "it parse a web form as device data",
+          st == 402 and "account_suspended" in abody)
+
+    _sb.unsuspend(_oid)
+    st, body = req(qo, "/dashboard", base=QBASE)
+    check("restoring puts them straight back in", st == 200
+          and "Account Suspended" not in body)
+    _sb.db.close()
 finally:
     srv_q.shutdown()
     srv_q.server_close()
@@ -764,6 +797,36 @@ check("an open request is shown with who, how many, and how to reach them",
 check("...with nothing rendered at all when there are none, so the panel does "
       "not carry a permanently empty box",
       _wa2._quote_inbox([], {}, "C") == "")
+
+print("the suspend control on the platform admin page:")
+_rows_ok = [{"id": 1, "name": "Acme", "owner_email": "a@b.c", "user_count": 2,
+             "bill": {"status": "active", "plan": "d25", "device_limit": 25},
+             "device_count": 5, "active_count": 5, "created": 1700000000.0}]
+_sa_ok = _wa2._render_superadmin(
+    {"email": "s@x.c", "role": "owner", "is_superadmin": True},
+    _rows_ok, [], csrf="C", billing_on=True)
+check("a company in good standing shows a Suspend button",
+      'action="/superadmin/suspend"' in _sa_ok and "Suspend<" in _sa_ok)
+check("...which confirms first, because the company loses the site the "
+      "moment it is clicked",
+      "return confirm(" in _sa_ok)
+
+_rows_susp = [dict(_rows_ok[0],
+                   bill={"status": "suspended", "plan": "d25",
+                         "device_limit": 25})]
+_sa_susp = _wa2._render_superadmin(
+    {"email": "s@x.c", "role": "owner", "is_superadmin": True},
+    _rows_susp, [], csrf="C", billing_on=True)
+check("a suspended company shows Restore instead, and says Suspended in its "
+      "status so it is obvious at a glance why they are complaining",
+      'action="/superadmin/restore"' in _sa_susp
+      and "Restore access" in _sa_susp and "Suspended" in _sa_susp)
+check("...and restoring does NOT ask for confirmation -- letting a paying "
+      "customer back in is never the risky direction",
+      "return confirm(" not in _wa2._suspend_button(1, "suspended", "C"))
+check("the plan they were on is still selected, since suspending never "
+      "touched it",
+      'value="d25" selected' in _sa_susp)
 
 print("the EFT reference is shown to the customer AND to the superadmin:")
 import mikromon.web_auth as _wa

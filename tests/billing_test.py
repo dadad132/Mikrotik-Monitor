@@ -240,6 +240,44 @@ try:
 except ValueError:
     check("set_plan rejects an unknown plan", True)
 
+print("Suspending a company that has not paid:")
+store.set_plan(20, "d50")
+check("a paying company is not locked", not store.is_locked(20))
+store.suspend(20)
+check("suspending locks them out immediately, whatever the dates say",
+      store.is_locked(20) and store.billing_status(20) == "suspended"
+      and store.is_suspended(20))
+check("...but their plan and device cap are kept, so restoring is one flip "
+      "and not an admin rebuilding the account from memory",
+      store.get(20)["plan"] == "d50" and store.device_limit(20) == 50)
+store.unsuspend(20)
+check("restoring puts them straight back on the plan they kept",
+      not store.is_locked(20) and store.billing_status(20) == "active"
+      and store.device_limit(20) == 50)
+
+# The case a date-driven lockout cannot reach: the calendar says they are
+# fine, the bank says otherwise.
+store.start_trial(21)
+check("a company mid-trial is not locked", not store.is_locked(21))
+store.suspend(21)
+check("...and can still be suspended -- a manual suspension outranks an "
+      "unexpired trial, which is the whole reason to have the button",
+      store.is_locked(21) and store.billing_status(21) == "suspended")
+
+store.set_free(22)
+store.suspend(22)
+store.unsuspend(22)
+check("restoring a company that never had a plan returns them to the free "
+      "cap, not to a paid state they were never on",
+      store.billing_status(22) in ("none", "inactive")
+      and store.device_limit(22) == billing.FREE_DEVICES)
+check("unsuspend on a company that was not suspended does nothing",
+      (store.set_plan(23, "d5") or store.unsuspend(23) or True)
+      and store.billing_status(23) == "active")
+check("suspended orgs come back in one batched query, since the alert path "
+      "asks for the whole set at once during an outage",
+      store.suspended_orgs() == {21})
+
 print("Quote requests from companies past the last packet:")
 store.add_quote_request(77, 340, "ops@myit.test", "Q4 rollout, 340 sites")
 check("a request is recorded with the size and contact asked for",

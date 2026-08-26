@@ -404,6 +404,12 @@ class BillingStore:
         if not row:
             return False
         status = row.get("status", "inactive")
+        # A manual suspension is a decision, not a deadline. It outranks every
+        # date on the row -- including an unexpired trial or a paid period
+        # still running -- because the whole point is to act on an account the
+        # dates say is fine but the bank says is not.
+        if status == "suspended":
+            return True
         if status in ("active", "trialing"):
             return False
         if status == "trial":
@@ -439,11 +445,14 @@ class BillingStore:
         return max(0.0, (gpe - time.time()) / 86400)
 
     def billing_status(self, org_id: int) -> str:
-        """Returns: 'none' | 'trial' | 'active' | 'grace' | 'locked'."""
+        """Returns: 'none' | 'trial' | 'active' | 'grace' | 'locked' |
+        'suspended'."""
         row = self.get(org_id)
         if not row:
             return "none"
         status = row.get("status", "inactive")
+        if status == "suspended":
+            return "suspended"
         if status in ("active", "trialing"):
             return "active"
         if status == "trial":
@@ -511,6 +520,46 @@ class BillingStore:
             self.db.execute("UPDATE quote_requests SET handled = ? WHERE id = ?",
                             (1 if handled else 0, int(quote_id)))
             self.db.commit()
+
+    def suspend(self, org_id: int) -> None:
+        """Cut a company off until they pay, by hand.
+
+        Keeps `plan` and `device_limit` untouched. Restoring is then a single
+        flip back rather than an admin trying to remember what the customer
+        was on -- and a customer who pays should be working again in seconds,
+        not waiting for someone to reconstruct their account.
+        """
+        self._upsert(org_id, status="suspended", grace_period_end=None)
+
+    def unsuspend(self, org_id: int) -> None:
+        """Undo a suspension, putting the company back on the plan it kept
+        throughout. A company with no plan returns to the free cap rather
+        than to a paid state it never had."""
+        row = self.get(org_id) or {}
+        if row.get("status") != "suspended":
+            return
+        plan = row.get("plan")
+        if plan:
+            self._upsert(org_id, status="active", grace_period_end=None)
+        else:
+            self._upsert(org_id, status="inactive", grace_period_end=None,
+                         device_limit=FREE_DEVICES)
+
+    def is_suspended(self, org_id: int) -> bool:
+        return (self.get(org_id) or {}).get("status") == "suspended"
+
+    def suspended_orgs(self) -> set:
+        """Every org currently suspended, in one query.
+
+        Batched because the alert path asks this for a whole run of alerts at
+        once, and per-org lookups there would put a query on the hot path of
+        something that fires during an outage.
+        """
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT org_id FROM billing WHERE status = 'suspended'"
+            ).fetchall()
+        return {int(r[0]) for r in rows}
 
     def set_unlimited(self, org_id: int) -> None:
         """Grant a company an UNLIMITED device cap (device_limit 0), active."""

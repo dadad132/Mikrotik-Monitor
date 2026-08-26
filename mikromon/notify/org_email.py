@@ -252,11 +252,31 @@ class OrgEmailNotifier(Notifier):
     name = "org_email"
 
     def __init__(self, smtp_cfg, auth_db_path: str, devices_db_path: str,
-                alert_log_db: str | None = None):
+                alert_log_db: str | None = None, billing_db: str | None = None):
         self._smtp = smtp_cfg
         self._auth_db = auth_db_path
         self._devices_db = devices_db_path
         self._alert_log_db = alert_log_db
+        self._billing_db = billing_db
+
+    def _suspended_orgs(self) -> set:
+        """Orgs cut off for non-payment, or an empty set if billing is not in
+        use. Never raises: an alert is worth more than this filter, so a
+        billing db that will not open lets the mail through rather than
+        silencing a real outage.
+        """
+        if not self._billing_db:
+            return set()
+        try:
+            from ..billing import BillingStore
+            store = BillingStore(self._billing_db)
+            try:
+                return store.suspended_orgs()
+            finally:
+                store.db.close()
+        except Exception:  # noqa: BLE001
+            log.exception("could not read suspended orgs; alerting anyway")
+            return set()
 
     def send(self, alerts) -> None:
         targets = [a for a in alerts if _should_notify(a)]
@@ -291,7 +311,18 @@ class OrgEmailNotifier(Notifier):
                 if org_id is not None:
                     by_org.setdefault(org_id, []).append(a)
 
+            # A suspended company keeps nothing but the invoice. Alert email
+            # is the part of this product people actually feel, so leaving it
+            # running would make a suspension something they never notice --
+            # they would go on being told their WAN dropped while locked out
+            # of the site that explains why.
+            suspended = self._suspended_orgs()
+
             for org_id, org_alerts in by_org.items():
+                if org_id in suspended:
+                    log.info("skipping %d alert(s) for suspended org %s",
+                             len(org_alerts), org_id)
+                    continue
                 recipients = auth.get_alert_emails(org_id)
                 if not recipients:
                     continue

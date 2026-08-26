@@ -5778,6 +5778,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 user["_show_billing"] = True
                 org_id = user.get("org_id")
                 if billing.is_locked(org_id):
+                    # An API caller is a script, not a person: bouncing it to
+                    # an HTML billing page means it quietly parses a login
+                    # form as data. 402 says the real reason in a way a
+                    # client can act on.
+                    if path.startswith("/api/"):
+                        return self._send(
+                            402,
+                            '{"error":"account_suspended",'
+                            '"detail":"This account is suspended pending '
+                            'payment. Contact billing to restore access."}',
+                            "application/json")
                     if path != "/billing":
                         return self._redirect("/billing")
                 elif billing.in_grace_period(org_id):
@@ -5980,7 +5991,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             bill = billing.get(user["org_id"]) if billing else None
             contact = auth.get_billing_contact() if auth else None
             if billing and billing.is_locked(user["org_id"]):
-                return self._send(200, _render_locked(user, contact),
+                return self._send(200, _render_locked(
+                    user, contact,
+                    manual=billing.is_suspended(user["org_id"])),
                                   "text/html; charset=utf-8")
             pf_enabled = bool(_pf_merchant_id and _pf_merchant_key)
             # The page marks the packet that fits, which needs the real
@@ -6151,6 +6164,55 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._redirect("/superadmin?error=" + quote(str(exc)))
             return self._redirect("/superadmin?ok=" +
                                   quote("Company plan updated."))
+
+        def _post_superadmin_suspend(self, user, restore: bool = False):
+            """Superadmin-only: cut a company off for non-payment, or let them
+            back in once they have paid.
+
+            The plan and device cap are left untouched either way, so a
+            customer who pays is working again on the next click rather than
+            waiting for someone to rebuild their account from memory.
+            """
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if billing is None:
+                return self._redirect("/superadmin?error=" +
+                                      quote("Billing is not enabled on this server."))
+            try:
+                org_id = int(flat.get("org_id", "0"))
+            except (ValueError, TypeError):
+                org_id = 0
+            if not org_id:
+                return self._redirect("/superadmin?error=" + quote("Unknown company."))
+            # A superadmin suspending their own company would lock themselves
+            # out of the page holding the button that undoes it.
+            if not restore and org_id == user.get("org_id"):
+                return self._redirect("/superadmin?error=" + quote(
+                    "You cannot suspend your own company — you would lose "
+                    "access to the page that restores it."))
+            name = ""
+            try:
+                name = auth.org_name(org_id) if auth else ""
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                if restore:
+                    billing.unsuspend(org_id)
+                else:
+                    billing.suspend(org_id)
+            except Exception as exc:  # noqa: BLE001
+                return self._redirect("/superadmin?error=" + quote(str(exc)))
+            log.info("org %s (%s) %s by superadmin %s", org_id, name or "?",
+                     "restored" if restore else "SUSPENDED",
+                     user.get("email", "?"))
+            what = ("Access restored for " if restore
+                    else "Suspended — access and alerts stopped for ")
+            return self._redirect("/superadmin?ok=" +
+                                  quote(what + (name or f"org {org_id}") + "."))
 
         def _post_superadmin_smtp(self, user):
             """Superadmin-only: save the platform SMTP relay in the DB so email
@@ -8822,6 +8884,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_billing(user)
             if path == "/superadmin/smtp":
                 return self._post_superadmin_smtp(user)
+            if path == "/superadmin/suspend":
+                return self._post_superadmin_suspend(user)
+            if path == "/superadmin/restore":
+                return self._post_superadmin_suspend(user, restore=True)
             if path == "/superadmin/billing-contact":
                 return self._post_superadmin_billing_contact(user)
             if path == "/superadmin/hub-endpoint":
