@@ -536,8 +536,9 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                        + contact_p)
     else:
         status_html = (f'<p style="margin:0"><span style="color:#64748b;font-weight:700">'
-                       f'Free plan</span> &middot; {FREE_DEVICES} devices &middot; '
-                       f'subscribe to add more</p>')
+                       f'Free plan</span> &middot; {FREE_DEVICES} '
+                       f'device{"" if FREE_DEVICES == 1 else "s"} &middot; '
+                       f'choose a packet to add more</p>')
 
     note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
            (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
@@ -672,7 +673,8 @@ _STATUS_COLOR = {
 }
 
 
-def _suspend_button(org_id, status: str, csrf: str) -> str:
+def _suspend_button(org_id, status: str, csrf: str,
+                    is_staff_org: bool = False) -> str:
     """Cut a company off, or let them back in.
 
     One button with two states rather than a dropdown: this gets reached for
@@ -682,6 +684,12 @@ def _suspend_button(org_id, status: str, csrf: str) -> str:
     because letting a paying customer back in is never the risky direction.
     """
     suspended = status == "suspended"
+    # Platform staff are exempt from the lockout, so offering the button on
+    # their company would be offering an action that does nothing. Say why
+    # once, here, rather than letting an admin click it and get an error.
+    if is_staff_org and not suspended:
+        return ('<div class="muted" style="font-size:11px;margin-top:6px">'
+                'Platform admin &mdash; exempt from lockout</div>')
     action = "restore" if suspended else "suspend"
     confirm = ("" if suspended else
                ' onclick="return confirm('
@@ -716,7 +724,7 @@ def _plan_select(org_id, current_plan, csrf) -> str:
     opts.append('<option value="unlimited"'
                 + (" selected" if current_plan == "unlimited" else "")
                 + '>Unlimited</option>')
-    opts.append('<option value="free">Free (5)</option>')
+    opts.append(f'<option value="free">Free ({FREE_DEVICES})</option>')
     return (f'<form method="POST" action="/superadmin/billing" '
             f'style="display:flex;gap:4px">'
             f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
@@ -1081,7 +1089,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
             f' / {device_limit if device_limit else "∞"}</td>'
             f'<td>{created_str}</td>'
             + (f'<td>{_plan_select(r.get("id"), plan, csrf)}'
-               f'{_suspend_button(r.get("id"), status, csrf)}</td>'
+               f'{_suspend_button(r.get("id"), status, csrf, r.get("has_superadmin", False))}</td>'
                if billing_on else "")
             + '</tr>'
         )
@@ -1406,9 +1414,10 @@ def _render_guide(user, tab_intro: dict) -> str:
         'gets there, so you know exactly who to email to arrange payment '
         'and get switched back on.</p>'
         f'<p>Without an active plan, a company is capped at '
-        f'{FREE_DEVICES} devices. Paid plans raise that cap — see the '
-        f'Billing page (company owners) for current plan sizes and '
-        f'pricing.</p>'))
+        f'{FREE_DEVICES} device{"" if FREE_DEVICES == 1 else "s"} — the same '
+        f'as the trial, so an evaluation never goes dark, but the fleet stays '
+        f'behind a packet. Packets raise that cap — see the Billing page '
+        f'(company owners) for sizes and pricing.</p>'))
 
     activity = _guide_section("activity", "Activity log", (
         '<p>The <b>Activity</b> tab (owners) is a timeline of every '

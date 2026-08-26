@@ -586,14 +586,20 @@ try:
           len(_chk2.quote_requests()) == 1)
     _chk2.db.close()
     print("Suspending a company for non-payment:")
+    # A company of its own with a plain owner: admin@acme.test is platform
+    # staff by this point in the file, and staff are exempt from the lockout,
+    # so testing suspension through them would prove nothing.
     _sb = _BS(_bdb)
     _a = AuthStore(adb)
-    _oid = _a.get_user("admin@acme.test")["org_id"]
+    _oid = _a.signup("owner@payless.test", "password123", "PayLess Co")
     _a.close()
     _sb.set_plan(_oid, "d25")
+    qo = opener()
+    req(qo, "/login", {"email": "owner@payless.test", "password": "password123"},
+        base=QBASE)
     st, body = req(qo, "/dashboard", base=QBASE)
     check("a company in good standing reaches the dashboard",
-          st == 200 and "Suspended" not in body)
+          st == 200 and "Account Suspended" not in body)
 
     _sb.suspend(_oid)
     st, body = req(qo, "/dashboard", base=QBASE)
@@ -617,6 +623,40 @@ try:
     st, body = req(qo, "/dashboard", base=QBASE)
     check("restoring puts them straight back in", st == 200
           and "Account Suspended" not in body)
+
+    print("Platform staff are never locked out by billing:")
+    # The panel that restores a suspended company sits behind the same guard.
+    # Locking a superadmin out of it takes the recovery path down with the
+    # thing it recovers, and then nobody can undo it from the UI at all.
+    _a2 = AuthStore(adb)
+    _saoid = _a2.get_user("admin@acme.test")["org_id"]
+    _a2.set_superadmin("admin@acme.test", True)
+    _a2.close()
+    _sb.suspend(_saoid)
+    sa = opener()
+    req(sa, "/login", {"email": "admin@acme.test", "password": "admin123"},
+        base=QBASE)
+    st, body = req(sa, "/superadmin", base=QBASE)
+    check("a superadmin whose OWN company is suspended still reaches the "
+          "panel holding the button that undoes it",
+          st == 200 and "Platform admin" in body)
+    check("...and is not bounced off the ordinary pages either",
+          "Platform admin" in req(sa, "/superadmin", base=QBASE)[1])
+    st, _ = req(sa, "/api/devices", base=QBASE)
+    check("...and their API keeps working, since the 402 is for customers",
+          st == 200)
+
+    # This predates the suspend button: an unpaid trial on the staff company
+    # was enough to trigger it.
+    _sb.unsuspend(_saoid)
+    _sb.start_trial(_saoid)
+    _sb._upsert(_saoid, trial_end=time.time() - 40 * 86400,
+                grace_period_end=time.time() - 8 * 86400)
+    st, body = req(sa, "/superadmin", base=QBASE)
+    check("...including when it is an expired trial rather than a manual "
+          "suspension that locked their company",
+          st == 200 and "Platform admin" in body)
+    _sb.set_plan(_saoid, "d25")
     _sb.db.close()
 finally:
     srv_q.shutdown()
@@ -727,6 +767,18 @@ finally:
     srv.shutdown()
     srv.server_close()
 
+print("the free plan cap is stated honestly everywhere it appears:")
+import mikromon.web_auth as _wa
+from mikromon.billing import FREE_DEVICES as _FREE
+_freehtml = _wa._render_billing(
+    {"org_id": 99, "email": "a@b.c", "role": "owner", "org_name": "Nopay"},
+    None, True, "C")
+check("a company with no plan is told the real cap, singular, not '1 devices'",
+      f"{_FREE} device" in _freehtml and f"{_FREE} devices" not in _freehtml)
+check("the superadmin's Free option names the cap it actually sets, rather "
+      "than a number typed in beside it that can drift",
+      f"Free ({_FREE})" in _wa._plan_select(1, None, "C"))
+
 print("device packets on the billing page:")
 import mikromon.web_auth as _wa2
 from mikromon.billing import MAX_TIER_DEVICES as _MAXD, QUOTE_ABOVE_DEVICES as _QT
@@ -827,6 +879,16 @@ check("...and restoring does NOT ask for confirmation -- letting a paying "
 check("the plan they were on is still selected, since suspending never "
       "touched it",
       'value="d25" selected' in _sa_susp)
+
+_rows_staff = [dict(_rows_ok[0], has_superadmin=True)]
+_sa_staff = _wa2._render_superadmin(
+    {"email": "s@x.c", "role": "owner", "is_superadmin": True},
+    _rows_staff, [], csrf="C", billing_on=True)
+check("a company holding a platform admin is not offered a Suspend button, "
+      "because staff are exempt from the lockout -- the badge would say "
+      "Suspended while they carried on working",
+      'action="/superadmin/suspend"' not in _sa_staff
+      and "exempt from lockout" in _sa_staff)
 
 print("the EFT reference is shown to the customer AND to the superadmin:")
 import mikromon.web_auth as _wa

@@ -175,6 +175,12 @@ check("org with no billing record is on the free-plan cap",
       and store.billing_status(1) == "none" and not store.is_locked(1))
 check("free-plan cap is enforced", store.can_add(1, billing.FREE_DEVICES - 1)
       and not store.can_add(1, billing.FREE_DEVICES))
+# Pinned, not derived: every other check here reads the constant, so the two
+# would agree with each other no matter what it said.
+check("the free plan is ONE device, the same as the trial -- it exists so an "
+      "evaluation does not go dark, not as a product to settle on",
+      billing.FREE_DEVICES == 1
+      and billing.FREE_DEVICES == billing.TRIAL_DEVICES)
 
 store.start_trial(2)
 check("start_trial sets status=trial with the trial device cap",

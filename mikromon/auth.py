@@ -357,6 +357,18 @@ class AuthStore:
             out.append(d)
         return out
 
+    def org_has_superadmin(self, org_id: int) -> bool:
+        """Whether a company holds any platform-staff account.
+
+        Used to keep such a company out of billing actions that assume a
+        customer: staff are exempt from lockout, so marking their company
+        suspended would show a status the system does not honour.
+        """
+        row = self.db.execute(
+            "SELECT 1 FROM users WHERE org_id = ? AND is_superadmin = 1 "
+            "LIMIT 1", (int(org_id),)).fetchone()
+        return row is not None
+
     def count_users(self) -> int:
         return self.db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
 

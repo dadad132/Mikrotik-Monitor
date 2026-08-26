@@ -32,7 +32,11 @@ log = logging.getLogger(__name__)
 GRACE_DAYS = 7
 _GRACE_SECS = GRACE_DAYS * 86400
 _TRIAL_DAYS = 30
-FREE_DEVICES = 5     # cap once a company has no active billing (lapsed/free)
+# Cap once a company has no active billing (lapsed, or never paid). Matches
+# the trial cap on purpose: the free tier is there so an evaluation does not
+# go dark, not as a product. A company that lapses keeps one device watched
+# and has to choose a packet to get the rest back.
+FREE_DEVICES = 1
 TRIAL_DEVICES = 1   # cap for a brand-new company's 30-day trial
 
 _PF_LIVE_URL = "https://www.payfast.co.za/eng/process"

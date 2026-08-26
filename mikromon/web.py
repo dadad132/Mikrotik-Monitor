@@ -5777,6 +5777,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 user = dict(user)
                 user["_show_billing"] = True
                 org_id = user.get("org_id")
+            # Platform staff are never locked out by billing. The panel that
+            # restores a suspended company sits behind this guard, so locking
+            # a superadmin out of it takes the recovery path down along with
+            # the thing it recovers -- and then nobody can undo it from the
+            # UI at all. Their own company lapsing a trial was enough to
+            # trigger it, long before there was a suspend button.
+            if billing and not user.get("is_superadmin"):
                 if billing.is_locked(org_id):
                     # An API caller is a script, not a person: bouncing it to
                     # an HTML billing page means it quietly parses a login
@@ -6056,8 +6063,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                                if n in known_set)
                         except Exception:
                             pass
+                    has_sa = False
+                    try:
+                        has_sa = auth.org_has_superadmin(oid) if auth else False
+                    except Exception:  # noqa: BLE001
+                        pass
                     rows.append({**org, "bill": bill, "device_count": dev_count,
-                                 "active_count": active_count})
+                                 "active_count": active_count,
+                                 "has_superadmin": has_sa})
             finally:
                 if _ds is not None:
                     _ds.close()
@@ -6188,12 +6201,20 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 org_id = 0
             if not org_id:
                 return self._redirect("/superadmin?error=" + quote("Unknown company."))
-            # A superadmin suspending their own company would lock themselves
-            # out of the page holding the button that undoes it.
-            if not restore and org_id == user.get("org_id"):
-                return self._redirect("/superadmin?error=" + quote(
-                    "You cannot suspend your own company — you would lose "
-                    "access to the page that restores it."))
+            # Platform staff are exempt from the billing lockout, so marking
+            # their company suspended would set a status nothing honours --
+            # the badge would say Suspended while they carried on working.
+            # Refuse it rather than display a state that is not true.
+            if not restore and auth is not None:
+                try:
+                    staff_org = auth.org_has_superadmin(org_id)
+                except Exception:  # noqa: BLE001
+                    staff_org = org_id == user.get("org_id")
+                if staff_org:
+                    return self._redirect("/superadmin?error=" + quote(
+                        "That company holds a platform admin account, which "
+                        "is exempt from billing lockout — suspending it "
+                        "would show a status that has no effect."))
             name = ""
             try:
                 name = auth.org_name(org_id) if auth else ""
