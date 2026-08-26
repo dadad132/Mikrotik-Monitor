@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -79,34 +80,62 @@ CREATE TABLE IF NOT EXISTS billing (
 # (Capitec's is 20 characters), and every character a customer has to retype
 # is a character they can get wrong.
 _PAYREF_PREFIX = "EMK"
+_PAYREF_SLUG_MAX = 12
+# Letters, then the org id. Bounded to 5 digits so an 8-digit date in a
+# statement description ("EFT 20260825 ...") cannot be mistaken for an id.
+_PAYREF_RE = re.compile(r"[A-Za-z]{2,14}[\s-]?0*(\d{1,5})(?!\d)")
 
 
-def payment_reference(org_id: int) -> str:
-    """The reference a company puts on a manual EFT, e.g. "EMK-0042".
+def _payref_slug(name: str) -> str:
+    """A company name reduced to something a bank reference can carry: LETTERS
+    only, upper case, truncated. Spaces and punctuation go because reference
+    fields mangle them inconsistently between banks.
 
-    Derived from the org id rather than stored, so it is stable for the life
-    of the account, cannot collide, and needs no migration or admin step to
-    hand out. It deliberately does NOT contain the company name: names get
-    edited, and a reference that changes underneath a customer's saved
-    beneficiary is worse than one that is merely dull.
+    Digits go for a sharper reason. A statement arrives as one mangled string,
+    and the id is found by looking for the digits at the end -- so a name that
+    itself ends in digits ("Net24") would run into the id and read as a
+    different account entirely. Dropping them from the slug costs a little
+    fidelity in the name half and makes the half that decides identity
+    unambiguous."""
+    out = re.sub(r"[^A-Za-z]+", "", str(name or "")).upper()
+    return out[:_PAYREF_SLUG_MAX]
+
+
+def payment_reference(org_id: int, name: str = "") -> str:
+    """The reference a company puts on a manual EFT, e.g. "MYITAFRICA-0042".
+
+    The company name is in it so a bank statement line says WHO paid without
+    a lookup. The org id is what actually identifies the account: names get
+    edited and two companies can reduce to the same letters, so the number is
+    the part that has to be unique and stable, and it is kept even when the
+    name changes underneath it. Falls back to a plain "EMK-0042" when there
+    is no usable name, which is also the format issued before names were
+    included -- both still resolve to the same account.
+
+    Deliberately NOT in here: the device count or plan. Those change as an
+    account grows, and a reference that changes is a reference a customer's
+    saved beneficiary no longer matches -- they would go on paying the old
+    one for months. The org list shows devices and plan beside this instead,
+    where being current costs nothing.
 
     Note the direction this runs in. A reference cannot be generated from an
     incoming payment -- by the time money lands it already carries whatever
     the payer typed. It only identifies an account if the customer was given
     it BEFORE paying, which is why it appears on their billing page.
     """
-    return f"{_PAYREF_PREFIX}-{int(org_id):04d}"
+    slug = _payref_slug(name) or _PAYREF_PREFIX
+    return f"{slug}-{int(org_id):04d}"
 
 
 def org_id_from_reference(ref: str):
     """The org a payment reference belongs to, or None if it is not one of
-    ours. Tolerates the mangling bank statements apply -- lower case, lost
-    hyphen, surrounding text from the payer's own description."""
-    import re as _re
-
-    m = _re.search(rf"{_PAYREF_PREFIX}[\s-]?0*(\d+)", str(ref or ""),
-                   _re.IGNORECASE)
-    return int(m.group(1)) if m else None
+    ours. Tolerates what statements actually do to a reference -- lower case,
+    a dropped hyphen, and the payer's own description wrapped around it -- and
+    reads both the current "MYITAFRICA-0042" form and the earlier "EMK-0042"
+    one, so a customer still paying with the reference they saved months ago
+    is matched to the same account."""
+    found = _PAYREF_RE.findall(str(ref or ""))
+    return int(found[-1]) if found else None
 
 
 def can_add_device(device_limit: int, current_count: int) -> bool:

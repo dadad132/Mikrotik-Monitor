@@ -193,23 +193,34 @@ store.close()
 print("EFT payment reference (manual bank-transfer reconciliation):")
 from mikromon.billing import payment_reference, org_id_from_reference
 
-check("each company gets its own short, typable reference",
-      payment_reference(7) == "EMK-0007"
-      and payment_reference(42) == "EMK-0042")
-check("...derived from the org id, so it is stable for the life of the "
-      "account and cannot collide with another company's",
-      payment_reference(42) == payment_reference(42)
-      and payment_reference(42) != payment_reference(43))
+check("the reference names the company, so a statement line says who paid "
+      "without a lookup",
+      payment_reference(42, "My IT Africa") == "MYITAFRICA-0042"
+      and payment_reference(7, "Kyotech") == "KYOTECH-0007")
+check("...with punctuation and spaces stripped, because a banking app's "
+      "reference field rejects most of them",
+      payment_reference(3, "A&B Net (Pty) Ltd.") == "ABNETPTYLTD-0003")
+check("...falling back to the plain prefix when there is no name to use",
+      payment_reference(9) == "EMK-0009")
+check("...but the ID still decides identity, so two companies with the same "
+      "name never share a reference",
+      payment_reference(42, "Acme") != payment_reference(43, "Acme"))
+check("...and it survives a rename: the ID half is what gets matched, so a "
+      "customer's saved beneficiary keeps working",
+      org_id_from_reference(payment_reference(42, "Old Name")) == 42
+      and org_id_from_reference(payment_reference(42, "New Name")) == 42)
 check("...and short enough to survive a banking app's reference field, "
       "which truncates (Capitec's is 20 characters)",
-      len(payment_reference(9999)) <= 20)
+      len(payment_reference(9999, "A Very Long Company Name Ltd")) <= 20)
 
 for _raw, _want in [
-        ("EMK-0042", 42),
+        ("MYITAFRICA-0042", 42),
+        ("EMK-0042", 42),              # references issued before the rename
         ("emk-0042", 42),              # statements lower-case things
         ("EMK0042", 42),               # the hyphen gets dropped
         ("EMK 42", 42),                # and re-typed loosely
         ("PAYMENT EMK-0042 MY IT AFRICA", 42),   # buried in a description
+        ("EFT 20260825 MYITAFRICA-0042", 42),    # ...next to a date
         ("random text", None),
         ("", None)]:
     check(f"a statement line {_raw!r} resolves to org {_want} — bank "
@@ -220,6 +231,15 @@ for _raw, _want in [
 check("a reference for one org never resolves to another",
       org_id_from_reference(payment_reference(7)) == 7
       and org_id_from_reference(payment_reference(70)) == 70)
+check("...including when the company name itself ends in digits: those are "
+      "dropped from the name half, so they cannot run into the id and resolve "
+      "to a different account",
+      payment_reference(7, "Net24") == "NET-0007"
+      and org_id_from_reference(payment_reference(7, "Net24")) == 7)
+check("the device count is deliberately NOT in the reference -- it changes as "
+      "an account grows, and a reference that changes is one the customer's "
+      "saved beneficiary no longer matches",
+      payment_reference(42, "My IT Africa") == "MYITAFRICA-0042")
 
 print()
 print()

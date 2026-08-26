@@ -631,13 +631,19 @@ import mikromon.web_auth as _wa
 from mikromon.billing import payment_reference as _pref
 
 _bill_html = _wa._render_billing(
-    {"org_id": 42, "email": "a@b.c", "role": "owner"},
+    {"org_id": 42, "email": "a@b.c", "role": "owner",
+     "org_name": "My IT Africa"},
     {"status": "active", "plan": "starter", "device_limit": 5},
     False, "CSRF", contact={"bank_name": "Capitec", "bank_account": "123456"})
 check("the company sees its own reference on the billing page BEFORE paying "
       "-- it cannot be worked out afterwards from money arriving, so handing "
       "it over up front is the whole mechanism",
-      _pref(42) in _bill_html and "Paying by EFT" in _bill_html)
+      _pref(42, "My IT Africa") in _bill_html
+      and "Paying by EFT" in _bill_html)
+check("...and the reference carries their company name, so the superadmin "
+      "reading a bank statement knows who paid without a lookup",
+      _pref(42, "My IT Africa") in _bill_html
+      and "MYITAFRICA-0042" in _bill_html)
 check("...along with the bank details to pay into, when they are configured "
       "-- a reference with nowhere to send the money is half an instruction",
       "Capitec" in _bill_html and "123456" in _bill_html)
@@ -656,6 +662,23 @@ check("...and a partly-filled set shows only what was entered, rather than "
           {"org_id": 7, "email": "a@b.c", "role": "owner"}, None, False, "C",
           contact={"email": "b@x.c", "bank_name": "Capitec"}))
 
+# The case that actually bites on day one: nobody has filled the bank details
+# in yet, so the customer is looking at a reference and no account to send it
+# to. Showing the code alone would read as a complete instruction and quietly
+# stall every payment.
+_nobank = _wa._render_billing(
+    {"org_id": 7, "email": "a@b.c", "role": "owner", "org_name": "Kyotech"},
+    None, False, "C", contact={"name": "Jaco", "email": "b@x.c"})
+check("with no bank details configured the customer is told who to ask, "
+      "rather than being left with a reference and nowhere to send the money",
+      "not published" in _nobank and "b@x.c" in _nobank)
+_nothing = _wa._render_billing(
+    {"org_id": 7, "email": "a@b.c", "role": "owner", "org_name": "Kyotech"},
+    None, False, "C", contact=None)
+check("...and with nothing configured at all it still says so plainly "
+      "instead of rendering an empty gap",
+      "not published" in _nothing and "contact your provider" in _nothing)
+
 _form = _wa._render_superadmin(
     {"email": "s@x.c", "role": "owner", "is_superadmin": True},
     [], [], csrf="C", billing_on=True,
@@ -673,6 +696,20 @@ check("...and it is shown even with card payment switched off, since an EFT "
           {"org_id": 7, "email": "a@b.c", "role": "owner"},
           None, False, "CSRF"))
 
+# The superadmin has no other way to notice: their own panel looks fine while
+# every customer's billing page is quietly missing the account to pay into.
+_warn = _wa._render_superadmin(
+    {"email": "s@x.c", "role": "owner", "is_superadmin": True},
+    [], [], csrf="C", billing_on=True, billing_contact={"email": "b@x.c"})
+check("the panel warns the superadmin while no bank details are set -- "
+      "otherwise the first sign of it is an invoice nobody paid",
+      "No bank details set" in _warn)
+check("...and stops warning once they are, so it does not become noise",
+      "No bank details set" not in _wa._render_superadmin(
+          {"email": "s@x.c", "role": "owner", "is_superadmin": True},
+          [], [], csrf="C", billing_on=True,
+          billing_contact={"email": "b@x.c", "bank_name": "Capitec"}))
+
 _sa_html = _wa._render_superadmin(
     {"email": "s@x.c", "role": "owner", "is_superadmin": True},
     [{"id": 1, "name": "My IT Africa", "owner_email": "a@b.c",
@@ -682,7 +719,7 @@ _sa_html = _wa._render_superadmin(
     [], csrf="C", billing_on=True)
 check("the superadmin org list carries each company's reference, so a line "
       "on the bank statement can be traced back to an account by eye",
-      _pref(1) in _sa_html and "My IT Africa" in _sa_html)
+      _pref(1, "My IT Africa") in _sa_html and "My IT Africa" in _sa_html)
 
 print()
 print()

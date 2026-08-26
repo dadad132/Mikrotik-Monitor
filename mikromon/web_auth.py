@@ -358,8 +358,9 @@ def _grace_banner_html(days_left: float, contact: dict | None = None) -> str:
             f'</div>')
 
 
-def _eft_reference_box(org_id, contact: dict | None = None) -> str:
-    """The company's own EFT reference, shown before they pay.
+def _eft_reference_box(org_id, contact: dict | None = None,
+                       org_name: str = "") -> str:
+    """The company's own EFT reference, plus where to actually send the money.
 
     A bank statement line only says who a payment is from and what they typed
     in the reference field. If the customer was never given a reference, there
@@ -369,10 +370,17 @@ def _eft_reference_box(org_id, contact: dict | None = None) -> str:
 
     Deliberately plain and copyable rather than decorative: it gets retyped
     into a banking app by hand, and every character is a chance to get it
-    wrong."""
+    wrong.
+
+    The bank details matter as much as the reference. A reference with no
+    account to send it to is half an instruction, and a customer who cannot
+    work out where to pay is a customer who does not pay. When no details have
+    been configured this says so and points at whatever contact HAS been set,
+    rather than showing a bare code and leaving them to guess."""
     from .billing import payment_reference
 
-    ref = payment_reference(org_id)
+    ref = payment_reference(org_id, org_name)
+    contact = contact or {}
     bank = ""
     if contact:
         fields = [("Bank", contact.get("bank_name")),
@@ -388,6 +396,19 @@ def _eft_reference_box(org_id, contact: dict | None = None) -> str:
                         f'{esc(lbl)}</span><b>{esc(str(val))}</b></div>'
                         for lbl, val in filled)
                     + "</div>")
+    if not bank:
+        who = " or ".join(x for x in (esc(str(contact.get("name") or "")),
+                                      esc(str(contact.get("email") or "")))
+                          if x)
+        bank = ('<div style="margin-top:12px;font-size:13px;padding:10px 12px;'
+                'border-radius:8px;background:var(--surface-2);'
+                'border:1px solid var(--border)">'
+                'Bank details are not published here yet &mdash; '
+                + (f'contact <b>{who}</b> for them, quoting the reference '
+                   f'above.' if who else
+                   'contact your provider for them, quoting the reference '
+                   'above.')
+                + '</div>')
     return (
         f'<div class="box"><h2>Paying by EFT</h2>'
         f'<p class="muted" style="margin-top:0">Use this reference on the '
@@ -473,7 +494,8 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                   # Shown whether or not card payment is switched on: a
                   # customer paying by EFT needs the reference regardless,
                   # and needs it BEFORE they pay rather than after.
-                  + _eft_reference_box(user.get("org_id"), contact))
+                  + _eft_reference_box(user.get("org_id"), contact,
+                                      user.get("org_name", "")))
 
     # --- plan table ---
     if pf_enabled:
@@ -623,11 +645,22 @@ def _billing_contact_box(contact, csrf) -> str:
         # every company's billing page beside the reference they must quote --
         # a reference with nowhere to send the money is only half the
         # instruction.
-        f'<p class="muted" style="margin:14px 0 6px;font-size:12px">'
-        f'Bank details for customers paying by EFT. Shown on their billing '
-        f'page next to the reference they quote. Leave blank to show only '
-        f'the reference.</p>'
-        f'<div style="display:grid;grid-template-columns:'
+        # Loud while empty: until these are filled in, every company's billing
+        # page shows a reference with no account behind it, and the first time
+        # anyone notices is when an invoice goes unpaid.
+        + ('<p style="margin:14px 0 6px;font-size:12px;padding:8px 10px;'
+           'border-radius:6px;background:rgba(217,119,6,0.12);'
+           'color:#b45309">&#9888; <b>No bank details set.</b> Every '
+           'company&rsquo;s billing page is currently showing a payment '
+           'reference with nowhere to send the money. Fill these in and they '
+           'can pay by EFT.</p>'
+           if not any(str(c.get(k) or "").strip()
+                      for k in ("bank_name", "bank_account",
+                                "bank_holder", "bank_branch"))
+           else '<p class="muted" style="margin:14px 0 6px;font-size:12px">'
+                'Bank details for customers paying by EFT. Shown on their '
+                'billing page next to the reference they quote.</p>')
+        + f'<div style="display:grid;grid-template-columns:'
         f'repeat(auto-fit,minmax(220px,1fr));gap:10px">'
         f'<label>Bank<br><input name="bank_name" value="{v("bank_name")}" '
         f'placeholder="Capitec" style="width:100%"></label>'
@@ -855,7 +888,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
             # here so a bank statement line can be traced back to an account
             # by eye, which is the whole point of issuing one.
             f'<br><code style="font-size:11px">'
-            f'{esc(payment_reference(r["id"]))}</code></td>'
+            f'{esc(payment_reference(r["id"], r.get("name", "")))}</code></td>'
             f'<td><span style="color:{color};font-weight:700">{label}</span>'
             f'{f"<br><span class=\'muted\' style=\'font-size:11px\'>trial ends {trial_str}</span>" if trial_str else ""}'
             f'{f"<br><span class=\'muted\' style=\'font-size:11px;color:#d97706\'>grace ends {grace_str}</span>" if grace_str else ""}'
