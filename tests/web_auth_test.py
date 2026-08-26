@@ -719,6 +719,27 @@ check("a company past the last packet gets no tier suggestion, because there "
       "is no honest one to give",
       _wa2._fitting_tier(_QT + 1) is None)
 
+# What a packet costs is the customer's business; which gateway the server
+# happens to hold keys for is not. The page used to replace the whole ladder
+# with a note about adding a section to config.yaml -- a message for whoever
+# runs the server, shown to the people paying to use it.
+_nopf = _wa2._render_billing(
+    {"org_id": 42, "email": "a@b.c", "role": "owner", "org_name": "Acme"},
+    None, False, "CSRF", device_count=23,
+    contact={"bank_name": "Capitec", "bank_account": "1234567890"})
+check("prices still show when card payment is not switched on -- a customer "
+      "deciding whether to stay needs to know what it costs either way",
+      all(f'>{n}</td>' in _nopf for n in range(5, _MAXD + 1, 5)))
+check("...with no subscribe buttons, since there is nothing behind them",
+      'action="/billing/subscribe"' not in _nopf)
+check("...and they are pointed at the payment route that does work",
+      "EFT" in _nopf and "Capitec" in _nopf)
+for _leak in ("PayFast", "payfast", "config.yaml", "not configured",
+              "not yet configured"):
+    check(f"the billing page never says {_leak!r} to a customer -- server "
+          f"plumbing is not their problem",
+          _leak not in _nopf and _leak not in _ladder)
+
 check("the way out above the last packet is on the page for everyone, not "
       "only for companies already over it -- someone planning a 300-site "
       "rollout has to see the door before they conclude there is none",

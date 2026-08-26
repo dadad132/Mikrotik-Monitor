@@ -491,9 +491,13 @@ def _quote_request_box(csrf: str, device_count: int = 0) -> str:
 def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                     msg: str = "", error: str = "", contact: dict | None = None,
                     device_count: int = 0) -> str:
-    """Billing page: current subscription status + PayFast plan subscribe
-    buttons, and the company's own EFT reference for paying by bank
-    transfer."""
+    """Billing page: current subscription status, the packet ladder, and the
+    company's own EFT reference for paying by bank transfer.
+
+    The packet prices render whether or not card payment is configured. What
+    a packet costs is the customer's business; which gateway the server has
+    keys for is not.
+    """
     status = (bill or {}).get("status", "none")
     plan_name = (bill or {}).get("plan") or ""
     device_limit = int((bill or {}).get("device_limit") or FREE_DEVICES)
@@ -566,48 +570,52 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
     # themselves, and the usual outcome of that is picking the cheapest row
     # and hitting the device cap a week later.
     fits = _fitting_tier(device_count)
-    if pf_enabled:
-        plan_rows = ""
-        for p in PLANS:
-            is_current = (status in ("active", "trialing")
-                          and plan_name == p["name"])
-            per_dev = p["price_usd"] / p["devices"]
-            if is_current:
-                btn = '<span class="badge ok">Current plan</span>'
-            else:
-                btn = (f'<form method="POST" action="/billing/subscribe">'
-                       f'<input type="hidden" name="csrf" value="{csrf}">'
-                       f'<input type="hidden" name="plan" value="{esc(p["name"])}">'
-                       f'<button class="btn" type="submit" style="padding:6px 14px">'
-                       f'Subscribe</button></form>')
-            hint = ""
-            row_style = ""
-            if fits and p["name"] == fits["name"] and not is_current:
-                hint = ('<br><span style="font-size:11px;color:#2563eb;'
-                        'font-weight:600">Fits your '
-                        f'{device_count} device{"" if device_count == 1 else "s"}'
-                        '</span>')
-                row_style = ' style="background:rgba(37,99,235,.06)"'
-            plan_rows += (f'<tr{row_style}>'
-                          f'<td><b>{esc(p["label"])}</b>{hint}</td>'
-                          f'<td>{p["devices"]}</td>'
-                          f'<td><b>${p["price_usd"]:,.2f}</b>/mo</td>'
-                          f'<td>${per_dev:,.2f}/device</td>'
-                          f'<td>{btn}</td>'
-                          f'</tr>')
-        plans_html = (f'<div class="box"><h2>Choose a packet</h2>'
-                      f'<p class="muted" style="margin-top:0">Packets step in '
-                      f'{TIER_STEP}s up to {MAX_TIER_DEVICES} devices, and the '
-                      f'price per device drops as the packet grows. All prices '
-                      f'in USD, billed monthly via PayFast. Cancel anytime.</p>'
-                      f'<table><thead><tr>'
-                      f'<th>Packet</th><th>Devices</th><th>Monthly</th>'
-                      f'<th>Per device</th><th></th>'
-                      f'</tr></thead><tbody>{plan_rows}</tbody></table></div>')
-    else:
-        plans_html = ('<div class="box"><p class="muted">PayFast billing is not '
-                      'yet configured on this server. Add a <code>billing:</code> '
-                      'section to config.yaml to enable subscriptions.</p></div>')
+    plan_rows = ""
+    for p in PLANS:
+        is_current = (status in ("active", "trialing")
+                      and plan_name == p["name"])
+        per_dev = p["price_usd"] / p["devices"]
+        if is_current:
+            btn = '<span class="badge ok">Current plan</span>'
+        elif pf_enabled:
+            btn = (f'<form method="POST" action="/billing/subscribe">'
+                   f'<input type="hidden" name="csrf" value="{csrf}">'
+                   f'<input type="hidden" name="plan" value="{esc(p["name"])}">'
+                   f'<button class="btn" type="submit" style="padding:6px 14px">'
+                   f'Subscribe</button></form>')
+        else:
+            btn = ""
+        hint = ""
+        row_style = ""
+        if fits and p["name"] == fits["name"] and not is_current:
+            hint = ('<br><span style="font-size:11px;color:#2563eb;'
+                    'font-weight:600">Fits your '
+                    f'{device_count} device{"" if device_count == 1 else "s"}'
+                    '</span>')
+            row_style = ' style="background:rgba(37,99,235,.06)"'
+        plan_rows += (f'<tr{row_style}>'
+                      f'<td><b>{esc(p["label"])}</b>{hint}</td>'
+                      f'<td>{p["devices"]}</td>'
+                      f'<td><b>${p["price_usd"]:,.2f}</b>/mo</td>'
+                      f'<td>${per_dev:,.2f}/device</td>'
+                      f'<td>{btn}</td>'
+                      f'</tr>')
+    # How to pay depends on what the server has switched on, but WHAT things
+    # cost never does. Card payment being unconfigured is an operator's
+    # problem, so the customer is told about the payment route that does work
+    # (the EFT box directly below) rather than being shown an empty page with
+    # a note about a config file they will never open.
+    pay_line = ("Cancel anytime." if pf_enabled
+                else "Pay monthly by EFT using the reference below.")
+    plans_html = (f'<div class="box"><h2>Choose a packet</h2>'
+                  f'<p class="muted" style="margin-top:0">Packets step in '
+                  f'{TIER_STEP}s up to {MAX_TIER_DEVICES} devices, and the '
+                  f'price per device drops as the packet grows. All prices '
+                  f'in USD, billed monthly. {pay_line}</p>'
+                  f'<table><thead><tr>'
+                  f'<th>Packet</th><th>Devices</th><th>Monthly</th>'
+                  f'<th>Per device</th><th></th>'
+                  f'</tr></thead><tbody>{plan_rows}</tbody></table></div>')
 
     plans_html += _quote_request_box(csrf, device_count)
 

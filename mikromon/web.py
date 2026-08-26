@@ -9079,7 +9079,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             """A company past the last packet asking to be contacted."""
             if not billing:
                 return self._redirect("/billing?error=" + quote(
-                    "Billing is not configured on this server."))
+                    "Could not send the request just now. Please email us "
+                    "instead and we will pick it up."))
             from .billing import QUOTE_ABOVE_DEVICES
             try:
                 devices = int(str(flat.get("devices", "")).strip() or 0)
@@ -9127,7 +9128,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             """Redirect the owner to the PayFast payment page for their chosen plan."""
             if not billing or not _pf_merchant_id:
                 return self._redirect("/billing?error=" + quote(
-                    "PayFast billing is not configured on this server."))
+                    "Card payment is not available yet — please pay by EFT "
+                    "using the reference on this page."))
             plan_name = flat.get("plan", "").strip()
             host = self.headers.get("Host", "localhost")
             scheme = "https" if secure_cookies else "http"
@@ -9160,7 +9162,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             )
             html = (f'<!doctype html><html><body>'
                     f'<p style="font-family:sans-serif;margin:40px auto;'
-                    f'text-align:center">Redirecting to PayFast…</p>'
+                    f'text-align:center">Redirecting to secure checkout…</p>'
                     f'<form id="pf" method="POST" action="{pf_url}">{fields}</form>'
                     f'<script>document.getElementById("pf").submit();</script>'
                     f'</body></html>')
@@ -9195,7 +9197,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._redirect("/billing?ok=" + quote(
                     "Subscription cancelled. Access continues until the grace period ends."))
             return self._redirect("/billing?error=" + quote(
-                "Could not cancel via PayFast. Please contact support."))
+                "Could not cancel the subscription. Please contact support."))
 
         def _post_login(self):
             flat, _ = self._form()
