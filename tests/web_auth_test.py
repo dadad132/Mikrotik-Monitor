@@ -626,6 +626,38 @@ finally:
     srv.shutdown()
     srv.server_close()
 
+print("the EFT reference is shown to the customer AND to the superadmin:")
+import mikromon.web_auth as _wa
+from mikromon.billing import payment_reference as _pref
+
+_bill_html = _wa._render_billing(
+    {"org_id": 42, "email": "a@b.c", "role": "owner"},
+    {"status": "active", "plan": "starter", "device_limit": 5},
+    False, "CSRF", contact={"bank_name": "Capitec", "bank_account": "123456"})
+check("the company sees its own reference on the billing page BEFORE paying "
+      "-- it cannot be worked out afterwards from money arriving, so handing "
+      "it over up front is the whole mechanism",
+      _pref(42) in _bill_html and "Paying by EFT" in _bill_html)
+check("...along with the bank details to pay into, when they are configured",
+      "Capitec" in _bill_html and "123456" in _bill_html)
+check("...and it is shown even with card payment switched off, since an EFT "
+      "customer needs it either way",
+      "Paying by EFT" in _wa._render_billing(
+          {"org_id": 7, "email": "a@b.c", "role": "owner"},
+          None, False, "CSRF"))
+
+_sa_html = _wa._render_superadmin(
+    {"email": "s@x.c", "role": "owner", "is_superadmin": True},
+    [{"id": 1, "name": "My IT Africa", "owner_email": "a@b.c",
+      "user_count": 2, "status": "active", "plan": "starter",
+      "device_limit": 5, "device_count": 5, "active_count": 5,
+      "created": 1700000000.0}],
+    [], csrf="C", billing_on=True)
+check("the superadmin org list carries each company's reference, so a line "
+      "on the bank statement can be traced back to an account by eye",
+      _pref(1) in _sa_html and "My IT Africa" in _sa_html)
+
+print()
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

@@ -190,6 +190,38 @@ except ValueError:
 
 store.close()
 
+print("EFT payment reference (manual bank-transfer reconciliation):")
+from mikromon.billing import payment_reference, org_id_from_reference
+
+check("each company gets its own short, typable reference",
+      payment_reference(7) == "EMK-0007"
+      and payment_reference(42) == "EMK-0042")
+check("...derived from the org id, so it is stable for the life of the "
+      "account and cannot collide with another company's",
+      payment_reference(42) == payment_reference(42)
+      and payment_reference(42) != payment_reference(43))
+check("...and short enough to survive a banking app's reference field, "
+      "which truncates (Capitec's is 20 characters)",
+      len(payment_reference(9999)) <= 20)
+
+for _raw, _want in [
+        ("EMK-0042", 42),
+        ("emk-0042", 42),              # statements lower-case things
+        ("EMK0042", 42),               # the hyphen gets dropped
+        ("EMK 42", 42),                # and re-typed loosely
+        ("PAYMENT EMK-0042 MY IT AFRICA", 42),   # buried in a description
+        ("random text", None),
+        ("", None)]:
+    check(f"a statement line {_raw!r} resolves to org {_want} — bank "
+          f"statements mangle what the payer typed, so matching has to "
+          f"tolerate case, a missing hyphen and surrounding text",
+          org_id_from_reference(_raw) == _want)
+
+check("a reference for one org never resolves to another",
+      org_id_from_reference(payment_reference(7)) == 7
+      and org_id_from_reference(payment_reference(70)) == 70)
+
+print()
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 
 from .auth import AuthStore
-from .billing import PLANS, GRACE_DAYS, FREE_DEVICES, TRIAL_DEVICES, _TRIAL_DAYS
+from .billing import payment_reference, PLANS, GRACE_DAYS, FREE_DEVICES, TRIAL_DEVICES, _TRIAL_DAYS
 from .util import human_bytes
 from .web_shared import (
     _BRAND, _PAGE_CSS, esc, _header, _page, _who,
@@ -358,9 +358,50 @@ def _grace_banner_html(days_left: float, contact: dict | None = None) -> str:
             f'</div>')
 
 
+def _eft_reference_box(org_id, contact: dict | None = None) -> str:
+    """The company's own EFT reference, shown before they pay.
+
+    A bank statement line only says who a payment is from and what they typed
+    in the reference field. If the customer was never given a reference, there
+    is nothing on the deposit tying it to an account, and reconciling it means
+    guessing from the name. So the reference has to be handed out up front --
+    it cannot be worked out afterwards from the money arriving.
+
+    Deliberately plain and copyable rather than decorative: it gets retyped
+    into a banking app by hand, and every character is a chance to get it
+    wrong."""
+    from .billing import payment_reference
+
+    ref = payment_reference(org_id)
+    bank = ""
+    if contact:
+        bits = [contact.get(k) for k in ("bank_name", "bank_account")
+                if contact.get(k)]
+        if bits:
+            bank = ('<div style="margin-top:10px;font-size:13px">'
+                    + " &middot; ".join(esc(str(b)) for b in bits) + "</div>")
+    return (
+        f'<div class="box"><h2>Paying by EFT</h2>'
+        f'<p class="muted" style="margin-top:0">Use this reference on the '
+        f'payment so it can be matched to your account. Without it a deposit '
+        f'arrives with nothing to identify it by.</p>'
+        f'<div style="display:flex;align-items:center;gap:12px;margin:10px 0">'
+        f'<code style="font-size:22px;font-weight:700;letter-spacing:1px;'
+        f'padding:8px 14px;border-radius:8px;background:var(--surface-2);'
+        f'border:1px solid var(--border)" id="eftRef">{esc(ref)}</code>'
+        f'<button class="btn ghost" type="button" onclick="'
+        f'navigator.clipboard&amp;&amp;navigator.clipboard.writeText('
+        f"'{ref}'" f');this.textContent=&quot;Copied&quot;">Copy</button>'
+        f'</div>{bank}'
+        f'<p class="muted" style="font-size:12px;margin-bottom:0">This '
+        f'reference belongs to your account and never changes.</p></div>')
+
+
 def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                     msg: str = "", error: str = "", contact: dict | None = None) -> str:
-    """Billing page: current subscription status + PayFast plan subscribe buttons."""
+    """Billing page: current subscription status + PayFast plan subscribe
+    buttons, and the company's own EFT reference for paying by bank
+    transfer."""
     status = (bill or {}).get("status", "none")
     plan_name = (bill or {}).get("plan") or ""
     device_limit = int((bill or {}).get("device_limit") or FREE_DEVICES)
@@ -420,7 +461,11 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                   f'<div style="display:flex;align-items:center;'
                   f'justify-content:space-between;flex-wrap:wrap;gap:10px">'
                   f'{status_html}{cancel_btn}</div>'
-                  f'</div>')
+                  f'</div>'
+                  # Shown whether or not card payment is switched on: a
+                  # customer paying by EFT needs the reference regardless,
+                  # and needs it BEFORE they pay rather than after.
+                  + _eft_reference_box(user.get("org_id"), contact))
 
     # --- plan table ---
     if pf_enabled:
@@ -775,7 +820,12 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
             f'<td><b>{esc(r["name"])}</b>'
             f'<br><span class="muted" style="font-size:11px">'
             f'{esc(r.get("owner_email",""))} &middot; '
-            f'{r.get("user_count",0)} user(s)</span></td>'
+            f'{r.get("user_count",0)} user(s)</span>'
+            # The reference this company was told to quote on an EFT. Shown
+            # here so a bank statement line can be traced back to an account
+            # by eye, which is the whole point of issuing one.
+            f'<br><code style="font-size:11px">'
+            f'{esc(payment_reference(r["id"]))}</code></td>'
             f'<td><span style="color:{color};font-weight:700">{label}</span>'
             f'{f"<br><span class=\'muted\' style=\'font-size:11px\'>trial ends {trial_str}</span>" if trial_str else ""}'
             f'{f"<br><span class=\'muted\' style=\'font-size:11px;color:#d97706\'>grace ends {grace_str}</span>" if grace_str else ""}'
@@ -813,7 +863,9 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
     table = (
         '<div class="box" style="overflow-x:auto">'
         '<table style="min-width:700px"><thead><tr>'
-        '<th>Company</th><th>Status</th><th>Plan</th>'
+        '<th>Company<br><span class="muted" style="font-weight:400;'
+        'font-size:10px">with its EFT reference</span></th>'
+        '<th>Status</th><th>Plan</th>'
         '<th>Devices</th><th>Joined</th>'
         + ("<th>Assign plan</th>" if billing_on else "")
         + f'</tr></thead><tbody>{tbody or "<tr><td colspan=6 class=muted>No organisations yet.</td></tr>"}'

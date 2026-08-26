@@ -74,6 +74,41 @@ CREATE TABLE IF NOT EXISTS billing (
 
 # ===== pure helpers ===========================================================
 
+# Prefix for the EFT reference each company quotes when paying by bank
+# transfer. Short on purpose: banking apps truncate the reference field
+# (Capitec's is 20 characters), and every character a customer has to retype
+# is a character they can get wrong.
+_PAYREF_PREFIX = "EMK"
+
+
+def payment_reference(org_id: int) -> str:
+    """The reference a company puts on a manual EFT, e.g. "EMK-0042".
+
+    Derived from the org id rather than stored, so it is stable for the life
+    of the account, cannot collide, and needs no migration or admin step to
+    hand out. It deliberately does NOT contain the company name: names get
+    edited, and a reference that changes underneath a customer's saved
+    beneficiary is worse than one that is merely dull.
+
+    Note the direction this runs in. A reference cannot be generated from an
+    incoming payment -- by the time money lands it already carries whatever
+    the payer typed. It only identifies an account if the customer was given
+    it BEFORE paying, which is why it appears on their billing page.
+    """
+    return f"{_PAYREF_PREFIX}-{int(org_id):04d}"
+
+
+def org_id_from_reference(ref: str):
+    """The org a payment reference belongs to, or None if it is not one of
+    ours. Tolerates the mangling bank statements apply -- lower case, lost
+    hyphen, surrounding text from the payer's own description."""
+    import re as _re
+
+    m = _re.search(rf"{_PAYREF_PREFIX}[\s-]?0*(\d+)", str(ref or ""),
+                   _re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
 def can_add_device(device_limit: int, current_count: int) -> bool:
     """device_limit 0 = unlimited."""
     return not device_limit or current_count < device_limit
