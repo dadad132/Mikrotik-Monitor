@@ -61,16 +61,63 @@ check("unlimited (0) always allows", billing.can_add_device(0, 999))
 check("under the limit allows", billing.can_add_device(5, 4))
 check("at the limit blocks", not billing.can_add_device(5, 5))
 
+print("Device packets (fives, up to the quote threshold):")
+_devs = [p["devices"] for p in billing.PLANS]
+check("packets step in fives all the way to the last tier, with no gaps -- "
+      "a missing size is a customer who cannot buy what they need",
+      _devs == list(range(5, billing.MAX_TIER_DEVICES + 1, 5)))
+check("price rises with every step up, so a bigger packet is never cheaper "
+      "than a smaller one",
+      all(billing.PLANS[i]["price_usd"] < billing.PLANS[i + 1]["price_usd"]
+          for i in range(len(billing.PLANS) - 1)))
+check("...while the per-device rate falls with every step, which is the "
+      "whole reason to buy a bigger packet",
+      all(billing.tier_rate_usd(a) > billing.tier_rate_usd(b)
+          for a, b in zip(_devs, _devs[1:])))
+check("the ladder runs $25 for 5 devices to $290 for 100",
+      billing.plan_by_name("d5")["price_usd"] == 25
+      and billing.plan_by_name("d100")["price_usd"] == 290)
+check("a ten-cent-per-step rate from 15 devices up, as priced",
+      [billing.tier_rate_usd(n) for n in (15, 20, 45, 70, 100)]
+      == [4.60, 4.50, 4.00, 3.50, 2.90])
+check("every packet price is a whole dollar -- these get read off a page and "
+      "typed into a banking app",
+      all(float(p["price_usd"]).is_integer() for p in billing.PLANS))
+
+print("Above the last packet it is a quote, not a tier:")
+check("100 devices is still a packet",
+      not billing.needs_quote(billing.MAX_TIER_DEVICES))
+check("101 devices needs a quote", billing.needs_quote(101))
+check("there is no tier above the threshold to accidentally sell",
+      not any(p["devices"] > billing.QUOTE_ABOVE_DEVICES
+              for p in billing.PLANS))
+
+print("Retired plan names still resolve (existing subscribers):")
+for _old, _want in [("starter", 5), ("small", 15), ("medium", 30),
+                    ("business", 50), ("pro", 100)]:
+    check(f"{_old!r} keeps its {_want}-device cap rather than dropping to the "
+          f"free tier, which would lock devices a customer is paying for",
+          billing.plan_by_name(_old)["devices"] == _want)
+check("the retired enterprise plans keep caps larger than any tier on sale",
+      billing.plan_by_name("ent500")["devices"] == 500
+      and billing.plan_by_name("ent1000")["devices"] == 1000)
+check("an unknown plan name still resolves to nothing",
+      billing.plan_by_name("no-such-plan") is None)
+
 print("Signed payment-link building (build_payment_data):")
+_t15 = billing.plan_by_name("d15")
 data = billing.build_payment_data(
     merchant_id="10000100", merchant_key="46f0cd694581a",
     passphrase="jt7NOE43FZPn", sandbox=True,
-    org_id=42, plan_name="small", buyer_email="owner@acme.test",
+    org_id=42, plan_name="d15", buyer_email="owner@acme.test",
     buyer_name="Ada Owner", notify_url="https://x/billing/itn",
     return_url="https://x/billing/ok", cancel_url="https://x/billing/cancel")
-check("amount matches the plan price", data["amount"] == "1270.00")
+# Derived, not hard-coded: a literal here would go stale the next time a
+# price moves and would then be asserting last year's number.
+check("amount matches the plan price",
+      data["amount"] == f'{_t15["price_zar"]:.2f}')
 check("custom fields route the ITN back to the org + plan",
-      data["custom_int1"] == "42" and data["custom_str1"] == "small")
+      data["custom_int1"] == "42" and data["custom_str1"] == "d15")
 check("buyer name is split into first/last",
       data["name_first"] == "Ada" and data["name_last"] == "Owner")
 check("merchant_key is not signed but is present in the form data",
@@ -163,12 +210,17 @@ check("a grace deadline in the past locks the org",
 
 # Manual superadmin plan assignment (payment handled off-platform).
 print("Manual plan assignment (superadmin):")
-p_small = next(p for p in billing.PLANS if p["name"] == "small")
-store.set_plan(10, "small")
+p_small = billing.plan_by_name("d15")
+store.set_plan(10, "d15")
 check("set_plan activates the org with the plan's device cap",
       store.billing_status(10) == "active"
       and store.device_limit(10) == p_small["devices"]
-      and store.get(10)["plan"] == "small")
+      and store.get(10)["plan"] == "d15")
+# A superadmin re-saving a company that is still on a retired name must not
+# silently shrink their cap.
+store.set_plan(11, "business")
+check("assigning a retired plan name still grants the cap it was sold with",
+      store.device_limit(11) == 50 and store.billing_status(11) == "active")
 check("assigned plan is not locked and enforces the cap",
       not store.is_locked(10)
       and store.can_add(10, p_small["devices"] - 1)
@@ -187,6 +239,28 @@ try:
     check("set_plan rejects an unknown plan", False)
 except ValueError:
     check("set_plan rejects an unknown plan", True)
+
+print("Quote requests from companies past the last packet:")
+store.add_quote_request(77, 340, "ops@myit.test", "Q4 rollout, 340 sites")
+check("a request is recorded with the size and contact asked for",
+      store.open_quote_count() == 1
+      and store.quote_requests()[0]["devices"] == 340
+      and store.quote_requests()[0]["contact"] == "ops@myit.test")
+store.add_quote_request(77, 400, "ops@myit.test", "still waiting")
+check("a second request from the same company is kept, not collapsed -- it "
+      "usually means the first went unanswered, which is the signal worth "
+      "seeing",
+      store.open_quote_count() == 2)
+check("newest first, so the panel leads with the freshest ask",
+      store.quote_requests()[0]["devices"] == 400)
+store.mark_quote_handled(store.quote_requests()[0]["id"])
+check("marking one handled drops it off the open list without deleting it",
+      store.open_quote_count() == 1
+      and len(store.quote_requests(include_handled=True)) == 2)
+check("a note far longer than any form should send is truncated rather than "
+      "stored whole",
+      (store.add_quote_request(78, 200, "x@y.z", "N" * 5000) or True)
+      and len(store.quote_requests()[0]["note"]) <= 2000)
 
 store.close()
 

@@ -8,7 +8,10 @@ from __future__ import annotations
 import time
 
 from .auth import AuthStore
-from .billing import payment_reference, PLANS, GRACE_DAYS, FREE_DEVICES, TRIAL_DEVICES, _TRIAL_DAYS
+from .billing import (payment_reference, PLANS, GRACE_DAYS, FREE_DEVICES,
+                      TRIAL_DEVICES, _TRIAL_DAYS, TIER_STEP,
+                      MAX_TIER_DEVICES, QUOTE_ABOVE_DEVICES, needs_quote,
+                      plan_by_name)
 from .util import human_bytes
 from .web_shared import (
     _BRAND, _PAGE_CSS, esc, _header, _page, _who,
@@ -426,8 +429,68 @@ def _eft_reference_box(org_id, contact: dict | None = None,
         f'reference belongs to your account and never changes.</p></div>')
 
 
+def _fitting_tier(device_count: int):
+    """The smallest packet that holds this many devices, or None if the
+    company is past the last tier (and so needs a quote) or has none yet.
+
+    Smallest-that-fits rather than nearest: a packet the company has already
+    outgrown is not a recommendation, it is a cap they hit on the first day.
+    """
+    if not device_count or device_count <= 0:
+        return None
+    for p in PLANS:
+        if p["devices"] >= device_count:
+            return p
+    return None
+
+
+def _quote_request_box(csrf: str, device_count: int = 0) -> str:
+    """The path out of the ladder for a company bigger than the last packet.
+
+    Above 100 devices the shape of the deal stops being something a price
+    table can answer -- support terms, onboarding, billing cycle -- so this
+    asks for a conversation instead of quoting a number nobody can honour.
+    Shown to everyone, not only to companies already over the line: a customer
+    planning a 300-site rollout needs to know the door exists BEFORE they
+    conclude the product stops at 100 and go elsewhere.
+    """
+    over = needs_quote(device_count)
+    prompt = (f'You are monitoring {device_count} devices, which is past the '
+              f'largest packet. Tell us what you need and the team will come '
+              f'back to you with a quote.'
+              if over else
+              f'Packets go up to {MAX_TIER_DEVICES} devices. If you need more '
+              f'than that, ask for a quote and the team will put together '
+              f'pricing that fits.')
+    return (
+        f'<div class="box"'
+        + (' style="border-color:#2563eb"' if over else '')
+        + f'><h2>More than {QUOTE_ABOVE_DEVICES} devices?</h2>'
+        f'<p class="muted" style="margin-top:0">{esc(prompt)}</p>'
+        f'<form method="POST" action="/billing/quote">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<div style="display:grid;grid-template-columns:'
+        f'repeat(auto-fit,minmax(200px,1fr));gap:10px">'
+        f'<label>Devices you need<br><input name="devices" type="number" '
+        f'min="{QUOTE_ABOVE_DEVICES + 1}" max="100000" '
+        f'value="{max(int(device_count or 0), QUOTE_ABOVE_DEVICES + 1)}" '
+        f'required style="width:100%"></label>'
+        f'<label>Best contact<br><input name="contact" '
+        f'placeholder="name@company.com or a phone number" '
+        f'style="width:100%"></label>'
+        f'</div>'
+        f'<label style="display:block;margin-top:10px">Anything we should '
+        f'know<br><textarea name="note" rows="3" style="width:100%" '
+        f'placeholder="Timelines, sites, support needs — whatever helps us '
+        f'quote accurately."></textarea></label>'
+        f'<div style="margin-top:10px"><button class="btn" type="submit">'
+        f'Request a quote</button></div>'
+        f'</form></div>')
+
+
 def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
-                    msg: str = "", error: str = "", contact: dict | None = None) -> str:
+                    msg: str = "", error: str = "", contact: dict | None = None,
+                    device_count: int = 0) -> str:
     """Billing page: current subscription status + PayFast plan subscribe
     buttons, and the company's own EFT reference for paying by bank
     transfer."""
@@ -497,11 +560,17 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                   + _eft_reference_box(user.get("org_id"), contact,
                                       user.get("org_name", "")))
 
-    # --- plan table ---
+    # --- packet ladder --------------------------------------------------
+    # Twenty tiers is a lot to read, so the row that actually fits this
+    # company is marked. Without it the customer has to do the arithmetic
+    # themselves, and the usual outcome of that is picking the cheapest row
+    # and hitting the device cap a week later.
+    fits = _fitting_tier(device_count)
     if pf_enabled:
         plan_rows = ""
         for p in PLANS:
-            is_current = (status in ("active", "trialing") and plan_name == p["name"])
+            is_current = (status in ("active", "trialing")
+                          and plan_name == p["name"])
             per_dev = p["price_usd"] / p["devices"]
             if is_current:
                 btn = '<span class="badge ok">Current plan</span>'
@@ -511,24 +580,36 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                        f'<input type="hidden" name="plan" value="{esc(p["name"])}">'
                        f'<button class="btn" type="submit" style="padding:6px 14px">'
                        f'Subscribe</button></form>')
-            plan_rows += (f'<tr>'
-                          f'<td><b>{esc(p["label"])}</b></td>'
+            hint = ""
+            row_style = ""
+            if fits and p["name"] == fits["name"] and not is_current:
+                hint = ('<br><span style="font-size:11px;color:#2563eb;'
+                        'font-weight:600">Fits your '
+                        f'{device_count} device{"" if device_count == 1 else "s"}'
+                        '</span>')
+                row_style = ' style="background:rgba(37,99,235,.06)"'
+            plan_rows += (f'<tr{row_style}>'
+                          f'<td><b>{esc(p["label"])}</b>{hint}</td>'
                           f'<td>{p["devices"]}</td>'
                           f'<td><b>${p["price_usd"]:,.2f}</b>/mo</td>'
                           f'<td>${per_dev:,.2f}/device</td>'
                           f'<td>{btn}</td>'
                           f'</tr>')
-        plans_html = (f'<div class="box"><h2>Choose a plan</h2>'
-                      f'<p class="muted" style="margin-top:0">All prices in USD, '
-                      f'billed monthly via PayFast. Cancel anytime.</p>'
+        plans_html = (f'<div class="box"><h2>Choose a packet</h2>'
+                      f'<p class="muted" style="margin-top:0">Packets step in '
+                      f'{TIER_STEP}s up to {MAX_TIER_DEVICES} devices, and the '
+                      f'price per device drops as the packet grows. All prices '
+                      f'in USD, billed monthly via PayFast. Cancel anytime.</p>'
                       f'<table><thead><tr>'
-                      f'<th>Plan</th><th>Devices</th><th>Monthly</th>'
+                      f'<th>Packet</th><th>Devices</th><th>Monthly</th>'
                       f'<th>Per device</th><th></th>'
                       f'</tr></thead><tbody>{plan_rows}</tbody></table></div>')
     else:
         plans_html = ('<div class="box"><p class="muted">PayFast billing is not '
                       'yet configured on this server. Add a <code>billing:</code> '
                       'section to config.yaml to enable subscriptions.</p></div>')
+
+    plans_html += _quote_request_box(csrf, device_count)
 
     inner = (f'<div class="wrap"><h1>Billing</h1>{note}'
              f'{status_box}{plans_html}</div>')
@@ -567,11 +648,19 @@ _STATUS_COLOR = {
 def _plan_select(org_id, current_plan, csrf) -> str:
     """A per-company plan-assign control for the superadmin (manual billing)."""
     opts = ['<option value="">— assign —</option>']
+    known = {p["name"] for p in PLANS}
+    # A company still on a retired plan name would otherwise show "— assign —",
+    # which reads as "no plan" and invites an admin to overwrite a cap the
+    # customer is paying for. Surface it instead, clearly marked.
+    if current_plan and current_plan not in known and current_plan != "unlimited":
+        legacy = plan_by_name(current_plan)
+        opts.append(f'<option value="{esc(current_plan)}" selected>'
+                    f'{esc(current_plan)} (retired · '
+                    f'{legacy["devices"] if legacy else "?"} dev)</option>')
     for p in PLANS:
         sel = " selected" if current_plan == p["name"] else ""
         opts.append(f'<option value="{esc(p["name"])}"{sel}>'
-                    f'{esc(p["label"])} · {p["devices"]} dev · '
-                    f'${p["price_usd"]:.0f}/mo</option>')
+                    f'{p["devices"]} dev · ${p["price_usd"]:.0f}/mo</option>')
     opts.append('<option value="unlimited"'
                 + (" selected" if current_plan == "unlimited" else "")
                 + '>Unlimited</option>')
@@ -846,12 +935,53 @@ def _hub_endpoint_box(hub_ip, hub_port, router_count, csrf,
         f'</form></div>')
 
 
+def _quote_inbox(quotes, org_names: dict | None = None, csrf: str = "") -> str:
+    """Open quote requests from companies past the last packet.
+
+    These are people who have said they want to pay more, so a request going
+    unnoticed is the most expensive kind of silence on the platform. It sits
+    at the top of the panel while open, and disappears once marked handled
+    rather than piling up as permanent noise.
+    """
+    if not quotes:
+        return ""
+    org_names = org_names or {}
+    rows = ""
+    for q in quotes:
+        when = time.strftime("%d %b %Y %H:%M", time.localtime(q.get("created") or 0))
+        who = org_names.get(q.get("org_id")) or f'org {q.get("org_id")}'
+        note = str(q.get("note") or "").strip()
+        rows += (
+            f'<tr><td><b>{esc(str(who))}</b><br>'
+            f'<span class="muted" style="font-size:11px">{esc(when)}</span></td>'
+            f'<td><b>{int(q.get("devices") or 0)}</b> devices</td>'
+            f'<td>{esc(str(q.get("contact") or "")) or "<span class='muted'>—</span>"}</td>'
+            f'<td style="max-width:340px">{esc(note) if note else "<span class='muted'>—</span>"}</td>'
+            f'<td><form method="POST" action="/superadmin/quote-handled">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="id" value="{int(q.get("id") or 0)}">'
+            f'<button class="btn ghost" type="submit" '
+            f'style="padding:5px 12px">Mark handled</button></form></td></tr>')
+    n = len(quotes)
+    return (f'<div class="box" style="border-color:#2563eb">'
+            f'<h2>Quote requests '
+            f'<span class="badge" style="background:#2563eb;color:#fff">{n}</span>'
+            f'</h2>'
+            f'<p class="muted" style="margin-top:0">Companies that need more '
+            f'than {QUOTE_ABOVE_DEVICES} devices and asked to be contacted. '
+            f'Reach out, agree a price, then assign a cap with '
+            f'<b>Unlimited</b> or a custom limit below.</p>'
+            f'<table><thead><tr><th>Company</th><th>Needs</th>'
+            f'<th>Contact</th><th>Notes</th><th></th></tr></thead>'
+            f'<tbody>{rows}</tbody></table></div>')
+
+
 def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        msg: str = "", error: str = "", smtp=None,
                        billing_on: bool = False, billing_contact=None,
                        hub_ip: str = "", hub_port: str = "",
                        router_count: int = 0, hub_pubkey: str = "",
-                       regions=None, nextdns=None) -> str:
+                       regions=None, nextdns=None, quotes=None) -> str:
     """Platform superadmin panel — shows all orgs, billing status, and device counts."""
     note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
            (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
@@ -1013,7 +1143,13 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
         '</div>'
     )
 
-    inner = (f'<div class="wrap"><h1>Platform admin</h1>{note}{tiles}{table}'
+    # Above the org table: a company asking to spend more is the one thing on
+    # this page that goes stale if it is not seen today.
+    quote_html = _quote_inbox(
+        quotes or [], {r["id"]: r.get("name", "") for r in rows}, csrf)
+
+    inner = (f'<div class="wrap"><h1>Platform admin</h1>{note}{tiles}'
+             f'{quote_html}{table}'
              f'{_smtp_settings_box(smtp, csrf)}'
              f'{_billing_contact_box(billing_contact, csrf)}'
              f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf, hub_pubkey)}'

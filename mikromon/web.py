@@ -5983,10 +5983,24 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(200, _render_locked(user, contact),
                                   "text/html; charset=utf-8")
             pf_enabled = bool(_pf_merchant_id and _pf_merchant_key)
+            # The page marks the packet that fits, which needs the real
+            # count -- a recommendation based on nothing would be worse than
+            # none, since the customer would trust it.
+            dev_count = 0
+            if devices_db:
+                try:
+                    from .devices_store import DevicesStore as _DS
+                    _dsb = _DS(devices_db)
+                    try:
+                        dev_count = len(_dsb.names_for_org(user["org_id"]))
+                    finally:
+                        _dsb.close()
+                except Exception:
+                    log.exception("billing: could not count org devices")
             return self._send(200, _render_billing(
                 user, bill, pf_enabled, self._session()["csrf"],
                 msg=q.get("ok", [""])[0], error=q.get("error", [""])[0],
-                contact=contact),
+                contact=contact, device_count=dev_count),
                 "text/html; charset=utf-8")
 
         def _serve_superadmin(self, url, user):
@@ -6034,6 +6048,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             finally:
                 if _ds is not None:
                     _ds.close()
+            open_quotes = []
+            if billing:
+                try:
+                    open_quotes = billing.quote_requests()
+                except Exception:
+                    log.exception("superadmin: could not load quote requests")
             from .backup import list_backups
             backups = list_backups(backups_dir)
             smtp_settings = auth.get_smtp() if auth else None
@@ -6054,7 +6074,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 hub_ip=hub_ip, hub_port=hub_port, router_count=router_count,
                 hub_pubkey=hub_pubkey_cur,
                 regions=auth.get_regions() if auth else [],
-                nextdns=auth.get_nextdns() if auth else {}),
+                nextdns=auth.get_nextdns() if auth else {},
+                quotes=open_quotes),
                 "text/html; charset=utf-8")
 
         def _backup_paths(self):
@@ -8809,6 +8830,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_regions(user)
             if path == "/superadmin/nextdns":
                 return self._post_superadmin_nextdns(user)
+            if path == "/superadmin/quote-handled":
+                return self._post_superadmin_quote_handled(user)
             # Everything below requires a logged-in user + a valid CSRF token.
             if not user:
                 # A stale/expired session (e.g. the in-memory session table
@@ -8904,6 +8927,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_billing_subscribe(flat, user)
             if path == "/billing/cancel-sub":
                 return self._post_billing_cancel(flat, user)
+            if path == "/billing/quote":
+                return self._post_billing_quote(flat, user)
             # Org isolation: an owner may only touch devices their company owns.
             if not self._owns_target(flat, user):
                 return self._send(403, "forbidden")
@@ -9049,6 +9074,54 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             except Exception:  # noqa: BLE001
                 log.exception("billing.apply_itn failed")
             return self._send(200, "ok")
+
+        def _post_billing_quote(self, flat, user):
+            """A company past the last packet asking to be contacted."""
+            if not billing:
+                return self._redirect("/billing?error=" + quote(
+                    "Billing is not configured on this server."))
+            from .billing import QUOTE_ABOVE_DEVICES
+            try:
+                devices = int(str(flat.get("devices", "")).strip() or 0)
+            except ValueError:
+                devices = 0
+            # Bounded rather than trusted: this field is free text on a public
+            # form, and an absurd number would sit in the admin panel looking
+            # like a real lead.
+            if devices <= QUOTE_ABOVE_DEVICES or devices > 100000:
+                return self._redirect("/billing?error=" + quote(
+                    f"Enter a device count above {QUOTE_ABOVE_DEVICES} "
+                    f"— smaller sizes are covered by the packets above."))
+            contact_txt = (flat.get("contact", "").strip()
+                           or user.get("email", "") or "")
+            try:
+                billing.add_quote_request(user["org_id"], devices,
+                                          contact_txt,
+                                          flat.get("note", "").strip())
+            except Exception:
+                log.exception("could not record quote request")
+                return self._redirect("/billing?error=" + quote(
+                    "Could not send the request. Please try again."))
+            log.info("quote request: org=%s devices=%s", user["org_id"], devices)
+            return self._redirect("/billing?ok=" + quote(
+                "Request sent — the team will be in touch shortly."))
+
+        def _post_superadmin_quote_handled(self, user):
+            """Superadmin-only: clear a quote request off the panel once the
+            team has actually reached out."""
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if not billing:
+                return self._redirect("/superadmin")
+            try:
+                billing.mark_quote_handled(int(flat.get("id", "0")))
+            except Exception:
+                log.exception("could not mark quote handled")
+            return self._redirect("/superadmin?ok=" + quote("Quote marked handled"))
 
         def _post_billing_subscribe(self, flat, user):
             """Redirect the owner to the PayFast payment page for their chosen plan."""

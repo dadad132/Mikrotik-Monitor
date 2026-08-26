@@ -13,6 +13,11 @@ from .web_shared import (
     _BRAND, esc, _THEME_VARS, _THEME_INIT_JS, _THEME_TOGGLE_JS,
     _theme_toggle_btn,
 )
+# Prices come from billing, never from a second copy kept here. They used to
+# be hard-coded in both places and drifted apart -- the landing page went on
+# advertising a figure the checkout no longer charged, which is the kind of
+# bug a customer finds before you do.
+from .billing import PLANS, MAX_TIER_DEVICES, TIER_STEP, QUOTE_ABOVE_DEVICES
 
 _TITLE = f"{_BRAND} — MikroTik Monitoring & Remote Management"
 
@@ -54,9 +59,10 @@ _FEATURES = [
      "each member can see and manage. Add unlimited staff — your team grows "
      "without extra per-seat charges."),
     ("&#128179;", "Transparent Per-Device Billing",
-     "30-day free trial with 1 device. Then pay only for what you use — from "
-     "$25/mo for 5 devices up to $3 000/mo for 1 000 devices. Cancel anytime; "
-     "7-day grace period on missed payments."),
+     "30-day free trial with 1 device. Then pay only for what you use — packets "
+     "step in fives from $25/mo for 5 devices up to $290/mo for 100, and the "
+     "per-device price falls the whole way. Bigger fleets get a custom quote. "
+     "Cancel anytime; 7-day grace period on missed payments."),
 ]
 
 _STEPS = [
@@ -71,7 +77,20 @@ _STEPS = [
      "backups, push config changes, and open WebFig/Winbox from anywhere."),
 ]
 
-# Real billing tiers shown on the landing page.
+def _tier(devices: int) -> dict:
+    """The tier for a device count, for building landing-page copy."""
+    return next(p for p in PLANS if p["devices"] == devices)
+
+
+def _rate(devices: int) -> str:
+    t = _tier(devices)
+    return f'${t["price_usd"] / devices:.2f} / device / month'
+
+
+# Cards are a sample of the ladder, not the whole of it: twenty cards is a
+# wall nobody reads. The full ladder sits in the table underneath, and these
+# four mark the shape of it -- entry, the common size, the biggest packet,
+# and the door out for anyone larger.
 _PLANS = [
     {
         "name":    "Free Trial",
@@ -93,15 +112,15 @@ _PLANS = [
     },
     {
         "name":    "Starter",
-        "devices": "5 devices",
-        "amount":  "$25",
+        "devices": f'{_tier(5)["devices"]} devices',
+        "amount":  f'${_tier(5)["price_usd"]}',
         "period":  "per month",
         "items":   [
             "Everything in Free Trial",
             "Unlimited team members",
             "Email alerts",
             "7-day grace on missed payment",
-            "$5.00 / device / month",
+            _rate(5),
         ],
         "cta_href":  "/signup",
         "cta_label": "Start free trial",
@@ -109,13 +128,13 @@ _PLANS = [
         "soon":      False,
     },
     {
-        "name":    "Business",
-        "devices": "50 devices",
-        "amount":  "$210",
+        "name":    "Growing",
+        "devices": f'{_tier(50)["devices"]} devices',
+        "amount":  f'${_tier(50)["price_usd"]}',
         "period":  "per month",
         "items":   [
             "Everything in Starter",
-            "$4.20 / device / month",
+            _rate(50),
             "Priority support",
         ],
         "cta_href":  "/signup",
@@ -124,31 +143,36 @@ _PLANS = [
         "soon":      False,
     },
     {
-        "name":    "Professional",
-        "devices": "100 devices",
-        "amount":  "$400",
+        "name":    "Full house",
+        "devices": f'{MAX_TIER_DEVICES} devices',
+        "amount":  f'${_tier(MAX_TIER_DEVICES)["price_usd"]}',
         "period":  "per month",
         "items":   [
-            "Everything in Business",
-            "$4.00 / device / month",
-            "Ideal for MSPs",
+            "Everything in Growing",
+            _rate(MAX_TIER_DEVICES),
+            "The largest off-the-shelf packet",
         ],
         "cta_href":  "/signup",
         "cta_label": "Start free trial",
         "highlight": False,
         "soon":      False,
     },
-]
-
-_ALL_TIERS = [
-    ("Starter",        5,    25),
-    ("Small",         15,    69),
-    ("Medium",        30,   135),
-    ("Business",      50,   210),
-    ("Professional", 100,   400),
-    ("Ent 250",      250,   925),
-    ("Ent 500",      500,  1750),
-    ("Ent 1000",    1000,  3000),
+    {
+        "name":    "Custom",
+        "devices": f'Over {QUOTE_ABOVE_DEVICES} devices',
+        "amount":  "Let's talk",
+        "period":  "quoted to fit",
+        "items":   [
+            f"Everything in the {MAX_TIER_DEVICES}-device packet",
+            "Pricing built around your fleet",
+            "Onboarding and support terms to match",
+            "Billing cycle that suits you",
+        ],
+        "cta_href":  "/signup",
+        "cta_label": "Request a quote",
+        "highlight": False,
+        "soon":      False,
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -404,18 +428,33 @@ def _price_card(plan: dict) -> str:
 
 
 def _tier_rows() -> str:
+    """Every packet, in fives, then the row that leads out of the table.
+
+    The whole ladder is shown rather than a summary: a visitor's first
+    question is "what does MY size cost", and making them interpolate between
+    two sample tiers is how you lose them to a competitor who just says.
+    """
     rows = ""
-    for name, devices, price in _ALL_TIERS:
-        per = round(price / devices, 2)
+    for p in PLANS:
+        per = p["price_usd"] / p["devices"]
         rows += (f'<tr>'
-                 f'<td><b>{esc(name)}</b></td>'
-                 f'<td>{devices}</td>'
-                 f'<td class="usd">${price:,}</td>'
+                 f'<td><b>{p["devices"]} devices</b></td>'
+                 f'<td>{p["devices"]}</td>'
+                 f'<td class="usd">${p["price_usd"]:,}</td>'
                  f'<td class="per">${per:.2f} / device</td>'
                  f'<td><a class="btn-nav-primary" href="/signup" '
                  f'style="display:inline-block;padding:5px 14px;font-size:13px">'
                  f'Start trial</a></td>'
                  f'</tr>')
+    rows += (f'<tr style="background:var(--surface-2)">'
+             f'<td><b>Over {QUOTE_ABOVE_DEVICES} devices</b></td>'
+             f'<td>Custom</td>'
+             f'<td class="usd">Let&rsquo;s talk</td>'
+             f'<td class="per">Quoted to fit your fleet</td>'
+             f'<td><a class="btn-nav-primary" href="/signup" '
+             f'style="display:inline-block;padding:5px 14px;font-size:13px">'
+             f'Request a quote</a></td>'
+             f'</tr>')
     return rows
 
 
@@ -533,7 +572,7 @@ def render_landing() -> str:
 
     <!-- Full tier table -->
     <h3 style="font-size:16px;font-weight:700;margin-bottom:14px;color:var(--text)">
-      All plans include every feature — you only pay for more devices.
+      Every packet includes every feature &mdash; you only pay for more devices.
     </h3>
     <table class="tier-table">
       <thead><tr>
@@ -542,7 +581,9 @@ def render_landing() -> str:
       <tbody>{tier_rows}</tbody>
     </table>
     <p style="font-size:12px;color:var(--text-faint);margin-top:12px">
-      Need more than 1 000 devices? <a href="/signup">Contact us</a> for a custom quote.
+      Packets step in {TIER_STEP}s up to {MAX_TIER_DEVICES} devices. Need more than that?
+      <a href="/signup">Sign up</a> and request a quote from your Billing tab &mdash;
+      the team will come back to you with pricing built around your fleet.
     </p>
   </div>
 </section>

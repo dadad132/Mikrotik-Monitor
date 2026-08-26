@@ -521,6 +521,74 @@ finally:
     srv_nosec.shutdown()
     srv_nosec.server_close()
 
+# ---- live server with billing on, to exercise the quote-request route ------
+# The route is owner-only and CSRF-guarded, and it writes to the billing db --
+# none of which the render-level checks above can see.
+_bdb = os.path.join(tmp, "quote-billing.db")
+QBASE = "http://127.0.0.1:8102"
+srv_q = ThreadingHTTPServer(("127.0.0.1", 8102), web.make_handler(
+    mdb, sfile, AuthStore(adb), web.SessionManager(),
+    secure_cookies=False, devices_db=wdb, defaults=DEF,
+    billing_cfg={"db": _bdb}))
+threading.Thread(target=srv_q.serve_forever, daemon=True).start()
+try:
+    print("Requesting a quote above the last packet:")
+    qo = opener()
+    st, body = req(qo, "/login",
+                   {"email": "admin@acme.test", "password": "admin123"}, base=QBASE)
+    st, body = req(qo, "/billing", base=QBASE)
+    check("the billing page offers the quote route", st == 200
+          and 'action="/billing/quote"' in body)
+    _tok = re.search(r'name="csrf" value="([^"]+)"', body).group(1)
+
+    st, _ = req(qo, "/billing/quote",
+                {"csrf": "wrong", "devices": "340", "contact": "x@y.z"}, base=QBASE)
+    check("a request without a valid CSRF token is refused", st == 400)
+
+    st, body = req(qo, "/billing/quote",
+                   {"csrf": _tok, "devices": "60", "contact": "x@y.z"}, base=QBASE)
+    check("a size the packets already cover is rejected rather than filed as "
+          "a lead -- that customer should be checking out, not waiting for a "
+          "call",
+          "error" in body.lower() or "above" in body.lower())
+
+    st, body = req(qo, "/billing/quote",
+                   {"csrf": _tok, "devices": "340", "contact": "ops@myit.test",
+                    "note": "Q4 rollout"}, base=QBASE)
+    check("a genuine request is accepted and confirmed to the customer",
+          st == 200 and "team will be in touch" in body.lower())
+
+    from mikromon.billing import BillingStore as _BS
+    _chk = _BS(_bdb)
+    _open = _chk.quote_requests()
+    check("...and lands in the billing store where the admin panel reads it, "
+          "rather than only in an email that can bounce unnoticed",
+          len(_open) == 1 and _open[0]["devices"] == 340
+          and _open[0]["contact"] == "ops@myit.test")
+    _chk.db.close()
+
+    print("A member who is not the owner cannot request a quote:")
+    bobq = opener()
+    req(bobq, "/login", {"email": "bob@acme.test", "password": "bob123"}, base=QBASE)
+    # Bob's OWN csrf token, so the request gets past the csrf gate and is
+    # actually tested against the owner check -- borrowing the owner's token
+    # would prove only that csrf works.
+    _, _acct = req(bobq, "/account", base=QBASE)
+    _btok = re.search(r'name="csrf" value="([^"]+)"', _acct).group(1)
+    st, body = req(bobq, "/billing/quote",
+                   {"csrf": _btok, "devices": "340", "contact": "b@b.b"},
+                   base=QBASE)
+    check("...because a quote request commits the company to a conversation "
+          "about money, which is the owner's call",
+          st == 403)
+    _chk2 = _BS(_bdb)
+    check("...and nothing of theirs is filed",
+          len(_chk2.quote_requests()) == 1)
+    _chk2.db.close()
+finally:
+    srv_q.shutdown()
+    srv_q.server_close()
+
 # ---- live server (with the devices DB so org isolation is real) ------------
 srv = ThreadingHTTPServer(("127.0.0.1", 8098), web.make_handler(
     mdb, sfile, AuthStore(adb), web.SessionManager(),
@@ -625,6 +693,56 @@ try:
 finally:
     srv.shutdown()
     srv.server_close()
+
+print("device packets on the billing page:")
+import mikromon.web_auth as _wa2
+from mikromon.billing import MAX_TIER_DEVICES as _MAXD, QUOTE_ABOVE_DEVICES as _QT
+
+_ladder = _wa2._render_billing(
+    {"org_id": 42, "email": "a@b.c", "role": "owner", "org_name": "Acme"},
+    {"status": "active", "plan": "d15", "device_limit": 15},
+    True, "CSRF", device_count=23)
+check("every packet from 5 to the last one is offered, so a customer can buy "
+      "the size they actually need instead of the nearest round number",
+      all(f'>{n}</td>' in _ladder for n in range(5, _MAXD + 1, 5)))
+check("the packet that fits the company's real device count is marked -- "
+      "twenty rows without a pointer is a customer guessing",
+      "Fits your 23 devices" in _ladder)
+check("...and it is the smallest packet that HOLDS them, not the nearest one, "
+      "since a packet they have already outgrown is a cap not a plan",
+      _wa2._fitting_tier(23)["devices"] == 25
+      and _wa2._fitting_tier(25)["devices"] == 25
+      and _wa2._fitting_tier(26)["devices"] == 30)
+check("a company with no devices yet is not pushed at a packet",
+      _wa2._fitting_tier(0) is None)
+check("a company past the last packet gets no tier suggestion, because there "
+      "is no honest one to give",
+      _wa2._fitting_tier(_QT + 1) is None)
+
+check("the way out above the last packet is on the page for everyone, not "
+      "only for companies already over it -- someone planning a 300-site "
+      "rollout has to see the door before they conclude there is none",
+      f"More than {_QT} devices?" in _ladder
+      and 'action="/billing/quote"' in _ladder)
+_over = _wa2._render_billing(
+    {"org_id": 42, "email": "a@b.c", "role": "owner", "org_name": "Acme"},
+    None, True, "CSRF", device_count=340)
+check("...and a company already over the line is told so in its own numbers",
+      "340 devices, which is past the largest packet" in _over)
+check("the quote form cannot be used to ask for a size the packets already "
+      "cover, which would land as a lead that should have been a checkout",
+      f'min="{_QT + 1}"' in _over)
+
+print("quote requests reach the platform admin:")
+check("an open request is shown with who, how many, and how to reach them",
+      all(x in _wa2._quote_inbox(
+          [{"id": 3, "org_id": 42, "devices": 340, "contact": "ops@myit.test",
+            "note": "Q4 rollout", "created": 1756000000.0}],
+          {42: "My IT Africa"}, "C")
+          for x in ("My IT Africa", "340", "ops@myit.test", "Q4 rollout")))
+check("...with nothing rendered at all when there are none, so the panel does "
+      "not carry a permanently empty box",
+      _wa2._quote_inbox([], {}, "C") == "")
 
 print("the EFT reference is shown to the customer AND to the superadmin:")
 import mikromon.web_auth as _wa

@@ -44,18 +44,88 @@ _PF_VALIDATE_SANDBOX = "https://sandbox.payfast.co.za/eng/query/validate"
 # figure) — price_zar is ONLY used internally to build the actual PayFast
 # charge (build_payment_data below), since PayFast is a South African
 # gateway that settles in ZAR regardless of what currency is displayed.
-PLANS = [
-    {"name": "starter",  "label": "Starter",        "devices": 5,    "price_usd": 25,   "price_zar": 460.00},
-    {"name": "small",    "label": "Small",           "devices": 15,   "price_usd": 69,   "price_zar": 1270.00},
-    {"name": "medium",   "label": "Medium",          "devices": 30,   "price_usd": 135,  "price_zar": 2490.00},
-    {"name": "business", "label": "Business",        "devices": 50,   "price_usd": 210,  "price_zar": 3870.00},
-    {"name": "pro",      "label": "Professional",    "devices": 100,  "price_usd": 400,  "price_zar": 7360.00},
-    {"name": "ent250",   "label": "Enterprise 250",  "devices": 250,  "price_usd": 925,  "price_zar": 17030.00},
-    {"name": "ent500",   "label": "Enterprise 500",  "devices": 500,  "price_usd": 1750, "price_zar": 32210.00},
-    {"name": "ent1000",  "label": "Enterprise 1000", "devices": 1000, "price_usd": 3000, "price_zar": 55230.00},
-]
+# Packets step in fives all the way to 100 devices. Anything larger is a
+# quote, not a tier: at that size the shape of the deal (support terms,
+# on-boarding, payment cycle) stops being something a price table can answer,
+# and a customer who needs 340 devices is better served by a conversation than
+# by being pushed into a 500 bracket they will not fill.
+TIER_STEP = 5
+MAX_TIER_DEVICES = 100
+QUOTE_ABOVE_DEVICES = MAX_TIER_DEVICES
+
+# PayFast settles in ZAR whatever currency we display, so every USD price
+# carries a ZAR twin built at this rate. It is a constant rather than a live
+# lookup on purpose -- a subscription amount that drifted with the exchange
+# rate would re-quote every existing customer every month.
+_ZAR_PER_USD = 18.4
+
+
+def tier_rate_usd(devices: int) -> float:
+    """Per-device monthly price at a given packet size.
+
+    Volume discount, flat and predictable: $5.00 at the smallest packet, then
+    ten cents off per five-device step from 15 devices up, bottoming out at
+    $2.90 for 100. The two steps below 15 fall twice as fast (5.00 -> 4.80 ->
+    4.60) because the smallest packets carry the same fixed per-account cost
+    over far fewer devices, so the curve has further to come down there.
+
+    Expressed as a rate rather than a price list because the rate is the thing
+    that was decided; the prices are what fall out of it, and deriving them
+    means a tier cannot silently disagree with its neighbours.
+    """
+    if devices <= 5:
+        return 5.00
+    if devices <= 10:
+        return 4.80
+    return round(4.60 - 0.10 * ((devices - 15) // TIER_STEP), 2)
+
+
+def _make_tier(devices: int) -> dict:
+    usd = int(round(devices * tier_rate_usd(devices)))
+    return {
+        "name": f"d{devices}",
+        "label": f"{devices} devices",
+        "devices": devices,
+        "price_usd": usd,
+        "price_zar": round(usd * _ZAR_PER_USD, 2),
+    }
+
+
+PLANS = [_make_tier(n)
+         for n in range(TIER_STEP, MAX_TIER_DEVICES + 1, TIER_STEP)]
 
 _PLAN_MAP = {p["name"]: p for p in PLANS}
+
+# Plan names sold before the ladder existed. A company still on one of these
+# keeps the cap it paid for: dropping an unknown name back to the free cap
+# would lock devices a customer is currently paying to monitor, and they would
+# find out by being unable to work rather than by being told.
+_LEGACY_PLAN_DEVICES = {
+    "starter": 5, "small": 15, "medium": 30, "business": 50, "pro": 100,
+    "ent250": 250, "ent500": 500, "ent1000": 1000,
+}
+
+
+def plan_by_name(plan_name: str):
+    """A tier by name, or None. Resolves retired plan names to the tier that
+    matches the cap they were sold, and synthesises an entry for the old
+    enterprise plans, which are larger than any tier now on sale."""
+    plan = _PLAN_MAP.get(plan_name)
+    if plan is not None:
+        return plan
+    devices = _LEGACY_PLAN_DEVICES.get(plan_name)
+    if devices is None:
+        return None
+    tier = _PLAN_MAP.get(f"d{devices}")
+    if tier is not None:
+        return tier
+    return {"name": plan_name, "label": f"Custom ({devices} devices)",
+            "devices": devices, "price_usd": 0, "price_zar": 0.0}
+
+
+def needs_quote(devices: int) -> bool:
+    """Whether a device count is past the last tier and has to be quoted."""
+    return int(devices or 0) > QUOTE_ABOVE_DEVICES
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS billing (
@@ -70,6 +140,21 @@ CREATE TABLE IF NOT EXISTS billing (
     trial_end          REAL,
     updated            REAL NOT NULL
 );
+
+-- A company past the last tier asking to be contacted. Kept in the billing
+-- db rather than emailed and forgotten, because an email that bounces or
+-- lands in a spam folder loses a customer silently -- here the request sits
+-- in the admin panel until somebody marks it handled.
+CREATE TABLE IF NOT EXISTS quote_requests (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id       INTEGER NOT NULL,
+    devices      INTEGER NOT NULL,
+    contact      TEXT,
+    note         TEXT,
+    created      REAL NOT NULL,
+    handled      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_quote_open ON quote_requests(handled, created);
 """
 
 
@@ -168,7 +253,7 @@ def build_payment_data(*, merchant_id: str, merchant_key: str,
     Returns a dict of field_name → value ready to be serialised as a hidden
     HTML form or a URL-encoded POST body.
     """
-    plan = _PLAN_MAP.get(plan_name)
+    plan = plan_by_name(plan_name)
     if plan is None:
         raise ValueError(f"Unknown plan: {plan_name!r}")
 
@@ -377,12 +462,55 @@ class BillingStore:
         """Superadmin MANUALLY activates a paid plan for a company (payment
         handled off-platform, e.g. EFT/manual). Sets the device cap from the
         plan and marks the org active with no grace deadline."""
-        plan = _PLAN_MAP.get(plan_name)
+        plan = plan_by_name(plan_name)
         if plan is None:
             raise ValueError(f"Unknown plan: {plan_name!r}")
         self._upsert(org_id, status="active", plan=plan_name,
                      device_limit=plan["devices"], grace_period_end=None,
                      pf_token=None)
+
+    # --- quote requests (companies past the last tier) --------------------
+
+    def add_quote_request(self, org_id: int, devices: int,
+                          contact: str = "", note: str = "") -> None:
+        """Record a company asking to be contacted about a custom packet.
+
+        Deliberately allows more than one open request per company: a second
+        one usually means the first went unanswered, and collapsing them would
+        hide exactly the signal worth seeing.
+        """
+        with self._lock:
+            self.db.execute(
+                "INSERT INTO quote_requests (org_id, devices, contact, note, "
+                "created) VALUES (?,?,?,?,?)",
+                (int(org_id), int(devices), str(contact or "")[:200],
+                 str(note or "")[:2000], time.time()))
+            self.db.commit()
+
+    def quote_requests(self, include_handled: bool = False) -> list:
+        """Quote requests, newest first. Open ones only unless asked."""
+        keys = ("id", "org_id", "devices", "contact", "note", "created",
+                "handled")
+        sql = f"SELECT {', '.join(keys)} FROM quote_requests"
+        if not include_handled:
+            sql += " WHERE handled = 0"
+        sql += " ORDER BY created DESC"
+        with self._lock:
+            rows = self.db.execute(sql).fetchall()
+        return [dict(zip(keys, r)) for r in rows]
+
+    def open_quote_count(self) -> int:
+        with self._lock:
+            row = self.db.execute(
+                "SELECT COUNT(*) FROM quote_requests "
+                "WHERE handled = 0").fetchone()
+        return int(row[0]) if row else 0
+
+    def mark_quote_handled(self, quote_id: int, handled: bool = True) -> None:
+        with self._lock:
+            self.db.execute("UPDATE quote_requests SET handled = ? WHERE id = ?",
+                            (1 if handled else 0, int(quote_id)))
+            self.db.commit()
 
     def set_unlimited(self, org_id: int) -> None:
         """Grant a company an UNLIMITED device cap (device_limit 0), active."""
@@ -413,7 +541,7 @@ class BillingStore:
         if not org_id:
             return
 
-        plan = _PLAN_MAP.get(plan_name)
+        plan = plan_by_name(plan_name)
         device_limit = plan["devices"] if plan else FREE_DEVICES
 
         if payment_status == "COMPLETE":
