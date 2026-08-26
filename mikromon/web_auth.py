@@ -375,11 +375,19 @@ def _eft_reference_box(org_id, contact: dict | None = None) -> str:
     ref = payment_reference(org_id)
     bank = ""
     if contact:
-        bits = [contact.get(k) for k in ("bank_name", "bank_account")
-                if contact.get(k)]
-        if bits:
-            bank = ('<div style="margin-top:10px;font-size:13px">'
-                    + " &middot; ".join(esc(str(b)) for b in bits) + "</div>")
+        fields = [("Bank", contact.get("bank_name")),
+                  ("Account name", contact.get("bank_holder")),
+                  ("Account number", contact.get("bank_account")),
+                  ("Branch code", contact.get("bank_branch"))]
+        filled = [(lbl, val) for lbl, val in fields if str(val or "").strip()]
+        if filled:
+            bank = ('<div style="margin-top:12px;font-size:13px">'
+                    + "".join(
+                        f'<div><span class="muted" '
+                        f'style="display:inline-block;min-width:120px">'
+                        f'{esc(lbl)}</span><b>{esc(str(val))}</b></div>'
+                        for lbl, val in filled)
+                    + "</div>")
     return (
         f'<div class="box"><h2>Paying by EFT</h2>'
         f'<p class="muted" style="margin-top:0">Use this reference on the '
@@ -610,6 +618,28 @@ def _billing_contact_box(contact, csrf) -> str:
         f'placeholder="Jane Smith" style="width:100%"></label>'
         f'<label>Email<br><input name="email" type="email" value="{v("email")}" '
         f'placeholder="billing@yourdomain.com" style="width:100%"></label>'
+        f'</div>'
+        # The account customers paying by EFT actually pay INTO. Shown on
+        # every company's billing page beside the reference they must quote --
+        # a reference with nowhere to send the money is only half the
+        # instruction.
+        f'<p class="muted" style="margin:14px 0 6px;font-size:12px">'
+        f'Bank details for customers paying by EFT. Shown on their billing '
+        f'page next to the reference they quote. Leave blank to show only '
+        f'the reference.</p>'
+        f'<div style="display:grid;grid-template-columns:'
+        f'repeat(auto-fit,minmax(220px,1fr));gap:10px">'
+        f'<label>Bank<br><input name="bank_name" value="{v("bank_name")}" '
+        f'placeholder="Capitec" style="width:100%"></label>'
+        f'<label>Account number<br><input name="bank_account" '
+        f'value="{v("bank_account")}" placeholder="1234567890" '
+        f'style="width:100%"></label>'
+        f'<label>Account name<br><input name="bank_holder" '
+        f'value="{v("bank_holder")}" placeholder="Your company (Pty) Ltd" '
+        f'style="width:100%"></label>'
+        f'<label>Branch code<br><input name="bank_branch" '
+        f'value="{v("bank_branch")}" placeholder="470010" '
+        f'style="width:100%"></label>'
         f'</div>'
         f'<div style="margin-top:10px"><button class="btn" type="submit">'
         f'Save billing contact</button></div>'

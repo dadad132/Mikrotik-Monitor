@@ -638,8 +638,35 @@ check("the company sees its own reference on the billing page BEFORE paying "
       "-- it cannot be worked out afterwards from money arriving, so handing "
       "it over up front is the whole mechanism",
       _pref(42) in _bill_html and "Paying by EFT" in _bill_html)
-check("...along with the bank details to pay into, when they are configured",
+check("...along with the bank details to pay into, when they are configured "
+      "-- a reference with nowhere to send the money is half an instruction",
       "Capitec" in _bill_html and "123456" in _bill_html)
+
+_full = _wa._render_billing(
+    {"org_id": 42, "email": "a@b.c", "role": "owner"}, None, False, "CSRF",
+    contact={"email": "b@x.c", "bank_name": "Capitec",
+             "bank_holder": "My IT Africa (Pty) Ltd",
+             "bank_account": "1234567890", "bank_branch": "470010"})
+check("every bank field the superadmin filled in is shown, labelled",
+      all(x in _full for x in ("Capitec", "My IT Africa (Pty) Ltd",
+                               "1234567890", "470010")))
+check("...and a partly-filled set shows only what was entered, rather than "
+      "empty rows for the rest",
+      "Branch code" not in _wa._render_billing(
+          {"org_id": 7, "email": "a@b.c", "role": "owner"}, None, False, "C",
+          contact={"email": "b@x.c", "bank_name": "Capitec"}))
+
+_form = _wa._render_superadmin(
+    {"email": "s@x.c", "role": "owner", "is_superadmin": True},
+    [], [], csrf="C", billing_on=True,
+    billing_contact={"email": "b@x.c", "bank_name": "Capitec"})
+check("the superadmin can actually EDIT those bank details — they are shown "
+      "to every customer, so they had to be reachable from the panel rather "
+      "than only settable in a config file",
+      all(f'name="{f}"' in _form for f in
+          ("bank_name", "bank_account", "bank_holder", "bank_branch")))
+check("...and the form comes back filled in with what was saved",
+      'value="Capitec"' in _form)
 check("...and it is shown even with card payment switched off, since an EFT "
       "customer needs it either way",
       "Paying by EFT" in _wa._render_billing(

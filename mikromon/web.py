@@ -6179,6 +6179,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             cfg = {
                 "name": flat.get("name", "").strip(),
                 "email": flat.get("email", "").strip(),
+                # Where EFT customers send the money. Optional -- a deployment
+                # taking card payments only never fills these in, and the
+                # billing page then shows the reference alone.
+                "bank_name": flat.get("bank_name", "").strip(),
+                "bank_account": flat.get("bank_account", "").strip(),
+                "bank_holder": flat.get("bank_holder", "").strip(),
+                "bank_branch": flat.get("bank_branch", "").strip(),
             }
             auth.set_billing_contact(cfg)
             return self._redirect("/superadmin?ok=" +
