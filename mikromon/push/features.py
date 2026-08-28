@@ -305,7 +305,31 @@ def _dist_from_routes(routes, client, ctype,
     return ""
 
 
-def _wan_sortable_items(current):
+def _dist_label(dist) -> str:
+    """How a distance reads in the uplink list.
+
+    An unknown distance is shown as unknown. It used to fall back to "1",
+    which is the worst possible guess: 1 is not a neutral placeholder, it is
+    the value that means "this is the primary line". A line the operator had
+    set to 10 was reported as the highest-priority uplink on the router.
+    """
+    return f"distance {dist}" if str(dist or "").strip() else "distance not reported"
+
+
+def _wan_sortable_items(current, cfg=None):
+    # What the WAN tab has each line set to, keyed by interface. Used only
+    # when the router itself will not say: once failover sets
+    # add-default-route=no, RouterOS stops reporting the client's
+    # default-route-distance AND (on a client that is not currently bound)
+    # its gateway, so there is nothing left to match a route against. The
+    # configured value is then the only true answer available, and it is the
+    # one the operator typed.
+    cfg_dist = {}
+    for lk in (getattr(getattr(cfg, "wan", None), "links", []) or []):
+        iface = getattr(lk, "interface", "") or ""
+        dist = getattr(lk, "distance", None)
+        if iface and dist:
+            cfg_dist[_norm_iface(iface)] = str(dist)
     routes = current.get("routes", [])
     ppp_active_by_name = {_norm_iface(s.get("name", "")): s
                           for s in current.get("ppp_active", []) if s.get("name")}
@@ -315,7 +339,9 @@ def _wan_sortable_items(current):
     for c in current.get("dhcp", []):
         iface = c.get("interface", "?")
         status = c.get("status", "unknown")
-        dist = c.get("default-route-distance", "") or _dist_from_routes(routes, c, "dhcp") or "1"
+        dist = (c.get("default-route-distance", "")
+                or _dist_from_routes(routes, c, "dhcp")
+                or cfg_dist.get(_norm_iface(iface), ""))
         rid = c.get(".id", "").lstrip("*")
         if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
             conn_info = f"{status} · no default route"
@@ -324,7 +350,7 @@ def _wan_sortable_items(current):
             conn_info = f"{status}" + (f" · route {rs}" if rs else "")
         items.append({
             "id": f"dhcp:{rid}",
-            "label": f"DHCP {iface} [{conn_info}] · distance {dist}",
+            "label": f"DHCP {iface} [{conn_info}] · {_dist_label(dist)}",
             "_dist": dist,
         })
     for c in current.get("ppp", []):
@@ -334,7 +360,7 @@ def _wan_sortable_items(current):
         dist = (c.get("default-route-distance", "")
                 or _dist_from_routes(routes, c, c.get("_type", "ppp"),
                                      ppp_active_by_name, ip_addr_by_iface)
-                or "1")
+                or cfg_dist.get(_norm_iface(name), ""))
         rid = c.get(".id", "").lstrip("*")
         state = "connected" if running else "disconnected"
         if str(c.get("add-default-route", "yes")).lower() in ("no", "false"):
@@ -345,7 +371,7 @@ def _wan_sortable_items(current):
             conn_info = f"{state}" + (f" · route {rs}" if rs else "")
         items.append({
             "id": f"{c.get('_type', 'ppp')}:{rid}",
-            "label": f"{ctype} {name} [{conn_info}] · distance {dist}",
+            "label": f"{ctype} {name} [{conn_info}] · {_dist_label(dist)}",
             "_dist": dist,
         })
 
@@ -385,7 +411,7 @@ def _wan_gateway_for(client):
 
 
 def routes_form(current, cfg):
-    items = _wan_sortable_items(current)
+    items = _wan_sortable_items(current, cfg)
     fo_enabled = bool(current.get("failover_routes"))
 
     fields = [

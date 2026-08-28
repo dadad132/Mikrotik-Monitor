@@ -2353,6 +2353,66 @@ check("the DHCP secondary's real distance (11) is shown, distinct from "
       "the primary's",
       rec_dhcp is not None and rec_dhcp["_dist"] == "11")
 
+# Reported live: WAN tab set to 10 and 11, Routes tab showed 1 and 11.
+# Once failover sets add-default-route=no, RouterOS stops reporting the
+# client's default-route-distance, and on a client that is not currently
+# bound it stops reporting the gateway too -- so there is nothing left to
+# match a route against, and the list fell back to a hard-coded "1".
+print("Routes tab distances when the router will not report them:")
+_blind = {
+    "routes": [{"dst-address": "0.0.0.0/0", "gateway": "196.1.1.1",
+                "distance": "10", "comment": "mikromon:failover:primary",
+                "active": "true"}],
+    # no "gateway" key: nothing to match the route by
+    "dhcp": [{"interface": "ether1", "status": "bound", ".id": "*1",
+              "add-default-route": "no"}],
+    "ppp": [{"name": "pppoe-out1", "_type": "pppoe", ".id": "*2",
+             "running": "true", "default-route-distance": "11"}],
+    "ppp_active": [], "ip_addrs": [],
+}
+
+
+class _L:
+    def __init__(self, interface, distance):
+        self.interface, self.distance = interface, distance
+
+
+_blind_cfg = types.SimpleNamespace(wan=types.SimpleNamespace(
+    links=[_L("ether1", 10), _L("pppoe-out1", 11)]))
+
+_bi = F._wan_sortable_items(_blind, _blind_cfg)
+_bd = next(it for it in _bi if it["id"].startswith("dhcp:"))
+_bp = next(it for it in _bi if it["id"].startswith("pppoe:"))
+check("a line the router will not report falls back to the distance the "
+      "operator set on the WAN tab (10), not to 1",
+      _bd["_dist"] == "10" and "distance 10" in _bd["label"])
+check("...and the line the router DOES report is unaffected",
+      _bp["_dist"] == "11")
+check("...so the list orders them the way the operator set them, rather "
+      "than putting the 10 line first because it was mislabelled 1",
+      [it["id"].split(":")[0] for it in _bi] == ["dhcp", "pppoe"])
+
+_bi2 = F._wan_sortable_items(_blind)
+_bd2 = next(it for it in _bi2 if it["id"].startswith("dhcp:"))
+check("with no configured distance to fall back on it says so, instead of "
+      "printing 1 -- 1 is not a neutral placeholder, it is the value that "
+      "means 'this is the primary line'",
+      _bd2["_dist"] == "" and "not reported" in _bd2["label"])
+
+# The router's own answer must still win: config is the fallback, not an
+# override, or the tab would report what was asked for rather than what is.
+_live = {**_blind,
+         "dhcp": [{"interface": "ether1", "status": "bound", ".id": "*1",
+                   "gateway": "196.1.1.1", "add-default-route": "no"}]}
+_lc = types.SimpleNamespace(wan=types.SimpleNamespace(
+    links=[_L("ether1", 99), _L("pppoe-out1", 11)]))
+_li = next(it for it in F._wan_sortable_items(_live, _lc)
+           if it["id"].startswith("dhcp:"))
+check("what is actually on the router (10) beats a stale configured value "
+      "(99) -- this list reports the router, and the fallback is only for "
+      "when the router says nothing",
+      _li["_dist"] == "10")
+
 # The Routes tab's Failover summary line must make it obvious when a link
 # has no detectable gateway IP (PPP-active/DHCP gave nothing usable, so
 # _gateway_for_link fell back to routing via the interface itself) instead
