@@ -417,22 +417,8 @@ def routes_form(current, cfg):
     fields = [
         {"type": "list", "name": "wan_priority_info",
          "label": "Internet line priority (top = primary)",
-         "items": items,
-         "hint": "Read-only — set the priority order and each line's Distance "
-                 "on the WAN tab. That's what Gateway Failover below actually "
-                 "applies; this just reports what's currently live on the router."},
-        {"type": "heading", "label": "Gateway Failover",
-         "hint": "Sets each configured uplink's priority (not just the "
-                 "first two). A DHCP line gets a dedicated route straight "
-                 "to its real gateway; a PPPoE/dial-up line's priority is "
-                 "set directly on its own connection instead (no gateway "
-                 "to detect — RouterOS's own PPP client already routes it "
-                 "correctly). RouterOS then uses whichever line is "
-                 "currently connected and has priority — no separate check "
-                 "IP, no ping health check. This means it reacts when a "
-                 "line's own connection actually drops, but not to a line "
-                 "that's technically still connected while the internet "
-                 "beyond it is down."},
+         "items": items},
+        {"type": "heading", "label": "Gateway Failover"},
         {"type": "toggle", "name": "fo_enabled", "value": "1",
          "on": fo_enabled, "label": "Enable gateway failover",
          "desc": "Turning this on or off can take between 2–5 minutes to "
@@ -928,18 +914,12 @@ def sdwan_form(current, cfg):
     links = ", ".join(e.label(i) for i, e in enumerate(cfg.wan.links)) or "(none)"
     return [
         {"type": "static", "label": "Configured WAN uplinks (priority order)",
-         "value": links,
-         "hint": "Edit them, including each link's own route Distance, on "
-                 "the Devices page → WAN uplinks section. Gateway Failover "
-                 "(Netwatch health checks, automatic switchover) lives on "
-                 "the Routes tab."},
+         "value": links},
         {"type": "rows", "name": "pol",
          "label": "Send specific LAN subnets out a chosen WAN (policy routing)",
          "cols": [("subnet", "LAN subnet or host", "192.168.88.0/24"),
                   ("via", "out this WAN (interface or gateway)", "ether1")],
-         "rows": _policy_rows(current),
-         "hint": "Each row marks that source and routes it via the chosen WAN "
-                 "(mangle mark + marked default route). Leave empty for none."},
+         "rows": _policy_rows(current)},
     ]
 
 
@@ -1349,19 +1329,12 @@ def nextdns_form(current, cfg):
     fields += [
         {"type": "toggle", "name": "opt", "value": "allow_remote",
          "label": "Allow remote DNS requests",
-         "on": _norm(dns.get("allow-remote-requests", "")) == "true",
-         "hint": "Must be ON for the router to answer client DNS at all. "
-                 "(Turned on automatically when you force client DNS below.)"},
+         "on": _norm(dns.get("allow-remote-requests", "")) == "true"},
         {"type": "toggle", "name": "opt", "value": "force_dns",
          "label": "Force all client DNS through this router",
-         "on": bool(current.get("forced")),
-         "hint": "Redirects every client's port-53 traffic to the router (NAT) "
-                 "so a device hard-coded to someone else's resolver can't "
-                 "bypass the DNS chosen here — or NextDNS's filtering, if "
-                 "that's enabled above."},
+         "on": bool(current.get("forced"))},
         {"type": "textarea", "name": "bypass", "label": "Bypass IPs (one per line)",
-         "value": ips, "hint": "Hosts allowed to use their own DNS even when "
-                 "\"Force all client DNS\" above is on."},
+         "value": ips},
     ]
     return fields
 
@@ -1452,11 +1425,7 @@ def qos_form(current, cfg):
                       ("down", "download Mbps", "50"),
                       ("up", "upload Mbps", "20"),
                       ("off", "paused? (yes)", "")],
-             "rows": rows,
-             "hint": "Each row is a speed limit (simple queue). max-limit is "
-                     "upload/download. Put 'yes' in the last column to PAUSE a "
-                     "limit (disable it) without deleting it; clear it to resume. "
-                     "Blank rows are ignored."}]
+             "rows": rows}]
 
 
 def qos_plan(pusher, cfg, flat, multi):
@@ -1596,10 +1565,7 @@ def remote_summary(current, cfg):
 def remote_form(current, cfg):
     users = current.get("users", [])
     fields: list[dict] = [
-        {"type": "heading", "label": "Grant temporary access",
-         "hint": f"Type who it's for and click Create — the password and "
-                f"address to give them come right after. It stops working "
-                f"on its own in {_REMOTE_DEFAULT_MINUTES} minutes."},
+        {"type": "heading", "label": "Grant temporary access"},
         {"type": "text", "name": "tempuser", "label": "Who is this for?",
          "placeholder": "e.g. alice, or the contractor's name"},
         {"type": "toggle", "name": "restrict_source", "value": "1",
@@ -1620,8 +1586,6 @@ def remote_form(current, cfg):
             "cols": [("name", "name", "")],
             "rows": [{"name": u.get("name", "")} for u in users],
             "can_add": False,
-            "hint": "Delete a row and apply to cut off that person's access "
-                    "right away.",
         })
     return fields
 
@@ -2410,11 +2374,7 @@ def tunnel_form(current, cfg):
         ]
     detected = current.get("lan_subnets") or []
     fields: list[dict] = [
-        {"type": "heading", "label": "Site-to-site VPN",
-         "hint": "Connects this router's own network to other routers' "
-                 "networks through the WireGuard tunnel, so devices on "
-                 "either side can reach each other directly — no separate "
-                 "VPN client needed on those devices."},
+        {"type": "heading", "label": "Site-to-site VPN"},
         {"type": "static", "label": "Status",
          "value": "Not part of a VPN group yet. Make this router the main "
                   "host below, or add it as a sub-unit from another "
@@ -2636,11 +2596,7 @@ def scripts_form(current, cfg):
         {"type": "text", "name": "new_name", "label": "Script name",
          "placeholder": "block-badnet"},
         {"type": "textarea", "name": "new_source",
-         "label": "Script source (RouterOS commands)", "value": "",
-         "hint": "Paste a RouterOS script. Saving adds it to /system script "
-                 "(tagged so mikromon owns it) — it does not run yet. Use the "
-                 "Run button on a saved script to execute it. Re-saving with the "
-                 "same name updates the source."},
+         "label": "Script source (RouterOS commands)", "value": ""},
     ]
 
 
@@ -2736,11 +2692,7 @@ def harden_form(current, cfg):
         {"type": "text", "name": "allowed",
          "label": "Allow management ONLY from these IPs/subnets (comma-separated)",
          "value": cur_addr,
-         "placeholder": "102.36.140.219/32, 192.168.88.0/24",
-         "hint": "Applied to the services ticked below. ⚠ Include this monitoring "
-                 "server's public IP (and your own admin IP) or you will lock "
-                 "mikromon — and yourself — out. Leave blank to skip service "
-                 "restriction and only block attackers below."},
+         "placeholder": "102.36.140.219/32, 192.168.88.0/24"},
         {"type": "static", "label": "Restrict these management services",
          "value": ""},
     ]
@@ -2763,8 +2715,7 @@ def harden_form(current, cfg):
                                "plaintext / legacy — safe to turn off"})
     fields.append({"type": "text", "name": "block",
                    "label": "Block these attacker IPs (comma-separated)",
-                   "placeholder": "45.198.224.18",
-                   "hint": "Added to a drop list at the top of the input chain."})
+                   "placeholder": "45.198.224.18"})
     return fields
 
 
@@ -2879,8 +2830,7 @@ def hubtunnel_form(current, cfg):
          "label": "Route to the hub (allowed-address)",
          "value": peer.get("allowed-address", "") or "10.10.0.0/16"},
         {"type": "text", "name": "keepalive", "label": "Persistent keepalive",
-         "value": peer.get("persistent-keepalive", "") or "25s",
-         "hint": "Keeps the NAT hole open so the hub can reach back (CGNAT)."},
+         "value": peer.get("persistent-keepalive", "") or "25s"},
     ]
 
 
@@ -3191,9 +3141,7 @@ def update_form(current, cfg):
              "options": [("stable", "Stable (recommended)"),
                          ("long-term", "Long-term (most conservative)"),
                          ("testing", "Testing")],
-             "value": u.get("channel", "stable") or "stable",
-             "hint": "Preview to change the channel. Then use the buttons below "
-                     "to check for and install updates."}]
+             "value": u.get("channel", "stable") or "stable"}]
 
 
 def update_plan(pusher, cfg, flat, multi):

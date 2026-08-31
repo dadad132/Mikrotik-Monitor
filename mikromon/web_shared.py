@@ -190,6 +190,48 @@ _PAGE_CSS = """
  .tabs a.on{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
  .tabs a.soon{color:var(--text-faint);cursor:not-allowed}
  .tabs a.soon::after{content:" · soon";font-size:10px}
+ /* The "?" that replaced the grey blurb under every tab. Pushed to the far
+    right so it never competes with the tab you came to click, but always in
+    the same place, so it becomes muscle memory rather than something to hunt
+    for. */
+ .tabs a.helpbtn{margin-left:auto;align-self:center;width:22px;height:22px;
+   padding:0;margin-bottom:4px;border:1.5px solid var(--text-faint);
+   border-radius:50%;color:var(--text-faint);font-size:13px;font-weight:700;
+   line-height:1;display:inline-flex;align-items:center;justify-content:center;
+   border-bottom-color:var(--text-faint);flex:none}
+ .tabs a.helpbtn:hover{color:var(--accent);border-color:var(--accent);
+   background:var(--accent-soft)}
+ /* Guide: figures, numbered steps, and the warnings that stayed on the tabs
+    when the explanatory grey text moved into the guide. */
+ .gfig{margin:16px 0;padding:14px;background:var(--surface-2);
+   border:1px solid var(--border);border-radius:10px}
+ .gfig svg{display:block;width:100%;height:auto;max-width:660px;margin:0 auto}
+ .gfig figcaption{font-size:12px;color:var(--text-faint);text-align:center;
+   margin:10px auto 0;max-width:560px;line-height:1.5}
+ .gsteps{counter-reset:gstep;list-style:none;padding:0;margin:12px 0}
+ .gsteps li{position:relative;padding-left:34px;margin-bottom:11px}
+ .gsteps li::before{counter-increment:gstep;content:counter(gstep);
+   position:absolute;left:0;top:1px;width:23px;height:23px;border-radius:50%;
+   background:var(--accent);color:#fff;font-size:12px;font-weight:700;
+   display:flex;align-items:center;justify-content:center}
+ .gwarn,.fwarn{border-left:3px solid var(--warning);background:var(--warning-bg);
+   border-radius:0 8px 8px 0;color:var(--text)}
+ .gwarn{padding:9px 12px;margin:12px 0;font-size:13px}
+ .fwarn{padding:7px 10px;margin-top:6px;font-size:12px}
+ .gtabhead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;
+   margin:26px 0 4px;padding-top:16px;border-top:1px solid var(--border)}
+ .gtabhead:first-of-type{border-top:0;padding-top:0;margin-top:8px}
+ .gtabhead h3{margin:0;font-size:16px}
+ .gtabhead .gwhere{font-size:11px;color:var(--text-faint);
+   text-transform:uppercase;letter-spacing:.05em}
+ /* Arriving from a tab's "?" drops you into the middle of a long page. Clear
+    the sticky nav so the heading is not hidden under it, and mark the section
+    you landed on -- otherwise the jump looks like it did nothing. */
+ .gtabhead{scroll-margin-top:74px}
+ .gtabhead:target h3{color:var(--accent)}
+ .gtabhead:target::before{content:"";position:absolute;left:-14px;width:4px;
+   height:22px;border-radius:2px;background:var(--accent)}
+ .gtabhead{position:relative}
  .tabdrop{position:relative;display:flex;align-items:stretch}
  .tabdrop>.dropbtn{padding:8px 13px;font-size:14px;color:var(--text-muted);
    text-decoration:none;border-bottom:2px solid transparent;margin-bottom:-2px;

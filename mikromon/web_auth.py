@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 
+from . import guide_art, guide_tabs
 from .auth import AuthStore
 from .billing import (payment_reference, PLANS, GRACE_DAYS, FREE_DEVICES,
                       TRIAL_DEVICES, _TRIAL_DAYS, TIER_STEP,
@@ -1220,18 +1221,43 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
     return _page("Platform Admin", _header(user, "/superadmin") + inner)
 
 
+def _guide_tab_block(t: dict) -> str:
+    """One device tab's help, anchored so the tab's own "?" can land on it.
+
+    Steps are numbered rather than run together in a paragraph: someone
+    reading this is mid-task with the tab open in another window, and a
+    numbered list survives being glanced at, which prose does not.
+    """
+    steps = "".join(f"<li>{st}</li>" for st in t.get("steps") or [])
+    steps_html = f'<ol class="gsteps">{steps}</ol>' if steps else ""
+    warn = (f'<div class="gwarn"><b>&#9888; Watch out:</b> {t["warn"]}</div>'
+            if t.get("warn") else "")
+    art_fn = getattr(guide_art, t["art"], None) if t.get("art") else None
+    art = art_fn() if art_fn else ""
+    return (f'<div class="gtabhead" id="tab-{esc(t["slug"])}">'
+            f'<h3>{t["title"]}</h3>'
+            f'<span class="gwhere">device tab</span></div>'
+            f'<p>{t["what"]}</p>{art}{steps_html}{warn}')
+
+
 def _guide_section(anchor: str, title: str, body: str) -> str:
     return (f'<div class="box" id="{anchor}"><h2 style="margin-top:0">{title}</h2>'
             f'{body}</div>')
 
 
-def _render_guide(user, tab_intro: dict) -> str:
+def _render_guide(user, tab_intro: dict | None = None) -> str:
     """A plain-language walkthrough of every tab and a glossary of the
     networking terms used throughout the dashboard — for someone who isn't
     sure what a setting does or what a term means, without having to ask
-    or guess. Static content; doesn't touch the database. `tab_intro` is
-    web.py's _TAB_INTRO (passed in rather than imported, to avoid a
-    circular import — web.py imports render functions from this module)."""
+    or guess. Static content; doesn't touch the database.
+
+    Every device tab gets its own anchored subsection (`#tab-<slug>`) so the
+    "?" button on that tab can land the reader exactly where they need to
+    be, instead of at the top of a long page they then have to search.
+
+    `tab_intro` is accepted and ignored: the per-tab copy moved into
+    guide_tabs when the grey blurb came off the tabs themselves. The
+    parameter stays so an older caller does not break."""
     toc_items = [
         ("overview", "What this dashboard does"),
         ("dashboard", "The Dashboard"),
@@ -1301,31 +1327,15 @@ def _render_guide(user, tab_intro: dict) -> str:
         '<p>You only ever do this once per router. After that, every tab '
         'works purely from the dashboard.</p>'))
 
-    tab_rows = [
-        ("Routes — Gateway Failover", tab_intro.get("routes", "")),
-        ("WAN — policy routing", tab_intro.get("wan", "")),
-        ("Security", tab_intro.get("security", "")),
-        ("Restrict management access", tab_intro.get("harden", "")),
-        ("DNS", tab_intro.get("nextdns", "")),
-        ("Queues (QoS)", tab_intro.get("qos", "")),
-        ("Port forwarding", tab_intro.get("portfwd", "")),
-        ("Interfaces", tab_intro.get("interfaces", "")),
-        ("Remote access", tab_intro.get("remote", "")),
-        ("Custom scripts", tab_intro.get("scripts", "")),
-        ("Update RouterOS", tab_intro.get("update", "")),
-    ]
-    tabs_table = "".join(
-        f'<tr><td style="white-space:nowrap;vertical-align:top"><b>{esc(name)}</b></td>'
-        f'<td>{esc(desc)}</td></tr>'
-        for name, desc in tab_rows if desc)
     tabs = _guide_section("tabs", "What each device tab does", (
-        '<p>Open a router from the Dashboard to see its tabs. Every tab '
-        'follows the same pattern: change something, click <b>Preview</b> '
-        'to see exactly what would be sent to the router, then '
-        '<b>Apply</b> to actually push it.</p>'
-        f'<table><tr><th>Tab</th><th>What it\'s for</th></tr>{tabs_table}</table>'
-        '<p class="muted" style="margin-top:10px">The VPN tab and the '
-        'Backups tab work a little differently — see the sections below.</p>'))
+        '<p>Open a router from the Dashboard to see its tabs. Every tab that '
+        'changes something follows the same pattern: make your change, click '
+        '<b>Preview</b> to see exactly what would be sent to the router, then '
+        '<b>Apply</b> to push it.</p>'
+        + guide_art.preview_apply()
+        + '<p class="muted">Each tab has a <b>?</b> button on the right of its '
+        'tab bar that jumps straight to its section below.</p>'
+        + "".join(_guide_tab_block(t) for t in guide_tabs.TABS)))
 
     vpn = _guide_section("vpn", "VPN — connecting sites together", (
         '<p>This dashboard\'s server runs its own always-on WireGuard '
@@ -1334,7 +1344,8 @@ def _render_guide(user, tab_intro: dict) -> str:
         '(CGNAT, mobile data, etc). This tunnel is what Remote access, '
         'the self-repair check, and the VPN tab all run over — there is '
         'no separate VPN product involved, it\'s all the same tunnel.</p>'
-        '<h3>Personal VPN access — using Remote access from your own computer</h3>'
+        + guide_art.dial_home()
+        + '<h3>Personal VPN access — using Remote access from your own computer</h3>'
         '<p>Remote access shows a "Connect to" address that\'s the '
         'router\'s address <i>on this tunnel</i> — it only works if the '
         'computer running Winbox/SSH is itself connected to the same '
@@ -1376,7 +1387,8 @@ def _render_guide(user, tab_intro: dict) -> str:
         'two-step process: Preview shows exactly what would be added, '
         'changed or removed on the router — nothing happens to the router '
         'yet. Apply actually sends it.</p>'
-        '<p><b>Automatic backup.</b> Right before Apply commits anything, '
+        + guide_art.preview_apply()
+        + '<p><b>Automatic backup.</b> Right before Apply commits anything, '
         'the dashboard takes a full snapshot of the router\'s configuration '
         'and stores it on the Backups tab, so you can restore to exactly '
         'how it was before if something goes wrong.</p>'

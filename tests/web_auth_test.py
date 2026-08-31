@@ -767,6 +767,76 @@ finally:
     srv.shutdown()
     srv.server_close()
 
+print("the Guide and the tab \"?\" buttons:")
+import re as _re
+import mikromon.web as _web
+import mikromon.web_auth as _wag
+from mikromon import guide_art as _art, guide_tabs as _gt
+
+_guide = _wag._render_guide({"email": "a@b.c", "role": "owner",
+                             "org_name": "Acme"})
+_anchors = set(_re.findall(r'id="(tab-[\w-]+)"', _guide))
+_slugs = {(sl or "overview") for sl in _web._LIVE_TABS.values()}
+
+# The contract that makes the "?" worth having: a tab whose button lands on
+# an anchor that does not exist just dumps the reader at the top of a long
+# page, which is exactly the situation the button was meant to fix.
+_broken = []
+for _sl in sorted(_slugs):
+    _href = _re.search(r'class="helpbtn" href="([^"]+)"',
+                       _web._device_tabbar("R1", _sl, True, "C")).group(1)
+    if _href.split("#", 1)[1] not in _anchors:
+        _broken.append(_sl)
+check("every device tab's ? button lands on a real section of the guide -- "
+      "a dangling anchor drops the reader at the top of a long page, which "
+      "is the problem the button exists to solve",
+      not _broken)
+check("...including the read-only and maintenance tabs, not just the ones "
+      "that push config",
+      all(f"tab-{x}" in _anchors
+          for x in ("overview", "interfaces", "backups", "tempaccess")))
+check("the ? is present even for a member who cannot push config -- being "
+      "unable to change a thing is not a reason to be unable to read what "
+      "it does",
+      "helpbtn" in _web._device_tabbar("R1", "overview", False, ""))
+
+check("each tab's section says what to DO, as numbered steps, not just what "
+      "the tab is for",
+      _guide.count('class="gsteps"') >= 12)
+check("the guide carries its own diagrams inline, so it needs no static "
+      "file route and works with no network",
+      "<svg" in _guide and "<img" not in _guide)
+# Scoped to the diagrams themselves: the page shell legitimately defines hex
+# colours for the theme tokens, so testing the whole page proves nothing.
+_all_svg = "".join(_re.findall(r"<svg.*?</svg>",
+                               _guide, _re.S))
+check("...and the diagrams use theme tokens, not hard-coded light-mode "
+      "colours -- the whole dashboard has a dark mode and a diagram that "
+      "ignores it becomes a white slab",
+      "var(--" in _all_svg and not _re.search(r"#[0-9a-fA-F]{3,6}", _all_svg))
+
+# Diagrams share a document, so a marker id defined in one and used by
+# another silently changes the second one's arrow colour.
+for _fn in ("dial_home", "preview_apply", "failover_distance", "tunnel_sites"):
+    _svg = _re.search(r"<svg.*?</svg>", getattr(_art, _fn)(), _re.S).group(0)
+    check(f"{_fn} defines every marker it references, so two diagrams on one "
+          f"page cannot borrow each other's arrowheads",
+          set(_re.findall(r"url\(#(\w+)\)", _svg))
+          <= set(_re.findall(r'<marker id="(\w+)"', _svg)))
+
+print("the grey blurb is gone from the tabs, warnings are not:")
+check("no push-tab form field carries an explanatory grey hint any more -- "
+      "that text moved into the guide, behind the ?",
+      '"hint"' not in io.open("mikromon/push/features.py",
+                              encoding="utf-8").read())
+check("but the warnings that only matter at the moment of action stayed on "
+      "the tab: help nobody has open cannot stop someone locking themselves "
+      "out",
+      _gt.ONPAGE_WARNINGS.get("harden")
+      and "lock" in _gt.ONPAGE_WARNINGS["harden"].lower())
+check("...and every on-page warning names a real tab",
+      all(w in _slugs for w in _gt.ONPAGE_WARNINGS))
+
 print("the free plan cap is stated honestly everywhere it appears:")
 import mikromon.web_auth as _wa
 from mikromon.billing import FREE_DEVICES as _FREE

@@ -29,6 +29,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
+from . import guide_tabs
 from .auth import AuthStore
 from .config import DEFAULT_CHECKS
 from .metrics import MetricsStore
@@ -1989,7 +1990,22 @@ def _device_tabbar(name, active, is_admin=True, csrf="") -> str:
             out.append(f'<a class="soon">{esc(t)}</a>')
     if is_admin:
         out.append(_maintenance_menu(name, active, csrf))
+    # Replaces the grey paragraph that used to sit under every tab bar. Help
+    # is now something you reach for when stuck, rather than a wall of text
+    # everyone reads past on every visit -- and it lands on THIS tab's
+    # section of the guide, not the top of a long page.
+    out.append(_tab_help_link(active))
     return f'<div class="tabs">{"".join(out)}</div>'
+
+
+def _tab_help_link(active: str) -> str:
+    """The "?" that deep-links a tab to its own part of the guide."""
+    slug = active or "overview"
+    anchor = slug if slug in guide_tabs.BY_SLUG else "tabs"
+    title = guide_tabs.BY_SLUG.get(slug, {}).get("title", "this tab")
+    return (f'<a class="helpbtn" href="/guide#tab-{esc(anchor)}" '
+            f'title="How do I use {esc(title)}?" '
+            f'aria-label="Help for {esc(title)}">?</a>')
 
 
 def _maintenance_menu(name, active, csrf) -> str:
@@ -4861,45 +4877,6 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None,
             f'</form><template id="tmpl-wl">{row(None)}</template></div>')
 
 
-_TAB_INTRO = {
-    "routes": "See your internet lines (DHCP and PPPoE connections) and their "
-              "current status, and turn automatic Gateway Failover on/off below. "
-              "Drag to reorder — the top line becomes the primary route.",
-    "wan": "Send specific LANs out a chosen internet line (policy routing). "
-           "Gateway Failover itself lives on the Routes tab.",
-    "security": "Toggle common firewall protections. Existing rules below can be "
-                "viewed; easymikrotik only manages the ones it creates.",
-    "harden": "Stop brute-force attacks: lock API/Winbox/SSH to your trusted IPs, "
-              "disable insecure services, and block attacker IPs. ⚠ Include this "
-              "server's IP in the allowed list so you don't lock easymikrotik out.",
-    "nextdns": "Point the router at a quick DNS provider (or NextDNS's own "
-               "servers, if enabled below) and optionally force every "
-               "client through it. The NextDNS box below is separate — it "
-               "gives this router its own real NextDNS.io profile (security "
-               "protections, parental control, blocklists, a custom "
-               "block/allow list), all managed right here, nothing to sign "
-               "into on NextDNS's own site. A router with several internet "
-               "lines gets one profile per line — same settings on all of "
-               "them, separate query logs, and the router follows whichever "
-               "line is up on its own.",
-    "qos": "Cap upload/download speed for a subnet or interface (simple queues). "
-           "Add a row, then Preview.",
-    "portfwd": "Forward an external port to an internal device, or adopt forwards "
-               "the router already has.",
-    "interfaces": "A read-only view of the router's ports, VLANs and bridges.",
-    "remote": "Create a temporary RouterOS login (auto-expires on its own) "
-             "for Winbox/SSH/WebFig — no firewall opening, no VPN config.",
-    "tunnel": "Connect this router's network to other sites' networks through "
-             "the WireGuard tunnel, so devices on either side can reach each "
-             "other directly.",
-    "scripts": "Paste any RouterOS script for things the other tabs don't cover. "
-               "Save adds it (tagged), Run executes it, Remove deletes it — all "
-               "previewed first and logged.",
-    "update": "Check for and install RouterOS upgrades. ⚠ Installing reboots the "
-              "router (1–2 min offline) — it's previewed and you must confirm.",
-}
-
-
 def _render_confirm_page(name, user, slug, minutes, backup, hub_ip, csrf) -> str:
     """Shown right after a safe-mode change is applied. The router itself
     verifies, in `minutes`, that it can still reach the hub — and auto-reverts
@@ -5153,8 +5130,13 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                                      detected_gateways=detected_gateways)
                   if slug == "wan" and preview is None else "")
     logbox = _recent_log_box(recent or [], device=name)
-    intro = (f'<p class="muted" style="margin:-6px 0 14px">{_TAB_INTRO[slug]}</p>'
-             if slug in _TAB_INTRO else "")
+    # What this tab is FOR now lives in the guide, one click away on the "?".
+    # What stays here is the subset that is only useful at the moment of
+    # action -- "include this server's IP or you lock yourself out" is no use
+    # on a help page nobody has open.
+    _w = guide_tabs.ONPAGE_WARNINGS.get(slug, "")
+    intro = (f'<div class="fwarn" style="margin:-2px 0 14px">&#9888; {esc(_w)}'
+             f'</div>' if _w else "")
     inner = (f'<div class="wrap" style="max-width:1100px">'
              f'<h1>{esc(name)} &middot; {esc(feature["title"])}</h1>{tabbar}{intro}'
              f'{_facts_strip(facts or {})}{banner}{err}{report_html}'
@@ -5821,7 +5803,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     org=org_data),
                     "text/html; charset=utf-8")
             if path == "/guide":
-                return self._send(200, _render_guide(user, _TAB_INTRO),
+                return self._send(200, _render_guide(user),
                                   "text/html; charset=utf-8")
             if path == "/admin":
                 return self._serve_admin(user)
