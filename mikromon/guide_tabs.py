@@ -65,14 +65,33 @@ TABS = [
              "internet lines, put them in priority order and give each one a "
              "<b>Distance</b>. Below that, policy routing sends specific LANs "
              "or hosts out a line you choose.",
-     "steps": ["Add a row per internet line. Top row is the highest priority.",
-               "Give each one a Distance — <b>lower wins</b>. Leave it blank "
-               "and they get numbered 1, 2, 3… in order.",
+     "steps": ["Add a row per internet line. <b>Top row is the primary</b>, "
+               "second is the first backup, and so on. Drag the ☰ handle or "
+               "use the arrows to reorder.",
+               "Pick the <b>Interface</b> the line comes in on. A 🌐 beside a "
+               "port means a live internet connection was detected on it "
+               "right now — use that to find which port the ISP is actually "
+               "plugged into instead of guessing.",
+               "Leave <b>Type</b> on <i>Auto</i>. It works out dial-up "
+               "(PPPoE) from DHCP by itself, and you only override it if it "
+               "ever gets a line wrong.",
+               "Leave <b>Gateway</b> blank to use the detected address. A "
+               "dial-up line ignores this field entirely — RouterOS's own PPP "
+               "client already routes it correctly.",
+               "Set a <b>Distance</b> — <b>lower wins</b>. Leave it blank and "
+               "failover numbers them by position instead (1st = 1, 2nd = 2, "
+               "…), and switching failover off leaves that line's distance "
+               "exactly as it already was.",
                'Save. Failover itself is switched on over on the '
                '<a href="#tab-routes">Routes tab</a>.',
                "For policy routing, add a row marking a source subnet and the "
                "line it should go out of, then Preview and Apply."],
-     "warn": ""},
+     "warn": "A changed Distance is saved to the line straight away, but "
+             "RouterOS only applies it to the real route on that line's "
+             "<b>next reconnect</b>. easymikrotik will not force it — that "
+             "line may be the one carrying its own connection to this router, "
+             "so bouncing it risks cutting itself off. Reconnect the line "
+             "yourself, or wait, to make a distance change take effect now."},
 
     {"slug": "security", "title": "Security — firewall", "art": None,
      "what": "Common firewall protections as switches. Rules the router "
@@ -110,8 +129,17 @@ TABS = [
                "port-53 traffic to the router, so nobody opts out by "
                "hard-coding 8.8.8.8 on their laptop.",
                "<b>Preview</b>, then <b>Apply</b>."],
-     "warn": "Turning NextDNS off puts back the DNS settings the router had "
-             "before you turned it on — it does not leave you sitting on "
+     "warn": "Do not trust the banner on NextDNS's own website to tell you "
+             "whether a router is connected. It reports on <b>whichever "
+             "computer is viewing it</b>, so a PC with Secure DNS switched on "
+             "in Chrome or Edge shows &ldquo;not using NextDNS&rdquo; even "
+             "when the router is filtering perfectly. Use <b>Is this router "
+             "really using NextDNS?</b> on the DNS tab instead — it asks the "
+             "router itself, over the API, with no browser in the path. If "
+             "the profile has no blocked domains yet it blocks "
+             "<code>example.org</code> for the few seconds the test runs and "
+             "removes it again. Turning NextDNS off puts back the DNS "
+             "settings the router had before, rather than leaving you on "
              "whatever easymikrotik last set."},
 
     {"slug": "qos", "title": "Queues (QoS)", "art": None,
@@ -119,6 +147,8 @@ TABS = [
              "download for a subnet or an interface.",
      "steps": ["Add a row and pick the target — a subnet like "
                "<code>192.168.1.0/24</code>, or an interface.",
+               "In the Queue Setup Builder, leaving the LAN subnet blank "
+               "auto-detects it from the router's bridge at run time.",
                "Set max-limit as upload/download, e.g. <code>5M/20M</code>.",
                "To pause a limit without losing it, put <code>yes</code> in "
                "the last column and Apply. Clear it again to switch the limit "
@@ -181,9 +211,12 @@ TABS = [
                "<b>Preview</b> to see exactly what will be sent.",
                "<b>Save</b> stores it on the router — <b>it does not run it</b>.",
                "Use <b>Run</b> on a saved script to actually execute it."],
-     "warn": "Nothing here is checked for correctness — it is your script, "
-             "sent as typed. The safe-mode self-check still applies, so a "
-             "script that cuts the router off does get rolled back."},
+     "warn": "Removing a saved script does <b>not</b> undo whatever it "
+             "already did to the router — write an undo script for that, or "
+             "use the typed tabs, whose changes are reversible. Nothing here "
+             "is checked for correctness either: it is your script, sent as "
+             "typed. The safe-mode self-check still applies, so a script that "
+             "cuts the router off does get rolled back."},
 
     {"slug": "update", "title": "Update RouterOS", "art": None,
      "what": "Checks for RouterOS upgrades and installs them. The check also "
@@ -201,8 +234,13 @@ TABS = [
              "that you did not have to remember to make.",
      "steps": ["Take a backup by hand at any time with the button.",
                "Download one to keep a copy off the router.",
-               "Restore rolls the router back to that configuration."],
-     "warn": ""},
+               "Automatic ones are named "
+               "<code>before-&lt;feature&gt;-&lt;time&gt;</code>, so you can "
+               "find the snapshot from just before a change went wrong.",
+               "Once you are happy a change is good, delete its snapshot to "
+               "keep the list readable."],
+     "warn": "Restoring reboots the router, so the site drops for a minute "
+             "or two."},
 
     {"slug": "tempaccess", "title": "Temp Access", "art": None,
      "what": "A time-limited window for someone else to reach the router "

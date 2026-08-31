@@ -824,6 +824,34 @@ for _fn in ("dial_home", "preview_apply", "failover_distance", "tunnel_sites"):
           set(_re.findall(r"url\(#(\w+)\)", _svg))
           <= set(_re.findall(r'<marker id="(\w+)"', _svg)))
 
+# The user reported still seeing a 220-word paragraph above the WAN uplinks
+# table after the first pass: the tab-level blurb had gone, but the boxes
+# inside the tabs kept their own.
+_boxes = io.open("mikromon/web.py", encoding="utf-8").read()
+for _gone in ("List your internet links in <b>priority order</b>",
+              "Give this router its own NextDNS profile",
+              "A backup is taken automatically before every",
+              "Run executes the script now",
+              "Set the IP range, name prefix, and speeds"):
+    check(f"the box prose starting {_gone[:34]!r} is gone from the tabs",
+          _gone not in _boxes)
+check("...and each of those boxes carries a ? to the guide instead",
+      _boxes.count("_help_dot(") >= 7)
+
+# Removing prose is only safe if what it said survives somewhere.
+_scripts = _gt.BY_SLUG["scripts"]["warn"]
+check("the gotcha that removing a script does NOT undo what it already did "
+      "survived into the guide -- it existed nowhere else",
+      "does <b>not</b> undo" in _scripts)
+_dns = _gt.BY_SLUG["nextdns"]["warn"]
+check("...as did the reason NextDNS's own website says 'not using NextDNS' "
+      "for a router that is filtering perfectly",
+      "whichever computer is viewing it" in _dns)
+_wan = _gt.BY_SLUG["wan"]["warn"]
+check("...and that a changed Distance only takes effect on the line's next "
+      "reconnect, which is the least guessable thing on the WAN tab",
+      "next reconnect" in _wan)
+
 print("the grey blurb is gone from the tabs, warnings are not:")
 check("no push-tab form field carries an explanatory grey hint any more -- "
       "that text moved into the guide, behind the ?",

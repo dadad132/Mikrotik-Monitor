@@ -201,6 +201,13 @@ _PAGE_CSS = """
    border-bottom-color:var(--text-faint);flex:none}
  .tabs a.helpbtn:hover{color:var(--accent);border-color:var(--accent);
    background:var(--accent-soft)}
+ /* Same affordance, next to a box heading instead of on the tab bar. */
+ .helpdot{width:19px;height:19px;flex:none;border:1.5px solid var(--text-faint);
+   border-radius:50%;color:var(--text-faint);font-size:12px;font-weight:700;
+   line-height:1;display:inline-flex;align-items:center;justify-content:center;
+   text-decoration:none;vertical-align:middle}
+ .helpdot:hover{color:var(--accent);border-color:var(--accent);
+   background:var(--accent-soft)}
  /* Guide: figures, numbered steps, and the warnings that stayed on the tabs
     when the explanatory grey text moved into the guide. */
  .gfig{margin:16px 0;padding:14px;background:var(--surface-2);

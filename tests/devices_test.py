@@ -291,9 +291,19 @@ check("a port with no detected connection is listed plainly",
 check("the detected port sorts to the top of the dropdown",
       wed_detect.index('value="ether5"') < wed_detect.index('value="ether1"')
       and wed_detect.index('value="ether5"') < wed_detect.index('value="lte1"'))
-check("the detection note only shows when ifaces (live router data) is available",
+check("the marker only appears when live router data was available",
       "has an active internet connection" not in wed  # no ifaces passed above
-      and "mikromon detected an active internet connection" in wed_detect)
+      and "has an active internet connection" in wed_detect)
+# The separate legend paragraph is gone with the rest of the editor's grey
+# prose. It can go because the marker explains itself on the option it sits
+# on -- a legend elsewhere on the page was always a worse place to say it.
+check("the marker is explained on the option itself, not in a legend "
+      "paragraph the reader has to find and match up",
+      "🌐 has an active internet connection" in wed_detect)
+check("...and the editor points at the guide instead of carrying 220 words "
+      "of explanation above the table",
+      'href="/guide#tab-wan"' in wed_detect
+      and "List your internet links" not in wed_detect)
 
 # The interface picker groups dial-up (PPPoE/PPTP/L2TP) separately from
 # plain ethernet ports, so it's clear at a glance which kind of connection

@@ -1976,6 +1976,20 @@ _ADMIN_TABS = {"provision", "routes", "wan", "security", "harden", "nextdns",
                "update", "backups", "tempaccess", "interfaces"}
 
 
+def _help_dot(anchor: str, what: str = "") -> str:
+    """The small "?" that replaces a paragraph of grey explanation.
+
+    Sits beside a box heading rather than under it, so the explanation costs
+    a click for whoever needs it and no vertical space for everyone else.
+    Same shape and same destination as the one on the tab bar, so the two
+    read as one affordance rather than two.
+    """
+    label = what or "this"
+    return (f'<a class="helpdot" href="/guide#tab-{esc(anchor)}" '
+            f'title="How do I use {esc(label)}?" '
+            f'aria-label="Help for {esc(label)}">?</a>')
+
+
 def _device_tabbar(name, active, is_admin=True, csrf="") -> str:
     q = quote(name)
     out = []
@@ -3292,16 +3306,7 @@ def _nextdns_box(name, cfg, csrf, nextdns_configured: bool) -> str:
             f'Deletes the profile in NextDNS too, including its blocklist '
             f'history for this router.</p></div>')
     return (
-        f'<div class="box"><h2>NextDNS</h2>'
-        f'<p class="muted">Give this router its own NextDNS profile — '
-        f'separate blocklists, allowlists and query logs from every other '
-        f'router on this account. Needs RouterOS 7.1+ (DNS-over-HTTPS). '
-        f'Also forces every client\'s DNS traffic through this router (so '
-        f'a device with its own manually-set DNS can\'t silently skip '
-        f'NextDNS\'s filtering) and switches off any Quick DNS provider '
-        f'preset above, so this router only ever resolves through '
-        f'NextDNS — turn either off on the DNS tab above if you don\'t '
-        f'want them.</p>'
+        f'<div class="box"><h2>NextDNS{_help_dot("nextdns", "NextDNS")}</h2>'
         f'<form method="POST" action="/device/nextdns">'
         f'<input type="hidden" name="csrf" value="{csrf}">'
         f'<input type="hidden" name="device" value="{q}">'
@@ -3325,19 +3330,8 @@ def _nextdns_test_box(name, csrf) -> str:
     filtering perfectly or not working at all. This asks the router directly,
     over its own API, with no browser or client PC in the path."""
     q = esc(name)
-    return (f'<div class="box"><h2>Is this router really using NextDNS?</h2>'
-            f'<p class="muted">Asks the <b>router itself</b> to resolve a '
-            f'domain from this profile\'s blocked list. If it comes back '
-            f'blocked, nothing but this NextDNS profile could have done that '
-            f'— so the router is connected and filtering, proven. '
-            f'The banner on NextDNS\'s own website can\'t tell you this: it '
-            f'reports on whichever computer is viewing it, so a PC with '
-            f'Secure DNS switched on in Chrome or Edge shows "not using '
-            f'NextDNS" even when this router is working perfectly.</p>'
-            f'<p class="muted">Nothing to set up first: if this profile has '
-            f'no blocked domains yet, the test blocks '
-            f'<code>{esc(_NEXTDNS_PROBE_DOMAIN)}</code> for the few seconds '
-            f'it runs and removes it again afterwards.</p>'
+    return (f'<div class="box"><h2>Is this router really using NextDNS?'
+            f'{_help_dot("nextdns", "the NextDNS test")}</h2>'
             f'<form method="POST" action="/device/nextdns-test">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="device" value="{q}">'
@@ -3986,12 +3980,8 @@ def _render_device_backups(name, user, facts, csrf, *, backups=None,
                      f'<td>{acts}</td></tr>')
         if not rows and not error:
             rows = '<tr><td colspan="4" class="muted">No backup files on the router yet.</td></tr>'
-        table = (f'<div class="box"><h2>Restore points on the router</h2>'
-                 f'<p class="muted">A backup is taken automatically before every '
-                 f'change you push (named <code>before-&lt;feature&gt;-&lt;time&gt;'
-                 f'</code>). If a change broke something, <b>Restore</b> the '
-                 f'matching snapshot (reboots the router); once you\'ve confirmed a '
-                 f'change is good, <b>Delete</b> its snapshot to keep this tidy.</p>'
+        table = (f'<div class="box"><h2>Restore points on the router'
+                 f'{_help_dot("backups", "Backups")}</h2>'
                  f'<table><tr><th>File</th><th>Size</th><th>Created</th>'
                  f'<th>Actions</th></tr>{rows}</table></div>') if not error else ""
         create = (f'<div class="box"><h2>Create a backup</h2>'
@@ -4338,10 +4328,8 @@ def _queue_script_box(name, csrf, facts=None) -> str:
     qn = esc(name)
     base_attr = 'placeholder="leave blank to auto-detect"'
     return (
-        f'<div class="box"><h2>Queue Setup Builder</h2>'
-        f'<p class="muted">Set the IP range, name prefix, and speeds — the '
-        f'RouterOS script is generated live below. Leave the LAN subnet blank '
-        f'to auto-detect from the router\'s bridge interface at run time.</p>'
+        f'<div class="box"><h2>Queue Setup Builder'
+        f'{_help_dot("qos", "the queue builder")}</h2>'
         f'<div class="fields">'
         f'<div class="f"><label class="f">Range from (host #)</label>'
         f'<input id="qb-from" type="number" min="1" max="254" value="40" oninput="qbGen()"></div>'
@@ -4407,12 +4395,9 @@ def _scripts_box(name, csrf, scripts) -> str:
                  f'{act("remove", "Remove", "ghost")}</td></tr>')
     if not rows:
         return ""
-    return (f'<div class="box"><h2>Saved scripts on the router</h2>'
-            f'<p class="muted">Run executes the script now; Remove deletes the '
-            f'script entry. Both are previewed before anything happens. Note: '
-            f'removing a script does not undo changes it already made — add an '
-            f'undo script for that, or use the typed tabs for reversible rules.'
-            f'</p><table><tr><th>Script</th><th></th></tr>{rows}</table></div>')
+    return (f'<div class="box"><h2>Saved scripts on the router'
+            f'{_help_dot("scripts", "Custom scripts")}</h2>'
+            f'<table><tr><th>Script</th><th></th></tr>{rows}</table></div>')
 
 
 _PRE = ('white-space:pre-wrap;background:#f8fafc;padding:10px;border-radius:6px;'
@@ -4829,40 +4814,13 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None,
                 f'onclick="this.closest(\'tr\').remove()">&times;</button></td></tr>')
     links = list(getattr(cfg.wan, "links", [])) if cfg else []
     body = "".join(row(link) for link in links) + row(None)
-    detect_note = ('<p class="muted">\U0001f310 = mikromon detected an active '
-                   'internet connection on that port right now (bound DHCP lease, '
-                   'running PPPoE/L2TP session, or a live default route) — use it '
-                   'to find which port the ISP is actually plugged into instead of '
-                   'guessing.</p>' if ifaces is not None else "")
-    return (f'<div class="box"><h2>WAN uplinks</h2>'
-            f'<p class="muted">List your internet links in <b>priority order</b> — '
-            f'<b>top = primary</b>, 2nd = first backup, and so on. <b>Drag the '
-            f'&#9776; handle</b> (or use the &uarr;/&darr; buttons) to reorder; '
-            f'failover/load-balancing below uses this order. <b>Type</b> is '
-            f'"Auto" by default (detects PPPoE/dial-up vs DHCP from the '
-            f'router\'s own interface list) — only change it if that ever '
-            f'guesses wrong for a line. A <b>dial-up</b> line doesn\'t use '
-            f'the Gateway field at all: RouterOS\'s own PPP client already '
-            f'routes it correctly on its own, so Gateway Failover only sets '
-            f'that line\'s priority directly on the connection, no route '
-            f'built for it. A <b>DHCP</b> line gets a dedicated route to '
-            f'its real gateway instead, and <b>Gateway</b> shows what '
-            f'mikromon detects automatically for it — leave it blank to '
-            f'use that, or fill it in yourself if detection picks the '
-            f'wrong address. <b>Distance</b> is optional. Set it and that '
-            f'line always uses exactly that value — while failover is on '
-            f'and when failover is turned off (restored to your client). '
-            f'Leave it blank and, when failover is off, that line\'s '
-            f'distance is left completely alone (whatever it already was); '
-            f'while failover is on, it just gets a sensible position-based '
-            f'value (1st = 1, 2nd = 2, ...). A changed Distance is saved on '
-            f'the client immediately, but RouterOS only applies it to that '
-            f'line\'s actual route on its <b>next reconnect</b> — mikromon '
-            f'does not force this automatically (that line may be the one '
-            f'carrying its own connection to this router, so bouncing it '
-            f'risks cutting itself off). Disconnect and reconnect the line '
-            f'yourself (or wait for it to happen naturally) to apply a '
-            f'distance change right away.</p>{detect_note}'
+    # Was 220 words of grey prose above the table, plus a legend for the
+    # globe marker. All of it is one click away on the "?" now -- the
+    # marker keeps its own tooltip in the interface dropdown, so the
+    # icon stays self-explanatory where it actually appears.
+    return (f'<div class="box">'
+            f'<h2 style="display:flex;align-items:center;gap:8px">'
+            f'WAN uplinks{_help_dot("wan", "WAN uplinks")}</h2>'
             f'<form method="POST" action="/device/wan">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="device" value="{esc(name)}">'
