@@ -136,7 +136,10 @@ smtp:
   # Admin → Company details page. Leave this list empty or add a fallback.
   to_addrs: []
   subject_prefix: "[EasyMikrotik]"
-  # Only email alerts at or above this severity: INFO / WARNING / CRITICAL
+  # Only email alerts at or above this severity: INFO / WARNING / CRITICAL.
+  # A recovery ("back online", "restored") is sent at the severity of the
+  # problem it clears, so raising this never leaves you with the failures and
+  # none of the all-clears.
   min_severity: WARNING
 
 # ----------------------------------------------------------------------------

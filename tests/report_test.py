@@ -155,6 +155,52 @@ check("the RESTORED (recovery) alert ALSO passes the notify filter — same "
       "key, only severity/recovery differ, neither of which _should_notify "
       "checks", _should_notify(recovery_alert))
 
+# Reported live: alerts arrived every time a WAN uplink dropped and never
+# when one came back. Recoveries were emitted as INFO, notifiers filter on
+# `severity >= min_severity`, and config.example.yaml ships min_severity as
+# WARNING -- so every "back online" was discarded before it reached anyone.
+print("a recovery reaches whoever was told about the problem:")
+import tempfile as _tf
+from mikromon.state import StateStore as _SS
+from mikromon.context import CheckContext as _CC
+from mikromon.notify import render as _render
+from mikromon.notify.base import Notifier as _N
+
+
+class _Chan(_N):
+    name = "chan"
+    def __init__(self, min_sev): self.min_severity = min_sev
+    def send(self, alerts): pass
+
+
+def _run(problem_sev, min_sev):
+    """Drive one condition down and back up; return what a channel delivers."""
+    st = _SS(os.path.join(_tf.mkdtemp(), "s.json")).load()
+    chan, out, now = _Chan(min_sev), [], [1000.0]
+    for healthy in (False, False, True, True):
+        now[0] += 60
+        ctx = _CC("R1", st, now=now[0], default_confirm=2)
+        ctx.transition("wan_failover", healthy=healthy, severity=problem_sev,
+                       title="Primary WAN is DOWN",
+                       recovery_title="WAN restored")
+        out += [a for a in ctx.alerts if chan.applicable([a])]
+    return [("recovery" if a.recovery else "problem") for a in out]
+
+
+check("with the shipped min_severity of WARNING, a WARNING problem and its "
+      "recovery are BOTH delivered — an alert channel that only ever reports "
+      "failures teaches people that no news means nothing happened",
+      _run(Severity.WARNING, Severity.WARNING) == ["problem", "recovery"])
+check("...and the same holds for a CRITICAL problem",
+      _run(Severity.CRITICAL, Severity.WARNING) == ["problem", "recovery"])
+check("a channel that never reported the problem is not told it is resolved "
+      "either — the recovery inherits the problem's severity, so filtering "
+      "stays consistent in both directions",
+      _run(Severity.WARNING, Severity.CRITICAL) == [])
+check("the recovery still reads as RESOLVED rather than by its inherited "
+      "severity, so raising it does not make an all-clear look like an alarm",
+      "RESOLVED" in _render.subject("[MikroMon]", [recovery_alert]))
+
 print("OrgEmailNotifier.send(): a recovery alert is actually delivered, "
       "not silently dropped:")
 sent = []

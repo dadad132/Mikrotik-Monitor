@@ -21,6 +21,16 @@ from .alert import Alert, Severity
 from .util import human_duration
 
 
+def _severity_or(stored, fallback: Severity) -> Severity:
+    """The severity recorded when a condition first went bad, for use on the
+    alert that clears it. Falls back for a condition recorded before this was
+    stored, or by a caller that never raised one."""
+    try:
+        return Severity(int(stored))
+    except (TypeError, ValueError):
+        return fallback
+
+
 class CheckContext:
     def __init__(self, device: str, store, now: float | None = None,
                  default_confirm: int = 1):
@@ -87,8 +97,19 @@ class CheckContext:
                              recovery=False, ts=self.now, facts=facts or {}))
         else:
             dur = human_duration(self.now - prev_since)
+            # A recovery carries the severity of the problem it resolves, not
+            # INFO. Notifiers filter on `severity >= min_severity`, and the
+            # shipped example config sets that to WARNING -- so emitting
+            # recoveries as INFO delivered every failure and silently
+            # swallowed every "back online". Reported live: alerts arrived
+            # when uplinks dropped and never when they returned.
+            #
+            # Whoever was told it broke is told it is fixed; whoever was not,
+            # is not. Rendering already tags a recovery RESOLVED rather than
+            # by severity, so this changes who receives it, not how it reads.
+            resolved = _severity_or(cond.get("severity"), severity)
             self._emit(Alert(
-                self.device, key, Severity.INFO,
+                self.device, key, resolved,
                 recovery_title or f"Resolved: {title}",
                 recovery_detail or f"Condition cleared after {dur}.",
                 cause="", recovery=True, ts=self.now,
@@ -120,11 +141,17 @@ class CheckContext:
         cond["since"] = self.now
 
         if new == "ok":
-            self._emit(Alert(self.device, key, Severity.INFO,
+            # Same reasoning as transition(): the all-clear inherits the
+            # severity of the grade it clears, so a WARNING-filtered channel
+            # that reported "temperature CRITICAL" also reports it back to
+            # normal instead of leaving the reader assuming it never did.
+            self._emit(Alert(self.device, key,
+                             _severity_or(cond.get("severity"), Severity.WARNING),
                              f"{what} back to normal ({shown})",
                              recovery=True, ts=self.now))
         else:
             sev = Severity.CRITICAL if new == "crit" else Severity.WARNING
+            cond["severity"] = int(sev)
             self._emit(Alert(self.device, key, sev,
                              f"{what} {new.upper()}: {shown}",
                              cause=cause, ts=self.now,
