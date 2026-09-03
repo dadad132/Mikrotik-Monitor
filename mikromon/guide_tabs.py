@@ -90,9 +90,9 @@ TABS = [
                "managing.",
                "Press <b>Save &amp; apply to router</b>. You get the same "
                "preview the Routes tab gives — the exact route changes your "
-               "new distances produce — and you confirm them there.",
-               "<b>Save without applying</b> records the details and sends "
-               "nothing, which is what you want when the router is offline.",
+               "new distances produce — and you confirm them there. Your "
+               "details are saved either way, even if the router cannot be "
+               "reached at that moment.",
                'Failover itself is switched on over on the '
                '<a href="#tab-routes">Routes tab</a>.',
                "For policy routing, add a row marking a source subnet and the "

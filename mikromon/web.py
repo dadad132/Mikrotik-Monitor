@@ -4839,20 +4839,24 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None,
             # off -- routes_plan reads an absent fo_enabled as "off".
             f'<input type="hidden" name="fo_enabled" '
             f'value="{"1" if failover_on else ""}">'
+            # A hidden field rather than a value on the button: pressing
+            # Enter in one of the text boxes submits the form without any
+            # button's value, and that used to fall through to the silent
+            # record-only path -- the exact behaviour this tab was fixed to
+            # stop. Every submission of this form now pushes.
+            f'<input type="hidden" name="push" value="1">'
             f'<div class="actions" style="margin-top:12px">'
             # Saving used to write the record and stop there, so a
             # customer who changed a Distance, pressed Save and read
             # "saved" had every reason to think the router had changed.
-            # It had not. This one saves AND shows what that means on
-            # the router -- the same preview the Routes tab gives.
-            f'<button class="btn" type="submit" name="push" value="1">'
-            f'Save &amp; apply to router</button>'
-            f'<button class="btn ghost" type="submit">'
-            f'Save without applying</button></div>'
+            # It had not. This saves AND shows what that means on the
+            # router -- the same preview the Routes tab gives.
+            f'<button class="btn" type="submit">'
+            f'Save &amp; apply to router</button></div>'
             f'<p class="muted" style="font-size:12px;margin:8px 0 0">'
-            f'Applying shows you the exact changes first, the same as '
-            f'the Routes tab. Save without applying only records the '
-            f'details &mdash; useful when the router is offline.</p>'
+            f'You see the exact changes before anything is sent, the same '
+            f'as the Routes tab. Your details are saved either way, even if '
+            f'the router cannot be reached right now.</p>'
             f'</form><template id="tmpl-wl">{row(None)}</template></div>')
 
 
@@ -6951,7 +6955,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(400, "device not managed in the dashboard")
             can_manage = self._can_manage_device(user, name)
             if feature.get("write") and not can_manage:
-                return self._send(403, "forbidden")
+                return self._deny_manage(user, name, f"tab:{slug}")
             facts = (_load_state(state_file).get("devices", {})
                      .get(name, {}).get("facts", {}))
             sess = self._session()
@@ -7139,7 +7143,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
         def _device_wan_post(self, flat, multi, user):
             if not self._can_manage_device(user, flat.get("device", "")):
-                return self._send(403, "forbidden")
+                return self._deny_manage(user, flat.get("device", ""),
+                                         "wan-save")
             name = flat.get("device", "")
             store = self._devstore()
             if store is None:
@@ -7202,10 +7207,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if flat.get("fo_enabled") == "1":
                     push_flat["fo_enabled"] = "1"
                 return self._device_push_post(push_flat, {}, user)
+            # Only reachable from a stale page that predates the hidden
+            # push field. Say plainly that the router was not touched rather
+            # than reporting a bare "saved", which is what made this tab
+            # misleading in the first place.
             return self._redirect(f"/device?name={quote(name)}&tab=wan&msg=" +
                                   quote("WAN uplinks saved. Nothing was sent "
-                                        "to the router — use Save & apply for "
-                                        "that."))
+                                        "to the router — press Save & apply "
+                                        "to push these to it."))
 
         def _device_adopt_post(self, flat, user):
             from .config import build_device
@@ -7270,7 +7279,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if feature is None or raw is None:
                 return self._send(404, "not found")
             if feature.get("write") and not self._can_manage_device(user, name):
-                return self._send(403, "forbidden")
+                return self._deny_manage(user, name, f"push:{slug}")
             cfg = build_device(raw, defaults)
             commit = flat.get("apply") == "1"
             uname = (user or {}).get("login", "")
@@ -8937,7 +8946,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                              "/device/remote-regenerate", "/device/remote-test")
             if path in _DEVICE_WRITE:
                 if not self._can_manage_device(user, flat.get("device", "")):
-                    return self._send(403, "forbidden")
+                    return self._deny_manage(user, flat.get("device", ""), path)
                 if path == "/device/backup":
                     return self._device_backup_post(flat, user)
                 if path == "/device/tempaccess":
@@ -9046,6 +9055,45 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             owner's company."""
             target = auth.get_user(identifier) if identifier else None
             return bool(target) and target.get("org_id") == user.get("org_id")
+
+        def _deny_manage(self, user, name, where=""):
+            """A 403 that says which router was refused and why.
+
+            A bare "forbidden" tells the person nothing they can act on and
+            tells us nothing when they report it -- there are four separate
+            device-management checks that all rendered the same one word, so
+            a screenshot of it could not be traced to any of them.
+            """
+            org = None
+            if devices_db:
+                ds = self._devstore()
+                try:
+                    org = ds.org_of(name) if ds else None
+                finally:
+                    if ds:
+                        ds.close()
+            log.warning("denied management of %r for user=%r org=%r "
+                        "device_org=%r at %s", name,
+                        (user or {}).get("login") or (user or {}).get("email"),
+                        (user or {}).get("org_id"), org, where or "?")
+            if not name:
+                detail = "No router was named in that request."
+            elif org is not None and (user or {}).get("org_id") != org:
+                detail = (f"&ldquo;{esc(name)}&rdquo; belongs to a different "
+                          f"company than the one you are signed in to.")
+            else:
+                detail = (f"Your account is not allowed to manage "
+                          f"&ldquo;{esc(name)}&rdquo;. A member can only "
+                          f"manage the routers allocated to them.")
+            return self._send(403, _page("Not allowed", (
+                f'<div class="wrap" style="max-width:560px;margin-top:10vh">'
+                f'<div class="box"><h1 style="margin-top:0">Not allowed</h1>'
+                f'<p>{detail}</p>'
+                f'<p class="muted">If that looks wrong, ask the account owner '
+                f'to check which routers your login is allocated.</p>'
+                f'<p><a class="btn ghost" href="/dashboard">Back to the '
+                f'dashboard</a></p></div></div>')),
+                "text/html; charset=utf-8")
 
         def _can_manage_device(self, user, name) -> bool:
             """Full device management is allowed for the company OWNER (any of

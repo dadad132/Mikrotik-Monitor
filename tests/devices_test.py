@@ -318,8 +318,15 @@ check("the editor offers a save that actually reaches the router, not only "
       "one that writes the record",
       'name="push" value="1"' in wed_detect
       and "Save &amp; apply to router" in wed_detect)
-check("...and keeps a record-only save for when the router is offline",
-      "Save without applying" in wed_detect)
+check("there is only ONE save button, so there is no way to save and quietly "
+      "not push — that ambiguity is what made this tab misleading",
+      wed_detect.count('type="submit"') == 1
+      and "without applying" not in wed_detect)
+# Pressing Enter in a text box submits with no button value, which used to
+# fall through to the silent record-only path.
+check("the push flag is a hidden field rather than a value on the button, so "
+      "submitting with the Enter key pushes too",
+      '<input type="hidden" name="push" value="1">' in wed_detect)
 _fo_on = web._wan_uplink_editor("R", cfgwan, "csrf", ifaces=[], failover_on=True)
 _fo_off = web._wan_uplink_editor("R", cfgwan, "csrf", ifaces=[], failover_on=False)
 check("the live failover state travels with the form -- routes_plan reads a "
@@ -2231,6 +2238,16 @@ try:
     st, _ = post(bob, "/devices/save",
                  {"csrf": bcsrf2, "name": "X", "host": "1.1.1.1"})
     check("member blocked from adding a device (owner-only, 403)", st == 403)
+    # A bare "forbidden" body named neither the router nor the reason, and
+    # four separate checks all rendered that same one word -- a screenshot of
+    # it could not be traced back to any of them.
+    st, dbody = post(bob, "/device/wan",
+                     {"csrf": bcsrf2, "device": "R1", "push": "1"})
+    check("a refused device action says WHICH router and WHY, instead of the "
+          "single word 'forbidden' that four different checks all produced",
+          st == 403 and "R1" in dbody
+          and ("not allowed to manage" in dbody
+               or "different company" in dbody))
 finally:
     srv.shutdown()
     srv.server_close()
