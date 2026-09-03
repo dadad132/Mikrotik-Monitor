@@ -78,10 +78,16 @@ TABS = [
                "Leave <b>Gateway</b> blank to use the detected address. A "
                "dial-up line ignores this field entirely — RouterOS's own PPP "
                "client already routes it correctly.",
-               "Set a <b>Distance</b> — <b>lower wins</b>. Leave it blank and "
-               "failover numbers them by position instead (1st = 1, 2nd = 2, "
-               "…), and switching failover off leaves that line's distance "
-               "exactly as it already was.",
+               "Set a <b>Distance</b> — <b>lower wins</b>. Leave rows blank "
+               "and they number themselves 10, 11, 12… down the list, so "
+               "dragging a line up or down is enough to change the order.",
+               "A number you type carries the ladder with it: put 10 on the "
+               "top line and the blanks below become 11 and 12; put 1 there "
+               "and they become 2 and 3. Blank rows always sort below the "
+               "row above them, so you can mix typed and blank rows safely.",
+               "Switching failover off leaves a blank line's distance exactly "
+               "as it already was — nothing is invented for a line we are not "
+               "managing.",
                "Press <b>Save &amp; apply to router</b>. You get the same "
                "preview the Routes tab gives — the exact route changes your "
                "new distances produce — and you confirm them there.",

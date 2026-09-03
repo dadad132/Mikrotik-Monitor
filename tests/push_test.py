@@ -1735,8 +1735,10 @@ check("check-gateway/target-scope are NOT set on these routes — no "
       "RouterOS-side health check, by explicit request",
       "check-gateway" not in main_adds[f"{_FO_TAG}primary"].params
       and "target-scope" not in main_adds[f"{_FO_TAG}primary"].params)
-check("link3's own route distance is 3 (position + 1, no explicit Distance set)",
-      main_adds[f"{_FO_TAG}link3"].params["distance"] == "3")
+check("link3's own route distance is 12 — third rung of the unnumbered "
+      "ladder, which starts at 10 so it cannot land on top of a route the "
+      "customer already had at 1",
+      main_adds[f"{_FO_TAG}link3"].params["distance"] == "12")
 check("no RouterOS scripts use invalid $(var) shell-style syntax",
       not any("$(" in str(v) for o in enable_plan.ops
              for v in o.params.values() if isinstance(v, str)))
@@ -1875,11 +1877,11 @@ check("a PPP link never gets a managed static route at all — no gateway "
       "value ever proved reliably usable for one",
       not any(o.path == ("ip", "route") and o.action == "add" for o in tf_plan_on.ops))
 check("a PPP link's priority is set directly on the client's own "
-      "default-route-distance instead (position-based: 1, no explicit "
-      "Distance chosen)",
+      "default-route-distance instead — first rung of the ladder, 10, with "
+      "no explicit Distance chosen",
       any(o.path == ("interface", "pppoe-client") and o.action == "set"
           and o.params.get(".id") == "*1"
-          and o.params.get("default-route-distance") == "1" for o in tf_plan_on.ops))
+          and o.params.get("default-route-distance") == "10" for o in tf_plan_on.ops))
 
 # Confirmed live via the router's own system log: mikromon never sent a
 # single "pppoe client changed" command for a link, while its DHCP-based
@@ -1938,7 +1940,7 @@ check("the case-insensitive match still finds the client to set its "
       "default-route-distance when enabling",
       any(o.path == ("interface", "pppoe-client") and o.action == "set"
           and o.params.get(".id") == "*1"
-          and o.params.get("default-route-distance") == "1" for o in case_plan_on.ops))
+          and o.params.get("default-route-distance") == "10" for o in case_plan_on.ops))
 
 # 4 uplinks: each gets its own route with its own real gateway and its own
 # priority distance — no shared/aliased state between links.
@@ -2357,6 +2359,53 @@ check("the DHCP secondary's real distance (11) is shown, distinct from "
 # was told "WAN uplinks saved", and the router kept its old distance. Saving
 # wrote the device record and never contacted the router at all -- the numbers
 # only reached it via a separate Apply on the Routes tab.
+print("the blank-Distance ladder:")
+
+
+class _RL:
+    def __init__(self, name, distance=None):
+        self.name, self.distance = name, distance
+
+
+def _ladder(*rows):
+    return F._fo_distances([_RL(f"l{i}", d) for i, d in enumerate(rows)])
+
+
+check("an all-blank list starts at 10, not 1 -- distance 1 is where a "
+      "hand-made default route or an ISP script tends to sit, and a managed "
+      "route landing on top of one would outrank config nobody told us about",
+      _ladder(None, None, None) == ["10", "11", "12"])
+check("a blank row continues from the row above it, so typing 10 on the "
+      "primary makes the backups 11 and 12",
+      _ladder(10, None, None) == ["10", "11", "12"])
+check("...and typing 1 on the primary makes them 2 and 3 -- the ladder "
+      "follows whatever the operator started it at",
+      _ladder(1, None, None) == ["1", "2", "3"])
+check("a typed row is used exactly, wherever it sits",
+      _ladder(10, 20, 30) == ["10", "20", "30"])
+check("a typed row mid-list restarts the ladder from itself",
+      _ladder(None, 50, None) == ["10", "50", "51"])
+check("reordering renumbers the blanks, since position decides the ladder",
+      _ladder(None, None) == ["10", "11"])
+
+# The bug this rule exists to kill. Position-based numbering gave the typed
+# primary 10 and the blank backups 2 and 3 -- and lower wins, so the backups
+# silently outranked the line the editor showed as the primary.
+_mixed = _ladder(10, None, None)
+check("mixing a typed primary with blank backups can no longer demote the "
+      "primary: every backup now sorts BELOW it, as the row order says",
+      all(int(d) > int(_mixed[0]) for d in _mixed[1:]))
+check("...and the ladder never decreases down the list while rows are left "
+      "blank, whatever the operator typed at the top",
+      all(int(b) > int(a) for a, b in zip(_mixed, _mixed[1:])))
+
+check("an absurd typed value is clamped to what RouterOS accepts rather than "
+      "being rejected by the router halfway through an apply",
+      _ladder(9999) == ["253"])
+check("a zero counts as blank, matching the form's own minimum of 1 and the "
+      "config layer, which already reads an empty box as 'no distance'",
+      _ladder(0, None) == ["10", "11"])
+
 print("changing a Distance produces a real change for the router:")
 
 

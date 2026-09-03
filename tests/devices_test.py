@@ -240,10 +240,16 @@ cfgdist2 = build_device(resaved, DEF)
 check("a second save/load round-trip still has the same chosen distances",
       [ep.distance for ep in cfgdist2.wan.links] == [10, 11, None])
 wed_dist = web._wan_uplink_editor("R", cfgdist, "csrf")
+# Asserts the value that came back, not the whole input's markup: pinning
+# every attribute made this fail the next time the placeholder text changed,
+# which told us nothing about whether the distance round-tripped.
+_dist_inputs = re.findall(r'<input name="link_distance"[^>]*>', wed_dist)
 check("the WAN uplinks editor actually displays the saved Distance value "
-      "(10) in that row's input, not blank/auto",
-      'name="link_distance" type="number" min="1" max="253" placeholder="auto" '
-      'value="10"' in wed_dist)
+      "(10) in that row's input, not blank",
+      any('value="10"' in i for i in _dist_inputs))
+check("...and the placeholder shows the ladder a blank row would get, so the "
+      "default is visible without reading the guide",
+      any('placeholder="10, 11' in i for i in _dist_inputs))
 check("a link with no chosen Distance shows the blank/auto placeholder, "
       "not a stray 'None'",
       'value="None"' not in wed_dist)

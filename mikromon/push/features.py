@@ -514,24 +514,53 @@ def _fo_role(idx):
     return "primary" if idx == 0 else "secondary" if idx == 1 else f"link{idx + 1}"
 
 
-def _fo_distance(idx, link):
-    """Distance for this link's STATIC FAILOVER ROUTE while failover is on:
-    its own explicit Distance (set in the WAN uplinks editor) if chosen,
-    else its position + 1 (1, 2, 3... in priority order) — failover's
-    managed routes need some strictly-ordered value to prioritize among
-    themselves, regardless of what's chosen. This is unrelated to what the
-    underlying client's own default-route-distance gets restored to when
-    failover is turned off — see the disabled branch below, which uses the
-    explicit Distance ONLY (nothing computed) and otherwise leaves that
-    field untouched entirely."""
-    explicit = getattr(link, "distance", None)
-    return str(explicit) if explicit else str(idx + 1)
+# Where an unnumbered ladder starts. Deliberately not 1: distance 1 is where
+# a hand-made default route, a VPN route or an ISP's own script tends to sit,
+# and a managed failover route landing on top of one of those would quietly
+# outrank config the customer never told us about. Starting at 10 leaves the
+# low numbers to whoever was there first.
+_FO_BASE_DISTANCE = 10
+# Matches the form's own max. RouterOS itself accepts up to 255, but the
+# editor has always capped at 253 and the clamp exists to agree with the
+# field, not to widen it — a number the form refuses should not become
+# reachable by another route.
+_FO_MAX_DISTANCE = 253
+
+
+def _fo_distances(links) -> list:
+    """Distance for every link's STATIC FAILOVER ROUTE, top row first.
+
+    A row with an explicit Distance uses it exactly. A blank row continues
+    from the row above it, +1 — so typing 10 on the primary makes the blanks
+    below it 11, 12, and typing 1 makes them 2, 3. The first blank on the list
+    starts the ladder at _FO_BASE_DISTANCE.
+
+    Computed for the whole list rather than per row, because a blank has no
+    meaning on its own: it means "just below the one above me", and that is
+    unknowable without its neighbours.
+
+    This replaced a per-row `position + 1`, which broke as soon as the two
+    kinds of row were mixed. Typing 10 on the primary and leaving the backups
+    blank gave the primary 10 and the backups 2 and 3 -- and since lower wins,
+    the backups silently outranked the line the editor showed as primary.
+    """
+    out, last = [], None
+    for idx, link in enumerate(links):
+        explicit = getattr(link, "distance", None)
+        if explicit:
+            d = int(explicit)
+        else:
+            d = _FO_BASE_DISTANCE if last is None else last + 1
+        d = max(1, min(_FO_MAX_DISTANCE, d))
+        out.append(str(d))
+        last = d
+    return out
 
 
 def _apply_failover(ops, flat, pusher, cfg):
     """Reconcile distance-based priority for EVERY configured WAN uplink,
     not just a primary/secondary pair — a 3rd, 4th... link is handled too,
-    each at its own distance (see _fo_distance). Two different mechanisms
+    each at its own distance (see _fo_distances). Two different mechanisms
     depending on link type:
 
       - DHCP links: a managed static default route (dst-address=0.0.0.0/0,
@@ -767,9 +796,12 @@ def _apply_failover(ops, flat, pusher, cfg):
     # been reliably detectable, so they keep the managed static route +
     # add-default-route=no approach.
     handled_routes = set()
+    # One pass for the whole ladder: a blank row's number depends on the row
+    # above it, so it cannot be worked out link by link.
+    fo_dists = _fo_distances(links)
     for idx, link in enumerate(links):
         role = _fo_role(idx)
-        distance = _fo_distance(idx, link)
+        distance = fo_dists[idx]
         iface = getattr(link, "interface", "") or ""
         if not iface:
             continue
