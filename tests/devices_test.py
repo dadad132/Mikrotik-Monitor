@@ -354,6 +354,30 @@ check("the Apply button under a preview always names the router and the "
 check("...and does not duplicate them when the submission already had them",
       list(_apply_fields({"device": ["R"], "feature": ["routes"]}).items()).count(
           ("device", "R")) == 1)
+# Saving on the WAN tab applies through the routes feature, which used to
+# render its result on the Routes tab -- moving the reader to a page they had
+# not asked for, mid-task, with no explanation.
+def _preview_page(view, submitted):
+    return web._render_feature_tab(
+        "R", {"login": "o@a.c", "role": "owner", "org_id": 1}, view,
+        _FEATS[view], "CSRF", preview=_prev, submitted=submitted)
+
+
+_wan_view = _preview_page("wan", {"feature": ["routes"], "device": ["R"],
+                                  "view": ["wan"]})
+check("a WAN save previews on the WAN tab, not on Routes — you stay on the "
+      "page you pressed the button on",
+      '<a class="on" href="/device?name=R&tab=wan"' in _wan_view)
+_wf = dict(re.findall(r'name="(\w+)" value="([^"]*)"',
+                      re.search(r'<form method="POST" action="/device/push">.*?</form>',
+                                _wan_view, re.S).group(0)))
+check("...while Apply still pushes the routes feature, since that is what "
+      "actually writes the distances",
+      _wf.get("feature") == "routes")
+check("...and carries the tab to return to, so confirming does not bounce you "
+      "to Routes either",
+      _wf.get("view") == "wan")
+
 check("...while still carrying the rest of the submission through, so Apply "
       "acts on what was previewed and not on a different plan",
       _apply_fields({"device": ["R"], "feature": ["routes"],

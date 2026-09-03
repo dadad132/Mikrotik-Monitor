@@ -7221,13 +7221,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # anything missing there is missing from the confirm POST.
                 # Passing {} left Apply with no device and no feature, and it
                 # came back "No router was named in that request".
-                push_multi = {"feature": ["routes"], "device": [name]}
+                push_multi = {"feature": ["routes"], "device": [name],
+                              "view": ["wan"]}
                 # Absent = "turn failover off" to routes_plan, so only pass it
                 # on when the router actually has failover running now.
                 if flat.get("fo_enabled") == "1":
                     push_flat["fo_enabled"] = "1"
                     push_multi["fo_enabled"] = ["1"]
-                return self._device_push_post(push_flat, push_multi, user)
+                return self._device_push_post(push_flat, push_multi, user,
+                                              view_slug="wan")
             # Only reachable from a stale page that predates the hidden
             # push field. Say plainly that the router was not touched rather
             # than reporting a bare "saved", which is what made this tab
@@ -7287,7 +7289,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if audit:
                     audit.close()
 
-        def _device_push_post(self, flat, multi, user):
+        def _device_push_post(self, flat, multi, user, view_slug=None):
             from .config import build_device
             from .device import DeviceError
             from .push import FEATURES, Pusher, PushError, rw_device
@@ -7295,6 +7297,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
             slug = flat.get("feature", "")
             name = flat.get("device", "")
+            # Which tab to SHOW, as distinct from which feature to push. The
+            # WAN tab applies its distances through the routes feature, and
+            # rendering the result on the Routes tab dumped the reader on a
+            # page they had not asked for, mid-task. Carried in the form so
+            # it survives the preview -> Apply round trip.
+            view = flat.get("view") or view_slug or slug
+            if view not in FEATURES:
+                view = slug
             feature = FEATURES.get(slug)
             raw = self._device_raw(name)
             if feature is None or raw is None:
@@ -7337,7 +7347,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         audit.append(name, uname, slug,
                                      "apply" if commit else "dry-run", "error",
                                      f"could not read the router: {exc}", str(exc))
-                    return self._feature_tab_page(name, user, slug, error=str(exc))
+                    return self._feature_tab_page(name, user, view, error=str(exc))
                 # Safety net: snapshot the whole config to a named backup BEFORE
                 # committing a real change, so you can restore it from the
                 # Backups tab if the change breaks something. Skipped on dry-run
@@ -7351,16 +7361,16 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                      feature=slug + ":backup")
                     except PushError as exc:
                         return self._feature_tab_page(
-                            name, user, slug,
+                            name, user, view,
                             error=f"Could not create the safety backup before "
                                   f"applying ({exc}). Nothing was changed — free "
                                   f"up flash space or check the router, then retry.")
                 try:
                     pusher.apply(plan, feature=slug)  # logs its own outcome
                 except PushError as exc:
-                    return self._feature_tab_page(name, user, slug, error=str(exc))
+                    return self._feature_tab_page(name, user, view, error=str(exc))
                 if not commit:
-                    return self._feature_tab_page(name, user, slug, preview=plan,
+                    return self._feature_tab_page(name, user, view, preview=plan,
                                                   submitted=multi)
                 # After applying the hub-tunnel feature, register the router's
                 # WireGuard public key as a peer on this server automatically.
@@ -7402,13 +7412,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                             feature=slug + ":arm-revert")
                         sess = self._session()
                         return self._send(200, _render_confirm_page(
-                            name, user, slug, _REVERT_MINUTES, bkname, hub_ip,
+                            name, user, view, _REVERT_MINUTES, bkname, hub_ip,
                             sess["csrf"] if sess else ""),
                             "text/html; charset=utf-8")
                     except PushError:
                         pass  # couldn't arm; fall through to the normal result
                 return self._redirect(
-                    f"/device?name={quote(name)}&tab={slug}&msg=" +
+                    f"/device?name={quote(name)}&tab={view}&msg=" +
                     quote("Changes applied to the router."))
             finally:
                 dev.close()
