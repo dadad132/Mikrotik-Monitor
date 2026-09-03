@@ -82,16 +82,23 @@ TABS = [
                "failover numbers them by position instead (1st = 1, 2nd = 2, "
                "…), and switching failover off leaves that line's distance "
                "exactly as it already was.",
-               'Save. Failover itself is switched on over on the '
+               "Press <b>Save &amp; apply to router</b>. You get the same "
+               "preview the Routes tab gives — the exact route changes your "
+               "new distances produce — and you confirm them there.",
+               "<b>Save without applying</b> records the details and sends "
+               "nothing, which is what you want when the router is offline.",
+               'Failover itself is switched on over on the '
                '<a href="#tab-routes">Routes tab</a>.',
                "For policy routing, add a row marking a source subnet and the "
                "line it should go out of, then Preview and Apply."],
-     "warn": "A changed Distance is saved to the line straight away, but "
-             "RouterOS only applies it to the real route on that line's "
-             "<b>next reconnect</b>. easymikrotik will not force it — that "
-             "line may be the one carrying its own connection to this router, "
-             "so bouncing it risks cutting itself off. Reconnect the line "
-             "yourself, or wait, to make a distance change take effect now."},
+     "warn": "How fast a new Distance takes effect depends on the line. On a "
+             "<b>DHCP or fixed line with failover on</b>, applying changes the "
+             "route there and then. On a <b>dial-up (PPPoE) line</b>, RouterOS "
+             "only picks the new distance up on that line's <b>next "
+             "reconnect</b> — easymikrotik will not force it, because that "
+             "line may be the one carrying its own connection back to us, so "
+             "bouncing it risks cutting itself off. Reconnect it yourself, or "
+             "wait, if you need a PPPoE change to land immediately."},
 
     {"slug": "security", "title": "Security — firewall", "art": None,
      "what": "Common firewall protections as switches. Rules the router "

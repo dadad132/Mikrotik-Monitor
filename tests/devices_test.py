@@ -305,6 +305,23 @@ check("...and the editor points at the guide instead of carrying 220 words "
       'href="/guide#tab-wan"' in wed_detect
       and "List your internet links" not in wed_detect)
 
+# Reported live: a customer changed a Distance, pressed Save, was told "WAN
+# uplinks saved", and the router kept its old value -- because saving wrote
+# the device record and never contacted the router.
+check("the editor offers a save that actually reaches the router, not only "
+      "one that writes the record",
+      'name="push" value="1"' in wed_detect
+      and "Save &amp; apply to router" in wed_detect)
+check("...and keeps a record-only save for when the router is offline",
+      "Save without applying" in wed_detect)
+_fo_on = web._wan_uplink_editor("R", cfgwan, "csrf", ifaces=[], failover_on=True)
+_fo_off = web._wan_uplink_editor("R", cfgwan, "csrf", ifaces=[], failover_on=False)
+check("the live failover state travels with the form -- routes_plan reads a "
+      "missing fo_enabled as 'switch failover off', so a distance change "
+      "would otherwise tear down the failover it was meant to adjust",
+      'name="fo_enabled" value="1"' in _fo_on
+      and 'name="fo_enabled" value=""' in _fo_off)
+
 # The interface picker groups dial-up (PPPoE/PPTP/L2TP) separately from
 # plain ethernet ports, so it's clear at a glance which kind of connection
 # each option is instead of guessing from a raw RouterOS type name.

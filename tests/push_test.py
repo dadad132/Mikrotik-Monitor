@@ -2353,6 +2353,67 @@ check("the DHCP secondary's real distance (11) is shown, distinct from "
       "the primary's",
       rec_dhcp is not None and rec_dhcp["_dist"] == "11")
 
+# Reported live: a customer changed a Distance on the WAN tab, pressed Save,
+# was told "WAN uplinks saved", and the router kept its old distance. Saving
+# wrote the device record and never contacted the router at all -- the numbers
+# only reached it via a separate Apply on the Routes tab.
+print("changing a Distance produces a real change for the router:")
+
+
+class _DL:
+    def __init__(self, interface, distance, name="", gateway="", link_type=""):
+        self.interface, self.distance = interface, distance
+        self.name, self.gateway, self.link_type = name, gateway, link_type
+
+
+_dcfg = types.SimpleNamespace(
+    name="R-dist",
+    wan=types.SimpleNamespace(links=[_DL("ether1", 10), _DL("ether2", 11)]))
+_dstate = {
+    ("ip", "route"): [
+        {".id": "*1", "comment": "mikromon:failover:primary",
+         "dst-address": "0.0.0.0/0", "gateway": "196.1.1.1",
+         "distance": "1", "active": "true"},
+        {".id": "*2", "comment": "mikromon:failover:secondary",
+         "dst-address": "0.0.0.0/0", "gateway": "10.0.0.1",
+         "distance": "2", "active": "true"},
+    ],
+    ("ip", "dhcp-client"): [
+        {".id": "*a", "interface": "ether1", "gateway": "196.1.1.1",
+         "status": "bound", "add-default-route": "no"},
+        {".id": "*b", "interface": "ether2", "gateway": "10.0.0.1",
+         "status": "bound", "add-default-route": "no"},
+    ],
+    ("interface", "pppoe-client"): [],
+    ("interface", "l2tp-client"): [],
+    ("ppp", "active"): [],
+    ("ip", "address"): [],
+    ("ip", "firewall", "nat"): [],
+    ("tool", "netwatch"): [],
+}
+_dp = F.routes_plan(Pusher(_dcfg, FakeApi(dict(_dstate)), dry_run=True),
+                    _dcfg, {"fo_enabled": "1"}, {})
+_set_dists = {op.params.get("distance") for op in _dp.ops
+              if op.action == "set" and op.path == ("ip", "route")}
+check("the plan actually moves the router's routes to the Distances typed on "
+      "the WAN tab, rather than leaving them where they were",
+      _set_dists == {"10", "11"})
+check("...so the plan is not empty, which is what the customer was really "
+      "reporting: pressing Save changed nothing anywhere",
+      not _dp.empty)
+
+# The same save must not quietly switch failover off. routes_plan reads a
+# missing fo_enabled as "turn it off", so the WAN tab has to pass the live
+# state through rather than omitting it.
+_off = F.routes_plan(Pusher(_dcfg, FakeApi(dict(_dstate)), dry_run=True),
+                     _dcfg, {}, {})
+_removes_routes = any(op.action == "remove" and op.path == ("ip", "route")
+                      for op in _off.ops)
+check("with fo_enabled absent the plan TEARS FAILOVER DOWN -- which is why "
+      "the WAN tab carries the live state in a hidden field instead of "
+      "leaving it out",
+      _removes_routes)
+
 # Reported live: WAN tab set to 10 and 11, Routes tab showed 1 and 11.
 # Once failover sets add-default-route=no, RouterOS stops reporting the
 # client's default-route-distance, and on a client that is not currently

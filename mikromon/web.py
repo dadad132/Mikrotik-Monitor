@@ -4724,7 +4724,7 @@ def _wan_is_dialup_type(itype: str) -> bool:
 
 
 def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None,
-                       detected_gateways=None) -> str:
+                       detected_gateways=None, failover_on=False) -> str:
     """Editable WAN uplink list (saved to the device record, not pushed).
 
     When ifaces is a list of interface dicts (fetched live from the router),
@@ -4830,8 +4830,25 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None,
             f'<tbody>{body}</tbody></table>'
             f'<button type="button" class="btn ghost" onclick="pushAddRow(\'wl\')" '
             f'style="margin-top:6px">+ Add uplink</button>'
+            # Failover's current state rides along so the push below
+            # reapplies the distances without also flipping failover
+            # off -- routes_plan reads an absent fo_enabled as "off".
+            f'<input type="hidden" name="fo_enabled" '
+            f'value="{"1" if failover_on else ""}">'
             f'<div class="actions" style="margin-top:12px">'
-            f'<button class="btn" type="submit">Save WAN uplinks</button></div>'
+            # Saving used to write the record and stop there, so a
+            # customer who changed a Distance, pressed Save and read
+            # "saved" had every reason to think the router had changed.
+            # It had not. This one saves AND shows what that means on
+            # the router -- the same preview the Routes tab gives.
+            f'<button class="btn" type="submit" name="push" value="1">'
+            f'Save &amp; apply to router</button>'
+            f'<button class="btn ghost" type="submit">'
+            f'Save without applying</button></div>'
+            f'<p class="muted" style="font-size:12px;margin:8px 0 0">'
+            f'Applying shows you the exact changes first, the same as '
+            f'the Routes tab. Save without applying only records the '
+            f'details &mdash; useful when the router is offline.</p>'
             f'</form><template id="tmpl-wl">{row(None)}</template></div>')
 
 
@@ -4967,7 +4984,8 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                         confirm_action="/device/push", cfg=None,
                         extra_html="", extra_actions="", report_html="",
                         wan_ifaces=None, online_ifaces=None,
-                        detected_gateways=None, can_manage=None) -> str:
+                        detected_gateways=None, can_manage=None,
+                        failover_on=False) -> str:
     if can_manage is None:
         can_manage = AuthStore.is_admin(user or {})
     tabbar = _device_tabbar(name, slug, can_manage, csrf)
@@ -5085,7 +5103,8 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
     # works even when the router is unreachable). Hidden during the confirm step.
     wan_editor = (_wan_uplink_editor(name, cfg, csrf, ifaces=wan_ifaces,
                                      online_ifaces=online_ifaces,
-                                     detected_gateways=detected_gateways)
+                                     detected_gateways=detected_gateways,
+                                     failover_on=failover_on)
                   if slug == "wan" and preview is None else "")
     logbox = _recent_log_box(recent or [], device=name)
     # What this tab is FOR now lives in the guide, one click away on the "?".
@@ -6991,6 +7010,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             wan_ifaces = cached_ifaces or None
             online_ifaces = set()
             detected_gateways = {}
+            # Whether gateway failover is currently on, so the WAN tab's Save
+            # can push the distances WITHOUT accidentally switching failover
+            # off (an absent fo_enabled reads as "turn it off" to routes_plan).
+            wan_failover_on = False
             _report_html = report_html  # local copy; may be overridden below
             if preview is None and not error:
                 from .device import DeviceError
@@ -7003,6 +7026,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     api.connect()
                     pusher = Pusher(cfg, api)
                     current = feature["read"](pusher, cfg)
+                    wan_failover_on = bool((current or {}).get("failover_routes"))
                     if slug == "tunnel" and devices_db:
                         hub = _hub_load(_hub_path(devices_db))
                         role, info = _vpn_group_info(hub, name)
@@ -7068,7 +7092,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 confirm_action=confirm_action, cfg=cfg, extra_html=extra_html,
                 extra_actions=extra_actions, report_html=_report_html,
                 wan_ifaces=wan_ifaces, online_ifaces=online_ifaces,
-                detected_gateways=detected_gateways, can_manage=can_manage)
+                detected_gateways=detected_gateways, can_manage=can_manage,
+                failover_on=wan_failover_on)
             return self._send(200, page, "text/html; charset=utf-8")
 
         def _nextdns_push(self, cfg, user) -> str:
@@ -7159,8 +7184,23 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     _ss.save()
                 except Exception:
                     pass
+            # "Save & apply": hand straight over to the same push path the
+            # Routes tab uses, so the customer sees the exact route changes
+            # their new Distances produce and confirms them. Without this the
+            # button wrote a number into our database and nothing else, while
+            # telling them it was saved.
+            if flat.get("push") == "1":
+                push_flat = {"feature": "routes", "device": name,
+                             "csrf": flat.get("csrf", "")}
+                # Absent = "turn failover off" to routes_plan, so only pass it
+                # on when the router actually has failover running now.
+                if flat.get("fo_enabled") == "1":
+                    push_flat["fo_enabled"] = "1"
+                return self._device_push_post(push_flat, {}, user)
             return self._redirect(f"/device?name={quote(name)}&tab=wan&msg=" +
-                                  quote("WAN uplinks saved."))
+                                  quote("WAN uplinks saved. Nothing was sent "
+                                        "to the router — use Save & apply for "
+                                        "that."))
 
         def _device_adopt_post(self, flat, user):
             from .config import build_device
