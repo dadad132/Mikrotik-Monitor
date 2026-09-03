@@ -4172,12 +4172,27 @@ def _field_html(desc) -> str:
     return ""
 
 
-def _hidden_from_multi(multi, skip=("csrf", "apply")) -> str:
+def _hidden_from_multi(multi, skip=("csrf", "apply"), *, device="",
+                      feature="") -> str:
+    """Re-emit a submitted form as hidden inputs, for the Apply that follows
+    a preview.
+
+    `device` and `feature` are passed in rather than trusted to be present in
+    `multi`, because they decide WHICH router and WHICH change the Apply acts
+    on, and a preview built by any other code path may not have carried them.
+    One did not, and its Apply button posted a confirmed change with no target
+    at all -- the router could not even be named in the refusal.
+    """
     out = []
+    seen = set()
     for k, vals in multi.items():
         if k in skip:
             continue
+        seen.add(k)
         for v in vals:
+            out.append(f'<input type="hidden" name="{esc(k)}" value="{esc(v)}">')
+    for k, v in (("device", device), ("feature", feature)):
+        if v and k not in seen:
             out.append(f'<input type="hidden" name="{esc(k)}" value="{esc(v)}">')
     return "".join(out)
 
@@ -5033,7 +5048,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                 f'<form method="POST" action="{confirm_action}">'
                 f'<input type="hidden" name="csrf" value="{csrf}">'
                 f'<input type="hidden" name="apply" value="1">'
-                f'{_hidden_from_multi(submitted or {})}'
+                f'{_hidden_from_multi(submitted or {}, device=name, feature=slug)}'
                 f'<div class="actions">'
                 f'<button class="btn" type="submit">Yes, do it</button>'
                 f'<a class="btn ghost" href="/device?name={q}&tab={slug}">Cancel'
@@ -5057,7 +5072,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                 f'<form method="POST" action="{confirm_action}">'
                 f'<input type="hidden" name="csrf" value="{csrf}">'
                 f'<input type="hidden" name="apply" value="1">'
-                f'{_hidden_from_multi(submitted or {})}'
+                f'{_hidden_from_multi(submitted or {}, device=name, feature=slug)}'
                 f'{safe}'
                 f'<div class="actions">'
                 f'<button class="btn" type="submit">Confirm &amp; apply to the '
@@ -7202,11 +7217,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if flat.get("push") == "1":
                 push_flat = {"feature": "routes", "device": name,
                              "csrf": flat.get("csrf", "")}
+                # The preview page rebuilds its Apply form from `multi`, so
+                # anything missing there is missing from the confirm POST.
+                # Passing {} left Apply with no device and no feature, and it
+                # came back "No router was named in that request".
+                push_multi = {"feature": ["routes"], "device": [name]}
                 # Absent = "turn failover off" to routes_plan, so only pass it
                 # on when the router actually has failover running now.
                 if flat.get("fo_enabled") == "1":
                     push_flat["fo_enabled"] = "1"
-                return self._device_push_post(push_flat, {}, user)
+                    push_multi["fo_enabled"] = ["1"]
+                return self._device_push_post(push_flat, push_multi, user)
             # Only reachable from a stale page that predates the hidden
             # push field. Say plainly that the router was not touched rather
             # than reporting a bare "saved", which is what made this tab

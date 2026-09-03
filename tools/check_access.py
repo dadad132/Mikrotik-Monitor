@@ -35,7 +35,9 @@ def _load_paths(cfg_path: str):
                 elif line.startswith("devices_db:"):
                     devices_db = line.split(":", 1)[1].strip().strip("'\"")
     except OSError as exc:
-        sys.exit(f"could not read {cfg_path}: {exc}")
+        sys.exit(f"could not read {cfg_path}: {exc}\n"
+                 f"Pass the path explicitly, e.g.\n"
+                 f"    python tools/check_access.py /opt/mikromon/config.yaml")
     return auth_db, devices_db
 
 
@@ -50,7 +52,15 @@ def _rows(db_path: str, sql: str):
 
 
 def main() -> None:
-    cfg_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
+    # The installer puts it in /opt/mikromon, which is not where you are
+    # standing when you clone the repo to run this.
+    _DEFAULTS = ("config.yaml", "/opt/mikromon/config.yaml",
+                 "/etc/mikromon/config.yaml")
+    if len(sys.argv) > 1:
+        cfg_path = sys.argv[1]
+    else:
+        cfg_path = next((c for c in _DEFAULTS if os.path.exists(c)),
+                        _DEFAULTS[0])
     auth_db, devices_db = _load_paths(cfg_path)
     print(f"config      {cfg_path}")
     print(f"auth_db     {auth_db}")

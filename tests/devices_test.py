@@ -324,6 +324,41 @@ check("there is only ONE save button, so there is no way to save and quietly "
       and "without applying" not in wed_detect)
 # Pressing Enter in a text box submits with no button value, which used to
 # fall through to the silent record-only path.
+# Reported live: Save & apply reached the preview, and pressing Apply there
+# came back "No router was named in that request". The preview page rebuilds
+# its Apply form entirely from the submitted fields, and the WAN tab handed it
+# an empty set -- so the confirm POST identified neither the router nor the
+# change.
+from mikromon.push.plan import Plan as _Plan, Operation as _Op
+from mikromon.push import FEATURES as _FEATS
+_prev = _Plan("R", [_Op("set", ("ip", "route"), {".id": "*1", "distance": "10"},
+                        desc="set distance 10")], summary="routes")
+
+
+def _apply_fields(submitted):
+    html = web._render_feature_tab(
+        "R", {"login": "o@a.c", "role": "owner", "org_id": 1}, "routes",
+        _FEATS["routes"], "CSRF", preview=_prev, submitted=submitted)
+    form = re.search(r'<form method="POST" action="/device/push">.*?</form>',
+                     html, re.S).group(0)
+    got = dict(re.findall(r'name="(\w+)" value="([^"]*)"', form))
+    got.pop("csrf", None)
+    return got
+
+
+check("the Apply button under a preview always names the router and the "
+      "change, even when the preview was built by a caller that submitted "
+      "nothing — otherwise it posts a confirmed change with no target",
+      _apply_fields({}).get("device") == "R"
+      and _apply_fields({}).get("feature") == "routes")
+check("...and does not duplicate them when the submission already had them",
+      list(_apply_fields({"device": ["R"], "feature": ["routes"]}).items()).count(
+          ("device", "R")) == 1)
+check("...while still carrying the rest of the submission through, so Apply "
+      "acts on what was previewed and not on a different plan",
+      _apply_fields({"device": ["R"], "feature": ["routes"],
+                     "fo_enabled": ["1"]}).get("fo_enabled") == "1")
+
 check("the push flag is a hidden field rather than a value on the button, so "
       "submitting with the Enter key pushes too",
       '<input type="hidden" name="push" value="1">' in wed_detect)
