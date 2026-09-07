@@ -780,6 +780,35 @@ check("_sync_vpn_group_to_hub writes both the peers file and the routes file",
       and "192.168.1.0/24" in open(vpn_routesp).read())
 
 # provisioning script: "lock API" binds api/api-ssl to the tunnel subnet + sets
+# A router provisioned twice under slightly different names leaves the older
+# peer registered on the hub. The router keeps only the newest private key, so
+# the stale peer can never hand-shake and its tunnel address answers on no
+# port at all -- indistinguishable, from the dashboard, from a router that is
+# switched off. Both real examples below came from a live fleet, where they
+# sat two lines apart in a report and were spotted only by eye.
+print("near-duplicate tunnel peers (the same router provisioned twice):")
+_fleet = ["BB Energy", "ECA Consulting", "ECA Richards Bay", "ECA Richardsbay",
+          "ECA Vryheid", "Geely Alberton", "Geely Edenvale", "Home", "Howler",
+          "Jetour Edenvale", "Mobilis Boksburg", "Mobilis Geely Edenvale",
+          "My IT - Home", "My IT - Office", "My It", "Test", "test"]
+_pairs = {frozenset(p) for p in web._near_duplicate_names(_fleet)}
+check("names differing only by a space are flagged",
+      frozenset({"ECA Richards Bay", "ECA Richardsbay"}) in _pairs)
+check("a name that wholly contains another is flagged, which is what a "
+      "rename-and-reprovision actually looks like",
+      frozenset({"Geely Edenvale", "Mobilis Geely Edenvale"}) in _pairs)
+check("names differing only by case are flagged",
+      frozenset({"Test", "test"}) in _pairs)
+check("a short common word does NOT flag unrelated sites -- 'Home' inside "
+      "'My IT - Home' is the false alarm that would train people to ignore "
+      "this warning",
+      frozenset({"Home", "My IT - Home"}) not in _pairs
+      and frozenset({"My It", "My IT - Office"}) not in _pairs)
+check("two genuinely different sites sharing a first word are left alone",
+      frozenset({"Geely Alberton", "Geely Edenvale"}) not in _pairs)
+check("...so the real fleet raises exactly three pairs, not a wall of noise",
+      len(_pairs) == 3)
+
 # up API-SSL, so the API has no public exposure. Only emitted with a tunnel.
 locked = web._provision_script(
     "R", {"host": "1.1.1.1"}, "mon", "pw1234567890", hub_ip="102.36.140.219",
@@ -788,10 +817,20 @@ locked = web._provision_script(
 check("lock-API binds api + api-ssl to the tunnel subnet (plain API, no cert)",
       # /16 (not /24): matches the peer's allowed-address widening so any
       # device on the hub's 10.10.x.x range can still reach the API.
-      "/ip service set api address=10.10.0.0/16" in locked
-      and "/ip service set api-ssl address=10.10.0.0/16" in locked
+      "available-from=10.10.0.0/16" in locked
+      and locked.count("available-from=10.10.0.0/16") == 2
       and "certificate add" not in locked
       and "api-ssl certificate=" not in locked)
+# RouterOS 7.24 renamed this property and warns that the old name goes away;
+# 7.18 has never heard of the new one. A fleet spanning both needs each
+# router to pick for itself.
+check("the new property name is tried first, with the old one as a fallback, "
+      "so the same script works on 7.18 and on 7.24 without a warning",
+      ":do { /ip service set api available-from=10.10.0.0/16 } "
+      "on-error={ /ip service set api address=10.10.0.0/16 }" in locked)
+check("...and the same for api-ssl",
+      ":do { /ip service set api-ssl available-from=10.10.0.0/16 } "
+      "on-error={ /ip service set api-ssl address=10.10.0.0/16 }" in locked)
 check("tunnel-accept firewall rule is moved FIRST so a drop can't block it",
       'move [find comment="mikromon:tunnel:fw"] destination=0' in locked)
 check("provisioning enables WebFig + Winbox for remote management over tunnel",
@@ -802,7 +841,8 @@ unlocked = web._provision_script(
     hub_pubkey="HUBKEY=", wg_priv="PRIV=", tunnel_ip="10.10.0.2",
     subnet="10.10.0.0/24", lock_api=False)
 check("lock-API omitted when not requested",
-      "/ip service set api address=" not in unlocked)
+      "available-from=" not in unlocked
+      and "/ip service set api address=" not in unlocked)
 # single user: ONE full-access login does both monitoring and config-push
 oneu = web._provision_script(
     "R", {"host": "1.1.1.1"}, "mikromon", "pw1234567890")
@@ -2237,6 +2277,31 @@ try:
           "EXPECTEDPUBKEY=" in _keyed
           and "KEY MISMATCH" in _keyed
           and "public-key" in _keyed)
+    # Found on a live router: the peer carried our comment but sat on
+    # interface "peer3" while the tunnel address was on "mikromon". The add
+    # only runs when no peer has our comment, so an existing mis-parented one
+    # was found, skipped and left there. It printed rx=0 tx=296 -- sending,
+    # receiving nothing, which from the dashboard is indistinguishable from a
+    # router that is switched off.
+    check("the peer is re-parented to our own interface on EVERY run, not "
+          "only when it is first created -- one found on another interface "
+          "used to be left there, splitting the tunnel across two interfaces",
+          'comment="mikromon:tunnel:hub"] interface=mikromon' in _keyed)
+
+    # The script is pasted, and RouterOS runs each top-level line of a paste
+    # as its own script -- so :local on one line is gone by the next. Split
+    # across lines this threw "syntax error (line 1 column 12)", then compared
+    # two empty variables, found them equal, and printed "key OK" without ever
+    # reading a key. A check that reports success when it did not run is worse
+    # than no check at all.
+    _blk = _keyed[:_keyed.index(":local mmwant")].rstrip().splitlines()[-1]
+    check("the key check opens a brace block, so a pasted script keeps its "
+          "variables long enough for the check to actually run",
+          _blk.strip() == "{")
+    check("...and the script's braces balance, so the paste terminates "
+          "instead of leaving the terminal waiting on an unclosed block",
+          _keyed.count("{") == _keyed.count("}"))
+
     check("...and it runs BEFORE the handshake wait, so a key problem is not "
           "misread as a blocked link",
           _keyed.index("KEY MISMATCH")

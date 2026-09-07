@@ -160,6 +160,41 @@ def _all_devices(store, state, allowed=None) -> list:
     return [_device_view(store, state, n) for n in names]
 
 
+def _near_duplicate_names(names) -> list:
+    """Pairs of peer names that differ only by spacing, case or punctuation.
+
+    "ECA Richards Bay" / "ECA Richardsbay" and "Geely Edenvale" / "Mobilis
+    Geely Edenvale" are the real examples this was written for. Compares on
+    letters and digits only, and also treats one name containing the whole of
+    another as a match, since re-provisioning usually adds a prefix rather
+    than editing what was there.
+    """
+    def key(n):
+        return "".join(ch for ch in str(n).lower() if ch.isalnum())
+
+    # A containment match only counts when the shorter name is long enough to
+    # be distinctive. Without this, "Home" matches "My IT - Home" and "My It"
+    # matches both "My IT - Home" and "My IT - Office" -- three false alarms
+    # on one real fleet, which is how a warning stops being read.
+    _MIN_CONTAINED = 10
+
+    out, seen = [], set()
+    items = [(n, key(n)) for n in names]
+    for i, (n_a, k_a) in enumerate(items):
+        for n_b, k_b in items[i + 1:]:
+            if not k_a or not k_b:
+                continue
+            if k_a == k_b:
+                same = True          # same name bar spacing/case/punctuation
+            else:
+                short, long_ = sorted((k_a, k_b), key=len)
+                same = short in long_ and len(short) >= _MIN_CONTAINED
+            if same and (n_a, n_b) not in seen:
+                seen.add((n_a, n_b))
+                out.append((n_a, n_b))
+    return out
+
+
 def _build_wg_diagnostics_lines(devices_db) -> list:
     """Hub/tunnel-level diagnostics for the same downloadable report: what
     hub.json has registered (router peers, Personal VPN peers, VPN
@@ -197,12 +232,60 @@ def _build_wg_diagnostics_lines(devices_db) -> list:
     lines.append("")
 
     leases_meta = hub.get("leases_meta") or {}
+    # Cross-check the tunnel peers against the routers actually being
+    # monitored. A peer with no device behind it is the fingerprint of a
+    # router provisioned twice under slightly different names: each run mints
+    # a NEW keypair and a NEW tunnel address, the old peer is left registered,
+    # and the router only ever holds the LAST private key it was given. If it
+    # ends up back on the older config, the hub sits waiting for a handshake
+    # signed with a key that no longer exists -- which looks exactly like
+    # "the router is offline", from a router you can log into all day.
+    #
+    # Cost nothing to compute and it was sitting in this report unseen: a
+    # dead peer next to a live near-twin, two lines apart, spotted only by
+    # eye.
+    known_devices = set()
+    try:
+        _ds = DevicesStore(devices_db)
+        try:
+            known_devices = {str(n) for n in _ds.names()}
+        finally:
+            _ds.close()
+    except Exception:  # noqa: BLE001 — diagnostics must never fail to render
+        pass
+
+    orphans = sorted(n for n in leases_meta if n not in known_devices)
+    twins = _near_duplicate_names(list(leases_meta))
+
     lines.append(f"Registered router peers ({len(leases_meta)}):")
     for name, m in sorted(leases_meta.items()):
+        flag = ""
+        if known_devices and name in orphans:
+            flag = "   <-- NO monitored device uses this peer"
         lines.append(f"  {name}: ip={m.get('ip', '?')} "
-                     f"pubkey={'set' if m.get('pubkey') else 'MISSING'}")
+                     f"pubkey={'set' if m.get('pubkey') else 'MISSING'}{flag}")
     if not leases_meta:
         lines.append("  (none)")
+    if orphans and known_devices:
+        lines.append("")
+        lines.append(f"  {len(orphans)} peer(s) above have no monitored "
+                     f"device. Usually left behind by a rename or a second")
+        lines.append("  provisioning run. Harmless on their own, but see the "
+                     "near-duplicate check below.")
+    for a_name, b_name in twins:
+        lines.append("")
+        lines.append(f"  !! \"{a_name}\" and \"{b_name}\" are near-identical "
+                     f"names holding SEPARATE tunnel keys.")
+        lines.append("     Most likely the same physical router provisioned "
+                     "twice. A router keeps only the")
+        lines.append("     newest private key, so the other peer can never "
+                     "hand-shake and its address will")
+        lines.append("     answer on no port at all. If one of these is "
+                     "'offline' while you can log into")
+        lines.append("     the router fine, compare the router's own "
+                     "/interface/wireguard public-key against")
+        lines.append("     both entries here -- whichever it does NOT match "
+                     "is the stale one.")
     lines.append("")
 
     roadwarriors = hub.get("roadwarriors") or {}
@@ -3708,8 +3791,17 @@ def _provision_script(name, raw, pwuser, pwd, *,
           + port + " allowed-address=" + net
           + ' persistent-keepalive=25s comment="mikromon:tunnel:hub"')
         a("}")
+        # interface= is set here, not just on the add. The add only runs when
+        # no peer carries our comment, so a peer that already exists on a
+        # DIFFERENT WireGuard interface was found, skipped, and left where it
+        # was -- while the tunnel address went on `mikromon`. Seen live on a
+        # router whose peer sat on `peer3`: handshakes left one interface, the
+        # address lived on another, and the peer printed rx=0 tx=296. From the
+        # dashboard that is indistinguishable from a router being switched
+        # off, and from the router it looks perfectly configured.
         a('/interface wireguard peers set '
           '[/interface wireguard peers find comment="mikromon:tunnel:hub"] '
+          'interface=mikromon '
           'public-key="' + hub_pubkey + '" endpoint-address=' + hub_ip
           + " endpoint-port=" + port + " allowed-address=" + net
           + " persistent-keepalive=25s")
@@ -3736,6 +3828,17 @@ def _provision_script(name, raw, pwuser, pwd, *,
         # router can read its own, so the two can simply be compared.
         if wg_pub:
             a(':put ""')
+            # One brace block, deliberately. The script is meant to be PASTED,
+            # and RouterOS runs each top-level line of a paste as its own
+            # script -- so `:local` on one line is gone by the next. Split
+            # across lines, `:set mmhave` threw "syntax error (line 1 column
+            # 12)" because mmhave did not exist in that line's scope, and then
+            # BOTH variables read as empty, compared equal, and the check
+            # cheerfully printed "key OK" without ever having read a key.
+            # A check that reports success when it did not run is worse than
+            # no check. Braces make the terminal buffer the whole thing and
+            # run it once, which is the only way the variables survive.
+            a("{")
             a(':local mmwant "' + wg_pub + '"')
             a(':local mmhave ""')
             a(':do { :set mmhave [/interface wireguard get '
@@ -3752,6 +3855,7 @@ def _provision_script(name, raw, pwuser, pwd, *,
               'the script,"')
             a('  :put "  or set it by hand from the /interface wireguard '
               'line in it."')
+            a("}")
             a("}")
         a(':put "mikromon: waiting 6s for the WireGuard handshake..."')
         a(":delay 6s")
@@ -3780,8 +3884,21 @@ def _provision_script(name, raw, pwuser, pwd, *,
             a("#    API-SSL/cert needed - the tunnel is the encryption). Runs LAST")
             a("#    so you don't lock yourself out mid-script: you reach mikromon")
             a("#    over the tunnel afterwards, on plain API (8728).")
-            a("/ip service set api address=" + net)
-            a("/ip service set api-ssl address=" + net)
+            # RouterOS 7.24 renamed this property from `address` to
+            # `available-from` ("backwards compatible via deprecation", per
+            # MikroTik's own changelog) -- so 7.24 still accepts the old name
+            # but prints a deprecation warning, and says it will be removed.
+            #
+            # This fleet spans 7.18 to 7.24, and 7.18 has never heard of
+            # `available-from`. So try the new name and fall back: new
+            # RouterOS takes it silently, old RouterOS errors on the unknown
+            # keyword and uses the one it knows. No version parsing, no
+            # warning on either, and it keeps working the day MikroTik
+            # actually drops `address`.
+            for _svc in ("api", "api-ssl"):
+                a(":do { /ip service set " + _svc + " available-from=" + net
+                  + " } on-error={ /ip service set " + _svc
+                  + " address=" + net + " }")
     a("")
     a('/log info "mikromon provisioning done"')
     return "\n".join(L)
