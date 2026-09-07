@@ -35,7 +35,7 @@ from .config import DEFAULT_CHECKS
 from .metrics import MetricsStore
 from .util import human_bps, human_duration
 from .web_shared import (
-    esc, _BRAND, _REVERT_MINUTES, _PAGE_CSS, _SHELL_CSS,
+    esc, _flash, _BRAND, _REVERT_MINUTES, _PAGE_CSS, _SHELL_CSS,
     _header, _page, parse_multipart_form,
     _THEME_VARS, _THEME_INIT_JS, _THEME_TOGGLE_JS,
 )
@@ -5416,7 +5416,7 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
                 f'<div class="chips">{src_boxes}</div>', full=True)
         + field("Enabled checks", f'<div class="chips">{chk_boxes}</div>', full=True))
 
-    msg_html = f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else ""
+    msg_html = _flash(msg)
 
     def _device_modal(modal_id, title, form_action, original_name, submit_lbl,
                       form_fields, intro=""):
@@ -9583,8 +9583,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             csrf = sess["csrf"] if sess else ""
             tabbar = _device_tabbar(name, "tempaccess", True, csrf)
             host = facts.get("host") or raw.get("host", "")
-            note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
-                   (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
+            note = _flash(msg, error)
             creds_html = ""
             if creds:
                 if creds.get("webfig_url") or creds.get("winbox_addr"):

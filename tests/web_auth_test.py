@@ -865,6 +865,36 @@ check("but the warnings that only matter at the moment of action stayed on "
 check("...and every on-page warning names a real tab",
       all(w in _slugs for w in _gt.ONPAGE_WARNINGS))
 
+# Reported live: new users could not tell whether a button had worked, so
+# they pressed it again. A result the reader misses is the same as no result.
+print("acting on something says so, clearly:")
+import mikromon.web_shared as _ws
+
+_ok = _ws._flash(msg="WAN uplinks saved.")
+_bad = _ws._flash(error="Could not reach the router.")
+check("a success is a banner, not a line of coloured text that gets read past",
+      'class="flash ok"' in _ok and "WAN uplinks saved." in _ok)
+check("a failure is visually distinct from a success, so the two are not "
+      "confused at a glance",
+      'class="flash bad"' in _bad and 'class="flash ok"' not in _bad)
+check("nothing is rendered when there is nothing to say",
+      _ws._flash() == "")
+check("both are announced to a screen reader, and as the right kind — a "
+      "failure interrupts, a success does not",
+      'role="alert"' in _bad and 'role="status"' in _ok)
+check("the message is escaped, since some of them carry text straight back "
+      "from a router",
+      "&lt;b&gt;" in _ws._flash(msg="<b>hi</b>"))
+
+_shell = _ws._page("t", "<p>x</p>")
+check("every page carries the busy-state script, so a slow action shows it "
+      "is running instead of looking like it did nothing",
+      "mmBusy" in _shell and "Working" in _shell)
+check("...and it hides the pressed button rather than disabling it — a "
+      "disabled control's name/value is not submitted, and several forms "
+      "here identify the action that way",
+      "display" in _shell and "ghost" in _shell)
+
 print("the free plan cap is stated honestly everywhere it appears:")
 import mikromon.web_auth as _wa
 from mikromon.billing import FREE_DEVICES as _FREE

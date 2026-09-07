@@ -208,6 +208,25 @@ _PAGE_CSS = """
    text-decoration:none;vertical-align:middle}
  .helpdot:hover{color:var(--accent);border-color:var(--accent);
    background:var(--accent-soft)}
+ /* Result banners. Sized to be seen: the previous one-line version was read
+    past, and someone who cannot tell whether their click worked clicks
+    again. */
+ .flash{display:flex;align-items:flex-start;gap:10px;margin:0 0 16px;
+   padding:13px 16px;border-radius:8px;font-size:14.5px;line-height:1.5;
+   border:1px solid transparent}
+ .flash-i{flex:none;font-weight:700;line-height:1.35}
+ .flash.ok{background:#dcfce7;border-color:#86efac;color:#14532d}
+ .flash.bad{background:#fee2e2;border-color:#fca5a5;color:#7f1d1d}
+ @media (prefers-color-scheme:dark){
+   :root:not([data-theme="light"]) .flash.ok{background:#052e16;
+     border-color:#166534;color:#bbf7d0}
+   :root:not([data-theme="light"]) .flash.bad{background:#3a0d0d;
+     border-color:#991b1b;color:#fecaca}
+ }
+ :root[data-theme="dark"] .flash.ok{background:#052e16;border-color:#166534;
+   color:#bbf7d0}
+ :root[data-theme="dark"] .flash.bad{background:#3a0d0d;border-color:#991b1b;
+   color:#fecaca}
  /* Guide: figures, numbered steps, and the warnings that stayed on the tabs
     when the explanatory grey text moved into the guide. */
  .gfig{margin:16px 0;padding:14px;background:var(--surface-2);
@@ -525,10 +544,63 @@ def _header(user, active="/dashboard") -> str:
             f'{foot}</aside>')
 
 
+_BUSY_JS = """
+<script>
+/* Pressing a button that talks to a router can take many seconds. With no
+   feedback people cannot tell a slow request from one that did nothing, so
+   they press again -- which is how a change gets applied twice. Every submit
+   now says what it is doing and stops accepting a second press. */
+(function(){
+  document.addEventListener('submit', function(ev){
+    var f = ev.target;
+    if (!f || f.tagName !== 'FORM' || f.dataset.mmBusy) return;
+    var btn = ev.submitter
+           || f.querySelector('button[type=submit], button:not([type])');
+    if (!btn || btn.dataset.mmNoBusy) return;
+    f.dataset.mmBusy = '1';
+    var label = (btn.dataset.mmBusyLabel || 'Working…');
+    /* The value of a disabled control is NOT submitted, so a button that
+       carries name=/value= (which is how several forms here say WHICH action
+       was pressed) must keep its name until the browser has serialised the
+       form. Hide it and show a stand-in instead. */
+    var ghost = document.createElement('button');
+    ghost.type = 'button';
+    ghost.className = btn.className;
+    ghost.disabled = true;
+    ghost.textContent = label;
+    btn.parentNode.insertBefore(ghost, btn);
+    btn.style.display = 'none';
+    f.querySelectorAll('button[type=submit], button:not([type])').forEach(
+      function(b){ if (b !== btn) b.disabled = true; });
+  }, true);
+})();
+</script>
+"""
+
+
+def _flash(msg: str = "", error: str = "") -> str:
+    """The banner shown after an action, at a size that gets noticed.
+
+    It used to be a thin green line of text, which people read straight past
+    and then pressed the button again because nothing looked different. A
+    result the reader misses is the same as no result.
+    """
+    out = ""
+    if error:
+        out += (f'<div class="flash bad" role="alert">'
+                f'<span class="flash-i">&#9888;</span>'
+                f'<span>{esc(error)}</span></div>')
+    if msg:
+        out += (f'<div class="flash ok" role="status">'
+                f'<span class="flash-i">&#10003;</span>'
+                f'<span>{esc(msg)}</span></div>')
+    return out
+
+
 def _page(title: str, body: str) -> str:
     return (f'<!doctype html><html><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1">'
             f'{_THEME_INIT_JS}'
             f'<title>{esc(title)}</title>'
             f'<style>{_THEME_VARS}{_SHELL_CSS}{_PAGE_CSS}</style></head>'
-            f'<body class="has-sidebar">{body}{_THEME_TOGGLE_JS}</body></html>')
+            f'<body class="has-sidebar">{body}{_THEME_TOGGLE_JS}{_BUSY_JS}</body></html>')

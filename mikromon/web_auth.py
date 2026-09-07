@@ -15,7 +15,7 @@ from .billing import (payment_reference, PLANS, GRACE_DAYS, FREE_DEVICES,
                       plan_by_name)
 from .util import human_bytes
 from .web_shared import (
-    _BRAND, _PAGE_CSS, esc, _header, _page, _who,
+    _BRAND, _PAGE_CSS, esc, _flash, _header, _page, _who,
     _THEME_VARS, _THEME_INIT_JS, _THEME_TOGGLE_JS, _theme_toggle_btn,
 )
 
@@ -106,8 +106,7 @@ def _render_signup(error: str = "", values=None, has_regions: bool = False) -> s
 
 def _render_account(user, csrf: str, msg: str = "", error: str = "",
                     org: dict | None = None) -> str:
-    note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
-           (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
+    note = _flash(msg, error)
     org_name = user.get("org_name", "")
     uname_row = (f'<p>Username <span class="muted">(your existing login — you can '
                  f'keep using it)</span><br><input value="{esc(user["username"])}" '
@@ -335,8 +334,7 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user,
               <button class="btn red" type="submit">Delete</button>
             </form>'''}
           </td></tr>""")
-    note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
-           (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
+    note = _flash(msg, error)
     inner = (
         f'<div class="wrap"><h1>Team &mdash; {esc(user.get("org_name", ""))}</h1>'
         f'{note}'
@@ -568,8 +566,7 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                        f'device{"" if FREE_DEVICES == 1 else "s"} &middot; '
                        f'choose a packet to add more</p>')
 
-    note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
-           (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
+    note = _flash(msg, error)
 
     # Cancel button shown only when there's an active PayFast subscription token
     cancel_btn = ""
@@ -1071,8 +1068,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        router_count: int = 0, hub_pubkey: str = "",
                        regions=None, nextdns=None, quotes=None) -> str:
     """Platform superadmin panel — shows all orgs, billing status, and device counts."""
-    note = (f'<p style="color:#16a34a">{esc(msg)}</p>' if msg else "") + \
-           (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
+    note = _flash(msg, error)
 
     _status_counts: dict[str, int] = {}
     tbody = ""
