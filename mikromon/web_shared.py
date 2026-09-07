@@ -215,6 +215,13 @@ _PAGE_CSS = """
    padding:13px 16px;border-radius:8px;font-size:14.5px;line-height:1.5;
    border:1px solid transparent}
  .flash-i{flex:none;font-weight:700;line-height:1.35}
+ /* First-visit explainer. A panel, not a modal: it must not stand between a
+    person and the work they came to do. */
+ .tipcard{border-left:4px solid var(--accent);background:var(--accent-soft)}
+ .tiphead{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+ .tipbadge{font-size:10.5px;font-weight:700;text-transform:uppercase;
+   letter-spacing:.09em;color:#fff;background:var(--accent);
+   padding:3px 8px;border-radius:20px}
  .flash.ok{background:#dcfce7;border-color:#86efac;color:#14532d}
  .flash.bad{background:#fee2e2;border-color:#fca5a5;color:#7f1d1d}
  @media (prefers-color-scheme:dark){

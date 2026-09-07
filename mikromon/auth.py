@@ -119,6 +119,12 @@ class AuthStore:
         self.db.commit()
         # Additive column migrations — safe to run every startup.
         self._add_col_if_missing("users", "phone", "TEXT")
+        # Which first-visit tips this person has already dismissed. Per user
+        # rather than in the browser, so someone who signs in from the office
+        # PC and then a laptop is not taught the same thing twice, and an
+        # owner can put them back for a member who is struggling.
+        self._add_col_if_missing("users", "seen_tips",
+                                 "TEXT NOT NULL DEFAULT '[]'")
         # Opt-in per person, so a member allocated three branches can be told
         # when one of THOSE goes down without also being told about every
         # other site in the company.
@@ -508,6 +514,35 @@ class AuthStore:
 
     def set_billing_contact(self, cfg: dict) -> None:
         self.set_setting("billing_contact", cfg)
+
+    def seen_tips(self, identifier: str) -> set:
+        """Tips this person has dismissed. "*" means they asked for none."""
+        row = self.db.execute(
+            "SELECT seen_tips FROM users WHERE lower(email) = ? "
+            "OR lower(username) = ? LIMIT 1",
+            ((identifier or "").strip().lower(),) * 2).fetchone()
+        if not row:
+            return set()
+        try:
+            return set(json.loads(row[0] or "[]"))
+        except (json.JSONDecodeError, TypeError):
+            return set()
+
+    def mark_tip_seen(self, identifier: str, key: str) -> None:
+        """Remember one tip as dismissed. Never un-marks: a tip that has been
+        read once should not come back because of a later save."""
+        seen = self.seen_tips(identifier)
+        seen.add(str(key))
+        self._update(self._require(identifier)["id"],
+                     seen_tips=json.dumps(sorted(seen)))
+
+    def mute_all_tips(self, identifier: str) -> None:
+        """Turn the lot off. Stored as a single marker rather than by listing
+        today's tips, so tips added later stay off too -- somebody who said
+        "stop showing me these" meant all of them, not the ones that existed
+        when they said it."""
+        self._update(self._require(identifier)["id"],
+                     seen_tips=json.dumps(["*"]))
 
     def set_alert_optin(self, identifier: str, on: bool) -> None:
         """Whether this person wants alert email for the routers they can see."""

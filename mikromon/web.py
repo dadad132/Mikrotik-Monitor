@@ -40,6 +40,7 @@ from .web_shared import (
     _THEME_VARS, _THEME_INIT_JS, _THEME_TOGGLE_JS,
 )
 from .web_auth import (
+    _first_visit_tip, _welcome_tip,
     _render_login, _render_signup, _render_account,
     _render_admin, _render_guide,
     _render_billing, _render_locked, _grace_banner_html,
@@ -1965,12 +1966,17 @@ def _firmware_chip(devs) -> str:
 
 
 def _render_dashboard(store, state, user=None, allowed=None, csrf="",
-                      ignored=None) -> str:
+                      ignored=None, seen_tips=None) -> str:
     devs = sorted((d for d in _all_devices(store, state, allowed)
                    if _device_has_data(d)),
                   key=lambda d: ({"crit": 0, "ok": 1}[_severity(d)],
                                  d["device"].lower()))
     summary = _fleet_summary(devs)
+    # Shown once, to somebody who has just signed in for the first
+    # time. Below the fleet, not above it: the routers are what they
+    # came for, and an explainer that pushes the product off the
+    # screen reads as an obstacle rather than help.
+    welcome = _welcome_tip(user or {}, csrf, seen_tips)
     # Counted from the same list the panel renders, with the ignored ones
     # already removed. summary["alerts"] is the raw condition total and
     # counts things this dashboard has been told not to show -- a chip
@@ -2027,6 +2033,7 @@ def _render_dashboard(store, state, user=None, allowed=None, csrf="",
 <input id="q" class="dash-search" placeholder="Search devices…">
 </div></div>
 <div class="dash-chips">{chips}</div>
+{welcome}
 {cards}
 {charts}
 {table}
@@ -5183,7 +5190,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                         extra_html="", extra_actions="", report_html="",
                         wan_ifaces=None, online_ifaces=None,
                         detected_gateways=None, can_manage=None,
-                        failover_on=False) -> str:
+                        failover_on=False, seen_tips=None) -> str:
     if can_manage is None:
         can_manage = AuthStore.is_admin(user or {})
     tabbar = _device_tabbar(name, slug, can_manage, csrf)
@@ -5313,7 +5320,8 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
     intro = (f'<div class="fwarn" style="margin:-2px 0 14px">&#9888; {esc(_w)}'
              f'</div>' if _w else "")
     inner = (f'<div class="wrap" style="max-width:1100px">'
-             f'<h1>{esc(name)} &middot; {esc(feature["title"])}</h1>{tabbar}{intro}'
+             f'<h1>{esc(name)} &middot; {esc(feature["title"])}</h1>{tabbar}'
+             f'{_first_visit_tip(slug, user, csrf, seen_tips)}{intro}'
              f'{_facts_strip(facts or {})}{banner}{err}{report_html}'
              f'{wan_editor}{body}{logbox}'
              f'<p class="muted">These engines are experimental — every push is '
@@ -6024,7 +6032,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._send(200, _render_dashboard(
                         store, state, user, allowed,
                         csrf=(_sess["csrf"] if _sess else ""),
-                        ignored=_ig), "text/html; charset=utf-8")
+                        ignored=_ig,
+                        seen_tips=(auth.seen_tips(user["login"])
+                                   if auth else set())),
+                        "text/html; charset=utf-8")
                 # if path == "/inventory":
                 #     return self._send(200, _render_inventory(store, state, user,
                 #                       allowed), "text/html; charset=utf-8")
@@ -7305,7 +7316,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 extra_actions=extra_actions, report_html=_report_html,
                 wan_ifaces=wan_ifaces, online_ifaces=online_ifaces,
                 detected_gateways=detected_gateways, can_manage=can_manage,
-                failover_on=wan_failover_on)
+                failover_on=wan_failover_on,
+                seen_tips=(auth.seen_tips(user["login"]) if auth else set()))
             return self._send(200, page, "text/html; charset=utf-8")
 
         def _nextdns_push(self, cfg, user) -> str:
@@ -9110,6 +9122,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_account()
             if path == "/account/send-test-email":
                 return self._post_test_email()
+            if path == "/tips/seen":
+                return self._post_tips_seen()
             user = self._user()
             # Superadmin server-backup actions: dispatched before the
             # generic is_admin (org-owner) gate below, since a platform
@@ -9559,6 +9573,37 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._redirect("/login?error=1")
             token = sessions.create(user["login"])
             return self._redirect("/dashboard", self._cookie_header(token))
+
+        def _post_tips_seen(self):
+            """Dismiss a first-visit tip, or all of them.
+
+            Recorded against the person, not the browser, so signing in from
+            somewhere else does not teach them the same thing again.
+            """
+            user = self._user()
+            if not user:
+                return self._redirect("/login")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            back = self.headers.get("Referer") or "/dashboard"
+            if not back.startswith("/"):
+                # Only ever return somewhere on this site: Referer is
+                # attacker-controllable and this is a redirect target.
+                from urllib.parse import urlparse as _up
+                _p = _up(back)
+                back = (_p.path + ("?" + _p.query if _p.query else "")) or "/dashboard"
+            if auth is None:
+                return self._redirect(back)
+            try:
+                if flat.get("mode") == "all":
+                    auth.mute_all_tips(user["login"])
+                else:
+                    auth.mark_tip_seen(user["login"], flat.get("tip", ""))
+            except Exception:  # noqa: BLE001 — a tip must never break a page
+                log.exception("could not record tip dismissal")
+            return self._redirect(back)
 
         def _post_account(self):
             user = self._user()

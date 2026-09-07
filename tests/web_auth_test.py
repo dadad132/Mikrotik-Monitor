@@ -867,6 +867,52 @@ check("...and every on-page warning names a real tab",
 
 # Reported live: new users could not tell whether a button had worked, so
 # they pressed it again. A result the reader misses is the same as no result.
+print("first-visit tips teach the tabs as they are opened:")
+import mikromon.web_auth as _wt
+from mikromon import guide_tabs as _gtabs
+
+_tip = _wt._first_visit_tip("routes", {"role": "owner"}, "CSRF", seen=set())
+check("a tab explains itself the first time it is opened",
+      "First time here" in _tip and "Gateway Failover" in _tip)
+check("...using the SAME copy as the guide, so there is one description of "
+      "each tab rather than a second one written for onboarding that nobody "
+      "ever edits again",
+      _gtabs.BY_SLUG["routes"]["what"] in _tip)
+check("...and it links to the full instructions rather than trying to be "
+      "them",
+      'href="/guide#tab-routes"' in _tip)
+check("a tab already dismissed says nothing",
+      _wt._first_visit_tip("routes", {}, "C", seen={"routes"}) == "")
+check("dismissing ONE tab does not silence the others — they arrive when "
+      "each is first opened, which is when they are useful",
+      _wt._first_visit_tip("wan", {}, "C", seen={"routes"}) != "")
+check("'stop showing me these' silences all of them, including tabs added "
+      "later — somebody who said that meant all of them, not the ones that "
+      "existed at the time",
+      _wt._first_visit_tip("wan", {}, "C", seen={"*"}) == ""
+      and _wt._welcome_tip({}, "C", seen={"*"}) == "")
+check("no csrf token means no tip, rather than a dismiss button that would "
+      "be rejected on submit",
+      _wt._first_visit_tip("routes", {}, "", seen=set()) == "")
+check("an unknown tab renders nothing instead of an empty card",
+      _wt._first_visit_tip("no-such-tab", {}, "C", seen=set()) == "")
+
+_wel = _wt._welcome_tip({"role": "owner"}, "CSRF", seen=set())
+check("a brand-new person gets three sentences on the dashboard, not a tour "
+      "of sixteen tabs before they may look at anything",
+      "Three things" in _wel and _wel.count("<li>") == 3)
+check("...it points at the ? as the way to learn each tab, so the lesson is "
+      "how to find help rather than a list to memorise",
+      "?" in _wel and "/guide" in _wel)
+check("...and it says the safety net out loud, since fear of breaking "
+      "something is what stops a new person pressing anything at all",
+      "previewed" in _wel and "undone by the router itself" in _wel)
+_wel_m = _wt._welcome_tip({"role": "member"}, "CSRF", seen=set())
+check("a member is told the screen shows the routers they were given, not "
+      "the whole company's",
+      "routers you have been given" in _wel_m
+      and "every router in your company" in _wel)
+
 print("acting on something says so, clearly:")
 import mikromon.web_shared as _ws
 

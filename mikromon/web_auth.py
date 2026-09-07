@@ -1244,6 +1244,91 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
     return _page("Platform Admin", _header(user, "/superadmin") + inner)
 
 
+def _welcome_tip(user, csrf: str, seen=None) -> str:
+    """Shown once, on the dashboard, to somebody who has just signed in for
+    the first time.
+
+    Four sentences, not a tour. Somebody who has never managed a router does
+    not need to be walked through sixteen tabs before they are allowed to
+    look at anything -- they need to know what this screen is, that the "?"
+    on every tab will explain that tab, and that nothing they press goes to a
+    router without showing them first. The rest is learned by doing, with the
+    per-tab tips arriving exactly when each tab is first opened.
+    """
+    seen = seen if seen is not None else set()
+    if "*" in seen or "welcome" in seen or not csrf:
+        return ""
+    owner = AuthStore.is_owner(user)
+    scope = ("every router in your company" if owner
+             else "the routers you have been given")
+    return (
+        f'<div class="box tipcard">'
+        f'<div class="tiphead"><span class="tipbadge">Welcome</span>'
+        f'<h2 style="margin:0">Three things and you are going</h2></div>'
+        f'<ol class="gsteps" style="margin:12px 0 0">'
+        f'<li><b>This screen is the fleet.</b> Each card is one router, from '
+        f'{scope}. Green is fine; anything red or amber wants a look.</li>'
+        f'<li><b>Click a router to open it.</b> Its tabs each do one job, and '
+        f'every tab has a <b>?</b> on the right that explains that tab in '
+        f'plain language.</li>'
+        f'<li><b>Nothing reaches a router without showing you first.</b> '
+        f'Every change is previewed, backed up before it is applied, and '
+        f'undone by the router itself if it loses contact with us. You '
+        f'cannot break a site by pressing the wrong thing once.</li>'
+        f'</ol>'
+        f'<p style="margin:12px 0 0;font-size:13px">'
+        f'<a href="/guide">Read the full guide &rarr;</a></p>'
+        f'<form method="POST" action="/tips/seen" class="actions" '
+        f'style="margin-top:14px">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<input type="hidden" name="tip" value="welcome">'
+        f'<button class="btn" type="submit" name="mode" value="one">'
+        f'Got it</button>'
+        f'<button class="btn ghost" type="submit" name="mode" value="all">'
+        f'Stop showing me these</button></form></div>')
+
+
+def _first_visit_tip(slug: str, user, csrf: str, seen=None) -> str:
+    """A short explainer the first time somebody opens a tab, and never again.
+
+    Built from guide_tabs, the same copy the "?" buttons link to, so there is
+    exactly one description of each tab in the product. A second copy written
+    for onboarding would be the one that goes stale, because nobody edits the
+    thing they only see once.
+
+    Shown as a panel, never a modal: it must not stand between a person and
+    the work, and somebody who already knows should be able to ignore it
+    rather than dismiss it. Two ways out -- this one, or all of them -- since
+    an experienced user should not have to close sixteen of these one by one.
+    """
+    seen = seen if seen is not None else set()
+    if "*" in seen or slug in seen:
+        return ""
+    tab = guide_tabs.BY_SLUG.get(slug)
+    if not tab or not csrf:
+        return ""
+    steps = "".join(f"<li>{st}</li>" for st in (tab.get("steps") or [])[:4])
+    more = (f'<p style="margin:10px 0 0;font-size:13px">'
+            f'<a href="/guide#tab-{esc(slug)}">Full instructions for this tab '
+            f'&rarr;</a></p>')
+    return (
+        f'<div class="box tipcard">'
+        f'<div class="tiphead"><span class="tipbadge">First time here</span>'
+        f'<h2 style="margin:0">{tab["title"]}</h2></div>'
+        f'<p style="margin:8px 0 0">{tab["what"]}</p>'
+        + (f'<ol class="gsteps" style="margin:12px 0 0">{steps}</ol>'
+           if steps else "")
+        + more
+        + f'<form method="POST" action="/tips/seen" class="actions" '
+          f'style="margin-top:14px">'
+          f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+          f'<input type="hidden" name="tip" value="{esc(slug)}">'
+          f'<button class="btn" type="submit" name="mode" value="one">'
+          f'Got it</button>'
+          f'<button class="btn ghost" type="submit" name="mode" value="all">'
+          f'Stop showing me these</button></form></div>')
+
+
 def _guide_tab_block(t: dict) -> str:
     """One device tab's help, anchored so the tab's own "?" can land on it.
 
