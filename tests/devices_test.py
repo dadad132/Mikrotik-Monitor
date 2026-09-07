@@ -2283,8 +2283,27 @@ try:
           "submitted, so doing that posts an empty set and turns everything "
           "off",
           "disabled" not in _code)
-    check("...it blocks further clicking a way that still submits the values",
-          "pointerEvents" in _code)
+    # The freezing itself lives in the shared busy handler now, so every
+    # form behaves the same way; the toggle just says a switch started it.
+    import mikromon.web_shared as _wsh
+    # The only thing the shared handler disables is the stand-in button it
+    # creates itself -- no name, no value, nothing to lose. What matters is
+    # that it never disables a control the form is carrying values in.
+    _busy_code = chr(10).join(
+        l for l in _wsh._BUSY_JS.split(chr(10))
+        if "/*" not in l and "*/" not in l and not l.strip().startswith("*")
+        and "disabled control" not in l and "never `disabled`" not in l)
+    check("...it hands off to the shared busy handler, which freezes the form "
+          "rather than disabling the controls carrying the values",
+          "mmToggleBusy" in _code
+          and "pointerEvents" in _busy_code
+          and "ghost.disabled" in _busy_code
+          and "btn.disabled" not in _busy_code
+          and "b.disabled" not in _busy_code
+          and "o.disabled" not in _busy_code)
+    check("...and the switch says what it is doing, next to itself, rather "
+          "than a button elsewhere on the page claiming to be busy",
+          "please wait" in _code and "turning on" in _code)
 
     check("a non-instant form is ignored by the script even if a switch "
           "carries the marker, so the opt-out cannot be defeated by markup "

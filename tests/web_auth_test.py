@@ -975,6 +975,21 @@ check("...and it hides the pressed button rather than disabling it — a "
       "disabled control's name/value is not submitted, and several forms "
       "here identify the action that way",
       "display" in _shell and "ghost" in _shell)
+check("...and the WHOLE form goes busy, not just the control that was "
+      "pressed, so a switch halfway down the page still makes it obvious "
+      "something is running",
+      "opacity" in _ws._BUSY_JS and "pointerEvents" in _ws._BUSY_JS)
+# The values live in these controls. Freezing them is fine; disabling them
+# means the browser never sends them, which is how one switch turned every
+# protection off.
+check("the busy state NEVER disables a form control, anywhere — a disabled "
+      "control is not submitted, and these carry the values being sent",
+      "o.disabled = true" not in _ws._BUSY_JS
+      and "b.disabled = true" not in _ws._BUSY_JS)
+check("a switch that started the submit is not overridden by a button "
+      "relabel, since the button it would pick is Preview and that is not "
+      "what is running",
+      "mmToggleBusy" in _ws._BUSY_JS)
 
 print("the free plan cap is stated honestly everywhere it appears:")
 import mikromon.web_auth as _wa

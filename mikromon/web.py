@@ -4271,18 +4271,19 @@ _FEATURE_JS = """
          if (lbl){
            var s=document.createElement('span');
            s.style.cssText='margin-left:8px;font-size:12px;opacity:.75';
-           s.textContent = sw.checked ? 'turning on…' : 'turning off…';
+           s.textContent = (sw.checked ? 'turning on' : 'turning off')
+                         + '… please wait';
            lbl.appendChild(s);
          }
-         /* Do NOT disable these. A disabled control is not submitted, so
-            disabling every switch before submitting posted a form with none
-            of them ticked -- which the engine correctly read as "turn all of
-            them off", and did. Blocking pointer events stops a second click
-            racing the first without removing the values. */
-         f.querySelectorAll('.fields').forEach(function(box){
-           box.style.pointerEvents = 'none';
-           box.style.opacity = '0.6';
-         });
+         /* Tell the shared busy handler a switch started this, so it dims
+            the form but does not relabel a button -- the switch has already
+            said what is happening, and the button it would pick is Preview,
+            which is not what is running.
+            Note what is NOT here: disabling anything. A disabled control is
+            not submitted, and these switches carry the values being sent.
+            Disabling them posted a form with none ticked, which the engine
+            read as "turn all of them off". */
+         f.dataset.mmToggleBusy = '1';
          if (f.requestSubmit) f.requestSubmit(); else f.submit();
        });
      });

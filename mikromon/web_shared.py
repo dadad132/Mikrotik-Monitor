@@ -553,18 +553,34 @@ def _header(user, active="/dashboard") -> str:
 
 _BUSY_JS = """
 <script>
-/* Pressing a button that talks to a router can take many seconds. With no
+/* Pressing anything that talks to a router can take many seconds. With no
    feedback people cannot tell a slow request from one that did nothing, so
-   they press again -- which is how a change gets applied twice. Every submit
-   now says what it is doing and stops accepting a second press. */
+   they press again -- which is how a change gets applied twice. Everything
+   that submits now says it is busy, in the same way, wherever it lives. */
 (function(){
   document.addEventListener('submit', function(ev){
     var f = ev.target;
     if (!f || f.tagName !== 'FORM' || f.dataset.mmBusy) return;
+    f.dataset.mmBusy = '1';
+
+    /* Dim and freeze the whole form, so the busy state is obvious even when
+       the control that started it is a switch halfway down the page.
+       pointer-events, never `disabled`: a disabled control is not submitted,
+       and these carry the values being sent. Getting that wrong once turned
+       every firewall protection off. */
+    f.style.transition = 'opacity .12s';
+    f.style.opacity = '0.55';
+    f.style.pointerEvents = 'none';
+
+    /* A switch that started this has already said "turning on/off..." next
+       to itself. Relabelling a button as well would point at the wrong
+       control -- and the button it would pick is Preview, which is not what
+       is happening. */
+    if (f.dataset.mmToggleBusy) return;
+
     var btn = ev.submitter
            || f.querySelector('button[type=submit], button:not([type])');
     if (!btn || btn.dataset.mmNoBusy) return;
-    f.dataset.mmBusy = '1';
     var label = (btn.dataset.mmBusyLabel || 'Working…');
     /* The value of a disabled control is NOT submitted, so a button that
        carries name=/value= (which is how several forms here say WHICH action
@@ -577,8 +593,6 @@ _BUSY_JS = """
     ghost.textContent = label;
     btn.parentNode.insertBefore(ghost, btn);
     btn.style.display = 'none';
-    f.querySelectorAll('button[type=submit], button:not([type])').forEach(
-      function(b){ if (b !== btn) b.disabled = true; });
   }, true);
 })();
 </script>
