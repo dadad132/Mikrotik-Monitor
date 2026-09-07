@@ -2222,6 +2222,44 @@ try:
 
     # --- Provision tab: generate a bootstrap script + save strong creds ---
     st, body = get(admin, "/device?name=WebR1&tab=provision")
+    # Reported live: people pressed "Generate script" to LOOK at the script.
+    # Both buttons mint a new password and tunnel key and store them at once,
+    # so the router stopped connecting -- and the only warning was one clause
+    # at the end of a grey paragraph BELOW the buttons.
+    _new = web._provision_actions(False, False)
+    _live = web._provision_actions(True, True)
+    _dark = web._provision_actions(True, False)
+    check("a router that has never been set up gets a plain primary button "
+          "and no scary warning — there is nothing to break yet",
+          "confirm(" not in _new and "Set up automatically" in _new)
+    check("a router that is ALREADY set up must confirm first, on both "
+          "buttons, since either one re-keys it",
+          _live.count("confirm(") == 2 and _dark.count("confirm(") == 2)
+    check("...and the confirmation says what happens in plain words, not in "
+          "RouterOS vocabulary the person clicking may never have met",
+          "NEW password" in _live and "STOP connecting" in _live
+          and "WireGuard" not in _live and "RouterOS" not in _live)
+    check("...and says so more firmly when the router is working right now, "
+          "which is exactly when pressing it is worst",
+          "working right now" in _live and "working right now" not in _dark)
+    check("neither button is the page's primary action once a router is set "
+          "up — nothing here is needed by a router that is connecting",
+          'class="btn ghost"' in _live and 'class="btn"' not in
+          _live.replace('class="btn ghost"', ""))
+
+    _p_new = web._render_device_provision(
+        "R", {"role": "owner", "login": "o@a.c"}, {"host": "10.10.0.5"}, "C",
+        hub_ip="1.2.3.4", provisioned=False, online=False)
+    _p_up = web._render_device_provision(
+        "R", {"role": "owner", "login": "o@a.c"}, {"host": "10.10.0.5"}, "C",
+        hub_ip="1.2.3.4", provisioned=True, online=True)
+    check("the page says which of the two situations you are in, instead of "
+          "looking identical either way",
+          "not set up yet" in _p_new and "already set up" in _p_up)
+    check("...and tells a confused reader they do not need this page at all "
+          "when the router is fine",
+          "should not need this page" in _p_up)
+
     check("admin can open the Provision tab",
           st == 200 and "Generate provisioning script" in body)
     st, body = post(admin, "/device/provision",

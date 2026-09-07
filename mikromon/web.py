@@ -3926,8 +3926,49 @@ def _secret_field(lbl, val, fid):
             f'onclick="mmReveal(this,\'{fid}\')">Show</button></div></div>')
 
 
+def _provision_actions(provisioned: bool, online: bool) -> str:
+    """The two provisioning buttons, worded and guarded for the state the
+    router is actually in.
+
+    On a router that already works these are destructive: both mint a new
+    password and a new tunnel key and store them immediately, so a press that
+    is not followed through leaves the router unable to connect. That was
+    invisible -- the consequence was one clause at the end of a grey paragraph
+    BELOW the buttons -- and people pressed Generate to look at the script and
+    broke working sites. The wording avoids RouterOS vocabulary entirely,
+    because the person clicking it may never have opened Winbox.
+    """
+    if not provisioned:
+        return (
+            '<div class="actions" style="margin-top:12px">'
+            '<button class="btn" type="submit" name="auto" value="1">'
+            'Set up automatically</button> '
+            '<button class="btn ghost" type="submit" name="auto" value="0">'
+            'Give me a script to paste</button></div>')
+
+    ask = (("This router is working right now. " if online else "")
+           + "Setting it up again gives it a NEW password and a NEW tunnel "
+             "key. It will STOP connecting until the new setup has finished "
+             "on the router itself. Only do this if it is not connecting and "
+             "you are fixing it. Continue?")
+    # Single quotes around the message, so it sits inside the double-quoted
+    # onclick attribute without escaping gymnastics. The text is ours, not a
+    # router's, so there is nothing in it that needs quoting.
+    js = ' onclick="return confirm(\'' + ask + '\')"'
+    return (
+        '<div class="actions" style="margin-top:12px">'
+        '<button class="btn ghost" type="submit" name="auto" value="1"'
+        + js + '>Set it up again</button> '
+        '<button class="btn ghost" type="submit" name="auto" value="0"'
+        + js + '>Give me a new script</button></div>'
+        '<p class="muted" style="font-size:12px;margin:8px 0 0">'
+        'A router that is already connecting does not need anything on this '
+        'page.</p>')
+
+
 def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
-                             creds=None, msg="", error="") -> str:
+                             creds=None, msg="", error="", provisioned=False,
+                             online=False) -> str:
     tabbar = _device_tabbar(name, "provision", True, csrf)
     q = quote(name)
     banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
@@ -3936,13 +3977,36 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
            f'</div>' if error else "")
     pwuser = ((raw or {}).get("push_username") or (raw or {}).get("username")
               or "mkmonitor")
-    intro = ('<p class="muted" style="margin:-6px 0 14px">Generate a one-paste '
-             'script for a new router. It creates a management user with a strong '
-             'password (saved here), optionally enables the API, and adds a '
-             '<b>WireGuard</b> dial-home tunnel. The hub IP + keys are filled from '
-             '<b>this</b> server, and the device is registered as a WireGuard peer '
-             'on the hub automatically — no manual entry. (WireGuard tunnel needs '
-             'RouterOS 7.1+.)</p>')
+    # This page reads completely differently depending on whether the router
+    # has been set up, and it used to look identical either way. Both buttons
+    # mint a NEW password and a NEW tunnel key and store them at once -- right
+    # for a new router, a way to break a working one. Reported live: people
+    # pressed Generate to have a LOOK at the script, and the site stopped
+    # connecting, because nothing said that looking and changing were the same
+    # act.
+    if not provisioned:
+        intro = ('<div class="box" style="border-left:4px solid var(--accent)">'
+                 '<h2 style="margin-top:0">This router is not set up yet</h2>'
+                 '<p style="margin-bottom:0">Use one of the buttons below, '
+                 'once. They create a login for ' + esc(_BRAND) + ', switch on '
+                 'the connection it uses, and link the router back to this '
+                 'server privately &mdash; so you never need a fixed address '
+                 'or anything opened up at the site. Nothing here can harm a '
+                 'router that is not set up yet.</p></div>')
+    else:
+        _state = ("connected and being monitored right now" if online
+                  else "set up already, but not reachable at the moment")
+        _tone = "var(--success)" if online else "var(--warning)"
+        intro = ('<div class="box" style="border-left:4px solid ' + _tone + '">'
+                 '<h2 style="margin-top:0">This router is already set up</h2>'
+                 '<p>It is <b>' + _state + '</b>. You should not need this '
+                 'page again unless it has stopped connecting.</p>'
+                 '<p style="margin-bottom:0"><b>Both buttons below give it a '
+                 'brand-new password and a brand-new key</b>, saved here '
+                 'straight away. The router keeps its old ones until the new '
+                 'setup actually finishes on it &mdash; so pressing a button '
+                 'and not seeing it through is what stops a router '
+                 'connecting.</p></div>')
     form = (
         f'<div class="box"><h2>Generate provisioning script</h2>'
         f'<form method="POST" action="/device/provision">'
@@ -3974,18 +4038,12 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
         f'needed; needs the tunnel above)</label>'
         f'</div></div>'
         f'</div>'
-        f'<div class="actions" style="margin-top:12px">'
-        f'<button class="btn ghost" type="submit" name="auto" value="0">Generate '
-        f'script instead</button> '
-        f'<button class="btn" type="submit" name="auto" value="1">Provision now '
-        f'(connect &amp; apply)</button></div></form>'
-        f'<p class="muted"><b>Provision now</b> connects to the router over its '
-        f'API (using the Host + login from the Devices page) and sets everything '
-        f'up automatically — no terminal, nothing to paste. Use it for a router '
-        f'you can reach now (e.g. on the LAN with its default login). <b>Generate '
-        f'script</b> is the fallback when you can\'t reach it directly. Either way '
-        f'a NEW key + password is created and the peer registered on the '
-        f'server.</p></div>')
+        + _provision_actions(provisioned, online)
+        + f'</form>'
+        f'<p class="muted"><b>Set up automatically</b> connects to the router over its API (using the Host and login from the Devices page) and '
+        f'does the whole thing itself &mdash; no terminal, nothing to paste. Use it when you can reach the router now, for example on its own '
+        f'LAN with its default login. <b>Give me a script to paste</b> is for when you cannot reach it directly: you copy the script into the '
+        f'router&rsquo;s terminal yourself.</p></div>')
     out = ""
     c = creds or {}
     if script is not None or c.get("applied"):
@@ -6776,9 +6834,22 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             csrf = sess["csrf"] if sess else ""
             hub = _hub_load(_hub_path(devices_db))
             hub_ip = hub.get("hub_ip") or _detect_server_ip()
+            # Already set up = the hub holds a tunnel key for it. Working = the
+            # last poll actually reached it. The page reads very differently in
+            # those two states, because pressing Generate means "set this up"
+            # in one and "break this and start again" in the other.
+            provisioned = bool((hub.get("leases_meta") or {}).get(name, {})
+                               .get("pubkey"))
+            st = _load_state(state_file) if state_file else {}
+            cond = ((st.get("devices", {}).get(name, {}) or {})
+                    .get("conditions", {}) or {})
+            online = (cond.get("reachability", {}).get("status") == "ok"
+                      and bool((st.get("devices", {}).get(name, {}) or {})
+                               .get("facts")))
             page = _render_device_provision(name, user, raw, csrf, hub_ip=hub_ip,
                                             script=script, creds=creds, msg=msg,
-                                            error=error)
+                                            error=error, provisioned=provisioned,
+                                            online=online)
             return self._send(200, page, "text/html; charset=utf-8")
 
         def _device_provision_post(self, flat, user):
