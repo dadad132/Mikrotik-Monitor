@@ -1201,8 +1201,14 @@ try:
           "otherorgkey" in still_there.get("roadwarriors", {}))
     st, body = get(admin, "/logs")
     check("admin can open the activity log", st == 200 and "activity log" in body.lower())
+    # `nobody` here is a signed-in MEMBER. This used to assert 403: members
+    # were locked out of Activity entirely, so someone looking after three
+    # branches had to ask the owner what had happened on their own sites.
+    # They are let in now and the rows are narrowed to their allocation.
     st, _ = get(nobody, "/logs")
-    check("non-admin blocked from the activity log (403)", st == 403)
+    check("a member is no longer locked out of the activity log — the rows "
+          "are scoped to their own routers instead",
+          st == 200)
 
     # The Activity tab must be scoped per-company — a user (even a
     # superadmin, viewing their OWN Activity tab) must never see another
@@ -2362,6 +2368,21 @@ try:
     st, _ = post(bob, "/devices/save",
                  {"csrf": bcsrf2, "name": "X", "host": "1.1.1.1"})
     check("member blocked from adding a device (owner-only, 403)", st == 403)
+    # Activity is open to members now, scoped to what they are allocated.
+    # Locking them out meant asking the owner what happened on their own
+    # sites, and the owner is not the person standing at the branch.
+    st, _ = get(bob, "/logs")
+    check("a member CAN open the Activity tab", st == 200)
+    # The page narrows rows with allowed_devices, the same call the dashboard
+    # uses -- so assert on that rather than on page text, which is empty here
+    # and would have passed for the wrong reason.
+    _bobu = {"role": "member", "devices": ["R2"]}
+    _ownu = {"role": "owner", "devices": []}
+    check("...scoped to the routers allocated to them, so the activity list "
+          "can never show a router its viewer cannot otherwise open",
+          AuthStore.allowed_devices(_bobu, ["R1", "R2"]) == ["R2"])
+    check("the owner still sees the whole company's activity",
+          AuthStore.allowed_devices(_ownu, ["R1", "R2"]) == ["R1", "R2"])
     # A bare "forbidden" body named neither the router nor the reason, and
     # four separate checks all rendered that same one word -- a screenshot of
     # it could not be traced back to any of them.

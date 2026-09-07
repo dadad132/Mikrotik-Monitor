@@ -30,6 +30,7 @@ DATASETS = {
     "log": ("log",),
     "history": ("system", "history"),
     "active": ("user", "active"),
+    "users": ("user",),          # the account list itself, not sessions
     "dhcp_lease": ("ip", "dhcp-server", "lease"),
     "dhcp_client": ("ip", "dhcp-client"),  # WAN-side client (not the lease table above)
     # client-count sources (any may be absent on a given board -> tolerated)

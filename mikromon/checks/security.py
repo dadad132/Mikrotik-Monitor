@@ -39,7 +39,7 @@ def _source_ip(message: str) -> str:
 
 class SecurityCheck(Check):
     flags = ("security",)
-    requires = ("log", "history", "active")
+    requires = ("log", "history", "active", "users")
     name = "security"
 
     def run(self, snap, dev, ctx) -> None:
@@ -47,6 +47,7 @@ class SecurityCheck(Check):
         seeding = not mem.get("initialized")
 
         self._scan_log(snap, dev, ctx, mem, seeding)
+        self._scan_users(snap, ctx, mem, seeding)
         self._scan_sessions(snap, dev, ctx, mem, seeding)
         self._scan_history(snap, ctx, mem, seeding)
 
@@ -90,6 +91,46 @@ class SecurityCheck(Check):
                 continue  # silently baseline pre-existing entries
             ctx.event(sig_key(sig), sev, title, detail=message, cause=cause,
                       facts={"topics": topics})
+
+    # ----- /user (the account list, not sessions) ---------------------------
+    def _scan_users(self, snap, ctx, mem, seeding):
+        """A login appearing on the router that was not there last poll.
+
+        Read from /user directly rather than inferred from log lines. The log
+        was the only source before, which meant the detection depended on the
+        router still holding the relevant entry -- /log is a small ring buffer
+        that a busy router overwrites in minutes, and the wording varies
+        between RouterOS versions. The account list is the fact itself.
+
+        Deliberately not alerted on removal: an account disappearing is
+        usually us or the operator tidying up, and pairing every add with a
+        remove alert is how people learn to filter the whole lot.
+        """
+        if "users" in snap.errors:
+            return                      # could not read it; say nothing
+        current = {}
+        for row in snap.rows("users"):
+            nm = str(row.get("name", "")).strip()
+            if nm:
+                current[nm] = str(row.get("group", "") or "")
+
+        known = set(mem.get("router_users", []))
+        if not seeding:
+            for nm, group in sorted(current.items()):
+                if nm in known:
+                    continue
+                grp = f" in group '{group}'" if group else ""
+                ctx.event(
+                    f"router_user:{nm}", Severity.WARNING,
+                    f"New login '{nm}' created on the router",
+                    cause=(f"A RouterOS account{grp} appeared that was not "
+                           f"there at the last check. If you did not create "
+                           f"it, treat this as a compromise: someone with "
+                           f"access has given themselves a way back in that "
+                           f"survives a password change."),
+                    facts={"user": nm, "group": group},
+                )
+        mem["router_users"] = sorted(current)
 
     # ----- /user/active -----------------------------------------------------
     def _scan_sessions(self, snap, dev, ctx, mem, seeding):

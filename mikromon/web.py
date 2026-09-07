@@ -8817,7 +8817,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._redirect("/dashboard")
 
         def _serve_logs(self, user):
-            if not AuthStore.is_admin(user):
+            # Open to members too, scoped below. A member responsible for
+            # three branches needs to see what happened on those three --
+            # locking them out meant asking the owner every time, and the
+            # owner is not the person on site.
+            if not user:
                 return self._send(403, "forbidden")
             audit = self._auditlog()
             rows = audit.recent(limit=200) if audit else []
@@ -8840,8 +8844,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 finally:
                     if ds:
                         ds.close()
-                rows = [r for r in rows if r.get("device") in org_names]
-                alert_rows = [r for r in alert_rows if r.get("device") in org_names]
+                # Then narrow to what this person may actually see: an owner
+                # gets the company's routers, a member only the ones
+                # allocated to them. Same call the dashboard uses, so the
+                # activity list can never show a router its viewer cannot
+                # otherwise open.
+                visible = set(AuthStore.allowed_devices(user, org_names))
+                rows = [r for r in rows if r.get("device") in visible]
+                alert_rows = [r for r in alert_rows
+                              if r.get("device") in visible]
             return self._send(200, _render_logs(user, rows, alert_rows),
                               "text/html; charset=utf-8")
 
@@ -9490,6 +9501,21 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if not AuthStore.is_owner(user):
                     return self._send(403, "forbidden")
                 return self._post_company(flat, user)
+            if action == "alerts":
+                # Any logged-in person sets this for themselves; what they
+                # then receive is decided by what they are allowed to see,
+                # not by this switch.
+                on = flat.get("alert_optin") == "1"
+                try:
+                    auth.set_alert_optin(user["login"], on)
+                except Exception as exc:  # noqa: BLE001
+                    return self._redirect("/account?error=" + quote(str(exc)))
+                if on and not (user.get("email") or "").strip():
+                    return self._redirect("/account?ok=" + quote(
+                        "Saved, but there is no email address on this account "
+                        "yet — add one above or nothing can be sent."))
+                return self._redirect("/account?ok=" + quote(
+                    "Alert emails on." if on else "Alert emails off."))
             # personal details
             new_email = flat.get("email", "").strip().lower()
             new_pw = flat.get("password", "")

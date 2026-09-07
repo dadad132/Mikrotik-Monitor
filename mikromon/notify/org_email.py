@@ -28,7 +28,14 @@ _NOTIFY_KEYS = {"wan_failover", "internet_down", "reachability"}
 
 
 def _should_notify(alert) -> bool:
-    return alert.key in _NOTIFY_KEYS or alert.key.startswith("wan_link:")
+    # router_user: a login appearing on a customer's router is the one
+    # security event worth an email on its own -- it either was not you, or
+    # it was and you already know. The rest of the security check's events
+    # (logins, failed auth) are far too frequent to mail and would bury the
+    # WAN alerts these recipients actually signed up for.
+    return (alert.key in _NOTIFY_KEYS
+            or alert.key.startswith("wan_link:")
+            or alert.key.startswith("router_user:"))
 
 
 def effective_smtp(auth, fallback):
@@ -305,11 +312,6 @@ class OrgEmailNotifier(Notifier):
 
         try:
             smtp = effective_smtp(auth, self._smtp)
-            by_org: dict[int, list] = {}
-            for a in targets:
-                org_id = ds.org_of(a.device)
-                if org_id is not None:
-                    by_org.setdefault(org_id, []).append(a)
 
             # A suspended company keeps nothing but the invoice. Alert email
             # is the part of this product people actually feel, so leaving it
@@ -318,19 +320,38 @@ class OrgEmailNotifier(Notifier):
             # of the site that explains why.
             suspended = self._suspended_orgs()
 
-            for org_id, org_alerts in by_org.items():
+            # Grouped by WHO should hear about it, not by which company owns
+            # it. A member allocated three branches is told when one of those
+            # drops and hears nothing about the rest of the company's sites,
+            # while the owner still gets one digest covering everything.
+            #
+            # Alerts that share an audience share an email, so a multi-device
+            # incident is still one message rather than one per router --
+            # which is the whole reason this notifier digests at all.
+            by_audience: dict[tuple, list] = {}
+            rcpt_cache: dict[tuple, tuple] = {}
+            for a in targets:
+                org_id = ds.org_of(a.device)
+                if org_id is None:
+                    continue
                 if org_id in suspended:
-                    log.info("skipping %d alert(s) for suspended org %s",
-                             len(org_alerts), org_id)
+                    log.info("skipping alert for suspended org %s", org_id)
                     continue
-                recipients = auth.get_alert_emails(org_id)
-                if not recipients:
-                    continue
+                ck = (org_id, a.device)
+                if ck not in rcpt_cache:
+                    rcpt_cache[ck] = tuple(
+                        auth.recipients_for_device(org_id, a.device))
+                who = rcpt_cache[ck]
+                if who:
+                    by_audience.setdefault(who, []).append(a)
+
+            for recipients, org_alerts in by_audience.items():
+                recipients = list(recipients)
                 try:
                     self._deliver(recipients, org_alerts, smtp)
                 except Exception:  # noqa: BLE001
-                    log.exception("OrgEmailNotifier: delivery failed for org %s",
-                                  org_id)
+                    log.exception("OrgEmailNotifier: delivery failed to %s",
+                                  ", ".join(recipients))
         finally:
             ds.close()
             auth.close()

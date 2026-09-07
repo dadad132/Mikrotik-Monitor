@@ -113,7 +113,12 @@ TABS = [
      "steps": ["Switch on the protections you want.",
                "<b>Preview</b> to see the exact firewall rules.",
                "<b>Apply</b>."],
-     "warn": ""},
+     "warn": "Separately from this tab, easymikrotik watches each router's "
+             "login list every poll. If an account appears that was not there "
+             "before, everyone set to receive alerts for that router is "
+             "emailed. If you did not create it, treat it as a compromise: "
+             "someone with access has given themselves a way back in that "
+             "survives a password change."},
 
     {"slug": "harden", "title": "Restrict management access", "art": None,
      "what": "Locks API, Winbox, SSH and WebFig down to trusted addresses, "

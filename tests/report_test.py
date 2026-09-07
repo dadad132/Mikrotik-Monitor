@@ -159,6 +159,78 @@ check("the RESTORED (recovery) alert ALSO passes the notify filter — same "
 # when one came back. Recoveries were emitted as INFO, notifiers filter on
 # `severity >= min_severity`, and config.example.yaml ships min_severity as
 # WARNING -- so every "back online" was discarded before it reached anyone.
+print("alerts reach the people who look after THAT router:")
+import tempfile as _tf2
+from mikromon.auth import AuthStore as _AS
+from mikromon.devices_store import DevicesStore as _DS2
+
+_t2 = _tf2.mkdtemp()
+_adb2, _wdb2 = os.path.join(_t2, "a.db"), os.path.join(_t2, "d.db")
+_a2 = _AS(_adb2)
+_o2 = _a2.signup("owner@acme.test", "password123", "Acme")
+_a2.add_member(_o2, "bob@acme.test", "password123", role="member",
+               devices=["Branch1"])
+_a2.add_member(_o2, "carol@acme.test", "password123", role="member",
+               devices=["Branch9"])
+_a2.set_alert_emails(_o2, ["it@acme.test"])
+for _w in ("owner@acme.test", "bob@acme.test", "carol@acme.test"):
+    _a2.set_alert_optin(_w, True)
+
+check("a member who looks after one branch is a recipient for it",
+      "bob@acme.test" in _a2.recipients_for_device(_o2, "Branch1"))
+check("...and is NOT a recipient for a branch that is not theirs — the whole "
+      "point is that they can be told about their own sites without being "
+      "told about the rest of the company's",
+      "bob@acme.test" not in _a2.recipients_for_device(_o2, "Branch9"))
+check("the owner hears about every router, since they can see every router",
+      "owner@acme.test" in _a2.recipients_for_device(_o2, "Branch1")
+      and "owner@acme.test" in _a2.recipients_for_device(_o2, "Branch9"))
+check("the company-wide list keeps working alongside it — dropping it would "
+      "silently switch off alerting for every org set up before this existed",
+      "it@acme.test" in _a2.recipients_for_device(_o2, "Branch9"))
+_a2.set_alert_optin("bob@acme.test", False)
+check("opting out removes only that person, not the branch's other watchers",
+      "bob@acme.test" not in _a2.recipients_for_device(_o2, "Branch1")
+      and "owner@acme.test" in _a2.recipients_for_device(_o2, "Branch1"))
+_a2.set_alert_optin("bob@acme.test", True)
+_a2.close()
+
+_ds2 = _DS2(_wdb2)
+for _n in ("Branch1", "Branch9"):
+    _ds2.upsert({"name": _n, "host": "10.0.0.1"}, {}, org_id=_o2)
+_ds2.close()
+
+_sent2 = []
+_orig2 = org_email._smtp_send
+org_email._smtp_send = lambda cfg, msg: _sent2.append(msg)
+try:
+    _cfg2 = SmtpConfig(host="smtp.example.test", port=587,
+                       from_addr="alerts@example.test")
+    OrgEmailNotifier(_cfg2, _adb2, _wdb2).send([
+        Alert("Branch1", "wan_failover", Severity.WARNING, "Branch1 WAN down"),
+        Alert("Branch9", "wan_failover", Severity.WARNING, "Branch9 WAN down")])
+finally:
+    org_email._smtp_send = _orig2
+
+_to = {m["To"] for m in _sent2}
+check("two routers with different audiences produce two emails, not one "
+      "digest that would show a member another company site",
+      len(_sent2) == 2)
+check("...the member's email covers only their branch",
+      any("bob@acme.test" in t and "Branch1" in m["Subject"]
+          for t, m in zip([m["To"] for m in _sent2], _sent2)))
+check("...and they are not on the one for the branch that is not theirs",
+      not any("bob@acme.test" in m["To"] and "Branch9" in m["Subject"]
+              for m in _sent2))
+
+check("a new login appearing on a router is emailed — it is either not you, "
+      "or it is and you know; every other security event is too frequent to "
+      "mail and would bury the WAN alerts people signed up for",
+      _should_notify(Alert("R1", "router_user:backdoor", Severity.WARNING,
+                           "New login 'backdoor' created on the router"))
+      and not _should_notify(Alert("R1", "security:abc", Severity.WARNING,
+                                   "Admin login")))
+
 print("a recovery reaches whoever was told about the problem:")
 import tempfile as _tf
 from mikromon.state import StateStore as _SS

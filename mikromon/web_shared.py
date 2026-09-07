@@ -473,6 +473,11 @@ def _nav_items(user) -> list:
     if not user:
         return []
     items = [("/dashboard", "Dashboard")]
+    # Activity is open to members now, scoped to the routers allocated to
+    # them. The page it links to does that narrowing itself; a link nobody
+    # can follow would just be a 403 with extra steps.
+    if user.get("role") != "owner":
+        items.append(("/logs", "Activity"))
     if user.get("role") == "owner":
         items += [("/devices", "Devices"), ("/logs", "Activity"),
                   ("/admin", "Users")]

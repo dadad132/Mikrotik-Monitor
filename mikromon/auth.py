@@ -119,6 +119,11 @@ class AuthStore:
         self.db.commit()
         # Additive column migrations — safe to run every startup.
         self._add_col_if_missing("users", "phone", "TEXT")
+        # Opt-in per person, so a member allocated three branches can be told
+        # when one of THOSE goes down without also being told about every
+        # other site in the company.
+        self._add_col_if_missing("users", "alert_optin",
+                                 "INTEGER NOT NULL DEFAULT 0")
         self._add_col_if_missing("users", "is_superadmin",
                                  "INTEGER NOT NULL DEFAULT 0")
         self._add_col_if_missing("orgs", "plan", "TEXT NOT NULL DEFAULT 'free'")
@@ -328,7 +333,7 @@ class AuthStore:
             return None
         cur = self.db.execute(
             "SELECT id, username, email, pw_hash, salt, iterations, role, "
-            "org_id, devices, created, is_superadmin FROM users "
+            "org_id, devices, created, is_superadmin, alert_optin FROM users "
             "WHERE lower(email) = ? OR lower(username) = ? LIMIT 1",
             (ident, ident))
         row = cur.fetchone()
@@ -339,11 +344,12 @@ class AuthStore:
                 "role": row[6], "org_id": row[7],
                 "devices": _load_devices(row[8]), "created": row[9],
                 "login": row[2] or row[1],
-                "is_superadmin": bool(row[10])}
+                "is_superadmin": bool(row[10]),
+                "alert_optin": bool(row[11])}
 
     def list_users(self, org_id: int | None = None) -> list:
-        sql = ("SELECT id, username, email, role, org_id, devices, created "
-               "FROM users")
+        sql = ("SELECT id, username, email, role, org_id, devices, created, "
+               "alert_optin FROM users")
         args: tuple = ()
         if org_id is not None:
             sql += " WHERE org_id = ?"
@@ -352,7 +358,8 @@ class AuthStore:
         out = []
         for r in self.db.execute(sql, args).fetchall():
             d = {"id": r[0], "username": r[1], "email": r[2], "role": r[3],
-                 "org_id": r[4], "devices": _load_devices(r[5]), "created": r[6]}
+                 "org_id": r[4], "devices": _load_devices(r[5]), "created": r[6],
+                 "alert_optin": bool(r[7])}
             d["login"] = d["email"] or d["username"]
             out.append(d)
         return out
@@ -501,6 +508,48 @@ class AuthStore:
 
     def set_billing_contact(self, cfg: dict) -> None:
         self.set_setting("billing_contact", cfg)
+
+    def set_alert_optin(self, identifier: str, on: bool) -> None:
+        """Whether this person wants alert email for the routers they can see."""
+        self._update(self._require(identifier)["id"], alert_optin=int(bool(on)))
+
+    def get_alert_optin(self, identifier: str) -> bool:
+        u = self.get_user(identifier)
+        return bool(u and u.get("alert_optin"))
+
+    def recipients_for_device(self, org_id: int, device: str) -> list:
+        """Who should be emailed about `device`, lowercased and de-duplicated.
+
+        Two sources, deliberately combined rather than one replacing the
+        other:
+
+          * the company-wide list on the Company details page, which predates
+            per-person opt-in and is how most orgs are still set up. Dropping
+            it would silently stop every existing customer's alerts.
+          * anyone in the company who has opted in AND is allowed to see this
+            particular router -- an owner sees all of them, a member only the
+            ones allocated to them.
+
+        The allocation check is the point: a member looking after three
+        branches gets told when one of those three drops, and hears nothing
+        about the rest of the company's sites. Reusing can_see means the
+        answer can never drift from what that person is actually shown in the
+        dashboard.
+        """
+        out = list(self.get_alert_emails(org_id))
+        for u in self.list_users(org_id):
+            if not u.get("alert_optin"):
+                continue
+            addr = (u.get("email") or "").strip()
+            if addr and self.can_see(u, device):
+                out.append(addr)
+        seen, uniq = set(), []
+        for a in out:
+            key = a.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                uniq.append(key)
+        return uniq
 
     def get_alert_emails(self, org_id: int) -> list:
         row = self.db.execute(

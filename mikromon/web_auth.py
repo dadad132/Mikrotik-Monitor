@@ -130,6 +130,33 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
         f'style="width:100%;max-width:360px"></p>'
         f'<button class="btn" type="submit">Save changes</button>'
         f'</form></div>')
+
+    # Opt-in per person rather than one company-wide list. An owner who ticks
+    # this hears about every router; a member hears only about the ones
+    # allocated to them, which is the difference between a useful alert and
+    # one more mail rule. Scoped by the same check that decides what they can
+    # see in the dashboard, so the two can never disagree.
+    _mine = ("every router in the company" if AuthStore.is_owner(user)
+             else "only the routers allocated to you")
+    alerts_box = (
+        f'<div class="box"><h2 style="margin-top:0">Alert emails</h2>'
+        f'<form method="POST" action="/account">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="action" value="alerts">'
+        f'<label class="chk" style="display:block;margin:0 0 10px">'
+        f'<input type="checkbox" name="alert_optin" value="1"'
+        + (" checked" if user.get("alert_optin") else "")
+        + f'> Email me when a router goes down or comes back</label>'
+        f'<p class="muted" style="margin:0 0 12px;font-size:13px">'
+        f'Sent to <b>{esc(user.get("email") or "your account email")}</b>, '
+        f'covering <b>{_mine}</b>. Turning this on does not affect anyone '
+        f'else, and the company-wide list on the Company details page keeps '
+        f'working alongside it.</p>'
+        + ('<p class="muted" style="margin:0 0 12px;font-size:13px;'
+           'color:#b45309">Add an email address above first — there is '
+           'nowhere to send these yet.</p>' if not user.get("email") else "")
+        + f'<button class="btn" type="submit">Save</button>'
+        f'</form></div>')
     company_box = ""
     if AuthStore.is_owner(user) and org is not None:
         o = org
@@ -196,7 +223,7 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
         f'<p class="muted" style="margin-top:-8px">'
         f'Company: <b>{esc(org_name)}</b> &middot; Role: <b>{esc(user["role"])}</b></p>'
         f'{note}'
-        f'{personal_box}'
+        f'{personal_box}{alerts_box}'
         f'{company_box}'
         f'</div>')
     return _page("My account", _header(user, "/account") + inner)
