@@ -986,38 +986,6 @@ Next steps:
 ============================================================
 EOF
 
-# ===========================================================================
-# TEMPORARY  --  REMOVE THIS WHOLE BLOCK ONCE THE ROUTERS BELOW ARE ONLINE
-# ===========================================================================
-# One-off key repairs. A router whose provisioning script failed to take the
-# new private key keeps its OLD key, while the hub goes on expecting the new
-# one -- so every handshake is discarded in silence and the router reports
-# rx=0 with tx climbing. The fix is to make the hub trust the key the router
-# actually has. Editing wg-peers.conf by hand does not survive, because that
-# file is regenerated from hub.json.
-#
-# Each line below is "<device name>|<public key read off that router>".
-# Delete a line once its router is up, and delete this whole block when the
-# list is empty. Nothing here is needed by a normal install; it is safe to
-# remove at any time and the installer works exactly the same without it.
-PENDING_KEY_FIXES="
-Mobilis Geely Edenvale|sThRTqESJXWSf2tPWnotb8sUB2sBGJ2b/yA4aekmcHU=
-"
-if [ -n "$(echo "${PENDING_KEY_FIXES}" | tr -d '[:space:]')" ]; then
-  echo ""
-  echo "--- applying pending WireGuard key repairs (TEMPORARY) ---"
-  echo "${PENDING_KEY_FIXES}" | while IFS='|' read -r _dev _key; do
-    [ -z "${_dev}" ] && continue
-    [ -z "${_key}" ] && continue
-    echo "  ${_dev}"
-    # Never fail the install over this: the routers that are already fine
-    # must still come back up if one repair does not apply.
-    sudo -u "${SERVICE_USER}" "${APP_DIR}/.venv/bin/python"       "${APP_DIR}/tools/set_router_key.py" "${_dev}" "${_key}"       || echo "  (could not apply -- run tools/set_router_key.py by hand)"
-  done
-  echo "--- end key repairs. Remove this block from install.sh once done. ---"
-  echo ""
-fi
-
 # ---------------------------------------------------------------------------
 # Post-install: copy log, write status summary
 # ---------------------------------------------------------------------------
