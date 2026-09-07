@@ -867,6 +867,35 @@ check("...and every on-page warning names a real tab",
 
 # Reported live: new users could not tell whether a button had worked, so
 # they pressed it again. A result the reader misses is the same as no result.
+# The guide has to describe the system as it now behaves. It said every
+# change is Preview-then-Apply, which stopped being true the moment switches
+# started applying themselves -- and a guide that contradicts the product is
+# worse than none, because people trust it.
+print("the guide matches how the product now works:")
+_g = _wag._render_guide({"email": "a@b.c", "role": "owner", "org_name": "A"})
+check("it explains that switches take effect when flipped",
+      "Switches take effect the moment you flip them" in _g)
+check("...and that typed-in changes still show you the commands first, so "
+      "the two paths are not confused",
+      "press <b>Preview</b> to see the exact commands" in _g)
+check("...and names the tabs that deliberately keep the preview step",
+      "reboots the router" in _g and "nobody has checked" in _g)
+check("the safety net is stated for BOTH paths, since that is what makes a "
+      "live switch safe to flip",
+      "backup is taken before anything is written" in _g)
+check("who gets emailed is written down, now that it is no longer one "
+      "company-wide list",
+      'id="alerts"' in _g and "allocated to them" in _g)
+check("...including that a recovery is sent, not only a failure",
+      "again when it comes back" in _g)
+check("...and what a new login on a router means",
+      "way back in that survives a password change" in _g)
+check("the once-only tips are explained, so nobody wonders where they went",
+      'id="tips"' in _g and "Stop showing me these" in _g)
+check("Activity no longer claims to be owners-only",
+      "Activity</b> tab is a timeline" in _g
+      and "(owners)" not in _g)
+
 print("first-visit tips teach the tabs as they are opened:")
 import mikromon.web_auth as _wt
 from mikromon import guide_tabs as _gtabs
@@ -906,7 +935,13 @@ check("...it points at the ? as the way to learn each tab, so the lesson is "
       "?" in _wel and "/guide" in _wel)
 check("...and it says the safety net out loud, since fear of breaking "
       "something is what stops a new person pressing anything at all",
-      "previewed" in _wel and "undone by the router itself" in _wel)
+      "cannot break a site" in _wel
+      and "puts it back by itself" in _wel)
+check("...and it is honest about the two paths now that switches are live — "
+      "claiming everything is previewed would be a promise the product no "
+      "longer keeps",
+      "Switches take effect as you flip them" in _wel
+      and "shows you the exact commands first" in _wel)
 _wel_m = _wt._welcome_tip({"role": "member"}, "CSRF", seen=set())
 check("a member is told the screen shows the routers they were given, not "
       "the whole company's",

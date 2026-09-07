@@ -2222,6 +2222,53 @@ try:
 
     # --- Provision tab: generate a bootstrap script + save strong creds ---
     st, body = get(admin, "/device?name=WebR1&tab=provision")
+    # A switch that moves but changes nothing until a second button is
+    # pressed is the same lie the Provision button told: it looks like the
+    # act, and is not. Flipping one now applies it.
+    print("switches apply themselves:")
+    from mikromon.push import FEATURES as _F2
+
+    def _tab(slug):
+        return web._render_feature_tab(
+            "R1", {"role": "owner", "login": "o@a.c", "org_id": 1}, slug,
+            _F2[slug], "C",
+            fields=[{"type": "toggle", "name": "opt", "value": "x",
+                     "label": "Example", "on": False}])
+
+    def _instant(slug):
+        h = _tab(slug)
+        sw = re.findall(r'<input[^>]*class="switch"[^>]*>', h)
+        return (any("data-mm-instant" in t for t in sw)
+                and 'data-mm-instant-form="1"' in h)
+
+    for _s in ("security", "harden", "nextdns", "routes"):
+        check(f"a switch on {_s} takes effect when you flip it, with no "
+              f"second button to press", _instant(_s))
+    for _s, _why in (("update", "installing RouterOS reboots the router"),
+                     ("scripts", "the payload is text nobody has checked"),
+                     ("remote", "creating a login is one-way")):
+        check(f"{_s} keeps its Preview step, because {_why} — a flick of a "
+              f"switch must not do that", not _instant(_s))
+
+    _sec = _tab("security")
+    check("the flip arms the safety net as well as applying — a backup first "
+          "and the router puts itself back if the change cuts it off",
+          "safe_revert" in web._FEATURE_JS and "apply" in web._FEATURE_JS)
+    check("Preview is demoted to the 'just show me' button rather than "
+          "removed, since seeing what would happen is still worth having",
+          "just show me" in _sec and 'class="btn ghost" type="submit"' in _sec)
+    check("...and the tab says plainly that switches are live, so nobody "
+          "flips one expecting to press something afterwards",
+          "take effect as soon as you flip" in _sec)
+    check("the whole form is submitted, not the one switch — the plan is "
+          "built from the tab's full state and a lone field would ask the "
+          "engine to reconcile against values it cannot see",
+          "requestSubmit" in web._FEATURE_JS)
+    check("a non-instant form is ignored by the script even if a switch "
+          "carries the marker, so the opt-out cannot be defeated by markup "
+          "alone",
+          "dataset.mmInstantForm" in web._FEATURE_JS)
+
     # Reported live: people pressed "Generate script" to LOOK at the script.
     # Both buttons mint a new password and tunnel key and store them at once,
     # so the router stopped connecting -- and the only warning was one clause

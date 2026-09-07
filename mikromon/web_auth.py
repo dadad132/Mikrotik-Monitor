@@ -1271,10 +1271,11 @@ def _welcome_tip(user, csrf: str, seen=None) -> str:
         f'<li><b>Click a router to open it.</b> Its tabs each do one job, and '
         f'every tab has a <b>?</b> on the right that explains that tab in '
         f'plain language.</li>'
-        f'<li><b>Nothing reaches a router without showing you first.</b> '
-        f'Every change is previewed, backed up before it is applied, and '
-        f'undone by the router itself if it loses contact with us. You '
-        f'cannot break a site by pressing the wrong thing once.</li>'
+        f'<li><b>You cannot break a site by pressing one wrong thing.</b> '
+        f'A backup is taken before anything is written, and the router puts '
+        f'it back by itself if a change cuts it off from us. Switches take '
+        f'effect as you flip them; anything bigger shows you the exact '
+        f'commands first.</li>'
         f'</ol>'
         f'<p style="margin:12px 0 0;font-size:13px">'
         f'<a href="/guide">Read the full guide &rarr;</a></p>'
@@ -1377,6 +1378,8 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
         ("devicemode", "“Device Mode” errors"),
         ("billing", "Trials, plans &amp; billing"),
         ("activity", "Activity log"),
+        ("alerts", "Who gets emailed, and about what"),
+        ("tips", "The tips that appear once"),
         ("glossary", "Glossary — what do these words mean?"),
     ]
     toc = ("<div class=\"box\"><h2 style=\"margin-top:0\">Contents</h2>"
@@ -1436,10 +1439,26 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
         'works purely from the dashboard.</p>'))
 
     tabs = _guide_section("tabs", "What each device tab does", (
-        '<p>Open a router from the Dashboard to see its tabs. Every tab that '
-        'changes something follows the same pattern: make your change, click '
-        '<b>Preview</b> to see exactly what would be sent to the router, then '
-        '<b>Apply</b> to push it.</p>'
+        '<p>Open a router from the Dashboard to see its tabs. There are two '
+        'ways a change reaches a router, and which one you get depends on how '
+        'big the change is.</p>'
+        '<p><b>Switches take effect the moment you flip them.</b> A switch '
+        'that moved but had not done anything yet would be lying to you, so '
+        'they do not work that way. Flip it on and the rule goes to the '
+        'router; flip it off and the same rule is removed. You never have to '
+        'press anything afterwards.</p>'
+        '<p><b>Anything you type or build up shows you first.</b> Rows of '
+        'firewall forwards, speed limits, WAN uplinks, a pasted script: you '
+        'fill them in, press <b>Preview</b> to see the exact commands, then '
+        '<b>Apply</b>. Three tabs keep that step for their switches too, '
+        'because instant would be wrong there &mdash; installing RouterOS '
+        'reboots the router, a custom script is text nobody has checked, and '
+        'a temporary login is a one-way act.</p>'
+        '<p><b>Either way the safety net is the same.</b> A full backup is '
+        'taken before anything is written, and the router then checks by '
+        'itself that it can still reach us &mdash; if it cannot, it puts the '
+        'backup back and reboots, with nobody driving to site. That is why '
+        'you cannot break a site by flipping the wrong switch once.</p>'
         + guide_art.preview_apply()
         + '<p class="muted">Each tab has a <b>?</b> button on the right of its '
         'tab bar that jumps straight to its section below.</p>'
@@ -1540,11 +1559,46 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
         f'(company owners) for sizes and pricing.</p>'))
 
     activity = _guide_section("activity", "Activity log", (
-        '<p>The <b>Activity</b> tab (owners) is a timeline of every '
-        'preview, apply, and result for every router in your company — '
-        'who did what, when, and whether it succeeded. Use it to check '
-        'what changed recently, or to see exactly why an applied change '
-        'failed.</p>'))
+        '<p>The <b>Activity</b> tab is a timeline of every preview, apply and '
+        'result — who did what, when, and whether it worked. Use it to check '
+        'what changed recently, or to see exactly why a change failed.</p>'
+        '<p>It shows the routers you are allowed to see: an owner gets the '
+        'whole company, a member gets the routers allocated to them. Members '
+        'are not shut out of it, because the person standing at the branch is '
+        'usually not the owner.</p>'))
+
+    alerts = _guide_section("alerts", "Who gets emailed, and about what", (
+        '<p>There are two separate lists, and they add up rather than '
+        'replacing each other.</p>'
+        '<p><b>The company list</b> lives on <b>Account &rarr; Company '
+        'details</b> and is set by the owner. Everyone on it hears about '
+        'every router in the company.</p>'
+        '<p><b>Your own switch</b> lives on <b>Account &rarr; Alert '
+        'emails</b>, and each person sets it for themselves. What you then '
+        'receive is decided by what you are allowed to see — an owner hears '
+        'about every router, a member only about the ones allocated to them. '
+        'So somebody looking after three branches can be told when one of '
+        'those three drops without being told about every other site in the '
+        'company.</p>'
+        '<p>You are emailed when a router or one of its internet lines goes '
+        'down, <b>and again when it comes back</b>. You are also emailed if a '
+        'new login appears on one of your routers — if you did not create it, '
+        'treat that as a compromise: someone with access has given themselves '
+        'a way back in that survives a password change.</p>'
+        '<p class="muted">Turning your switch on affects nobody else, and '
+        'turning it off does not stop anyone else being told.</p>'))
+
+    tips = _guide_section("tips", "The tips that appear once", (
+        '<p>The first time you open a tab, a short panel explains what that '
+        'tab is for and the first few things to do on it. It appears once per '
+        'tab and never again.</p>'
+        '<p><b>Got it</b> dismisses that one. <b>Stop showing me these</b> '
+        'turns off all of them, including tabs added later. Both are '
+        'remembered against your login rather than your browser, so signing '
+        'in from another machine will not start teaching you again.</p>'
+        '<p>Everything they say is on this page too, in more detail — the '
+        '<b>?</b> on the right of any tab bar jumps straight to that '
+        'tab&rsquo;s section here.</p>'))
 
     glossary_terms = [
         ("WAN", "The internet-facing side of a router — the line(s) that "
@@ -1626,7 +1680,8 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
              f'walkthrough of what everything on this dashboard does, and a '
              f'glossary of the networking terms it uses.</p>'
              f'{toc}{overview}{dashboard}{devices}{provision}{tabs}{vpn}'
-             f'{safety}{devicemode}{billing}{activity}{glossary}</div>')
+             f'{safety}{devicemode}{billing}{activity}{alerts}{tips}'
+             f'{glossary}</div>')
     return _page("Guide", _header(user, "/guide") + inner)
 
 

@@ -52,8 +52,10 @@ TABS = [
              "moves across by itself when one drops.",
      "steps": ['Set the order and each line\'s <b>Distance</b> on the '
                '<a href="#tab-wan">WAN tab</a> — that is where they live.',
-               "Come back here and switch <b>Enable gateway failover</b> on.",
-               "<b>Preview</b>, then <b>Apply</b>.",
+               "Come back here and flip <b>Enable gateway failover</b> on. "
+               "It goes to the router the moment you flip it &mdash; there is "
+               "no second button to press.",
+               "Flipping it back off removes the failover routes again.",
                "The list at the top shows what is actually live on the "
                "router, so use it to confirm your distances landed."],
      "warn": "Failover reacts when a line's own connection drops. A line that "
@@ -110,9 +112,12 @@ TABS = [
      "what": "Common firewall protections as switches. Rules the router "
              "already had are listed but never touched — easymikrotik only "
              "manages the ones it created itself.",
-     "steps": ["Switch on the protections you want.",
-               "<b>Preview</b> to see the exact firewall rules.",
-               "<b>Apply</b>."],
+     "steps": ["Flip a switch on. The firewall rule is sent to the router "
+               "straight away; flipping it off removes that same rule.",
+               "A backup is taken before anything changes, and the router "
+               "undoes it by itself if the change cuts it off from us.",
+               "<b>Preview changes</b> only shows you what a switch would do. "
+               "It changes nothing, and you never have to press it."],
      "warn": "Separately from this tab, easymikrotik watches each router's "
              "login list every poll. If an account appears that was not there "
              "before, everyone set to receive alerts for that router is "
@@ -125,9 +130,13 @@ TABS = [
              "switches off insecure services and drops known attacker IPs. "
              "This is the tab that stops brute-force attempts.",
      "steps": ["Enter the addresses allowed to manage the router.",
-               "Tick which services the restriction applies to.",
-               "<b>Preview</b>, and read it properly.",
-               "<b>Apply</b>."],
+               "Flip the switch for each service you want restricted. Each "
+               "one takes effect immediately.",
+               "This is the tab worth previewing first, even though you do "
+               "not have to &mdash; <b>Preview changes</b> shows exactly "
+               "which services you are about to shut the door on.",
+               "If a switch does lock this server out, the router restores "
+               "its own backup a few minutes later and comes back."],
      "warn": "Include this monitoring server's own IP in the allowed list. "
              "Leave it out and the router locks easymikrotik out along with "
              "the attackers. The safe-mode self-check will undo it, but you "
@@ -146,7 +155,8 @@ TABS = [
                "Optionally force client DNS. That redirects every device's "
                "port-53 traffic to the router, so nobody opts out by "
                "hard-coding 8.8.8.8 on their laptop.",
-               "<b>Preview</b>, then <b>Apply</b>."],
+               "Every switch here applies as you flip it, and undoes itself "
+               "when you flip it back."],
      "warn": "Do not trust the banner on NextDNS's own website to tell you "
              "whether a router is connected. It reports on <b>whichever "
              "computer is viewing it</b>, so a PC with Secure DNS switched on "

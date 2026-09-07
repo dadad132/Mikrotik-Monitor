@@ -2061,6 +2061,14 @@ _LIVE_TABS = {"Overview": "", "Provision": "provision",
               "Update": "update", "Backups": "backups",
               "Temp Access": "tempaccess"}
 # tabs that WRITE to the router (admins only); Overview is read-only
+# Instant toggles are wrong where the act is not a small reversible change:
+#   update  -- installing RouterOS reboots the router, and a flick of a
+#              switch must never take a site offline for two minutes.
+#   scripts -- the payload is free text nobody has checked, so the preview
+#              IS the review.
+#   remote  -- creating a login is a one-way act with a password shown once.
+_INSTANT_TOGGLE_OFF = {"update", "scripts", "remote"}
+
 _ADMIN_TABS = {"provision", "routes", "wan", "security", "harden", "nextdns",
                "qos", "portfwd", "remote", "tunnel", "scripts",
                "update", "backups", "tempaccess", "interfaces"}
@@ -4238,6 +4246,41 @@ _FEATURE_JS = """
  }
  document.addEventListener('DOMContentLoaded', mmInitDrag);
  document.addEventListener('DOMContentLoaded', mmExclusive);
+ /* A switch applies itself. Flipping one submits its form with apply=1 and
+    safe_revert=1 -- so the change goes to the router immediately, but a
+    backup is taken first and the router restores itself if the change cuts
+    it off. Preview is left as the "just show me" button.
+    The whole form is submitted, not just the switch, because the plan is
+    built from the tab's full state: sending one field alone would ask the
+    engine to reconcile against values it cannot see. */
+ function mmInstantToggles(){
+   document.querySelectorAll('input.switch[data-mm-instant]').forEach(
+     function(sw){
+       sw.addEventListener('change', function(){
+         var f = sw.closest('form');
+         if (!f || !f.dataset.mmInstantForm) return;
+         if (!f.querySelector('input[name=apply]')){
+           ['apply','safe_revert','instant'].forEach(function(n){
+             var h=document.createElement('input');
+             h.type='hidden'; h.name=n; h.value='1'; f.appendChild(h);
+           });
+         }
+         /* Say what is happening where they are looking, since the reply
+            comes back as a whole new page a few seconds later. */
+         var lbl = sw.closest('label');
+         if (lbl){
+           var s=document.createElement('span');
+           s.style.cssText='margin-left:8px;font-size:12px;opacity:.75';
+           s.textContent = sw.checked ? 'turning on…' : 'turning off…';
+           lbl.appendChild(s);
+         }
+         f.querySelectorAll('input.switch').forEach(function(o){
+           o.disabled = true; });
+         if (f.requestSubmit) f.requestSubmit(); else f.submit();
+       });
+     });
+ }
+ document.addEventListener('DOMContentLoaded', mmInstantToggles);
 </script>"""
 
 
@@ -4256,9 +4299,15 @@ def _field_html(desc) -> str:
         # mmExclusive() turns the others off when one is switched on.
         excl = (f' data-exclusive="{esc(desc["exclusive"])}"'
                 if desc.get("exclusive") else "")
+        # A switch that moves but changes nothing until a second button is
+        # pressed is telling the same lie the Provision button told: it looks
+        # like the act, and is not. Flipping one applies it there and then.
+        # Features opt out (see _INSTANT_TOGGLE_OFF) only where instant is
+        # genuinely wrong -- installing RouterOS reboots the router.
+        inst = "" if desc.get("no_instant") else ' data-mm-instant="1"'
         return (f'<div class="f"><label class="chk"><input type="checkbox" '
                 f'class="switch" name="{desc["name"]}" '
-                f'value="{esc(desc["value"])}"{ck}{excl}> '
+                f'value="{esc(desc["value"])}"{ck}{excl}{inst}> '
                 f'<b>{esc(label)}</b></label>{d}</div>')
     if t == "text":
         return (f'<div class="f"><label class="f">{esc(label)}</label>'
@@ -5288,17 +5337,31 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
             form = (f'<div class="box"><h2>{esc(feature["title"])}</h2>'
                     f'<div class="fields">{ff}</div></div>')
         elif fields is not None:
+            instant = slug not in _INSTANT_TOGGLE_OFF
+            if not instant:
+                fields = [{**d, "no_instant": True}
+                          if d.get("type") == "toggle" else d
+                          for d in fields]
             ff = "".join(_field_html(d) for d in fields)
-            preview_btn = ('<button class="btn" type="submit">Preview changes '
+            preview_btn = ('<button class="btn ghost" type="submit">'
+                           'Preview changes (just show me)</button>'
+                           if instant else
+                           '<button class="btn" type="submit">Preview changes '
                            '(dry-run)</button>')
+            note = ('<p class="muted" style="font-size:12px;margin:10px 0 0">'
+                    'Switches take effect as soon as you flip them &mdash; a '
+                    'backup is taken first and the router puts itself back if '
+                    'the change cuts it off. Preview only shows you what '
+                    'would happen; it changes nothing.</p>' if instant else "")
             form = (f'<div class="box"><h2>{esc(feature["title"])}</h2>'
-                    f'<form method="POST" action="/device/push">'
+                    f'<form method="POST" action="/device/push" '
+                    f'data-mm-instant-form="{"1" if instant else ""}">'
                     f'<input type="hidden" name="csrf" value="{csrf}">'
                     f'<input type="hidden" name="device" value="{esc(name)}">'
                     f'<input type="hidden" name="feature" value="{esc(slug)}">'
                     f'<div class="fields">{ff}</div>'
                     f'<div class="actions" style="margin-top:14px">{preview_btn}'
-                    f'{extra_actions}</div></form></div>')
+                    f'{extra_actions}</div>{note}</form></div>')
         else:
             form = ""  # read-only feature (e.g. Interfaces)
         body = (form + state + extra_html
@@ -7610,6 +7673,19 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                             pusher.plan_arm_revert(bkname, _REVERT_MINUTES,
                                                    hub_ip=hub_ip),
                             feature=slug + ":arm-revert")
+                        # A flipped switch goes back to the switch. The
+                        # countdown page is right when somebody deliberately
+                        # pressed Apply on a reviewed change; after flicking a
+                        # toggle it reads as an alarm, and it hides the switch
+                        # they were looking at. The net is armed either way.
+                        if flat.get("instant") == "1":
+                            return self._redirect(
+                                f"/device?name={quote(name)}&tab={view}&msg="
+                                + quote(
+                                    f"Sent to the router. It will check it "
+                                    f"can still reach us in {_REVERT_MINUTES} "
+                                    f"minutes and put itself back if it "
+                                    f"cannot."))
                         sess = self._session()
                         return self._send(200, _render_confirm_page(
                             name, user, view, _REVERT_MINUTES, bkname, hub_ip,
@@ -7619,7 +7695,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         pass  # couldn't arm; fall through to the normal result
                 return self._redirect(
                     f"/device?name={quote(name)}&tab={view}&msg=" +
-                    quote("Changes applied to the router."))
+                    quote("Sent to the router." if flat.get("instant") == "1"
+                          else "Changes applied to the router."))
             finally:
                 dev.close()
                 if audit:
