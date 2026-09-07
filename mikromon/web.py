@@ -4274,8 +4274,15 @@ _FEATURE_JS = """
            s.textContent = sw.checked ? 'turning on…' : 'turning off…';
            lbl.appendChild(s);
          }
-         f.querySelectorAll('input.switch').forEach(function(o){
-           o.disabled = true; });
+         /* Do NOT disable these. A disabled control is not submitted, so
+            disabling every switch before submitting posted a form with none
+            of them ticked -- which the engine correctly read as "turn all of
+            them off", and did. Blocking pointer events stops a second click
+            racing the first without removing the values. */
+         f.querySelectorAll('.fields').forEach(function(box){
+           box.style.pointerEvents = 'none';
+           box.style.opacity = '0.6';
+         });
          if (f.requestSubmit) f.requestSubmit(); else f.submit();
        });
      });

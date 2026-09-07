@@ -2264,6 +2264,28 @@ try:
           "built from the tab's full state and a lone field would ask the "
           "engine to reconcile against values it cannot see",
           "requestSubmit" in web._FEATURE_JS)
+    # Reported live: turning ONE protection off on the Security tab turned
+    # them ALL off. The instant-toggle script disabled every switch before
+    # submitting, and a disabled control is not submitted -- so the form
+    # posted with nothing ticked, which the engine correctly read as "none of
+    # these are wanted" and applied. The switches carry the state, so nothing
+    # that carries state may be disabled on the way out.
+    _fn = web._FEATURE_JS[web._FEATURE_JS.index("function mmInstantToggles"):]
+    _fn = _fn[:_fn.index("DOMContentLoaded", 40)]
+    _code = chr(10).join(
+        l for l in _fn.split(chr(10))
+        if "/*" not in l and "*/" not in l
+        and not l.strip().startswith("*")
+        and "disabled control" not in l
+        and "Do NOT disable" not in l)
+    check("flipping a switch never disables the other switches before "
+          "submitting — they carry the state, and a disabled control is not "
+          "submitted, so doing that posts an empty set and turns everything "
+          "off",
+          "disabled" not in _code)
+    check("...it blocks further clicking a way that still submits the values",
+          "pointerEvents" in _code)
+
     check("a non-instant form is ignored by the script even if a switch "
           "carries the marker, so the opt-out cannot be defeated by markup "
           "alone",
