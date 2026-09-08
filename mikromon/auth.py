@@ -509,6 +509,20 @@ class AuthStore:
         d = self.get_setting("nextdns")
         return d if isinstance(d, dict) else {}
 
+    def get_yoco(self) -> dict:
+        """Yoco card-payment credentials, set once by a superadmin.
+
+        `secret_key` authorises creating a hosted checkout. `webhook_secret`
+        proves a "this was paid" callback really came from Yoco -- without it
+        anyone who found the URL could upgrade themselves for nothing, so the
+        webhook refuses everything until it is set. {} if never configured.
+        """
+        d = self.get_setting("yoco")
+        return d if isinstance(d, dict) else {}
+
+    def set_yoco(self, cfg: dict) -> None:
+        self.set_setting("yoco", dict(cfg or {}))
+
     def set_nextdns(self, cfg: dict) -> None:
         self.set_setting("nextdns", cfg)
 

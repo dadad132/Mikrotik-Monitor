@@ -104,8 +104,87 @@ def _render_signup(error: str = "", values=None, has_regions: bool = False) -> s
             f'Already have an account? <a href="/login">Sign in</a></p>')
 
 
+def _plan_upgrade_box(csrf: str, bill, device_count: int = 0,
+                      yoco_on: bool = False) -> str:
+    """"I need more routers" answered where the owner already is.
+
+    The Billing tab has the full ladder with every price; this is the short
+    version, because somebody who has just hit their device limit is not
+    looking for a price list, they are looking for the next size up.
+
+    Only packets LARGER than the current one are offered. Selling somebody a
+    downgrade through a payment button would take their money and shrink
+    their account, and there is no way to read that as anything but a bug.
+    """
+    from .billing import PLANS, plan_by_name, MAX_TIER_DEVICES
+
+    b = bill or {}
+    cap = b.get("device_limit")
+    cur = plan_by_name(b.get("plan", "") or "")
+    cur_devices = cur["devices"] if cur else (cap if isinstance(cap, int) else 0)
+    if cap is None:
+        used = (f'{device_count} of unlimited devices'
+                if device_count else 'Unlimited devices')
+    else:
+        used = f'{device_count} of {cap} device{"" if cap == 1 else "s"} in use'
+    name = (f'{cur["devices"]} devices' if cur
+            else ("Unlimited" if cap is None else
+                  f'{cap} device{"" if cap == 1 else "s"}'))
+
+    bigger = [p for p in PLANS if p["devices"] > (cur_devices or 0)]
+    if not bigger:
+        # Past the ladder: the answer is a person, not a payment button.
+        return (
+            f'<div class="box"><h2 style="margin-top:0">Your plan</h2>'
+            f'<p style="margin:0 0 6px"><b>{esc(name)}</b> '
+            f'<span class="muted">&middot; {esc(used)}</span></p>'
+            f'<p class="muted" style="margin:0">Above {MAX_TIER_DEVICES} '
+            f'devices we quote per company. '
+            f'<a href="/billing">Request a quote on the Billing tab</a>.</p>'
+            f'</div>')
+
+    opts = "".join(
+        f'<option value="{esc(p["name"])}">{p["devices"]} devices '
+        f'&mdash; R{p["price_zar"]:,.0f} per month</option>' for p in bigger)
+    if not yoco_on:
+        # Card payment off: say where to go rather than showing a button that
+        # cannot charge anything.
+        return (
+            f'<div class="box"><h2 style="margin-top:0">Your plan</h2>'
+            f'<p style="margin:0 0 6px"><b>{esc(name)}</b> '
+            f'<span class="muted">&middot; {esc(used)}</span></p>'
+            f'<p class="muted" style="margin:0">Need more routers? '
+            f'<a href="/billing">Pick a bigger packet on the Billing tab</a> '
+            f'&mdash; it shows the reference to use when you pay.</p></div>')
+    return (
+        f'<div class="box"><h2 style="margin-top:0">Your plan</h2>'
+        f'<p style="margin:0 0 12px"><b>{esc(name)}</b> '
+        f'<span class="muted">&middot; {esc(used)}</span></p>'
+        f'<form method="POST" action="/billing/checkout" '
+        f'style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<label style="flex:1;min-width:240px">Move up to'
+        f'<br><select name="plan" style="width:100%">{opts}</select></label>'
+        f'<label>Pay for<br><select name="months">'
+        f'<option value="1">1 month</option>'
+        f'<option value="3">3 months</option>'
+        f'<option value="6">6 months</option>'
+        f'<option value="12">12 months</option>'
+        f'</select></label>'
+        f'<button class="btn" type="submit">Upgrade</button>'
+        f'</form>'
+        f'<p class="muted" style="margin:10px 0 0;font-size:12px">'
+        f'You pay by card on Yoco. The bigger packet switches on by itself as '
+        f'soon as the payment clears &mdash; usually a few seconds &mdash; '
+        f'and the invoice appears on the Billing tab. Time you have already '
+        f'paid for is added to, not lost.</p>'
+        f'</div>')
+
+
 def _render_account(user, csrf: str, msg: str = "", error: str = "",
-                    org: dict | None = None) -> str:
+                    org: dict | None = None, bill=None,
+                    device_count: int = 0,
+                    yoco_on: bool = False) -> str:
     note = _flash(msg, error)
     org_name = user.get("org_name", "")
     uname_row = (f'<p>Username <span class="muted">(your existing login — you can '
@@ -217,12 +296,15 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
             f'Sends a test notification to the alert recipients above</span>'
             f'</div></div>'
             + _EMAIL_POPUP_HTML)
+    plan_box = (_plan_upgrade_box(csrf, bill, device_count, yoco_on)
+                if AuthStore.is_owner(user)
+                and user.get("_show_billing") else "")
     inner = (
         f'<div class="wrap"><h1>My account</h1>'
         f'<p class="muted" style="margin-top:-8px">'
         f'Company: <b>{esc(org_name)}</b> &middot; Role: <b>{esc(user["role"])}</b></p>'
         f'{note}'
-        f'{personal_box}{alerts_box}'
+        f'{plan_box}{personal_box}{alerts_box}'
         f'{company_box}'
         f'</div>')
     return _page("My account", _header(user, "/account") + inner)
@@ -514,9 +596,113 @@ def _quote_request_box(csrf: str, device_count: int = 0) -> str:
         f'</form></div>')
 
 
+def _orders_box(orders) -> str:
+    """What this company has bought, newest first, each with its invoice.
+
+    A payment with no document is a line on a bank statement and an argument
+    six months later. The invoice is generated from the order row, so it says
+    what was actually charged rather than what the price list says today.
+    """
+    if not orders:
+        return ""
+    rows = ""
+    for o in orders:
+        when = time.strftime("%d %b %Y", time.localtime(
+            o.get("paid") or o.get("created") or 0))
+        plan = plan_by_name(o.get("plan", ""))
+        what = (f'{plan["devices"]} devices' if plan else o.get("plan", "?"))
+        months = int(o.get("months") or 1)
+        amount = f'R{(o.get("amount_cents") or 0) / 100:,.2f}'
+        if o.get("status") == "paid":
+            state = '<span class="badge ok">Paid</span>'
+            act = (f'<a class="btn ghost" style="padding:4px 12px" '
+                   f'href="/billing/invoice?id={int(o["id"])}">Invoice</a>')
+        else:
+            state = '<span class="muted">Not completed</span>'
+            act = ""
+        rows += (f'<tr><td>{esc(when)}</td>'
+                 f'<td>{esc(what)} &middot; {months} month'
+                 f'{"" if months == 1 else "s"}</td>'
+                 f'<td style="white-space:nowrap">{amount}</td>'
+                 f'<td>{state}</td><td>{act}</td></tr>')
+    return (f'<div class="box"><h2>Payments</h2>'
+            f'<table><thead><tr><th>Date</th><th>What</th><th>Amount</th>'
+            f'<th></th><th></th></tr></thead><tbody>{rows}</tbody></table>'
+            f'</div>')
+
+
+def _render_invoice(user, org: dict, order: dict, contact: dict | None,
+                    brand: str = "") -> str:
+    """A printable invoice for one paid order.
+
+    Deliberately built from the ORDER, not from today's price list: an
+    invoice that changes when prices change is not a record of anything.
+
+    No VAT line and the word "Invoice" rather than "Tax Invoice", because a
+    business that is not VAT-registered may not issue one -- when the number
+    arrives this grows a VAT block, and until then claiming one would be a
+    real problem rather than a cosmetic one.
+    """
+    plan = plan_by_name(order.get("plan", ""))
+    devices = plan["devices"] if plan else "?"
+    months = max(1, int(order.get("months") or 1))
+    total = (order.get("amount_cents") or 0) / 100
+    unit = total / months if months else total
+    paid_on = time.strftime("%d %B %Y", time.localtime(
+        order.get("paid") or order.get("created") or 0))
+    ref = payment_reference(order.get("org_id", 0), org.get("name", ""))
+    seller = "".join(
+        f'<div>{esc(str(v))}</div>' for v in (
+            contact.get("name") if contact else "",
+            contact.get("email") if contact else "") if v)
+    inner = (
+        f'<div class="wrap" style="max-width:760px">'
+        f'<div class="box" id="inv">'
+        f'<div style="display:flex;justify-content:space-between;'
+        f'align-items:flex-start;gap:20px;flex-wrap:wrap">'
+        f'<div><h1 style="margin:0 0 4px">Invoice</h1>'
+        f'<div class="muted">#{int(order["id"]):05d} &middot; {esc(paid_on)}</div>'
+        f'</div>'
+        f'<div style="text-align:right"><b style="font-size:17px">'
+        f'{esc(brand)}</b>{seller}</div></div>'
+        f'<hr style="border:0;border-top:1px solid var(--border);margin:18px 0">'
+        f'<div style="display:flex;gap:30px;flex-wrap:wrap;margin-bottom:18px">'
+        f'<div><div class="muted" style="font-size:11px;text-transform:uppercase;'
+        f'letter-spacing:.08em">Billed to</div>'
+        f'<b>{esc(org.get("name", ""))}</b></div>'
+        f'<div><div class="muted" style="font-size:11px;text-transform:uppercase;'
+        f'letter-spacing:.08em">Reference</div>'
+        f'<code>{esc(ref)}</code></div></div>'
+        f'<table><thead><tr><th>Description</th><th>Months</th>'
+        f'<th style="text-align:right">Amount</th></tr></thead><tbody>'
+        f'<tr><td>Router monitoring &mdash; up to {devices} devices'
+        f'<br><span class="muted" style="font-size:12px">'
+        f'R{unit:,.2f} per month</span></td>'
+        f'<td>{months}</td>'
+        f'<td style="text-align:right">R{total:,.2f}</td></tr>'
+        f'</tbody></table>'
+        f'<div style="display:flex;justify-content:flex-end;margin-top:14px">'
+        f'<div style="min-width:220px">'
+        f'<div style="display:flex;justify-content:space-between;'
+        f'font-size:18px;font-weight:700"><span>Total paid</span>'
+        f'<span>R{total:,.2f}</span></div>'
+        f'<div class="muted" style="font-size:12px;text-align:right;'
+        f'margin-top:4px">Paid by card on {esc(paid_on)}</div></div></div>'
+        f'<p class="muted" style="font-size:12px;margin-top:22px">'
+        f'This is a receipt for a payment already made. No VAT has been '
+        f'charged.</p>'
+        f'</div>'
+        f'<div class="actions" style="margin-top:14px">'
+        f'<button class="btn" type="button" onclick="window.print()">'
+        f'Print or save as PDF</button> '
+        f'<a class="btn ghost" href="/billing">Back to billing</a></div></div>')
+    return _page("Invoice", _header(user, "/billing") + inner)
+
+
 def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                     msg: str = "", error: str = "", contact: dict | None = None,
-                    device_count: int = 0) -> str:
+                    device_count: int = 0, yoco_on: bool = False,
+                    orders=None) -> str:
     """Billing page: current subscription status, the packet ladder, and the
     company's own EFT reference for paying by bank transfer.
 
@@ -603,6 +789,22 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
         per_dev = p["price_usd"] / p["devices"]
         if is_current:
             btn = '<span class="badge ok">Current plan</span>'
+        elif yoco_on:
+            # Priced here, on the server, from our own table. The browser
+            # sends only which packet was chosen -- never the amount, which
+            # would otherwise be a number a customer could edit before
+            # paying it.
+            _zar = p["price_zar"]
+            btn = (f'<form method="POST" action="/billing/checkout">'
+                   f'<input type="hidden" name="csrf" value="{csrf}">'
+                   f'<input type="hidden" name="plan" value="{esc(p["name"])}">'
+                   f'<select name="months" style="padding:5px;margin-right:6px">'
+                   f'<option value="1">1 month</option>'
+                   f'<option value="3">3 months</option>'
+                   f'<option value="6">6 months</option>'
+                   f'<option value="12">12 months</option></select>'
+                   f'<button class="btn" type="submit" style="padding:6px 14px">'
+                   f'Pay R{_zar:,.0f}</button></form>')
         elif pf_enabled:
             btn = (f'<form method="POST" action="/billing/subscribe">'
                    f'<input type="hidden" name="csrf" value="{csrf}">'
@@ -631,7 +833,10 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
     # problem, so the customer is told about the payment route that does work
     # (the EFT box directly below) rather than being shown an empty page with
     # a note about a config file they will never open.
-    pay_line = ("Cancel anytime." if pf_enabled
+    pay_line = ("Pick how long you want and pay by card — your packet "
+                "changes the moment the payment goes through."
+                if yoco_on else
+                "Cancel anytime." if pf_enabled
                 else "Pay monthly by EFT using the reference below.")
     plans_html = (f'<div class="box"><h2>Choose a packet</h2>'
                   f'<p class="muted" style="margin-top:0">Packets step in '
@@ -643,6 +848,7 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                   f'<th>Per device</th><th></th>'
                   f'</tr></thead><tbody>{plan_rows}</tbody></table></div>')
 
+    plans_html += _orders_box(orders or [])
     plans_html += _quote_request_box(csrf, device_count)
 
     inner = (f'<div class="wrap"><h1>Billing</h1>{note}'
@@ -650,8 +856,66 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
     return _page("Billing", _header(user, "/billing") + inner)
 
 
+def _locked_pay_block(user, csrf: str, yoco_on: bool, bill,
+                      contact: dict | None, org_name: str) -> str:
+    """How a suspended company actually pays, on the page that suspends them.
+
+    The old button here linked to /billing, which redirects locked companies
+    straight back to this page -- a customer being told to pay, with nowhere
+    to pay and no reference to quote.
+
+    Only offered to an owner: a member who happens to log in during a
+    suspension cannot commit the company to a payment, and showing them a
+    button that will 403 is worse than showing nothing.
+    """
+    from .billing import PLANS, plan_by_name
+
+    if not AuthStore.is_owner(user):
+        return ('<p class="muted" style="margin-top:14px">Ask the account '
+                'owner to settle this &mdash; only they can pay.</p>')
+    b = bill or {}
+    cur = plan_by_name(b.get("plan", "") or "")
+    cap = b.get("device_limit")
+    # Renewing what they had, not upselling: the packet they are already on
+    # is preselected. Somebody locked out is trying to get back in, not
+    # shopping.
+    want = cur["devices"] if cur else (cap if isinstance(cap, int) else 0)
+    if yoco_on:
+        opts = "".join(
+            f'<option value="{esc(p["name"])}"'
+            f'{" selected" if p["devices"] == want else ""}>'
+            f'{p["devices"]} devices &mdash; R{p["price_zar"]:,.0f} per month'
+            f'</option>' for p in PLANS)
+        return (
+            f'<form method="POST" action="/billing/checkout" '
+            f'style="margin:18px 0 0;text-align:left">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<label style="display:block;margin-bottom:8px">Packet'
+            f'<br><select name="plan" style="width:100%">{opts}</select>'
+            f'</label>'
+            f'<label style="display:block;margin-bottom:10px">Pay for'
+            f'<br><select name="months" style="width:100%">'
+            f'<option value="1">1 month</option>'
+            f'<option value="3">3 months</option>'
+            f'<option value="6">6 months</option>'
+            f'<option value="12">12 months</option></select></label>'
+            f'<button class="btn" type="submit" style="width:100%">'
+            f'Pay now and switch everything back on</button>'
+            f'<p class="muted" style="font-size:12px;margin:10px 0 0;'
+            f'text-align:center">Paid by card on Yoco. Your account comes '
+            f'back on by itself the moment the payment clears.</p>'
+            f'</form>')
+    # No card payment on this server: give them the reference and the bank
+    # details, which is the whole reason they were sent here.
+    return (f'<div style="margin-top:18px;text-align:left">'
+            f'{_eft_reference_box(user.get("org_id", 0), contact, org_name)}'
+            f'</div>')
+
+
 def _render_locked(user, contact: dict | None = None,
-                   manual: bool = False) -> str:
+                   manual: bool = False, csrf: str = "",
+                   yoco_on: bool = False, bill=None,
+                   org_name: str = "") -> str:
     """Full-page lockout shown when an org has lost access.
 
     The reason is stated because the two paths here need different actions
@@ -676,9 +940,8 @@ def _render_locked(user, contact: dict | None = None,
              f'<h1 style="color:#dc2626;margin-bottom:8px">Account Suspended</h1>'
              f'{why}'
              f'{contact_p}'
-             + (f'<p><a class="btn" href="/billing">View payment details</a></p>'
-                if manual else
-                f'<p><a class="btn" href="/billing">Reactivate your account</a></p>')
+             + _locked_pay_block(user, csrf, yoco_on, bill, contact,
+                                 org_name)
              + f'<p class="muted" style="margin-top:18px">'
              f'<a href="/logout">Log out</a></p>'
              f'</div></div>')
@@ -851,6 +1114,76 @@ def _billing_contact_box(contact, csrf) -> str:
         f'<div style="margin-top:10px"><button class="btn" type="submit">'
         f'Save billing contact</button></div>'
         f'</form></div>')
+
+
+def _yoco_box(cfg, csrf: str, webhook_url: str = "") -> str:
+    """Superadmin setting: the two Yoco keys that switch card payment on.
+
+    Both are write-only in this form. A saved key is shown as a masked
+    placeholder and an empty box leaves it alone, so re-saving the panel to
+    change something else cannot wipe the keys and quietly stop every
+    payment -- which would look exactly like Yoco being down.
+    """
+    c = cfg or {}
+    has_secret = bool(str(c.get("secret_key") or "").strip())
+    has_hook = bool(str(c.get("webhook_secret") or "").strip())
+    live = has_secret and has_hook
+    if live:
+        state = ('<p style="margin:0 0 10px;font-size:12px;padding:8px 10px;'
+                 'border-radius:6px;background:rgba(22,163,74,0.12);'
+                 'color:#15803d">&#10003; <b>Card payment is on.</b> '
+                 'Companies can buy and upgrade their own packet, and the '
+                 'plan changes the moment Yoco confirms the payment.</p>')
+    elif has_secret:
+        # The dangerous half-state: checkouts open and customers are charged,
+        # but nothing tells us they paid, so nobody's plan ever changes.
+        state = ('<p style="margin:0 0 10px;font-size:12px;padding:8px 10px;'
+                 'border-radius:6px;background:rgba(217,119,6,0.12);'
+                 'color:#b45309">&#9888; <b>Half configured.</b> Customers '
+                 'can be charged, but without the webhook secret nothing '
+                 'tells this server they paid, so their packet will not '
+                 'change. Add the signing secret below.</p>')
+    else:
+        state = ('<p class="muted" style="margin:0 0 10px;font-size:12px">'
+                 'Card payment is off. Companies see EFT details and the '
+                 'reference to quote, and you grant packets by hand from the '
+                 'table above.</p>')
+    hook = (f'<p class="muted" style="font-size:12px;margin:10px 0 0">'
+            f'Paste this as the webhook URL in the Yoco dashboard, and '
+            f'subscribe it to <code>payment.succeeded</code>:<br>'
+            f'<code>{esc(webhook_url)}</code></p>' if webhook_url else "")
+    return (
+        f'<div class="box"><h2>Card payment (Yoco)</h2>'
+        f'{state}'
+        f'<form method="POST" action="/superadmin/yoco">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<div style="display:grid;grid-template-columns:'
+        f'repeat(auto-fit,minmax(260px,1fr));gap:10px">'
+        f'<label>Secret key<br><input name="secret_key" type="password" '
+        f'placeholder="{"saved - leave blank to keep" if has_secret else "sk_live_..."}" '
+        f'style="width:100%"></label>'
+        f'<label>Webhook signing secret<br><input name="webhook_secret" '
+        f'type="password" placeholder='
+        f'"{"saved - leave blank to keep" if has_hook else "whsec_..."}" '
+        f'style="width:100%"></label>'
+        f'</div>{hook}'
+        f'<div style="margin-top:10px"><button class="btn" type="submit">'
+        f'Save Yoco settings</button></div></form>'
+        f'{"" if not (has_secret or has_hook) else _yoco_clear_form(csrf)}'
+        f'</div>')
+
+
+def _yoco_clear_form(csrf: str) -> str:
+    """Turning card payment off again. Separate form so it cannot be hit by
+    tabbing past Save, and confirmed, because it stops customers paying."""
+    return (
+        f'<form method="POST" action="/superadmin/yoco" '
+        f'style="margin-top:8px" onsubmit="return confirm(\'Remove the Yoco '
+        f'keys? Companies will go back to paying by EFT.\')">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<input type="hidden" name="clear" value="1">'
+        f'<button class="btn ghost" type="submit">Turn card payment off'
+        f'</button></form>')
 
 
 def _parse_regions_text(text: str) -> list:
@@ -1066,7 +1399,8 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        billing_on: bool = False, billing_contact=None,
                        hub_ip: str = "", hub_port: str = "",
                        router_count: int = 0, hub_pubkey: str = "",
-                       regions=None, nextdns=None, quotes=None) -> str:
+                       regions=None, nextdns=None, quotes=None,
+                       yoco=None, yoco_hook_url: str = "") -> str:
     """Platform superadmin panel — shows all orgs, billing status, and device counts."""
     note = _flash(msg, error)
 
@@ -1237,6 +1571,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
              f'{quote_html}{table}'
              f'{_smtp_settings_box(smtp, csrf)}'
              f'{_billing_contact_box(billing_contact, csrf)}'
+             f'{_yoco_box(yoco, csrf, yoco_hook_url)}'
              f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf, hub_pubkey)}'
              f'{_regions_box(regions or [], csrf)}'
              f'{_nextdns_settings_box(nextdns or {}, csrf)}'
@@ -1556,7 +1891,36 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
         f'{FREE_DEVICES} device{"" if FREE_DEVICES == 1 else "s"} — the same '
         f'as the trial, so an evaluation never goes dark, but the fleet stays '
         f'behind a packet. Packets raise that cap — see the Billing page '
-        f'(company owners) for sizes and pricing.</p>'))
+        f'(company owners) for sizes and pricing.</p>'
+        '<h3>Buying or moving up a packet</h3>'
+        '<p>Packets run in steps of five devices. You are only ever '
+        'offered packets <b>bigger</b> than the one you have: paying to '
+        'shrink your own account is never something you meant to do. Past '
+        'the largest packet the Billing tab asks for a quote instead, '
+        'because at that size the price is worth a conversation.</p>'
+        '<p>There are two ways to pay, and the Billing tab shows whichever '
+        'one this server is set up for:</p>'
+        '<ul>'
+        '<li><b>By card.</b> Pick the packet and how many months, and you '
+        'are taken to Yoco to pay. The new packet switches on <b>by '
+        'itself</b> the moment the payment clears — usually a few '
+        'seconds. Nobody at our end has to notice and do anything.</li>'
+        '<li><b>By EFT.</b> The Billing tab shows the bank details and a '
+        'reference to quote. Use that reference: it is how the payment is '
+        'matched to your company. A packet bought this way is switched on '
+        'by hand once the money lands.</li>'
+        '</ul>'
+        '<p>The owner can also move up straight from <b>Account &rarr; '
+        'Your plan</b>, which is where you already are when you run out '
+        'of device slots.</p>'
+        '<p><b>Months you have already paid for are added to, not thrown '
+        'away.</b> Renewing or upgrading early extends the date you are '
+        'paid up to; it never restarts it from today. If the company was '
+        'suspended for non-payment, paying un-suspends it on its own.</p>'
+        '<p>Every completed card payment gets an invoice, listed under '
+        '<b>Payments</b> on the Billing tab and emailed to the alert '
+        'recipients. It is generated from what you were actually charged, '
+        'so it stays correct even if prices change later.</p>'))
 
     activity = _guide_section("activity", "Activity log", (
         '<p>The <b>Activity</b> tab is a timeline of every preview, apply and '

@@ -613,6 +613,16 @@ try:
     check("...while telling them their data is intact, so they are not "
           "left wondering whether paying is even worth it",
           "untouched" in body.lower())
+    # The old page's only button linked to /billing, which redirects a
+    # locked company straight back here -- a customer told to pay, with
+    # nowhere to pay and no reference to quote.
+    check("...and gives them somewhere to actually pay: with card "
+          "payment off, the EFT reference for their own company",
+          "PAYLESSCO-" in body)
+    check("...instead of the old button back to the billing page, which "
+          "redirects locked companies straight to this same notice",
+          "View payment details" not in body
+          and "Reactivate your account" not in body)
     st, abody = req(qo, "/api/devices", base=QBASE)
     check("the API refuses them outright with 402 and a machine-readable "
           "reason -- redirecting a script to an HTML billing page would have "
@@ -658,6 +668,202 @@ try:
           st == 200 and "Platform admin" in body)
     _sb.set_plan(_saoid, "d25")
     _sb.db.close()
+
+    # ---- Yoco: the self-serve payment loop over real HTTP ------------------
+    # The unit tests in tests/yoco_test.py cover signing and the order table.
+    # These cover the parts only the live routes can be wrong about: who is
+    # allowed to start a payment, where the price comes from, and whether an
+    # unsigned "they paid" callback can grant a packet.
+    print("Buying a bigger packet through Yoco:")
+    import base64 as _b64, hashlib as _hl, hmac as _hm
+    import mikromon.yoco as _yoco
+    from mikromon.billing import plan_by_name as _plan
+
+    _hook_secret = "whsec_" + _b64.b64encode(b"test-webhook-signing-key").decode()
+    _ya = AuthStore(adb)
+    _ya.set_yoco({"secret_key": "sk_test", "webhook_secret": _hook_secret})
+    _ya.close()
+
+    _sent = {}
+    _real_checkout = _yoco.create_checkout
+
+    def _fake_checkout(secret_key, amount_cents, **kw):
+        _sent["amount"] = amount_cents
+        _sent["meta"] = kw.get("metadata")
+        return {"id": "ch_test", "redirectUrl": "https://pay.example/ch_test"}
+
+    _yoco.create_checkout = _fake_checkout
+
+    def _post_hook(body: bytes, *, secret=_hook_secret, ts=None, wid="msg_t"):
+        ts = str(int(ts if ts is not None else time.time()))
+        key = _b64.b64decode(secret[len("whsec_"):])
+        sig = _b64.b64encode(_hm.new(
+            key, wid.encode() + b"." + ts.encode() + b"." + body,
+            _hl.sha256).digest()).decode()
+        r = urllib.request.Request(
+            QBASE + "/billing/yoco-webhook", data=body,
+            headers={"Content-Type": "application/json", "webhook-id": wid,
+                     "webhook-timestamp": ts,
+                     "webhook-signature": "v1," + sig})
+        try:
+            with urllib.request.urlopen(r, timeout=5) as resp:
+                return getattr(resp, "status", resp.code)
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    try:
+        _yb = _BS(_bdb)
+        _ay = AuthStore(adb)
+        _yoid = _ay.signup("owner@yocotest.test", "password123", "Yoco Test Co")
+        _ay.close()
+        _yb.set_plan(_yoid, "d5")
+
+        yo = opener()
+        req(yo, "/login", {"email": "owner@yocotest.test",
+                           "password": "password123"}, base=QBASE)
+        # A successful checkout redirects to Yoco, which is off this
+        # server -- the POSTs use an opener that does not chase it.
+        yon = opener(redirect=False)
+        req(yon, "/login", {"email": "owner@yocotest.test",
+                            "password": "password123"}, base=QBASE)
+        st, abody = req(yo, "/account", base=QBASE)
+        # csrf is per session, so the token has to come from the
+        # opener that will do the posting.
+        _ytok = csrf_of(req(yon, "/account", base=QBASE)[1])
+        check("with card payment on, the owner can pick a bigger packet from "
+              "the Account tab, where they already are when they run out of "
+              "device slots",
+              st == 200 and "/billing/checkout" in abody
+              and 'name="plan"' in abody)
+        check("...and is only offered packets LARGER than the one they have, "
+              "since selling a downgrade through a payment button would take "
+              "their money and shrink their account",
+              'value="d10"' in abody and 'value="d5"' not in abody)
+
+        # The price is the whole reason this route exists server-side.
+        st, _ = req(yon, "/billing/checkout",
+                    {"csrf": _ytok, "plan": "d25", "months": "3",
+                     "amount": "1", "amount_cents": "1", "price": "1"},
+                    base=QBASE)
+        _want = int(round(_plan("d25")["price_zar"] * 100)) * 3
+        check("the amount charged is computed from our own plan table, not "
+              "from anything the browser sent -- a price that arrives from a "
+              "browser is a price a customer can edit",
+              _sent.get("amount") == _want)
+        check("only the order id travels through the browser, so nothing the "
+              "customer can reach decides which packet they receive",
+              set((_sent.get("meta") or {})) <= {"order", "org"})
+
+        _order_id = int(_sent["meta"]["order"])
+        check("the order is written before anyone is sent to pay",
+              _yb.order(_order_id)["status"] == "pending"
+              and _yb.order(_order_id)["amount_cents"] == _want)
+        check("...and the company is still on the packet it had, because "
+              "opening a payment page is not paying",
+              _yb.get(_yoid)["device_limit"] == 5)
+
+        _good = json.dumps({
+            "type": "payment.succeeded",
+            "payload": {"id": "p_test", "amount": _want,
+                        "metadata": {"order": str(_order_id)}}}).encode()
+
+        # Anyone can find this URL; the signature is the only thing stopping
+        # them upgrading themselves for nothing.
+        r = urllib.request.Request(QBASE + "/billing/yoco-webhook", data=_good,
+                                   headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(r, timeout=5) as resp:
+                _st = getattr(resp, "status", resp.code)
+        except urllib.error.HTTPError as e:
+            _st = e.code
+        check("an unsigned callback is refused outright", _st == 401)
+        check("...and grants nothing", _yb.get(_yoid)["device_limit"] == 5)
+
+        check("a callback signed with the wrong secret is refused",
+              _post_hook(_good, secret="whsec_" + _b64.b64encode(b"nope").decode())
+              == 401)
+        check("a correctly signed callback captured and replayed 10 minutes "
+              "later is refused",
+              _post_hook(_good, ts=time.time() - 600) == 401)
+        check("...and after all of that the company still has not been "
+              "upgraded", _yb.get(_yoid)["device_limit"] == 5)
+
+        check("the genuine callback is accepted", _post_hook(_good) == 200)
+        check("...and the packet switches on by itself, with nobody at our "
+              "end having to notice the payment",
+              _yb.get(_yoid)["device_limit"] == 25
+              and _yb.get(_yoid)["plan"] == "d25")
+        _end1 = _yb.get(_yoid)["current_period_end"]
+
+        # Yoco retries until it gets a 2xx, so the same event arrives twice.
+        check("the same event delivered again is accepted (so Yoco stops "
+              "retrying) but changes nothing",
+              _post_hook(_good, wid="msg_t2") == 200
+              and _yb.get(_yoid)["current_period_end"] == _end1)
+
+        # A payment for less than the order. Yoco would not send this, but
+        # being wrong here gives away a packet.
+        st, _ = req(yon, "/billing/checkout",
+                    {"csrf": _ytok, "plan": "d50", "months": "1"}, base=QBASE)
+        _short_id = int(_sent["meta"]["order"])
+        _short = json.dumps({
+            "type": "payment.succeeded",
+            "payload": {"id": "p_short", "amount": 100,
+                        "metadata": {"order": str(_short_id)}}}).encode()
+        check("a payment for less than the order is accepted but not applied",
+              _post_hook(_short, wid="msg_t3") == 200
+              and _yb.get(_yoid)["device_limit"] == 25)
+
+        st, bbody = req(yo, "/billing", base=QBASE)
+        check("the company can see what it has paid for, with an invoice",
+              st == 200 and "Payments" in bbody
+              and f"/billing/invoice?id={_order_id}" in bbody)
+        st, inv = req(yo, f"/billing/invoice?id={_order_id}", base=QBASE)
+        check("the invoice states the company, the packet and what was "
+              "actually charged",
+              st == 200 and "Yoco Test Co" in inv and "25 devices" in inv
+              and f"R{_want / 100:,.2f}" in inv)
+        check("no VAT is claimed on it, because the business is not yet "
+              "VAT-registered and claiming one would be a real problem "
+              "rather than a cosmetic one",
+              "Tax Invoice" not in inv and "VAT" not in inv.replace(
+                  "No VAT has been charged", ""))
+        st, ubody = req(yo, f"/billing/invoice?id={_short_id}", base=QBASE)
+        check("an order that was never paid has no invoice, and says so "
+              "rather than producing a document for money we never received",
+              "not been completed" in ubody)
+
+        # Invoice ids are guessable, and an invoice names a company and what
+        # it pays.
+        oth = opener()
+        req(oth, "/login", {"email": "zoe@other.test", "password": "zoe12345"},
+            base=QBASE)
+        st, _ = req(oth, f"/billing/invoice?id={_order_id}", base=QBASE)
+        check("another company cannot open this invoice by guessing its id",
+              st == 404)
+
+        print("Who may start a payment:")
+        bby = opener()
+        req(bby, "/login", {"email": "bob@acme.test", "password": "bob123"},
+            base=QBASE)
+        _, _bacct = req(bby, "/account", base=QBASE)
+        check("a member is not shown the upgrade picker -- committing the "
+              "company to a payment is the owner's call",
+              "/billing/checkout" not in _bacct)
+        st, _ = req(bby, "/billing/checkout",
+                    {"csrf": csrf_of(_bacct), "plan": "d100", "months": "12"},
+                    base=QBASE)
+        check("...and posting to the route directly is refused too, using "
+              "their own csrf token so this tests the owner check and not "
+              "just csrf", st == 403)
+
+        _yb.db.close()
+    finally:
+        _yoco.create_checkout = _real_checkout
+        _yaa = AuthStore(adb)
+        _yaa.set_yoco({})
+        _yaa.close()
+
 finally:
     srv_q.shutdown()
     srv_q.server_close()

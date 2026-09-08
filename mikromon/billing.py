@@ -159,6 +159,27 @@ CREATE TABLE IF NOT EXISTS quote_requests (
     handled      INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_quote_open ON quote_requests(handled, created);
+
+-- One row per "this company asked to buy this packet". Created BEFORE the
+-- customer is sent to the payment page, so the amount and the packet are
+-- fixed on our side and cannot be edited in the browser on the way through.
+-- It is also what makes payment idempotent: the webhook finds this row, and
+-- a row already marked paid is not applied a second time. Yoco retries
+-- webhooks, so that is not a theoretical concern.
+CREATE TABLE IF NOT EXISTS orders (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id       INTEGER NOT NULL,
+    plan         TEXT NOT NULL,        -- the packet being bought
+    months       INTEGER NOT NULL DEFAULT 1,
+    amount_cents INTEGER NOT NULL,     -- minor units; money is never a float
+    currency     TEXT NOT NULL DEFAULT 'ZAR',
+    status       TEXT NOT NULL DEFAULT 'pending',   -- pending|paid|cancelled
+    checkout_id  TEXT,                 -- Yoco's id for the hosted page
+    payment_id   TEXT,                 -- Yoco's id for the settled payment
+    created      REAL NOT NULL,
+    paid         REAL
+);
+CREATE INDEX IF NOT EXISTS ix_orders_org ON orders(org_id, created);
 """
 
 
@@ -481,6 +502,89 @@ class BillingStore:
         self._upsert(org_id, status="active", plan=plan_name,
                      device_limit=plan["devices"], grace_period_end=None,
                      pf_token=None)
+
+    # --- orders (a packet somebody is paying for) --------------------------
+
+    _ORDER_COLS = ("id", "org_id", "plan", "months", "amount_cents",
+                   "currency", "status", "checkout_id", "payment_id",
+                   "created", "paid")
+
+    def create_order(self, org_id: int, plan: str, amount_cents: int,
+                     months: int = 1, currency: str = "ZAR") -> int:
+        """Record what is being bought, before sending anyone to pay.
+
+        The amount is stored here rather than recomputed when the webhook
+        lands, so a price change between clicking Pay and the card settling
+        cannot charge one figure and grant another.
+        """
+        with self._lock:
+            cur = self.db.execute(
+                "INSERT INTO orders (org_id, plan, months, amount_cents, "
+                "currency, created) VALUES (?,?,?,?,?,?)",
+                (int(org_id), str(plan), max(1, int(months)),
+                 int(amount_cents), str(currency), time.time()))
+            self.db.commit()
+            return int(cur.lastrowid)
+
+    def set_order_checkout(self, order_id: int, checkout_id: str) -> None:
+        with self._lock:
+            self.db.execute("UPDATE orders SET checkout_id = ? WHERE id = ?",
+                            (str(checkout_id), int(order_id)))
+            self.db.commit()
+
+    def order(self, order_id: int) -> dict | None:
+        row = self.db.execute(
+            f"SELECT {', '.join(self._ORDER_COLS)} FROM orders WHERE id = ?",
+            (int(order_id),)).fetchone()
+        return dict(zip(self._ORDER_COLS, row)) if row else None
+
+    def orders_for_org(self, org_id: int, limit: int = 24) -> list:
+        rows = self.db.execute(
+            f"SELECT {', '.join(self._ORDER_COLS)} FROM orders "
+            f"WHERE org_id = ? ORDER BY created DESC LIMIT ?",
+            (int(org_id), int(limit))).fetchall()
+        return [dict(zip(self._ORDER_COLS, r)) for r in rows]
+
+    def mark_order_paid(self, order_id: int, payment_id: str = "") -> bool:
+        """Mark an order paid. True only the FIRST time.
+
+        Yoco retries a webhook until it gets a 2xx, and a retry after our own
+        timeout is normal rather than exceptional. Returning False on the
+        second call is what stops one payment granting two months.
+        """
+        with self._lock:
+            cur = self.db.execute(
+                "UPDATE orders SET status = 'paid', paid = ?, payment_id = ? "
+                "WHERE id = ? AND status != 'paid'",
+                (time.time(), str(payment_id), int(order_id)))
+            self.db.commit()
+            return cur.rowcount > 0
+
+    def apply_paid_order(self, order: dict) -> None:
+        """Give the company what it paid for.
+
+        Sets the packet's device cap, pushes the paid-until date out by the
+        months bought, and lifts any suspension -- somebody who has just paid
+        should not have to wait for a human to switch them back on, which was
+        the whole point of taking the card.
+
+        The period extends from whichever is later: what they already had, or
+        now. Renewing early therefore adds to the end of the current period
+        instead of throwing away what is left of it.
+        """
+        plan = plan_by_name(order.get("plan", ""))
+        if plan is None:
+            log.error("paid order %s names an unknown plan %r",
+                      order.get("id"), order.get("plan"))
+            return
+        org_id = int(order["org_id"])
+        row = self.get(org_id) or {}
+        base = max(float(row.get("current_period_end") or 0.0), time.time())
+        months = max(1, int(order.get("months") or 1))
+        self._upsert(org_id, status="active", plan=plan["name"],
+                     device_limit=plan["devices"],
+                     current_period_end=base + months * 30 * 86400,
+                     grace_period_end=None)
 
     # --- quote requests (companies past the last tier) --------------------
 

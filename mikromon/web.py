@@ -44,6 +44,7 @@ from .web_auth import (
     _render_login, _render_signup, _render_account,
     _render_admin, _render_guide,
     _render_billing, _render_locked, _grace_banner_html,
+    _render_invoice,
     _render_superadmin, _render_region_picker, _parse_regions_text,
 )
 
@@ -6040,6 +6041,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         billing.days_left_in_grace(org_id),
                         auth.get_billing_contact() if auth else None)
 
+            if path == "/billing/invoice":
+                return self._serve_invoice(url, user)
             if path == "/billing":
                 return self._serve_billing(url, user)
             if path == "/superadmin":
@@ -6052,10 +6055,18 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if path == "/account":
                 q = parse_qs(url.query)
                 org_data = auth.org(user["org_id"]) if auth else None
+                # Owners see their packet and can move up from here; the
+                # count is what makes "you are nearly full" honest.
+                _own = AuthStore.is_owner(user)
                 return self._send(200, _render_account(
                     user, self._session()["csrf"],
                     msg=q.get("ok", [""])[0], error=q.get("error", [""])[0],
-                    org=org_data),
+                    org=org_data,
+                    bill=(billing.get(user["org_id"])
+                          if billing and _own else None),
+                    device_count=(self._org_device_count(user["org_id"])
+                                  if _own else 0),
+                    yoco_on=self._yoco_live()),
                     "text/html; charset=utf-8")
             if path == "/guide":
                 return self._send(200, _render_guide(user),
@@ -6231,6 +6242,31 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 roadwarrior_box=rw_box),
                 "text/html; charset=utf-8")
 
+        def _org_device_count(self, org_id) -> int:
+            """How many routers this company has. 0 if we cannot tell.
+
+            Used wherever a page says "N of M devices in use" -- a wrong
+            number here is worse than none, so a failure counts as unknown
+            rather than guessing.
+            """
+            if not devices_db:
+                return 0
+            try:
+                from .devices_store import DevicesStore as _DS
+                _dsb = _DS(devices_db)
+                try:
+                    return len(_dsb.names_for_org(org_id))
+                finally:
+                    _dsb.close()
+            except Exception:  # noqa: BLE001
+                log.exception("could not count devices for org %s", org_id)
+                return 0
+
+        def _yoco_live(self) -> bool:
+            """Both keys present. One alone cannot complete a payment."""
+            y = auth.get_yoco() if auth else {}
+            return bool(y.get("secret_key") and y.get("webhook_secret"))
+
         def _serve_billing(self, url, user):
             if not AuthStore.is_admin(user):
                 return self._send(403, "forbidden")
@@ -6240,27 +6276,29 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if billing and billing.is_locked(user["org_id"]):
                 return self._send(200, _render_locked(
                     user, contact,
-                    manual=billing.is_suspended(user["org_id"])),
+                    manual=billing.is_suspended(user["org_id"]),
+                    csrf=self._session()["csrf"],
+                    yoco_on=self._yoco_live(),
+                    bill=bill,
+                    org_name=(auth.org_name(user["org_id"])
+                              if auth else "")),
                                   "text/html; charset=utf-8")
             pf_enabled = bool(_pf_merchant_id and _pf_merchant_key)
             # The page marks the packet that fits, which needs the real
             # count -- a recommendation based on nothing would be worse than
             # none, since the customer would trust it.
-            dev_count = 0
-            if devices_db:
-                try:
-                    from .devices_store import DevicesStore as _DS
-                    _dsb = _DS(devices_db)
-                    try:
-                        dev_count = len(_dsb.names_for_org(user["org_id"]))
-                    finally:
-                        _dsb.close()
-                except Exception:
-                    log.exception("billing: could not count org devices")
+            dev_count = self._org_device_count(user["org_id"])
+            # Card payment needs BOTH keys. With only the secret key we
+            # could charge a customer and never hear that they paid,
+            # which is worse than not offering the button at all.
+            yoco_on = self._yoco_live()
             return self._send(200, _render_billing(
                 user, bill, pf_enabled, self._session()["csrf"],
                 msg=q.get("ok", [""])[0], error=q.get("error", [""])[0],
-                contact=contact, device_count=dev_count),
+                contact=contact, device_count=dev_count,
+                yoco_on=yoco_on,
+                orders=(billing.orders_for_org(user["org_id"])
+                        if billing else [])),
                 "text/html; charset=utf-8")
 
         def _serve_superadmin(self, url, user):
@@ -6341,7 +6379,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 hub_pubkey=hub_pubkey_cur,
                 regions=auth.get_regions() if auth else [],
                 nextdns=auth.get_nextdns() if auth else {},
-                quotes=open_quotes),
+                quotes=open_quotes,
+                yoco=auth.get_yoco() if auth else {},
+                yoco_hook_url=(
+                    ("https" if secure_cookies else "http") + "://"
+                    + self.headers.get("Host", "")
+                    + "/billing/yoco-webhook")),
                 "text/html; charset=utf-8")
 
         def _backup_paths(self):
@@ -6507,6 +6550,41 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             auth.set_smtp(cfg)
             return self._redirect("/superadmin?ok=" +
                                   quote("Email (SMTP) settings saved."))
+
+        def _post_superadmin_yoco(self, user):
+            """Superadmin-only: the two Yoco keys that switch card payment on.
+
+            A blank box keeps whatever is already saved. Re-saving this panel
+            to change one field must not silently wipe a key and stop every
+            payment -- that failure looks like Yoco being down, and would be
+            hunted for in the wrong place.
+            """
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if auth is None:
+                return self._redirect("/superadmin?error=" +
+                                      quote("Auth store is not enabled."))
+            cur = dict(auth.get_yoco() or {})
+            if flat.get("clear"):
+                auth.set_yoco({})
+                log.warning("Yoco keys cleared by %s", user.get("email", "?"))
+                return self._redirect("/superadmin?ok=" + quote(
+                    "Card payment turned off. Companies will pay by EFT."))
+            for field in ("secret_key", "webhook_secret"):
+                val = (flat.get(field) or "").strip()
+                if val:
+                    cur[field] = val
+            auth.set_yoco(cur)
+            done = bool(cur.get("secret_key") and cur.get("webhook_secret"))
+            return self._redirect("/superadmin?ok=" + quote(
+                "Yoco settings saved. Card payment is on."
+                if done else
+                "Yoco settings saved. Add the other key to switch card "
+                "payment on."))
 
         def _post_superadmin_billing_contact(self, user):
             """Superadmin-only: set who a trial-expired/locked company should
@@ -9193,6 +9271,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # PayFast ITN: server-to-server, no auth session required.
             if path == "/billing/itn":
                 return self._post_billing_itn()
+            if path == "/billing/yoco-webhook":
+                return self._post_yoco_webhook()
             if auth is None:
                 return self._send(404, "not found")
             if path == "/signup":
@@ -9232,6 +9312,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_suspend(user)
             if path == "/superadmin/restore":
                 return self._post_superadmin_suspend(user, restore=True)
+            if path == "/superadmin/yoco":
+                return self._post_superadmin_yoco(user)
             if path == "/superadmin/billing-contact":
                 return self._post_superadmin_billing_contact(user)
             if path == "/superadmin/hub-endpoint":
@@ -9339,6 +9421,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_billing_cancel(flat, user)
             if path == "/billing/quote":
                 return self._post_billing_quote(flat, user)
+            if path == "/billing/checkout":
+                return self._post_billing_checkout(flat, user)
             # Org isolation: an owner may only touch devices their company owns.
             if not self._owns_target(flat, user):
                 return self._send(403, "forbidden")
@@ -9572,6 +9656,198 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             except Exception:
                 log.exception("could not mark quote handled")
             return self._redirect("/superadmin?ok=" + quote("Quote marked handled"))
+
+        def _post_billing_checkout(self, flat, user):
+            """Send an owner to Yoco to pay for a packet.
+
+            The order row is written BEFORE anyone is sent to pay, and the
+            amount comes from our own plan table. The browser says which
+            packet and how many months; it never says a price, because a
+            price that arrives from a browser is a price a customer can edit.
+            """
+            from .billing import plan_by_name
+            from .yoco import create_checkout, YocoError
+
+            if not billing or auth is None:
+                return self._redirect("/billing?error=" + quote(
+                    "Card payment is not available on this server."))
+            cfg = auth.get_yoco() or {}
+            if not cfg.get("secret_key"):
+                return self._redirect("/billing?error=" + quote(
+                    "Card payment is not switched on yet - please pay by EFT "
+                    "using the reference on this page."))
+            plan = plan_by_name((flat.get("plan") or "").strip())
+            if plan is None:
+                return self._redirect("/billing?error=" + quote(
+                    "That packet no longer exists. Please pick one from the "
+                    "list."))
+            try:
+                months = int(flat.get("months") or 1)
+            except (TypeError, ValueError):
+                months = 1
+            if months not in (1, 3, 6, 12):
+                months = 1
+
+            amount_cents = int(round(plan["price_zar"] * 100)) * months
+            org_id = user["org_id"]
+            order_id = billing.create_order(org_id, plan["name"], amount_cents,
+                                            months=months)
+            host = self.headers.get("Host", "localhost")
+            base = ("https" if secure_cookies else "http") + "://" + host
+            try:
+                res = create_checkout(
+                    cfg["secret_key"], amount_cents,
+                    # Only the order id travels through the browser. The plan
+                    # and the amount are read back from our own row, so
+                    # nothing the customer can reach decides what they get.
+                    metadata={"order": str(order_id), "org": str(org_id)},
+                    success_url=base + "/billing?ok=" + quote(
+                        "Thank you. Your payment is being confirmed - this "
+                        "page will show the new packet within a minute."),
+                    cancel_url=base + "/billing",
+                    failure_url=base + "/billing?error=" + quote(
+                        "That payment did not go through. Nothing was "
+                        "charged."))
+            except YocoError as exc:
+                log.warning("Yoco checkout failed for org %s: %s", org_id, exc)
+                return self._redirect("/billing?error=" + quote(str(exc)))
+            if res.get("id"):
+                billing.set_order_checkout(order_id, res["id"])
+            url = res.get("redirectUrl") or res.get("redirect_url") or ""
+            if not url:
+                return self._redirect("/billing?error=" + quote(
+                    "Yoco did not return a payment page. Nothing was "
+                    "charged - please try again."))
+            log.info("Yoco checkout %s: org %s wants %s for %s month(s), "
+                     "R%.2f (order %s)", res.get("id"), org_id, plan["name"],
+                     months, amount_cents / 100, order_id)
+            return self._redirect(url)
+
+        def _post_yoco_webhook(self):
+            """Yoco telling us a payment settled. The only thing we trust.
+
+            Server-to-server, no browser session. Yoco's own documentation is
+            blunt about the alternative: a customer can reach the success URL
+            without paying, but cannot forge the signature on this.
+
+            Answers 200 for anything that verifies, including events we do
+            nothing with, because a non-2xx makes Yoco retry, and retrying an
+            event we have already handled is noise at best.
+            """
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length else b""
+            if not billing or auth is None:
+                return self._send(200, "ok")
+            from .yoco import verify_webhook, event_of
+            secret = (auth.get_yoco() or {}).get("webhook_secret", "")
+            if not verify_webhook(secret, self.headers, raw):
+                # 401 rather than 200: an unsigned caller is either
+                # misconfigured or trying it on, and neither should be told
+                # "ok". Yoco retries a genuine event once the secret is right.
+                log.warning("Yoco webhook rejected (bad or missing signature)")
+                return self._send(401, "unverified")
+            try:
+                payload = json.loads(raw.decode("utf-8") or "{}")
+            except ValueError:
+                return self._send(200, "ok")
+            kind, meta, payment_id, amount = event_of(payload)
+            if kind != "payment.succeeded":
+                return self._send(200, "ok")
+            try:
+                order_id = int(meta.get("order") or 0)
+            except (TypeError, ValueError):
+                order_id = 0
+            order = billing.order(order_id) if order_id else None
+            if not order:
+                log.error("Yoco payment %s carries no known order (%r)",
+                          payment_id, meta)
+                return self._send(200, "ok")
+            # A payment for less than the order asked for. Yoco would not do
+            # this, but being wrong here gives away a packet, and the check is
+            # one comparison.
+            if amount and amount < int(order["amount_cents"]):
+                log.error("Yoco payment %s is %s cents, order %s expects %s "
+                          "- not applied", payment_id, amount, order_id,
+                          order["amount_cents"])
+                return self._send(200, "ok")
+            if not billing.mark_order_paid(order_id, payment_id):
+                log.info("Yoco webhook for order %s replayed - already "
+                         "applied", order_id)
+                return self._send(200, "ok")
+            billing.apply_paid_order(order)
+            log.info("Order %s paid (%s): org %s now on %s for %s month(s)",
+                     order_id, payment_id, order["org_id"], order["plan"],
+                     order["months"])
+            try:
+                self._email_invoice(order)
+            except Exception:  # noqa: BLE001 - the packet is already granted
+                log.exception("could not email the invoice for order %s",
+                              order_id)
+            return self._send(200, "ok")
+
+        def _email_invoice(self, order) -> None:
+            """Tell the company their payment landed, and where the invoice is.
+
+            Best effort on purpose: the packet has already been granted by the
+            time this runs, so an SMTP problem must never undo a payment.
+            """
+            if auth is None:
+                return
+            org_id = int(order["org_id"])
+            to = list(auth.get_alert_emails(org_id) or [])
+            for u in (auth.list_users(org_id) or []):
+                addr = (u.get("email") or "").strip()
+                if u.get("role") == "owner" and addr and addr not in to:
+                    to.append(addr)
+            if not to:
+                return
+            from email.message import EmailMessage
+            from .notify.org_email import effective_smtp, _smtp_send
+            smtp = effective_smtp(auth, smtp_cfg)
+            if not smtp or not getattr(smtp, "host", ""):
+                return
+            org_name = auth.org_name(org_id) or "your company"
+            total = (order.get("amount_cents") or 0) / 100
+            months = max(1, int(order.get("months") or 1))
+            plural = "" if months == 1 else "s"
+            prefix = (getattr(smtp, "subject_prefix", "") or "").strip()
+            msg = EmailMessage()
+            msg["Subject"] = (
+                f"{prefix} Payment received - invoice "
+                f"#{int(order['id']):05d}").strip()
+            msg["From"] = smtp.from_addr
+            msg["To"] = ", ".join(to)
+            msg.set_content(
+                f"Thank you - we have received R{total:,.2f} from "
+                f"{org_name}.\n\n"
+                f"Your plan is paid up for the next {months} month{plural} "
+                f"and is active now.\n\n"
+                f"Your invoice is on the Billing page of the dashboard, under "
+                f"Payments.\n")
+            _smtp_send(smtp, msg)
+
+        def _serve_invoice(self, url, user):
+            """One paid invoice, printable, for the company that paid it."""
+            if not AuthStore.is_admin(user) or not billing or auth is None:
+                return self._send(403, "forbidden")
+            q = parse_qs(url.query)
+            try:
+                order_id = int(q.get("id", ["0"])[0])
+            except ValueError:
+                order_id = 0
+            order = billing.order(order_id) if order_id else None
+            # Org isolation: numbers in a URL are guessable, and an invoice
+            # names the company and what it pays.
+            if not order or int(order["org_id"]) != int(user["org_id"]):
+                return self._send(404, "not found")
+            if order.get("status") != "paid":
+                return self._redirect("/billing?error=" + quote(
+                    "That payment has not been completed, so there is no "
+                    "invoice for it yet."))
+            org = {"name": auth.org_name(user["org_id"]) or ""}
+            return self._send(200, _render_invoice(
+                user, org, order, auth.get_billing_contact(), brand=_BRAND),
+                "text/html; charset=utf-8")
 
         def _post_billing_subscribe(self, flat, user):
             """Redirect the owner to the PayFast payment page for their chosen plan."""
