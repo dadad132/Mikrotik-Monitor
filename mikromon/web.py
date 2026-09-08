@@ -6569,6 +6569,30 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._redirect("/superadmin?error=" +
                                       quote("Auth store is not enabled."))
             cur = dict(auth.get_yoco() or {})
+            if flat.get("register"):
+                # Registering is API-only -- it cannot be done from the
+                # Yoco portal -- and the signing secret is returned once
+                # and never again. Doing it here means it is written
+                # straight to settings instead of being copied by hand.
+                from .yoco import register_webhook, YocoError
+                host = self.headers.get("Host", "")
+                hook_url = (("https" if secure_cookies else "http")
+                            + "://" + host + "/billing/yoco-webhook")
+                try:
+                    res = register_webhook(cur.get("secret_key", ""),
+                                           hook_url)
+                except YocoError as exc:
+                    return self._redirect("/superadmin?error="
+                                          + quote(str(exc)))
+                cur["webhook_secret"] = res["secret"]
+                cur["webhook_id"] = str(res.get("id") or "")
+                auth.set_yoco(cur)
+                log.info("Yoco webhook registered by %s: %s",
+                         user.get("email", "?"), hook_url)
+                return self._redirect("/superadmin?ok=" + quote(
+                    "Card payment is on. Yoco will now tell this "
+                    "server about every payment, and packets switch "
+                    "on by themselves."))
             if flat.get("clear"):
                 auth.set_yoco({})
                 log.warning("Yoco keys cleared by %s", user.get("email", "?"))

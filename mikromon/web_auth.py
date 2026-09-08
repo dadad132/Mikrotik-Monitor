@@ -1148,10 +1148,46 @@ def _yoco_box(cfg, csrf: str, webhook_url: str = "") -> str:
                  'Card payment is off. Companies see EFT details and the '
                  'reference to quote, and you grant packets by hand from the '
                  'table above.</p>')
-    hook = (f'<p class="muted" style="font-size:12px;margin:10px 0 0">'
-            f'Paste this as the webhook URL in the Yoco dashboard, and '
-            f'subscribe it to <code>payment.succeeded</code>:<br>'
-            f'<code>{esc(webhook_url)}</code></p>' if webhook_url else "")
+    # Registering the webhook is API-only -- it cannot be done from the Yoco
+    # Business Portal -- and the signing secret comes back exactly once. So
+    # the server does it and keeps the secret, rather than asking somebody
+    # to copy a value that can never be looked up again.
+    _warn = ("Register again? The signing secret is replaced, and Yoco keeps "
+             "delivering to the old registration too until you remove it. "
+             "Only do this if payments have stopped arriving.")
+    _confirm = (f''' onsubmit="return confirm('{_warn}')"'''
+                if has_hook else "")
+    if not webhook_url:
+        hook = ''
+    elif not has_secret:
+        hook = ('<p class="muted" style="font-size:12px;margin:10px 0 0">'
+                'Save the secret key first. This server can then register '
+                'the payment notification with Yoco for you.</p>')
+    elif not webhook_url.lower().startswith('https://'):
+        # Yoco will not deliver to plain http, and finding that out from a
+        # rejected registration is a poor way to learn it.
+        hook = (f'<p style="font-size:12px;margin:10px 0 0;padding:8px 10px;'
+                f'border-radius:6px;background:rgba(217,119,6,0.12);'
+                f'color:#b45309">&#9888; Yoco only sends payment '
+                f'notifications to an <b>https://</b> address, and this '
+                f'server is currently reached at '
+                f'<code>{esc(webhook_url)}</code>. Put it behind HTTPS '
+                f'before switching card payment on.</p>')
+    else:
+        _lead = ('Registered. Yoco sends payment notifications to'
+                 if has_hook else
+                 'Yoco still needs to be told where to send payment '
+                 'notifications:')
+        hook = (
+            f'<p class="muted" style="font-size:12px;margin:12px 0 6px">'
+            f'{_lead} <code>{esc(webhook_url)}</code></p>'
+            f'<form method="POST" action="/superadmin/yoco"{_confirm}>'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="register" value="1">'
+            f'<button class="btn{" ghost" if has_hook else ""}" '
+            f'type="submit">'
+            f'{"Register again" if has_hook else "Register the webhook with Yoco"}'
+            f'</button></form>')
     return (
         f'<div class="box"><h2>Card payment (Yoco)</h2>'
         f'{state}'
@@ -1166,9 +1202,10 @@ def _yoco_box(cfg, csrf: str, webhook_url: str = "") -> str:
         f'type="password" placeholder='
         f'"{"saved - leave blank to keep" if has_hook else "whsec_..."}" '
         f'style="width:100%"></label>'
-        f'</div>{hook}'
+        f'</div>'
         f'<div style="margin-top:10px"><button class="btn" type="submit">'
         f'Save Yoco settings</button></div></form>'
+        f'{hook}'
         f'{"" if not (has_secret or has_hook) else _yoco_clear_form(csrf)}'
         f'</div>')
 

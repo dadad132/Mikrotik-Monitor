@@ -169,6 +169,68 @@ finally:
     urllib.request.urlopen = _real
 
 
+# ------------------------------------------------------- webhook registration
+print("\nRegistering the webhook")
+
+_reg = {}
+
+
+def _reg_urlopen(req, timeout=None):
+    _reg["url"] = req.full_url
+    _reg["body"] = json.loads(req.data.decode())
+    _reg["auth"] = req.headers.get("Authorization")
+    return _Resp(json.dumps({"id": "wh_1", "secret": "whsec_abc"}))
+
+
+urllib.request.urlopen = _reg_urlopen
+try:
+    out = yoco.register_webhook("sk_live", "https://mm.example/billing/yoco-webhook")
+    check("registering returns the signing secret, which Yoco gives out once "
+          "and never again -- so the server stores it rather than asking "
+          "somebody to copy it",
+          out["secret"] == "whsec_abc")
+    check("it posts to Yoco's webhook endpoint with the key as a bearer token",
+          _reg["url"] == "https://payments.yoco.com/api/webhooks"
+          and _reg["auth"] == "Bearer sk_live")
+    check("...sending the name and url fields Yoco documents",
+          set(_reg["body"]) == {"name", "url"}
+          and _reg["body"]["url"].endswith("/billing/yoco-webhook"))
+
+    try:
+        yoco.register_webhook("sk_live", "http://mm.example/billing/yoco-webhook")
+        check("a plain-http URL is refused before Yoco ever sees it", False)
+    except yoco.YocoError as exc:
+        check("a plain-http URL is refused before Yoco ever sees it, with a "
+              "message that says which URL was wrong -- Yoco will not deliver "
+              "to http, and their rejection does not say why",
+              "https" in str(exc).lower())
+
+    try:
+        yoco.register_webhook("", "https://mm.example/x")
+        check("registering without a secret key is refused", False)
+    except yoco.YocoError:
+        check("registering without a secret key is refused", True)
+finally:
+    urllib.request.urlopen = _real
+
+
+def _no_secret(req, timeout=None):
+    return _Resp(json.dumps({"id": "wh_2"}))
+
+
+urllib.request.urlopen = _no_secret
+try:
+    yoco.register_webhook("sk_live", "https://mm.example/x")
+    check("a registration that comes back without a secret is treated as a "
+          "failure", False)
+except yoco.YocoError:
+    check("a registration that comes back without a secret is treated as a "
+          "failure, rather than saving a half-configured state that looks "
+          "fine on screen and silently drops every payment", True)
+finally:
+    urllib.request.urlopen = _real
+
+
 # ------------------------------------------------------------------- orders
 print("\nOrders: a payment becoming a plan")
 

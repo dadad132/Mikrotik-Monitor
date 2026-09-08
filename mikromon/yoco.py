@@ -179,3 +179,70 @@ def event_of(payload: dict) -> tuple:
         amount = 0
     return (str(body.get("type") or ""), meta,
             str(inner.get("id") or body.get("id") or ""), amount)
+
+
+_WEBHOOK_URL = "https://payments.yoco.com/api/webhooks"
+
+
+def register_webhook(secret_key: str, url: str, name: str = "mikromon",
+                     timeout: float = 20.0) -> dict:
+    """Tell Yoco where to send payment events, and get back the signing secret.
+
+    There is no way to do this from the Yoco Business Portal: registration is
+    API-only, and the response carries the signing secret **once and never
+    again**. Doing it from the server means the secret is written straight to
+    settings and nobody ever has to copy it out of a terminal, which is the
+    step where a "provided only once" value gets lost.
+
+    Yoco requires the endpoint to be HTTPS. That is checked here rather than
+    left to a rejection from their side, because the error that comes back
+    otherwise does not say which of the two URLs it disliked.
+    """
+    if not secret_key:
+        raise YocoError("Add the Yoco secret key first.")
+    if not url.lower().startswith("https://"):
+        raise YocoError(
+            "Yoco will only send payment notifications to an https:// "
+            "address, and this server is currently reachable over plain "
+            "http. Put it behind HTTPS first, then register the webhook.")
+    req = urllib.request.Request(
+        _WEBHOOK_URL, data=json.dumps({"name": name, "url": url}).encode(),
+        method="POST",
+        headers={"Authorization": f"Bearer {secret_key}",
+                 "Content-Type": "application/json",
+                 "Accept": "application/json",
+                 "User-Agent": "mikromon"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            out = json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:300]
+        except Exception:  # noqa: BLE001
+            pass
+        log.error("Yoco webhook registration failed: HTTP %s %s",
+                  exc.code, detail)
+        if exc.code in (401, 403):
+            raise YocoError(
+                "Yoco rejected that secret key. Check it was copied in "
+                "full, and that it is the key for the right mode "
+                "(test or live).") from None
+        raise YocoError(
+            f"Yoco would not register the webhook (HTTP {exc.code}). "
+            f"{detail[:160]}".strip()) from None
+    except Exception as exc:  # noqa: BLE001 — network, DNS, timeout
+        log.error("Yoco webhook registration failed: %s", exc)
+        raise YocoError(
+            "Could not reach Yoco to register the webhook. Check the "
+            "server's internet connection and try again.") from None
+    if not out.get("secret"):
+        # Without this the webhook cannot be verified, so treat it as a
+        # failure rather than saving a half-configured state that looks
+        # fine on screen and silently drops every payment.
+        raise YocoError(
+            "Yoco accepted the webhook but did not return a signing "
+            "secret, so payments could not be verified. Please contact "
+            "Yoco support before switching card payment on.")
+    log.info("Registered Yoco webhook %s -> %s", out.get("id"), url)
+    return out
