@@ -148,12 +148,23 @@ def detect_isp_ifaces(api) -> set:
     for c in _safe_fetch(api, _L2TP_CLIENT):
         if str(c.get("running", "false")).lower() in ("true", "yes") and c.get("name"):
             online.add(c["name"])
-    for r in _safe_fetch(api, _ROUTE):
+    routes = _safe_fetch(api, _ROUTE)
+    for r in routes:
         if (str(r.get("dst-address", "")).startswith("0.0.0.0/0")
                 and str(r.get("active", "true")).lower() not in ("false", "no")):
             m = re.search(r"via\s+(\S+)", str(r.get("gateway-status", "")))
             if m:
                 online.add(m.group(1))
+    # A static WAN has no DHCP lease and no PPP session, and its default
+    # route does not always spell out "via <iface>" -- so without this it
+    # was invisible here, and the setup page pointed at the wrong port.
+    addrs = _safe_fetch(api, _IP_ADDRESS)
+    by_iface = {_norm_iface(a.get("interface", "")): a.get("interface", "")
+                for a in addrs if a.get("interface")}
+    for iface_key in _static_gw_by_iface(routes, addrs):
+        real = by_iface.get(iface_key)
+        if real:
+            online.add(real)
     return online
 
 
@@ -427,8 +438,91 @@ def routes_form(current, cfg):
     return fields
 
 
+def _route_iface(route) -> str:
+    """Best-effort interface name a route exits through.
+
+    RouterOS states this three different ways depending on version and how
+    the route was made, and no single one of them is always present -- so
+    all three are tried. Mirrors checks/wan.py's helper of the same shape.
+    """
+    m = re.search(r"via\s+(\S+)", str(route.get("gateway-status", "")))
+    if m:
+        return m.group(1)
+    # "<gateway-ip>%<interface>" is RouterOS's own zone-id format.
+    immediate = str(route.get("immediate-gw", "") or "")
+    if "%" in immediate:
+        return immediate.rsplit("%", 1)[1]
+    # A route entered as gateway=<interface name> rather than an IP.
+    gw = str(route.get("gateway", "") or "")
+    return "" if _looks_like_ip(gw) else gw
+
+
+def _static_gw_by_iface(routes, ip_addrs) -> dict:
+    """Interface -> gateway IP, for uplinks configured with a static address.
+
+    A static WAN has no DHCP client and no PPP session to ask, so the two
+    places that knew a gateway for the other link types have nothing to say
+    about it. What it does have is the thing whoever set the site up typed in
+    by hand: a default route with a real gateway.
+
+    So the gateway is READ BACK from the router rather than worked out. The
+    tempting shortcut -- take the interface's subnet and assume the ISP is on
+    .1 -- is wrong often enough to matter (plenty of ISPs hand out a /29 with
+    the gateway on the first usable address, plenty do not), and being wrong
+    here means writing a default route that silently blackholes the site.
+
+    Two ways a route is tied to an interface, in order of trust:
+      1. The route says so itself, via gateway-status or immediate-gw.
+      2. The route's gateway IP falls inside a subnet configured on that
+         interface. This is inference, but not a guess: a gateway inside
+         eth1's own subnet is reachable through eth1 and nowhere else.
+    """
+    nets = {}
+    for a in ip_addrs or []:
+        iface = _norm_iface(a.get("interface", ""))
+        addr = str(a.get("address", "") or "")
+        if not iface or "/" not in addr:
+            continue
+        # Dynamic addresses come from DHCP or PPP, which are handled by their
+        # own branches and know their gateway exactly. Only static ones are
+        # this function's business.
+        if str(a.get("dynamic", "false")).lower() in ("true", "yes"):
+            continue
+        try:
+            nets.setdefault(iface, []).append(
+                ipaddress.ip_interface(addr).network)
+        except ValueError:
+            continue
+
+    out = {}
+    for r in routes or []:
+        if not str(r.get("dst-address", "")).startswith("0.0.0.0/0"):
+            continue
+        # A route mikromon wrote is not evidence of anything -- reading our
+        # own output back would let one bad detection persist forever.
+        if str(r.get("comment", "")).startswith("mikromon:"):
+            continue
+        gw = str(r.get("gateway", "") or "")
+        if not _looks_like_ip(gw):
+            continue
+        iface = _norm_iface(_route_iface(r))
+        if iface and iface in nets:
+            out.setdefault(iface, gw)
+            continue
+        try:
+            gw_ip = ipaddress.ip_address(gw)
+        except ValueError:
+            continue
+        for cand, networks in nets.items():
+            if any(gw_ip in n for n in networks):
+                out.setdefault(cand, gw)
+                break
+    return out
+
+
 def _gateway_for_link(link, pppoe_names, dhcp_by_iface,
-                      ppp_active_by_name=None, ip_addr_by_iface=None):
+                      ppp_active_by_name=None, ip_addr_by_iface=None,
+                      static_gw_by_iface=None):
     """Return the RouterOS gateway IP (or interface name) for a WAN uplink.
 
     Priority:
@@ -442,7 +536,11 @@ def _gateway_for_link(link, pppoe_names, dhcp_by_iface,
          NOT fall back to the interface's own assigned address (/ip/address's
          'address' field) — that's this router's own IP, not a next hop, and
          is not a usable gateway even though it looks like a plausible one.
-      3. DHCP client on the interface → use the DHCP-assigned gateway IP."""
+      3. DHCP client on the interface → use the DHCP-assigned gateway IP.
+      4. Static address on the interface → read the gateway back off the
+         default route already configured for it. A static WAN has
+         neither a DHCP client nor a PPP session to ask, so without this
+         it reported no gateway at all."""
     gw = getattr(link, "gateway", "") or ""
     if gw:
         return gw
@@ -472,7 +570,18 @@ def _gateway_for_link(link, pppoe_names, dhcp_by_iface,
     # Not PPP — check DHCP client for this interface
     dhcp = dhcp_by_iface.get(iface_key)
     if dhcp:
-        return dhcp.get("gateway", "")
+        gw = dhcp.get("gateway", "")
+        if gw:
+            return gw
+        # A DHCP client that exists but is not bound has no gateway yet.
+        # Fall through: the interface may also carry a static address.
+    # Static address: read the gateway off the route that is already
+    # there. This is the ordinary case for a site the ISP gave fixed
+    # IPs to, which until now looked identical to an unconfigured link.
+    if static_gw_by_iface:
+        gw = static_gw_by_iface.get(iface_key, "")
+        if gw:
+            return gw
     return ""
 
 
@@ -494,8 +603,10 @@ def detect_wan_gateways(api, links) -> dict:
                      for c in dhcp_clients if c.get("interface")}
     ppp_active_by_name = {_norm_iface(s.get("name", "")): s
                           for s in _safe_fetch(api, _PPP_ACTIVE) if s.get("name")}
+    _addrs = _safe_fetch(api, _IP_ADDRESS)
     ip_addr_by_iface = {_norm_iface(a.get("interface", "")): a
-                        for a in _safe_fetch(api, _IP_ADDRESS) if a.get("interface")}
+                        for a in _addrs if a.get("interface")}
+    static_gw = _static_gw_by_iface(_safe_fetch(api, _ROUTE), _addrs)
     out = {}
     for link in links:
         iface = getattr(link, "interface", "") or ""
@@ -503,7 +614,8 @@ def detect_wan_gateways(api, links) -> dict:
             continue
         bare = types.SimpleNamespace(interface=iface, gateway="")
         out[iface] = _gateway_for_link(bare, pppoe_names, dhcp_by_iface,
-                                       ppp_active_by_name, ip_addr_by_iface)
+                                       ppp_active_by_name, ip_addr_by_iface,
+                                       static_gw)
     return out
 
 
@@ -733,8 +845,10 @@ def _apply_failover(ops, flat, pusher, cfg):
                      for c in dhcp_clients if c.get("interface")}
     ppp_active_by_name = {_norm_iface(s.get("name", "")): s
                           for s in _safe_fetch(pusher.api, _PPP_ACTIVE) if s.get("name")}
+    _addrs = _safe_fetch(pusher.api, _IP_ADDRESS)
     ip_addr_by_iface = {_norm_iface(a.get("interface", "")): a
-                        for a in _safe_fetch(pusher.api, _IP_ADDRESS) if a.get("interface")}
+                        for a in _addrs if a.get("interface")}
+    static_gw = _static_gw_by_iface(_safe_fetch(pusher.api, _ROUTE), _addrs)
     fo_by_comment = {r.get("comment", ""): r for r in all_routes if fo_owns(r)}
 
     is_ppp = []
@@ -755,7 +869,8 @@ def _apply_failover(ops, flat, pusher, cfg):
             ppp_link = bool(iface_key) and iface_key in pppoe_names
         is_ppp.append(ppp_link)
         gw = _gateway_for_link(link, pppoe_names, dhcp_by_iface,
-                               ppp_active_by_name, ip_addr_by_iface)
+                               ppp_active_by_name, ip_addr_by_iface,
+                               static_gw)
         if not gw and not ppp_link:
             # Fall back to the gateway already on the router from a
             # previous apply (e.g. a DHCP lease that isn't bound right now).

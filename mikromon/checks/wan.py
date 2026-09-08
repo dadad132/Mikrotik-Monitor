@@ -15,6 +15,7 @@ config produces friendlier messages and lets you pin which link is primary.
 """
 from __future__ import annotations
 
+import ipaddress
 import re
 
 from ..alert import Severity
@@ -77,7 +78,29 @@ def _label(route: dict) -> str:
     return f"{gw} (distance {dist})"
 
 
-def _matches_endpoint(route: dict, ep, dhcp_by_iface: dict | None = None) -> bool:
+def _nets_of(addrs, iface: str) -> list:
+    """The subnets configured on one interface, from /ip/address.
+
+    This is the tab a static WAN's details actually live on -- there is
+    no DHCP client and no PPP session to ask about one.
+    """
+    out = []
+    want = _norm_iface(iface)
+    for a in addrs or []:
+        if _norm_iface(a.get("interface", "")) != want:
+            continue
+        addr = str(a.get("address", "") or "")
+        if "/" not in addr:
+            continue
+        try:
+            out.append(ipaddress.ip_interface(addr).network)
+        except ValueError:
+            continue
+    return out
+
+
+def _matches_endpoint(route: dict, ep, dhcp_by_iface: dict | None = None,
+                      addrs=None) -> bool:
     if ep.gateway and str(route.get("gateway", "")) == ep.gateway:
         return True
     if ep.interface and _norm_iface(_iface_of(route)) == _norm_iface(ep.interface):
@@ -94,6 +117,23 @@ def _matches_endpoint(route: dict, ep, dhcp_by_iface: dict | None = None) -> boo
         if dhcp:
             dhcp_gw = str(dhcp.get("gateway", ""))
             if dhcp_gw and str(route.get("gateway", "")) == dhcp_gw:
+                return True
+    # Static uplink: no DHCP client and no PPP session to ask, so ask the
+    # interface itself. A gateway inside this interface's own subnet is
+    # reachable through this interface and nowhere else, which ties the route
+    # to the link without guessing at anything.
+    #
+    # Confirmed live: a site the ISP gave fixed IPs to had every uplink
+    # reported permanently DOWN, because none of the three strategies above
+    # can see a link that has neither DHCP nor PPP behind it.
+    if addrs and ep.interface:
+        gw = str(route.get("gateway", "") or "")
+        try:
+            gw_ip = ipaddress.ip_address(gw)
+        except ValueError:
+            return False
+        for net in _nets_of(addrs, ep.interface):
+            if gw_ip in net:
                 return True
     return False
 
@@ -123,7 +163,7 @@ def _fo_route_idx(comment: str, links) -> int | None:
 
 class WanCheck(Check):
     flags = ("wan_failover", "internet_down")
-    requires = ("route", "dhcp_client")
+    requires = ("route", "dhcp_client", "ip_address")
     name = "wan"
 
     def run(self, snap, dev, ctx) -> None:
@@ -145,6 +185,7 @@ class WanCheck(Check):
         links = dev.wan.links
         dhcp_by_iface = {_norm_iface(c.get("interface", "")): c
                         for c in snap.rows("dhcp_client") if c.get("interface")}
+        addrs = snap.rows("ip_address")
 
         # ---- clear stale wan_failover / wan_link:N conditions -------------
         # Confirmed live: a device with wan_failover monitoring turned off
@@ -219,7 +260,8 @@ class WanCheck(Check):
                         continue  # primary: covered by the failover alert below
                     link_name = ep.label(idx)
                     ep_routes = [r for r in defaults
-                                if _matches_endpoint(r, ep, dhcp_by_iface)]
+                                if _matches_endpoint(r, ep, dhcp_by_iface,
+                                                     addrs)]
                     if not ep_routes:
                         ep_routes = [r for r in defaults
                                     if _fo_route_idx(str(r.get("comment", "")), links) == idx]
@@ -303,7 +345,8 @@ class WanCheck(Check):
             # remote IP that doesn't match the uplink's interface name via
             # gateway-status).
             primary_routes = [r for r in defaults
-                              if _matches_endpoint(r, links[0], dhcp_by_iface)]
+                              if _matches_endpoint(r, links[0], dhcp_by_iface,
+                                                   addrs)]
             if not primary_routes:
                 primary_routes = [r for r in defaults
                                   if _fo_route_idx(str(r.get("comment", "")), links) == 0]
@@ -314,11 +357,13 @@ class WanCheck(Check):
             # name (current scheme) or the older internal tag (routers not
             # yet re-pushed after the switch) — for the same reason as above.
             cur_idx = next((i for i, ep in enumerate(links)
-                            if _matches_endpoint(current, ep, dhcp_by_iface)), None)
+                            if _matches_endpoint(current, ep, dhcp_by_iface,
+                                                 addrs)), None)
             if cur_idx is None:
                 cur_idx = _fo_route_idx(cur_comment, links)
             on_backup = ((cur_idx != 0) if cur_idx is not None
-                        else not _matches_endpoint(current, links[0], dhcp_by_iface))
+                        else not _matches_endpoint(current, links[0],
+                                                   dhcp_by_iface, addrs))
             cur_name = (links[cur_idx].label(cur_idx) if cur_idx is not None
                         else (_iface_of(current) or current.get("gateway", "?")))
             rank = (f" (priority {cur_idx + 1} of {len(links)})"
