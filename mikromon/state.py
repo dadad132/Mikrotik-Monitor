@@ -73,6 +73,20 @@ class StateStore:
     def forget_device(self, name: str) -> None:
         self.data["devices"].pop(name, None)
 
+    def rename_device(self, old: str, new: str) -> bool:
+        """Carry a device's recorded conditions across a rename.
+
+        Otherwise every condition resets to unknown, and a router that was
+        already alerting goes quiet without anything having been fixed.
+        """
+        if not old or not new or old == new:
+            return False
+        devices = self.data.setdefault("devices", {})
+        if old not in devices or new in devices:
+            return False
+        devices[new] = devices.pop(old)
+        return True
+
     def prune_unknown_devices(self, known_names) -> None:
         """Drop state for devices no longer in the config."""
         for name in list(self.data["devices"]):

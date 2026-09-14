@@ -22,6 +22,9 @@ log = logging.getLogger(__name__)
 # Shortest a poll cycle will wait for its devices before carrying on without
 # the stragglers. Never below this even if poll_interval is tiny, so a fast
 # interval cannot start abandoning healthy-but-slow routers.
+# Housekeeping cadence. Hourly is far more often than needed to hold a
+# 30-day window, and cheap because the delete is indexed on ts.
+_PRUNE_EVERY_SECONDS = 3600
 _CYCLE_BUDGET_FLOOR = 30
 
 # Each router is asked to check MikroTik's servers for a newer RouterOS once
@@ -79,6 +82,11 @@ class Engine:
         if getattr(config, "metrics_db", None):
             self.metrics = MetricsStore(config.metrics_db)
             self.metrics.prune(getattr(config, "metrics_retention_days", 30))
+        # Retention used to be enforced ONLY here, at startup. A server
+        # left running for weeks therefore kept every sample it had ever
+        # taken, and every dashboard read got slower the whole time.
+        self._retention_days = float(getattr(config, "metrics_retention_days", 30))
+        self._next_prune = self.now_fn() + _PRUNE_EVERY_SECONDS
         self._stop = threading.Event()
         # Devices whose poll has been submitted and not yet returned. Guards
         # against stacking a second poll on a router that is already stuck.
@@ -304,10 +312,22 @@ class Engine:
             except Exception:  # noqa: BLE001 — one device's crash must not
                 log.exception("Unexpected error polling a device")  # skip the rest
         self.dispatch(batch)
+        self._prune_if_due()
         self._maybe_resync_after_grace()
         self.state.save()
         self._check_scheduled_reports()
         return batch
+
+    def _prune_if_due(self) -> None:
+        """Enforce metrics retention on a timer while the service runs."""
+        if self.metrics is None or self.now_fn() < getattr(
+                self, "_next_prune", float("inf")):
+            return
+        self._next_prune = self.now_fn() + _PRUNE_EVERY_SECONDS
+        try:
+            self.metrics.prune(self._retention_days)
+        except Exception:  # noqa: BLE001 — housekeeping must not stop polling
+            log.exception("metrics prune failed")
 
     def _check_scheduled_reports(self) -> None:
         for n in self.notifiers:

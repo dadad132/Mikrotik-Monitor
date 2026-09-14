@@ -2803,6 +2803,51 @@ def _rw_used_ips(hub) -> set:
     return {rw.get("ip", "") for rw in (hub.get("roadwarriors") or {}).values()}
 
 
+def _adoptable_lease(hub, name: str, host: str):
+    """An existing lease that clearly belongs to this device under another name.
+
+    Used when a device has no lease of its own. A lease whose tunnel IP is the
+    address the device is already being polled at is not a coincidence -- it
+    is this router, filed under the name it had before somebody renamed it.
+    Matching on the IP rather than on the name is the whole point: the name is
+    exactly the thing that changed.
+
+    Returns the old key, or None. Deliberately conservative: it never adopts a
+    lease that a live device still holds, and never guesses from a similar
+    name, because adopting the wrong one hands a router somebody else's key.
+    """
+    if not host:
+        return None
+    meta = hub.get("leases_meta") or {}
+    if name in meta:
+        return None
+    for other, m in meta.items():
+        if other != name and (m or {}).get("ip") == host:
+            return other
+    return None
+
+
+def _migrate_device_name(hub, old: str, new: str) -> bool:
+    """Move a device's tunnel lease from one name to another.
+
+    Returns whether anything moved. The peers file is NOT rewritten here --
+    the caller does that once, after saving, so a rename that touches several
+    structures still produces exactly one reload.
+    """
+    if not old or not new or old == new:
+        return False
+    moved = False
+    leases = hub.get("leases") or {}
+    if old in leases and new not in leases:
+        leases[new] = leases.pop(old)
+        moved = True
+    meta = hub.get("leases_meta") or {}
+    if old in meta and new not in meta:
+        meta[new] = meta.pop(old)
+        moved = True
+    return moved
+
+
 def _alloc_tunnel_ip(hub, name) -> str:
     """Random stable per-device tunnel IP across the 10.10.x.y /16 space."""
     leases = hub.setdefault("leases", {})
@@ -9175,6 +9220,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         raw["api_port"] = 8728
                     store.upsert(raw, defaults, original_name=orig,
                                  org_id=user["org_id"])
+                    if orig and orig != raw.get("name"):
+                        self._carry_identity(orig, raw["name"])
                     if provision_mode:
                         # Straight to the provisioning script to paste & sync.
                         return self._redirect(
@@ -9185,6 +9232,56 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(400, f"Error: {exc}")
             finally:
                 store.close()
+
+        def _carry_identity(self, old: str, new: str) -> None:
+            """Move everything filed under a device's OLD name to its new one.
+
+            A router's identity is spread across four stores, all keyed by
+            name: its tunnel lease and key in hub.json, its metric history,
+            its recorded conditions, and the devices row. Only the last was
+            being moved.
+
+            Reported live, and visible in a diagnostics report as peers with
+            no device: a renamed router lost its lease, so it looked like it
+            had never been provisioned. Provisioning it again minted a SECOND
+            tunnel IP and key, the device started being polled at the new
+            address, and the router -- still holding the first key, still
+            answering on the first address -- was reported UNREACHABLE while
+            somebody was logged into it.
+
+            Best effort, and deliberately after the rename has been written:
+            the rename itself must not fail because a metrics file is
+            momentarily locked.
+            """
+            try:
+                hub_file = _hub_path(devices_db)
+                hub = _hub_load(hub_file)
+                if _migrate_device_name(hub, old, new):
+                    _hub_save(hub_file, hub)
+                    # The peers file carries the name as a comment, so it is
+                    # rewritten even though no key changed -- otherwise the
+                    # next diagnostics report still lists the old name.
+                    _write_wg_peers(
+                        hub.get("wg_peers") or _WG_PEERS_DEFAULT,
+                        _hub_wg_leases(hub))
+                    log.info("renamed device %r -> %r: tunnel lease carried "
+                             "across", old, new)
+            except Exception:  # noqa: BLE001
+                log.exception("could not carry the tunnel lease from %r to %r "
+                              "-- the router will look unprovisioned", old, new)
+            if metrics_db:
+                try:
+                    from .metrics import MetricsStore as _MS
+                    _ms = _MS(metrics_db)
+                    try:
+                        moved = _ms.rename_device(old, new)
+                    finally:
+                        _ms.close()
+                    log.info("renamed device %r -> %r: %d samples carried "
+                             "across", old, new, moved)
+                except Exception:  # noqa: BLE001
+                    log.exception("could not carry metrics from %r to %r",
+                                  old, new)
 
         @staticmethod
         def _device_form_to_raw(store, flat, multi):
