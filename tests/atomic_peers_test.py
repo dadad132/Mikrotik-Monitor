@@ -135,6 +135,33 @@ check("a write that fails leaves the PREVIOUS contents intact, rather than "
 check("...and still cleans up after itself",
       not [f for f in os.listdir(d) if f.startswith(".mikromon-")])
 
+print("\nTwo leases can never share one public key")
+
+# WireGuard keys its peer table BY PUBLIC KEY. Two [Peer] blocks with the
+# same key are not two peers -- the second replaces the first, and whichever
+# AllowedIPs lands last decides where that router's traffic goes. A rename
+# that orphaned a lease is exactly how two entries come to share one key.
+dup = {
+    "Geely Edenvale":         {"ip": "10.10.150.81",  "pubkey": "SHARED="},
+    "Mobilis Geely Edenvale": {"ip": "10.10.157.167", "pubkey": "SHARED="},
+    "Howler":                 {"ip": "10.10.232.214", "pubkey": "OTHER="},
+}
+pd = os.path.join(d, "dup.conf")
+_write_wg_peers(pd, dup, prefer={"Mobilis Geely Edenvale", "Howler"})
+txt = open(pd, encoding="utf-8").read()
+check("a duplicated key is written once, not twice -- twice is an invalid "
+      "config whose winner comes down to sort order",
+      txt.count("PublicKey = SHARED=") == 1)
+check("...and the entry that survives is the one that still has a device, "
+      "so the live router keeps its own address",
+      "10.10.157.167/32" in txt and "10.10.150.81/32" not in txt)
+check("unrelated peers are untouched", "OTHER=" in txt)
+
+_write_wg_peers(pd, dup)
+check("even with nothing to prefer, only one entry is written -- an invalid "
+      "config is never produced",
+      open(pd, encoding="utf-8").read().count("PublicKey = SHARED=") == 1)
+
 print("\nWhen the directory forbids creating a temp file")
 
 # install.sh sets /etc/wireguard to 750 root:<service user>: readable and

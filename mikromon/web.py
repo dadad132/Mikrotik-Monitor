@@ -3013,7 +3013,7 @@ def _wg_keypair():
         return None, str(exc)
 
 
-def _write_wg_peers(path, leases):
+def _write_wg_peers(path, leases, prefer=None):
     """Rebuild the hub's WireGuard peers file from every device lease
     ({name: {ip, pubkey, extra}}). `extra` (optional) is a list of additional
     addresses/subnets to accept from that same peer — road-warrior human
@@ -3023,14 +3023,38 @@ def _write_wg_peers(path, leases):
     already carry a mask (a shared LAN subnet) are used as-is. The hub's wg0
     includes this file. Returns (ok, err)."""
     blocks = []
+    # WireGuard keys its peer table BY PUBLIC KEY, so two [Peer] blocks
+    # sharing one key do not describe two peers -- the second silently
+    # replaces the first, and whichever AllowedIPs lands last decides where
+    # that router's traffic is sent. A rename that orphaned a lease is how
+    # two entries come to hold the same key, and the symptom is a healthy
+    # router whose packets go to an address nobody is listening on.
+    #
+    # `prefer` is the set of names that still have a device. When a key is
+    # claimed twice, the live one wins; without that the winner would come
+    # down to sort order, which is to say chance.
+    prefer = set(prefer or ())
+    by_key: dict = {}
     for nm, lease in sorted(leases.items()):
         pub, ip = lease.get("pubkey"), lease.get("ip")
-        if pub and ip:
-            extra_cidrs = [e if "/" in e else f"{e}/32"
-                          for e in lease.get("extra") or []]
-            allowed = ", ".join([f"{ip}/32"] + extra_cidrs)
-            blocks.append(f"[Peer]\n# {nm}\nPublicKey = {pub}\n"
-                          f"AllowedIPs = {allowed}")
+        if not (pub and ip):
+            continue
+        held = by_key.get(pub)
+        if held is None or (nm in prefer and held[0] not in prefer):
+            by_key[pub] = (nm, lease)
+        if held is not None:
+            log.error("hub peers: %r and %r both claim public key %s...; "
+                      "keeping %r. One is a leftover from a rename -- two "
+                      "peers cannot share a key, and the loser's address "
+                      "would answer on nothing.",
+                      held[0], nm, str(pub)[:12], by_key[pub][0])
+    for pub, (nm, lease) in sorted(by_key.items(), key=lambda kv: kv[1][0]):
+        ip = lease.get("ip")
+        extra_cidrs = [e if "/" in e else f"{e}/32"
+                      for e in lease.get("extra") or []]
+        allowed = ", ".join([f"{ip}/32"] + extra_cidrs)
+        blocks.append(f"[Peer]\n# {nm}\nPublicKey = {pub}\n"
+                      f"AllowedIPs = {allowed}")
     try:
         _atomic_write(path, "\n\n".join(blocks)
                       + ("\n" if blocks else ""))
@@ -9391,14 +9415,40 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             hub = _hub_load(hub_file)
             peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
             leases = _hub_wg_leases(hub)
-            ok, err_msg = _write_wg_peers(peers_path, leases)
+            # Which names still have a device. A lease whose device was
+            # renamed or deleted stays in hub.json, so the peer count and
+            # the device count are different numbers -- and reporting the
+            # first as if it were the second reads like a bug in the count.
+            live: set = set()
+            _ds = None
+            try:
+                from .devices_store import DevicesStore as _DS
+                _ds = _DS(devices_db)
+                live = set(_ds.names())
+            except Exception:  # noqa: BLE001 — the reload still works
+                log.exception("could not read device names for the peer reload")
+            finally:
+                if _ds is not None:
+                    _ds.close()
+            ok, err_msg = _write_wg_peers(peers_path, leases, prefer=live)
             count = sum(1 for v in leases.values()
                         if v.get("pubkey") and v.get("ip"))
+            orphans = sorted(n for n, v in leases.items()
+                             if v.get("pubkey") and v.get("ip")
+                             and not n.startswith("person:")
+                             and live and n not in live)
             name = flat.get("device", "")
             if ok:
-                msg = quote(f"Hub peers reloaded — {count} device(s) written to "
-                            f"{peers_path}. The wg-reload service will apply them "
-                            f"to WireGuard automatically.")
+                extra = ""
+                if orphans:
+                    extra = (f" {len(orphans)} of those belong to no device "
+                             f"any more, left behind by a rename or a delete "
+                             f"({', '.join(orphans[:6])}"
+                             f"{', …' if len(orphans) > 6 else ''}). They are "
+                             f"harmless but they hold tunnel addresses.")
+                msg = quote(f"Hub peers reloaded — {count} peer(s) written to "
+                            f"{peers_path}.{extra} The wg-reload service "
+                            f"applies them to WireGuard automatically.")
             else:
                 msg = quote(f"Could not write {peers_path}: {err_msg}")
             if name:
