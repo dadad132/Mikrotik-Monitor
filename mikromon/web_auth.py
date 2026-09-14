@@ -1322,6 +1322,76 @@ def _invoiceninja_box(cfg, csrf: str, hook_url: str = "") -> str:
         f'{hook}{run}{disconnect}</div>')
 
 
+def _tunnel_health_box(rows, wg_err: str = "") -> str:
+    """Intended -> written -> loaded -> heard, per router, in one table.
+
+    Everything that went wrong this week was invisible from here: we could
+    see what mikromon meant to do and what it wrote, but never what the hub
+    was actually running or whether a packet had ever arrived. A key
+    mismatch, a peer the hub never applied, and an ISP blocking UDP all
+    presented as "the router is offline", and each was diagnosed by
+    guesswork over days.
+
+    The three columns separate them, so the verdict is read rather than
+    deduced.
+    """
+    if not rows:
+        return ""
+    if wg_err:
+        note = (f'<p style="margin:0 0 10px;font-size:12px;padding:8px 10px;'
+                f'border-radius:6px;background:rgba(217,119,6,0.12);'
+                f'color:#b45309">&#9888; Cannot read what WireGuard is '
+                f'actually running ({esc(wg_err)}), so the last two columns '
+                f'are blank. That reading is the difference between "the hub '
+                f'never loaded this router" and "the router is not reaching '
+                f'us" &mdash; two problems with opposite fixes. Allow it '
+                f'with:<br><code>echo \'mikromon ALL=(root) NOPASSWD: '
+                f'/usr/bin/wg show *\' | sudo tee '
+                f'/etc/sudoers.d/mikromon-wg</code></p>')
+    else:
+        bad = [r for r in rows if not r["ok"]]
+        note = (f'<p style="margin:0 0 10px;font-size:12px;padding:8px 10px;'
+                f'border-radius:6px;background:rgba(22,163,74,0.12);'
+                f'color:#15803d">&#10003; All {len(rows)} tunnels are up.</p>'
+                if not bad else
+                f'<p style="margin:0 0 10px;font-size:12px;padding:8px 10px;'
+                f'border-radius:6px;background:rgba(220,38,38,0.10);'
+                f'color:#b91c1c">{len(bad)} of {len(rows)} routers are not '
+                f'carrying traffic. The verdict column says which half of '
+                f'the problem each one is.</p>')
+
+    body = ""
+    for r in rows:
+        tick = ('<span style="color:#16a34a">&#10003;</span>' if r["ok"]
+                else '<span style="color:#dc2626">&#10007;</span>')
+        yn = lambda v: ('<span style="color:#16a34a">yes</span>' if v
+                        else '<span style="color:#dc2626">no</span>')
+        heard = "&mdash;"
+        if r["loaded"]:
+            heard = ("never" if r["age"] is None
+                     else (f'{int(r["age"])}s ago' if r["age"] < 120
+                           else f'{int(r["age"] // 60)} min ago'))
+        body += (f'<tr><td>{tick} {esc(r["name"])}</td>'
+                 f'<td><code>{esc(r["ip"])}</code></td>'
+                 f'<td>{yn(r["in_file"])}</td>'
+                 f'<td>{yn(r["loaded"])}</td>'
+                 f'<td style="white-space:nowrap">{heard}</td>'
+                 f'<td style="font-size:12px">{esc(r["verdict"])}</td></tr>')
+    return (
+        f'<div class="box"><h2>Tunnel health</h2>{note}'
+        f'<div style="overflow-x:auto"><table>'
+        f'<thead><tr><th>Router</th><th>Tunnel IP</th><th>In peers '
+        f'file</th><th>Loaded by WireGuard</th><th>Last heard</th>'
+        f'<th>Verdict</th></tr></thead><tbody>{body}</tbody></table></div>'
+        f'<p class="muted" style="font-size:12px;margin-top:8px">'
+        f'<b>In peers file</b> is what mikromon wrote. <b>Loaded</b> is what '
+        f'the hub is actually running &mdash; if a router is in the file but '
+        f'not loaded, the fault is here, not at the site. <b>Last heard</b> '
+        f'is the last completed handshake: never means either the router\'s '
+        f'own key differs from the one registered for it, or its packets are '
+        f'not arriving at all.</p></div>')
+
+
 def _parse_regions_text(text: str) -> list:
     """One region per line, "Name|https://url" — the textarea format
     _regions_box's form submits and _post_superadmin_regions parses.
@@ -1557,7 +1627,9 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        regions=None, nextdns=None, quotes=None,
                        yoco=None, yoco_hook_url: str = "",
                        invoiceninja=None,
-                       in_hook_url: str = "") -> str:
+                       in_hook_url: str = "",
+                       tunnel_rows=None,
+                       tunnel_err: str = "") -> str:
     """Platform superadmin panel — shows all orgs, billing status, and device counts."""
     note = _flash(msg, error)
 
@@ -1725,6 +1797,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
         quotes or [], {r["id"]: r.get("name", "") for r in rows}, csrf)
 
     inner = (f'<div class="wrap"><h1>Platform admin</h1>{note}{tiles}'
+             f'{_tunnel_health_box(tunnel_rows or [], tunnel_err)}'
              f'{quote_html}{table}'
              f'{_smtp_settings_box(smtp, csrf)}'
              f'{_billing_contact_box(billing_contact, csrf)}'

@@ -2906,6 +2906,120 @@ def _inplace_write(path, text: str) -> None:
         os.path.dirname(os.path.abspath(path)) or ".")
 
 
+def _wg_dump(iface: str = "wg0") -> tuple:
+    """(peers, error) from `wg show <iface> dump`.
+
+    peers maps public key -> {"endpoint", "allowed", "handshake", "rx", "tx"}.
+    Needs CAP_NET_ADMIN, so it retries under sudo -n the same way the
+    diagnostics report does; without it this returns an error rather than
+    pretending the fleet is fine.
+    """
+    import subprocess
+    cmds = [["wg", "show", iface, "dump"],
+            ["sudo", "-n", "wg", "show", iface, "dump"]]
+    out = err = ""
+    for cmd in cmds:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+        except FileNotFoundError:
+            return {}, "wireguard-tools is not installed on this server"
+        except Exception as exc:  # noqa: BLE001
+            return {}, str(exc)
+        if r.returncode == 0:
+            out = r.stdout
+            break
+        err = (r.stderr or "").strip() or f"exit {r.returncode}"
+    else:
+        return {}, err or "could not read the running WireGuard state"
+
+    peers = {}
+    for i, line in enumerate(out.splitlines()):
+        # The first line describes the interface itself, not a peer.
+        if i == 0:
+            continue
+        f = line.split("\t")
+        if len(f) < 8:
+            continue
+        try:
+            hs = int(f[4] or 0)
+        except ValueError:
+            hs = 0
+        try:
+            rx, tx = int(f[5] or 0), int(f[6] or 0)
+        except ValueError:
+            rx = tx = 0
+        peers[f[0]] = {"endpoint": f[2], "allowed": f[3],
+                       "handshake": hs, "rx": rx, "tx": tx}
+    return peers, ""
+
+
+def _tunnel_health_rows(hub, peers_path):
+    """One row per registered router: intended -> written -> loaded -> heard.
+
+    Returns (rows, wg_error). Each row is a dict the renderer turns into a
+    line; the verdict is computed here because it is the whole point, and
+    reading three columns to work it out by eye is what we have been doing
+    by hand all week.
+    """
+    import time as _t
+    leases = _hub_wg_leases(hub)
+    try:
+        with open(peers_path, encoding="utf-8") as fh:
+            written = fh.read()
+    except OSError:
+        written = ""
+    live, wg_err = _wg_dump()
+    now = _t.time()
+    rows = []
+    for name, lease in sorted(leases.items()):
+        pub = (lease or {}).get("pubkey") or ""
+        ip = (lease or {}).get("ip") or ""
+        in_file = bool(pub) and pub in written
+        p = live.get(pub) if pub else None
+        age = (now - p["handshake"]) if (p and p.get("handshake")) else None
+        if not pub or not ip:
+            verdict, ok = "no key registered — never provisioned", False
+        elif not in_file:
+            verdict, ok = ("missing from the peers file — press Reload hub "
+                           "peers", False)
+        elif wg_err:
+            verdict, ok = "cannot read the running state", False
+        elif p is None:
+            verdict, ok = ("IN THE FILE BUT NOT LOADED — the hub never "
+                           "applied it, so every packet from this router is "
+                           "discarded", False)
+        elif age is None:
+            verdict, ok = ("loaded, but this router has NEVER handshaked — "
+                           "its own key differs, or its packets are not "
+                           "reaching the hub at all", False)
+        elif age > 300:
+            verdict, ok = (f"last handshake {int(age // 60)} min ago — the "
+                           f"tunnel has stopped", False)
+        else:
+            verdict, ok = (f"up, handshake {int(age)}s ago", True)
+        rows.append({"name": name, "ip": ip, "pubkey": pub,
+                     "in_file": in_file, "loaded": p is not None,
+                     "age": age, "rx": (p or {}).get("rx", 0),
+                     "verdict": verdict, "ok": ok})
+    return rows, wg_err
+
+
+def _tunnel_panel(devices_db):
+    """(rows, error) for the Platform admin tunnel table, computed once per
+    request. Wrapped so a failure here can never take the page down: this is
+    a diagnostic, and a diagnostic that breaks the panel it lives on is
+    worse than none."""
+    if not devices_db:
+        return [], ""
+    try:
+        hub = _hub_load(_hub_path(devices_db))
+        peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
+        return _tunnel_health_rows(hub, peers_path)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("tunnel health panel failed")
+        return [], str(exc)
+
+
 def _hub_load(path) -> dict:
     try:
         with open(path, encoding="utf-8") as f:
@@ -6682,6 +6796,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 hub_port = str(hub_for_sa.get("listen_port", "") or "51820")
                 hub_pubkey_cur = hub_for_sa.get("hub_pubkey", "")
                 router_count = len(hub_for_sa.get("leases_meta") or {})
+            _tunnel_rows, _tunnel_err = _tunnel_panel(devices_db)
             return self._send(200, _render_superadmin(
                 user, rows, backups, self._session()["csrf"],
                 msg=q.get("ok", [""])[0],
@@ -6693,6 +6808,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 regions=auth.get_regions() if auth else [],
                 nextdns=auth.get_nextdns() if auth else {},
                 quotes=open_quotes,
+                tunnel_rows=_tunnel_rows, tunnel_err=_tunnel_err,
                 yoco=auth.get_yoco() if auth else {},
                 invoiceninja=auth.get_invoiceninja() if auth else {},
                 in_hook_url=(

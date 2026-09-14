@@ -558,7 +558,7 @@ After=wg-quick@wg0.service
 PartOf=wg-quick@wg0.service
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/bash -c 'if ! wg syncconf wg0 <(grep -vE "^[[:space:]]*(Address|DNS|MTU|Table|PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=" /etc/wireguard/wg0.conf; cat ${WG_PEERS} 2>/dev/null || true); then echo "mikromon: wg syncconf FAILED - no peers were applied, the hub will ignore every router" >&2; exit 1; fi; echo "mikromon: applied \$(grep -c "^\\[Peer\\]" ${WG_PEERS} 2>/dev/null || echo 0) peer(s) to wg0"; ip -4 route replace ${WG_SUBNET} dev wg0 2>/dev/null || true; while read -r r; do [ -n "\$r" ] && ip -4 route replace "\$r" dev wg0 2>/dev/null || true; done < ${WG_ROUTES}; exit 0'
+ExecStart=/usr/bin/bash -c 'if ! wg syncconf wg0 <(grep -vE "^[[:space:]]*(Address|DNS|MTU|Table|PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=" /etc/wireguard/wg0.conf; cat ${WG_PEERS} 2>/dev/null || true); then echo "mikromon: wg syncconf FAILED - no peers were applied, the hub will ignore every router" >&2; exit 1; fi; echo "mikromon: applied \$(grep -c PublicKey ${WG_PEERS} 2>/dev/null || echo 0) peer(s) to wg0"; ip -4 route replace ${WG_SUBNET} dev wg0 2>/dev/null || true; while read -r r; do [ -n "\$r" ] && ip -4 route replace "\$r" dev wg0 2>/dev/null || true; done < ${WG_ROUTES}; exit 0'
 [Install]
 WantedBy=multi-user.target
 UNIT
