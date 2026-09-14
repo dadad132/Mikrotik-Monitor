@@ -89,7 +89,20 @@ def _fetch_order(datasets):
 # down, and the shortest each attempt may be given. The attempts share the
 # caller's timeout budget rather than multiplying it -- see Device.reachable().
 _REACH_ATTEMPTS = 2
-_REACH_MIN_TIMEOUT = 1.0
+# Each attempt needs to outlive a lost SYN, not just a slow one.
+#
+# Linux retransmits a SYN at roughly 1s, then 3s. At the old 1.0s floor an
+# attempt expired before the FIRST retransmit had even been sent, so the
+# probe only ever tested whether one packet survived -- and these routers are
+# reached over WireGuard, much of it riding on LTE and wireless backup links
+# where a dropped packet is ordinary. Two such attempts still come to 2
+# packets, which is why healthy branches were being called UNREACHABLE.
+#
+# 4.0s covers both retransmits, so an attempt fails only when three packets
+# in a row are lost. Two attempts bound a dead device at 8s, which the poll
+# cycle absorbs: the fleet is polled concurrently, and the budget check in
+# the engine already carries on without a device that overruns.
+_REACH_MIN_TIMEOUT = 4.0
 
 
 class DeviceError(Exception):
@@ -129,7 +142,8 @@ class Device:
         return self.cfg.name
 
     # ----- connectivity -----------------------------------------------------
-    def reachable(self, timeout: float | None = None) -> bool:
+    def reachable(self, timeout: float | None = None,
+                  attempts: int | None = None) -> bool:
         """Fast TCP check against the API port. No auth, no root needed.
 
         Also times the handshake into `last_probe_ms`. That round trip is
@@ -138,7 +152,12 @@ class Device:
         router feels, which is exactly what a fleet view wants to show. It is
         the SERVER-to-router path, not the router's own internet latency;
         those are different numbers and only this one is free."""
-        timeout = timeout if timeout is not None else min(self.cfg.timeout, 5)
+        # Floored as well as capped: the cap used to bring a 10s device
+        # timeout down to 5s, which split into two 2.5s attempts. The
+        # floor keeps each attempt long enough to be worth making.
+        timeout = (timeout if timeout is not None
+                   else max(_REACH_MIN_TIMEOUT * _REACH_ATTEMPTS,
+                            min(self.cfg.timeout, 10)))
         # Tried twice before giving up. These routers are reached across a
         # WireGuard tunnel, so the probe rides on UDP that can and does drop
         # the occasional packet -- and a lost SYN is indistinguishable from a
@@ -151,8 +170,13 @@ class Device:
         # and several web handlers walk whole fleets, and the devices that are
         # down are exactly the slow ones. A floor keeps each attempt sane if
         # someone configures a very short timeout.
-        per_try = max(_REACH_MIN_TIMEOUT, timeout / _REACH_ATTEMPTS)
-        for attempt in range(_REACH_ATTEMPTS):
+        # The monitor and the dashboard want different things here. The
+        # monitor is unattended and must not cry wolf, so it retries. A
+        # web page has somebody watching a spinner, and would rather
+        # say "no answer" quickly and let them press it again.
+        tries = _REACH_ATTEMPTS if attempts is None else max(1, int(attempts))
+        per_try = max(_REACH_MIN_TIMEOUT, timeout / tries)
+        for attempt in range(tries):
             started = time.monotonic()
             try:
                 with socket.create_connection(
@@ -162,7 +186,7 @@ class Device:
                         (time.monotonic() - started) * 1000, 1)
                     return True
             except OSError:
-                if attempt + 1 < _REACH_ATTEMPTS:
+                if attempt + 1 < tries:
                     continue
         # Deliberately not recorded: a failed connect times how long the OS
         # took to give up, which says nothing about latency and would drag a

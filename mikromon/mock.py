@@ -133,7 +133,7 @@ class MockDevice:
     def name(self):
         return self.cfg.name
 
-    def reachable(self, timeout=None):
+    def reachable(self, timeout=None, attempts=None):
         # Advances the scenario once per poll (engine calls this first).
         self.tick = min(self.tick + 1, len(self.frames) - 1)
         return bool(self.frames[self.tick].get("reachable", True))

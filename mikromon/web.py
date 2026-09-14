@@ -418,7 +418,7 @@ def _build_vpn_router_diagnostics_lines(devices_db, defaults) -> list:
             cfg = build_device(raw, defaults)
             dev = rw_device(cfg)
             try:
-                if not dev.reachable():
+                if not dev.reachable(timeout=4.0, attempts=1):
                     lines.append("  UNREACHABLE from this server right now "
                                  "— can't check its live routes/firewall.")
                     lines.append("")
@@ -551,7 +551,7 @@ def _build_nextdns_diagnostics_lines(auth, devices_db, defaults) -> list:
                              f"router\" on the DNS tab to delete them.")
             dev = rw_device(cfg)
             try:
-                if not dev.reachable():
+                if not dev.reachable(timeout=4.0, attempts=1):
                     lines.append("  UNREACHABLE from this server right now "
                                  "— can't check its live DNS settings.")
                     lines.append("")
@@ -7137,7 +7137,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # Quick bounded probe first (deleting an already-dead/offline
                 # device is the common case) so this doesn't hang the delete
                 # request for the device's full configured timeout.
-                if not dev.reachable():
+                if not dev.reachable(timeout=4.0, attempts=1):
                     return {"steps": [],
                             "error": "router unreachable — skipped live cleanup "
                                      "(remove its WireGuard peer + user by hand "
@@ -7708,7 +7708,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             audit = self._auditlog()
             dev = rw_device(cfg)
             try:
-                if not dev.reachable():
+                if not dev.reachable(timeout=4.0, attempts=1):
                     return (" The router is unreachable right now, so its DNS "
                             "still points at the previous profile — it will "
                             "catch up the next time this runs while it's "
@@ -8425,7 +8425,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     # normal case) so one unreachable router in the group
                     # doesn't hang this request for its full configured
                     # timeout — see the same pattern in device offboarding.
-                    if not dev.reachable():
+                    if not dev.reachable(timeout=4.0, attempts=1):
                         errors.append(f"{member_name}: router unreachable — "
                                       f"routes not pushed")
                         continue
@@ -8490,7 +8490,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 audit = self._auditlog()
                 dev = rw_device(cfg)
                 try:
-                    if not dev.reachable():
+                    if not dev.reachable(timeout=4.0, attempts=1):
                         errors.append(f"{name}: router unreachable — "
                                       f"endpoint not updated")
                         continue
@@ -8849,7 +8849,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             dev = rw_device(cfg)
             snapshot_taken = False
             try:
-                if not dev.reachable():
+                if not dev.reachable(timeout=4.0, attempts=1):
                     msg += " Router unreachable right now — the DNS change " \
                            "will show as pending until it's back."
                 else:
@@ -9517,7 +9517,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             cfg = build_device(raw, defaults)
             dev = Device(cfg)
             try:
-                if not dev.reachable():
+                if not dev.reachable(timeout=4.0, attempts=1):
                     return self._send(200, _render_test_result(
                         name, False, f"UNREACHABLE: no TCP response from "
                         f"{cfg.host}:{cfg.api_port}", user),

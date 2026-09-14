@@ -1478,7 +1478,7 @@ try:
         def __init__(self, data):
             self.api = _FakeRouterApi(data)
 
-        def reachable(self, timeout=None):
+        def reachable(self, timeout=None, attempts=None):
             return True
 
         def connect(self):

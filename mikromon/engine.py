@@ -25,6 +25,15 @@ log = logging.getLogger(__name__)
 # Housekeeping cadence. Hourly is far more often than needed to hold a
 # 30-day window, and cheap because the delete is indexed on ts.
 _PRUNE_EVERY_SECONDS = 3600
+
+# When this share of the fleet goes unreachable in the SAME cycle, the fault
+# is on this side of the tunnel, not on that many routers at once.
+#
+# Both bounds matter. The fraction alone would mis-fire on a two-device
+# install where one going down is 50%; the count alone would mis-fire on a
+# large fleet where three genuinely failing branches are unremarkable.
+_FLEET_OUTAGE_FRACTION = 0.6
+_FLEET_OUTAGE_MIN_DEVICES = 3
 _CYCLE_BUDGET_FLOOR = 30
 
 # Each router is asked to check MikroTik's servers for a newer RouterOS once
@@ -273,6 +282,13 @@ class Engine:
             if self.metrics is not None:
                 self.metrics.keep_only(known)
         batch = []
+        # Copied BEFORE polling so a fleet-wide false alarm can be undone
+        # rather than merely unsent: if the conditions were left flipped, the
+        # recovery alert would still go out a minute later and report every
+        # router "back up" from an outage nobody was ever told about.
+        reach_before = {
+            d.name: dict(self.state.condition(d.name, "reachability"))
+            for d in self.devices}
         # A device already being polled from an earlier cycle is skipped
         # rather than queued again: re-submitting one that is stuck would
         # pile up threads until the pool had none left for the healthy
@@ -311,12 +327,70 @@ class Engine:
                             "updates", name)
             except Exception:  # noqa: BLE001 — one device's crash must not
                 log.exception("Unexpected error polling a device")  # skip the rest
+        batch = self._filter_fleet_wide_outage(batch, reach_before)
         self.dispatch(batch)
         self._prune_if_due()
         self._maybe_resync_after_grace()
         self.state.save()
         self._check_scheduled_reports()
         return batch
+
+    def _filter_fleet_wide_outage(self, batch, reach_before):
+        """Replace a storm of per-router offline alerts with one honest one.
+
+        Most of the fleet cannot fail between one poll and the next. When it
+        looks like it has, what actually happened is on this side: this
+        service restarted, the hub reloaded its WireGuard peers (which it
+        does on every provision), or the host lost its own network.
+
+        Confirmed from a live report: three routers in two different
+        companies, on different ISPs, recovering at the same second. Each of
+        those had produced a "Device UNREACHABLE" email and then a recovery
+        email, none of which described anything that had happened to a
+        router.
+
+        The affected conditions are put BACK, not just silenced. Leaving them
+        flipped means the recovery alert still arrives next cycle, announcing
+        that routers are "back up" from an outage nobody was told about --
+        which is more confusing than the original false alarm.
+        """
+        total = len(self.devices)
+        if total < _FLEET_OUTAGE_MIN_DEVICES:
+            return batch
+        newly_down = [
+            a for a in batch
+            if a.key == "reachability" and not a.recovery
+            and reach_before.get(a.device, {}).get("status") != "problem"]
+        if (len(newly_down) < _FLEET_OUTAGE_MIN_DEVICES
+                or len(newly_down) < total * _FLEET_OUTAGE_FRACTION):
+            return batch
+
+        names = sorted(a.device for a in newly_down)
+        for name in names:
+            prior = reach_before.get(name)
+            cond = self.state.condition(name, "reachability")
+            cond.clear()
+            if prior:
+                cond.update(prior)
+        kept = [a for a in batch if a not in newly_down]
+        log.error("%d of %d routers went unreachable in the same cycle -- "
+                  "treating that as a fault at this end, not %d separate "
+                  "outages. Not alerting per router: %s",
+                  len(newly_down), total, len(newly_down), ", ".join(names))
+        from .alert import Alert
+        kept.append(Alert(
+            "mikromon", "fleet_unreachable", Severity.CRITICAL,
+            f"Lost contact with {len(newly_down)} of {total} routers at once",
+            cause=("Routers in different companies, on different links, do "
+                   "not fail in the same minute. Something at the monitoring "
+                   "end is far more likely: this service restarting, the "
+                   "WireGuard hub reloading its peers (which happens every "
+                   "time a router is provisioned), or this server losing its "
+                   "own network. The routers themselves have NOT been "
+                   "alerted on individually, and their recorded state is "
+                   "unchanged. Affected: " + ", ".join(names)),
+            ts=self.now_fn()))
+        return kept
 
     def _prune_if_due(self) -> None:
         """Enforce metrics retention on a timer while the service runs."""
