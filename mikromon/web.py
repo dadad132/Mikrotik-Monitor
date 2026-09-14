@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import os
+import tempfile
 import re
 import secrets
 import shutil
@@ -312,17 +313,34 @@ def _build_wg_diagnostics_lines(devices_db) -> list:
         lines.append("  (none)")
     lines.append("")
 
-    def run(label, cmd, timeout=8):
+    def _try(cmd, timeout=8):
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, (r.stdout or "").rstrip(), (r.stderr or "").rstrip()
+
+    def run(label, cmd, timeout=8, sudo_retry=False):
         lines.append(f"--- {label}: {' '.join(cmd)} ---")
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout)
-            out = (r.stdout or "").rstrip()
-            err = (r.stderr or "").rstrip()
+            code, out, err = _try(cmd, timeout)
+            # `wg show` needs CAP_NET_ADMIN. This service does not run as
+            # root, so the one command that answers "is this router reaching
+            # the hub at all" was failing on every report -- and without it,
+            # a router that cannot handshake looks exactly like one whose
+            # link is down, or one that is switched off.
+            if (sudo_retry and code != 0
+                    and "not permitted" in (err + out).lower()):
+                try:
+                    code2, out2, err2 = _try(["sudo", "-n"] + cmd, timeout)
+                    if code2 == 0:
+                        lines.append(out2 or "(no output)")
+                        lines.append("")
+                        return
+                    err = f"{err} (and via sudo: {err2})"
+                except Exception:  # noqa: BLE001
+                    pass
             if out:
                 lines.append(out)
-            if r.returncode != 0:
-                lines.append(f"(exit code {r.returncode}"
+            if code != 0:
+                lines.append(f"(exit code {code}"
                              + (f": {err}" if err else "") + ")")
             elif not out:
                 lines.append("(no output)")
@@ -332,7 +350,19 @@ def _build_wg_diagnostics_lines(devices_db) -> list:
             lines.append(f"(failed: {exc})")
         lines.append("")
 
-    run("live WireGuard peer/handshake state", ["wg", "show", "wg0"])
+    run("live WireGuard peer/handshake state", ["wg", "show", "wg0"],
+        sudo_retry=True)
+    if any("not permitted" in ln.lower() for ln in lines[-4:]):
+        # Say how to fix it, here, rather than leaving the most useful
+        # section of the report permanently blank.
+        lines.append("  To make the section above work, allow this one "
+                     "read-only command without a password:")
+        lines.append("    echo '%s ALL=(root) NOPASSWD: /usr/bin/wg show *' "
+                     "| sudo tee /etc/sudoers.d/mikromon-wg"
+                     % (os.environ.get("USER") or "mikromon"))
+        lines.append("  It is the difference between knowing a router never "
+                     "handshook and guessing.")
+        lines.append("")
     run("reload service + path unit status",
         ["systemctl", "status", "--no-pager",
          "mikromon-wg-reload.service", "mikromon-wg-reload.path"])
@@ -2750,6 +2780,37 @@ def _device_tunnel_ip(name, devices_db) -> str:
     return ""
 
 
+def _atomic_write(path, text: str) -> None:
+    """Replace a file's contents in one step.
+
+    The hub's peers and routes files are watched by a systemd .path unit that
+    reloads WireGuard the moment they change. Writing in place fires that
+    watcher on the truncate, before any content exists, and `wg syncconf`
+    then applies whatever it managed to read -- dropping every peer it did
+    not see. Renaming into place cannot be observed half-done.
+
+    Written into the same directory so the rename stays on one filesystem;
+    across a mount boundary os.replace is not atomic and would reintroduce
+    exactly the race this exists to close.
+    """
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".mikromon-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            # The rename is atomic, but a crash between rename and writeback
+            # could still leave the new name pointing at unwritten blocks.
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _hub_load(path) -> dict:
     try:
         with open(path, encoding="utf-8") as f:
@@ -2760,8 +2821,7 @@ def _hub_load(path) -> dict:
 
 def _hub_save(path, data) -> None:
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        _atomic_write(path, json.dumps(data, indent=2))
     except Exception:  # noqa: BLE001 — best effort
         log.warning("could not save hub settings to %s", path)
 
@@ -2910,8 +2970,8 @@ def _write_wg_peers(path, leases):
             blocks.append(f"[Peer]\n# {nm}\nPublicKey = {pub}\n"
                           f"AllowedIPs = {allowed}")
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("\n\n".join(blocks) + ("\n" if blocks else ""))
+        _atomic_write(path, "\n\n".join(blocks)
+                      + ("\n" if blocks else ""))
         return True, ""
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
@@ -3012,8 +3072,7 @@ def _write_wg_routes(path, hub):
     maintains. Returns (ok, err)."""
     subnets = sorted(set(_vpn_flat_subnets(hub).values()))
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("\n".join(subnets) + ("\n" if subnets else ""))
+        _atomic_write(path, "\n".join(subnets) + ("\n" if subnets else ""))
         return True, ""
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
