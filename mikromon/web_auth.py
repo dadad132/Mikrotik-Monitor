@@ -1223,6 +1223,105 @@ def _yoco_clear_form(csrf: str) -> str:
         f'</button></form>')
 
 
+def _invoiceninja_box(cfg, csrf: str, hook_url: str = "") -> str:
+    """Superadmin setting: connect Invoice Ninja, and say what it will do.
+
+    Deliberately states the whole loop in plain words. The person setting
+    this up is agreeing that a program will email their customers and switch
+    services back on without asking anybody, which is worth spelling out
+    before it starts happening rather than after.
+    """
+    c = cfg or {}
+    url = str(c.get("url") or "")
+    has_token = bool(str(c.get("token") or "").strip())
+    live = bool(url and has_token)
+    days = int(c.get("days_before") or 7)
+    due = int(c.get("due_days") or 7)
+    secret = str(c.get("webhook_secret") or "")
+
+    if live:
+        state = (f'<p style="margin:0 0 10px;font-size:12px;padding:8px 10px;'
+                 f'border-radius:6px;background:rgba(22,163,74,0.12);'
+                 f'color:#15803d">&#10003; <b>Connected.</b> Each company is '
+                 f'invoiced <b>{days} days</b> before its packet lapses, '
+                 f'payable within {due}. When Invoice Ninja records the '
+                 f'payment the packet simply carries on &mdash; nobody here '
+                 f'has to do anything.</p>')
+    else:
+        state = ('<p class="muted" style="margin:0 0 10px;font-size:12px">'
+                 'Not connected. Renewal invoices are not being sent, and '
+                 'packets lapse into the grace period and then suspension '
+                 'with no invoice having gone out.</p>')
+
+    hook = ""
+    if live and hook_url:
+        sec = (f'<p class="muted" style="font-size:12px;margin:6px 0 0">'
+               f'Add a custom header so only Invoice Ninja can call it:<br>'
+               f'<code>X-Mikromon-Token: {esc(secret)}</code></p>'
+               if secret else
+               '<p class="muted" style="font-size:12px;margin:6px 0 0">'
+               'Set a shared token above and add it as a custom header on '
+               'the webhook, so a stranger who finds the address cannot '
+               'prod it.</p>')
+        hook = (f'<div style="margin-top:14px;padding:10px;border-radius:6px;'
+                f'background:rgba(148,163,184,0.12)">'
+                f'<p style="margin:0 0 4px;font-size:12px"><b>Optional:</b> '
+                f'in Invoice Ninja, add a webhook on <b>Create Payment</b> '
+                f'pointing at:</p>'
+                f'<code style="font-size:12px">{esc(hook_url)}</code>'
+                f'{sec}'
+                f'<p class="muted" style="font-size:12px;margin:8px 0 0">'
+                f'Only a shortcut. Payments are checked against Invoice '
+                f'Ninja every 15 minutes regardless, so a webhook that never '
+                f'arrives delays a reactivation by minutes rather than '
+                f'leaving somebody who has paid switched off.</p></div>')
+
+    run = ('' if not live else
+           f'<form method="POST" action="/superadmin/invoiceninja/run" '
+           f'style="margin-top:8px">'
+           f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+           f'<button class="btn ghost" type="submit">Run the billing pass '
+           f'now</button></form>')
+    disconnect = ('' if not live else
+                  f'<form method="POST" action="/superadmin/invoiceninja" '
+                  f'style="margin-top:8px" onsubmit="return confirm('
+                  f'&#39;Disconnect Invoice Ninja? Renewal invoices stop '
+                  f'going out, and packets will lapse with nothing having '
+                  f'been sent.&#39;)">'
+                  f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+                  f'<input type="hidden" name="clear" value="1">'
+                  f'<button class="btn ghost" type="submit">Disconnect'
+                  f'</button></form>')
+
+    return (
+        f'<div class="box"><h2>Renewal invoicing (Invoice Ninja)</h2>'
+        f'{state}'
+        f'<form method="POST" action="/superadmin/invoiceninja">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<div style="display:grid;grid-template-columns:'
+        f'repeat(auto-fit,minmax(240px,1fr));gap:10px">'
+        f'<label>Invoice Ninja address<br><input name="url" '
+        f'value="{esc(url)}" placeholder="https://billing.yourdomain.com" '
+        f'style="width:100%"></label>'
+        f'<label>API token<br><input name="token" type="password" '
+        f'placeholder="{"saved - leave blank to keep" if has_token else "from Settings &rarr; API Tokens"}" '
+        f'style="width:100%"></label>'
+        f'<label>Invoice this many days before it lapses<br>'
+        f'<input name="days_before" type="number" min="1" max="30" '
+        f'value="{days}" style="width:100%"></label>'
+        f'<label>Payable within (days)<br>'
+        f'<input name="due_days" type="number" min="1" max="60" '
+        f'value="{due}" style="width:100%"></label>'
+        f'<label>Shared webhook token<br><input name="webhook_secret" '
+        f'type="password" placeholder='
+        f'"{"saved - leave blank to keep" if secret else "any long random string"}" '
+        f'style="width:100%"></label>'
+        f'</div>'
+        f'<div style="margin-top:10px"><button class="btn" type="submit">'
+        f'Save and test the connection</button></div></form>'
+        f'{hook}{run}{disconnect}</div>')
+
+
 def _parse_regions_text(text: str) -> list:
     """One region per line, "Name|https://url" — the textarea format
     _regions_box's form submits and _post_superadmin_regions parses.
@@ -1437,7 +1536,9 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        hub_ip: str = "", hub_port: str = "",
                        router_count: int = 0, hub_pubkey: str = "",
                        regions=None, nextdns=None, quotes=None,
-                       yoco=None, yoco_hook_url: str = "") -> str:
+                       yoco=None, yoco_hook_url: str = "",
+                       invoiceninja=None,
+                       in_hook_url: str = "") -> str:
     """Platform superadmin panel — shows all orgs, billing status, and device counts."""
     note = _flash(msg, error)
 
@@ -1609,6 +1710,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
              f'{_smtp_settings_box(smtp, csrf)}'
              f'{_billing_contact_box(billing_contact, csrf)}'
              f'{_yoco_box(yoco, csrf, yoco_hook_url)}'
+             f'{_invoiceninja_box(invoiceninja, csrf, in_hook_url)}'
              f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf, hub_pubkey)}'
              f'{_regions_box(regions or [], csrf)}'
              f'{_nextdns_settings_box(nextdns or {}, csrf)}'

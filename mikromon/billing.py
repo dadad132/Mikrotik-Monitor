@@ -379,6 +379,12 @@ class BillingStore:
         self.db.executescript(_SCHEMA)
         self.db.commit()
         self._add_col_if_missing("billing", "grace_period_end", "REAL")
+        # Orders predate Invoice Ninja, so these are added rather than being
+        # in the CREATE TABLE -- an existing server must not need its
+        # database rebuilt to take an update.
+        self._add_col_if_missing("orders", "provider", "TEXT")
+        self._add_col_if_missing("orders", "external_id", "TEXT")
+        self._add_col_if_missing("orders", "due", "REAL")
         self._add_col_if_missing("billing", "trial_end", "REAL")
         self._add_col_if_missing("billing", "pf_token", "TEXT")
         self._add_col_if_missing("billing", "payment_id", "TEXT")
@@ -506,11 +512,13 @@ class BillingStore:
     # --- orders (a packet somebody is paying for) --------------------------
 
     _ORDER_COLS = ("id", "org_id", "plan", "months", "amount_cents",
+                   "provider", "external_id", "due",
                    "currency", "status", "checkout_id", "payment_id",
                    "created", "paid")
 
     def create_order(self, org_id: int, plan: str, amount_cents: int,
-                     months: int = 1, currency: str = "ZAR") -> int:
+                     months: int = 1, currency: str = "ZAR",
+                     provider: str = "yoco", due: float | None = None) -> int:
         """Record what is being bought, before sending anyone to pay.
 
         The amount is stored here rather than recomputed when the webhook
@@ -520,9 +528,10 @@ class BillingStore:
         with self._lock:
             cur = self.db.execute(
                 "INSERT INTO orders (org_id, plan, months, amount_cents, "
-                "currency, created) VALUES (?,?,?,?,?,?)",
+                "currency, created, provider, due) VALUES (?,?,?,?,?,?,?,?)",
                 (int(org_id), str(plan), max(1, int(months)),
-                 int(amount_cents), str(currency), time.time()))
+                 int(amount_cents), str(currency), time.time(),
+                 str(provider), due))
             self.db.commit()
             return int(cur.lastrowid)
 
@@ -544,6 +553,83 @@ class BillingStore:
             f"WHERE org_id = ? ORDER BY created DESC LIMIT ?",
             (int(org_id), int(limit))).fetchall()
         return [dict(zip(self._ORDER_COLS, r)) for r in rows]
+
+    def set_order_external(self, order_id: int, external_id: str) -> None:
+        """Record the id this order has at the invoicing provider, so a
+        payment recorded over there can be found back here."""
+        with self._lock:
+            self.db.execute("UPDATE orders SET external_id = ? WHERE id = ?",
+                            (str(external_id), int(order_id)))
+            self.db.commit()
+
+    def order_by_external(self, external_id: str, provider: str = ""):
+        """The order holding this provider-side id, or None."""
+        if not external_id:
+            return None
+        sql = (f"SELECT {', '.join(self._ORDER_COLS)} FROM orders "
+               f"WHERE external_id = ?")
+        args = [str(external_id)]
+        if provider:
+            sql += " AND provider = ?"
+            args.append(provider)
+        row = self.db.execute(sql + " ORDER BY created DESC LIMIT 1",
+                              args).fetchone()
+        return dict(zip(self._ORDER_COLS, row)) if row else None
+
+    def open_orders(self, provider: str = "", limit: int = 500) -> list:
+        """Orders raised but not yet paid.
+
+        The reconcile pass walks these and asks the provider whether each one
+        has been settled. That is what makes a webhook optional: a callback
+        that never arrives costs a few minutes, not a suspended customer who
+        has already paid.
+        """
+        sql = (f"SELECT {', '.join(self._ORDER_COLS)} FROM orders "
+               f"WHERE status != 'paid' AND external_id IS NOT NULL "
+               f"AND external_id != ''")
+        args: list = []
+        if provider:
+            sql += " AND provider = ?"
+            args.append(provider)
+        rows = self.db.execute(sql + " ORDER BY created LIMIT ?",
+                               args + [int(limit)]).fetchall()
+        return [dict(zip(self._ORDER_COLS, r)) for r in rows]
+
+    def has_open_order_for_period(self, org_id: int, period_end: float,
+                                  provider: str = "") -> bool:
+        """Whether a renewal invoice already covers this billing period.
+
+        Stops a daily job raising the same invoice every morning for a week.
+        Matched on the period the invoice was raised against rather than on a
+        date window, so it stays correct if the job misses a day or the
+        server's clock moves.
+        """
+        sql = ("SELECT 1 FROM orders WHERE org_id = ? AND status != 'paid' "
+               "AND due IS NOT NULL AND ABS(due - ?) < 86400")
+        args: list = [int(org_id), float(period_end or 0.0)]
+        if provider:
+            sql += " AND provider = ?"
+            args.append(provider)
+        return self.db.execute(sql + " LIMIT 1", args).fetchone() is not None
+
+    def orgs_due_for_renewal(self, within_days: float,
+                             now: float | None = None) -> list:
+        """Companies whose paid-up date falls inside the next `within_days`.
+
+        Only companies actually on a paid packet: a trial has nothing to
+        renew, and invoicing one would be the single worst first impression
+        the product could make.
+        """
+        now = now if now is not None else time.time()
+        horizon = now + float(within_days) * 86400
+        rows = self.db.execute(
+            "SELECT org_id, plan, device_limit, current_period_end, status "
+            "FROM billing WHERE current_period_end IS NOT NULL "
+            "AND current_period_end <= ? AND status IN "
+            "('active','grace','suspended','canceled') "
+            "ORDER BY current_period_end", (horizon,)).fetchall()
+        return [{"org_id": r[0], "plan": r[1], "device_limit": r[2],
+                 "current_period_end": r[3], "status": r[4]} for r in rows]
 
     def mark_order_paid(self, order_id: int, payment_id: str = "") -> bool:
         """Mark an order paid. True only the FIRST time.

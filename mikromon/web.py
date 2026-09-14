@@ -17,6 +17,7 @@ Endpoints:
 """
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import math
@@ -5865,6 +5866,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
     if billing_cfg.get("db"):
         from .billing import BillingStore
         billing = BillingStore(billing_cfg["db"])
+        # Renewal invoicing and payment reconciliation run here rather
+        # than from cron: they need this same open database, and a
+        # second process writing it is a race worth not having.
+        if auth is not None:
+            try:
+                from . import billing_runner
+                billing_runner.start(billing, auth)
+            except Exception:  # noqa: BLE001 - dashboard still starts
+                log.exception("could not start the billing runner")
     _pf_merchant_id = billing_cfg.get("payfast_merchant_id", "")
     _pf_merchant_key = billing_cfg.get("payfast_merchant_key", "")
     _pf_passphrase = billing_cfg.get("payfast_passphrase", "")
@@ -6426,6 +6436,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 nextdns=auth.get_nextdns() if auth else {},
                 quotes=open_quotes,
                 yoco=auth.get_yoco() if auth else {},
+                invoiceninja=auth.get_invoiceninja() if auth else {},
+                in_hook_url=(
+                    ("https" if secure_cookies else "http") + "://"
+                    + self.headers.get("Host", "")
+                    + "/billing/invoiceninja-webhook"),
                 yoco_hook_url=(
                     ("https" if secure_cookies else "http") + "://"
                     + self.headers.get("Host", "")
@@ -6595,6 +6610,80 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             auth.set_smtp(cfg)
             return self._redirect("/superadmin?ok=" +
                                   quote("Email (SMTP) settings saved."))
+
+        def _post_invoiceninja(self, user):
+            """Superadmin-only: connect Invoice Ninja, or disconnect it.
+
+            The token is write-only, like the Yoco keys: a blank box keeps
+            what is saved, so re-saving this panel to change the lead time
+            cannot silently wipe the credential and stop every renewal
+            invoice -- a failure that shows up a month later as customers who
+            were never billed.
+            """
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if auth is None:
+                return self._redirect("/superadmin?error=" +
+                                      quote("Auth store is not enabled."))
+            cur = dict(auth.get_invoiceninja() or {})
+            if flat.get("clear"):
+                auth.set_invoiceninja({})
+                log.warning("Invoice Ninja disconnected by %s",
+                            user.get("email", "?"))
+                return self._redirect("/superadmin?ok=" + quote(
+                    "Invoice Ninja disconnected. Renewal invoices will stop "
+                    "going out."))
+            url = (flat.get("url") or "").strip().rstrip("/")
+            if url:
+                cur["url"] = url
+            tok = (flat.get("token") or "").strip()
+            if tok:
+                cur["token"] = tok
+            hook = (flat.get("webhook_secret") or "").strip()
+            if hook:
+                cur["webhook_secret"] = hook
+            for field, lo, hi, dflt in (("days_before", 1, 30, 7),
+                                        ("due_days", 1, 60, 7)):
+                try:
+                    cur[field] = min(hi, max(lo, int(flat.get(field) or dflt)))
+                except (TypeError, ValueError):
+                    cur[field] = dflt
+            if not (cur.get("url") and cur.get("token")):
+                auth.set_invoiceninja(cur)
+                return self._redirect("/superadmin?ok=" + quote(
+                    "Saved. Add both the address and an API token to switch "
+                    "renewal invoicing on."))
+            # Prove it works now, rather than finding out when the first
+            # invoice silently fails to go out.
+            from .invoiceninja import ping, InvoiceNinjaError
+            try:
+                who = ping(cur["url"], cur["token"])
+            except InvoiceNinjaError as exc:
+                return self._redirect("/superadmin?error=" + quote(str(exc)))
+            auth.set_invoiceninja(cur)
+            log.info("Invoice Ninja connected (%s) by %s", who,
+                     user.get("email", "?"))
+            return self._redirect("/superadmin?ok=" + quote(
+                f"Connected to Invoice Ninja ({who}). Renewal invoices go "
+                f"out {cur['days_before']} days before a packet lapses."))
+
+        def _post_invoiceninja_run(self, user):
+            """Superadmin-only: do the renewal/reconcile pass right now."""
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            from .billing_runner import run_once
+            raised, applied = run_once(billing, auth)
+            return self._redirect("/superadmin?ok=" + quote(
+                f"Billing run finished: {raised} invoice(s) raised, "
+                f"{applied} payment(s) applied."))
 
         def _post_superadmin_yoco(self, user):
             """Superadmin-only: the two Yoco keys that switch card payment on.
@@ -9394,6 +9483,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_billing_itn()
             if path == "/billing/yoco-webhook":
                 return self._post_yoco_webhook()
+            if path == "/billing/invoiceninja-webhook":
+                return self._post_invoiceninja_webhook()
             if auth is None:
                 return self._send(404, "not found")
             if path == "/signup":
@@ -9435,6 +9526,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_suspend(user, restore=True)
             if path == "/superadmin/yoco":
                 return self._post_superadmin_yoco(user)
+            if path == "/superadmin/invoiceninja":
+                return self._post_invoiceninja(user)
+            if path == "/superadmin/invoiceninja/run":
+                return self._post_invoiceninja_run(user)
             if path == "/superadmin/billing-contact":
                 return self._post_superadmin_billing_contact(user)
             if path == "/superadmin/hub-endpoint":
@@ -9777,6 +9872,58 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             except Exception:
                 log.exception("could not mark quote handled")
             return self._redirect("/superadmin?ok=" + quote("Quote marked handled"))
+
+        def _post_invoiceninja_webhook(self):
+            """Invoice Ninja saying a payment was recorded.
+
+            Treated as a NUDGE, not as proof. Invoice Ninja signs nothing --
+            it can send a static header, which is a password rather than a
+            signature -- and the payload shape has moved between releases. So
+            this reads which invoice is being talked about and then asks the
+            Invoice Ninja API whether that invoice is actually settled.
+
+            That also means losing one of these is survivable: the same
+            question is asked on a timer by billing_runner, so a callback
+            dropped by a restart costs minutes rather than suspending
+            somebody who has paid.
+            """
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length else b""
+            if not billing or auth is None:
+                return self._send(200, "ok")
+            cfg = auth.get_invoiceninja() or {}
+            if not (cfg.get("url") and cfg.get("token")):
+                return self._send(200, "ok")
+            secret = str(cfg.get("webhook_secret") or "")
+            if secret:
+                sent = (self.headers.get("X-Mikromon-Token")
+                        or self.headers.get("x-mikromon-token") or "")
+                if not hmac.compare_digest(sent, secret):
+                    log.warning("Invoice Ninja webhook rejected: wrong or "
+                                "missing token header")
+                    return self._send(401, "unverified")
+            try:
+                payload = json.loads(raw.decode("utf-8") or "{}")
+            except ValueError:
+                payload = {}
+            from .invoiceninja import invoice_ids_in
+            from .billing_runner import reconcile_payments
+            ids = invoice_ids_in(payload)
+            applied = 0
+            try:
+                if ids:
+                    for inv_id in ids:
+                        applied += reconcile_payments(billing, cfg,
+                                                      only_invoice=inv_id)
+                else:
+                    # Nothing recognisable in the body: check everything
+                    # open rather than ignoring the callback.
+                    applied = reconcile_payments(billing, cfg)
+            except Exception:  # noqa: BLE001
+                log.exception("Invoice Ninja webhook: reconcile failed")
+            log.info("Invoice Ninja webhook: %d invoice(s) named, %d payment(s) "
+                     "applied", len(ids), applied)
+            return self._send(200, "ok")
 
         def _post_billing_checkout(self, flat, user):
             """Send an owner to Yoco to pay for a packet.
