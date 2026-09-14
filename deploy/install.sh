@@ -536,6 +536,15 @@ CONF
   # silently drops every router handshake (router dials, server never replies).
   # Strip those wg-quick-only lines first, keeping PrivateKey/ListenPort + peers.
   #
+  # The exit status of `bash -c` is the status of its LAST command. This
+  # ExecStart used to end with the route-adding `while` loop, so a failing
+  # `wg syncconf` -- the one step that actually matters -- still produced
+  # status=0/SUCCESS. Every diagnostics report showed that success line, and
+  # it never meant the peers had been applied. syncconf is now checked
+  # explicitly, fails the unit loudly, and the peer count is logged so
+  # `journalctl -u mikromon-wg-reload` says what was loaded rather than
+  # only that something ran.
+  #
   # After syncing peers, also ensure the /16 kernel route exists.  wg syncconf
   # updates the WireGuard peer table but does NOT add kernel IP routes, so
   # devices allocated outside 10.10.0.0/24 would otherwise be unreachable.
@@ -549,7 +558,7 @@ After=wg-quick@wg0.service
 PartOf=wg-quick@wg0.service
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/bash -c 'wg syncconf wg0 <(grep -vE "^[[:space:]]*(Address|DNS|MTU|Table|PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=" /etc/wireguard/wg0.conf; cat ${WG_PEERS} 2>/dev/null || true); ip -4 route replace ${WG_SUBNET} dev wg0 2>/dev/null || true; while read -r r; do [ -n "\$r" ] && ip -4 route replace "\$r" dev wg0 2>/dev/null || true; done < ${WG_ROUTES}'
+ExecStart=/usr/bin/bash -c 'if ! wg syncconf wg0 <(grep -vE "^[[:space:]]*(Address|DNS|MTU|Table|PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=" /etc/wireguard/wg0.conf; cat ${WG_PEERS} 2>/dev/null || true); then echo "mikromon: wg syncconf FAILED - no peers were applied, the hub will ignore every router" >&2; exit 1; fi; echo "mikromon: applied \$(grep -c "^\\[Peer\\]" ${WG_PEERS} 2>/dev/null || echo 0) peer(s) to wg0"; ip -4 route replace ${WG_SUBNET} dev wg0 2>/dev/null || true; while read -r r; do [ -n "\$r" ] && ip -4 route replace "\$r" dev wg0 2>/dev/null || true; done < ${WG_ROUTES}; exit 0'
 [Install]
 WantedBy=multi-user.target
 UNIT

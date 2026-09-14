@@ -864,6 +864,27 @@ check("provisioning refuses to look successful on a router that cannot save "
       "nothing",
       "free-hdd-space" in locked
       and "this router has almost no free storage" in locked)
+# Re-pasting the script is exactly what fails when RouterOS keeps a key of
+# its own and ignores the private-key line, so telling somebody to do that
+# again was useless advice. Nothing on the router needs to change: the hub
+# can be told to trust the key the router already has, and the router is the
+# only thing that knows it.
+# The self-check only exists when the hub registered a public key for this
+# router, so build one that has.
+keyed = web._provision_script(
+    "Mobilis Geely Edenvale", {"host": "1.1.1.1"}, "mon", "pw1234567890",
+    hub_ip="102.36.140.219", hub_pubkey="HUBKEY=", wg_priv="PRIV=",
+    wg_pub="EXPECTED=", tunnel_ip="10.10.0.2", subnet="10.10.0.0/24")
+check("a key mismatch hands over the command that fixes it, with the "
+      "router's own key substituted in, instead of sending somebody back "
+      "round the loop that just failed",
+      "tools/set_router_key.py" in keyed
+      and "$mmhave" in keyed
+      and "Do NOT re-paste this script" in keyed)
+check("...naming the device, so the command can be run as printed",
+      '\\"Mobilis Geely Edenvale\\"' in keyed)
+check("...and it still reports the match case plainly",
+      "key OK" in keyed)
 check("tunnel-accept firewall rule is moved FIRST so a drop can't block it",
       'move [find comment="mikromon:tunnel:fw"] destination=0' in locked)
 check("provisioning enables WebFig + Winbox for remote management over tunnel",

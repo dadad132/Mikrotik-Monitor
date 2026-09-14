@@ -4120,10 +4120,25 @@ def _provision_script(name, raw, pwuser, pwd, *,
               'this router."')
             a('  :put ("  hub expects:  " . $mmwant)')
             a('  :put ("  router has:   " . $mmhave)')
-            a('  :put "  The private-key line above did not take. Re-paste '
-              'the script,"')
-            a('  :put "  or set it by hand from the /interface wireguard '
-              'line in it."')
+            a('  :put ""')
+            # "Re-paste the script" was the old advice and it was useless:
+            # re-pasting is exactly what had already failed. RouterOS had
+            # kept a key of its own and ignored the private-key line, so
+            # doing it again produced the same mismatch. Nothing on the
+            # router needs to change -- the hub can be told to trust the key
+            # the router already has, and the router is the one thing that
+            # knows it. So print the command, filled in.
+            a('  :put "  Do NOT re-paste this script - that is what just '
+              'failed. Nothing on"')
+            a('  :put "  this router needs to change. Run this ON THE '
+              'MIKROMON SERVER to make"')
+            a('  :put "  the hub accept the key this router already has:"')
+            a('  :put ""')
+            a('  :put ("      python tools/set_router_key.py \\"'
+              + name.replace('"', "") + '\\" " . $mmhave)')
+            a('  :put ""')
+            a('  :put "  The tunnel comes up within a minute. No new keys, '
+              'no second visit."')
             a("}")
             a("}")
         a(':put "mikromon: waiting 6s for the WireGuard handshake..."')
