@@ -25,7 +25,7 @@ def _temperature(health_rows, resource):
 
 class ResourceCheck(Check):
     flags = ("resources",)
-    requires = ("resource", "health")
+    requires = ("log", "resource", "health")
     name = "resources"
 
     def run(self, snap, dev, ctx) -> None:
@@ -140,6 +140,43 @@ class ResourceCheck(Check):
                 what="Free storage", unit="%", higher_is_bad=False,
                 fmt=lambda v: f"{v:g}% ({human_bytes(free_hdd)} free)",
                 cause="Low storage can prevent logging, backups and upgrades.")
+
+        # ---- can this router save configuration at all? -------------------
+        # Not the same question as "is there free space", and the free-space
+        # check above cannot answer it. RouterOS exhausts INODES -- how many
+        # files it can hold -- long before bytes, so a board carrying
+        # thousands of tiny log fragments reports plenty free while being
+        # unable to write a single config change.
+        #
+        # In that state RouterOS ACCEPTS every command, logs this, and raises
+        # nothing. Confirmed live: a router that was reachable, that our own
+        # API user was logging into successfully every poll, and on which not
+        # one setting had persisted for days -- while the dashboard showed it
+        # merely as unprovisioned. Nothing pointed at the cause; the router
+        # had been saying so in its own log the whole time.
+        recent = snap.rows("log")[-400:]
+        save_fail = ""
+        for row in recent:
+            msg = str(row.get("message", ""))
+            low = msg.lower()
+            if "could not save configuration" in low or "no free inodes" in low:
+                save_fail = msg
+                break
+        ctx.transition(
+            "config_unsaveable", healthy=not save_fail,
+            severity=Severity.CRITICAL,
+            title="Router CANNOT SAVE configuration changes",
+            cause=(
+                f"The router logged: \"{save_fail}\". Its storage is full - "
+                f"usually of files rather than bytes, so the free-space "
+                f"figure can look fine. In this state RouterOS accepts every "
+                f"change, fails to write it, and reports no error, so "
+                f"anything configured here or by hand is silently lost. "
+                f"On the router: /file print and remove old backups, .npk "
+                f"packages and fetch downloads; check /system logging for a "
+                f"disk action and switch it to memory; then reboot."),
+            recovery_title="Router can save configuration again",
+        )
 
         # ---- temperature --------------------------------------------------
         temp = _temperature(snap.rows("health"), res)
