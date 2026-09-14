@@ -9342,6 +9342,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if name:
                 return self._redirect(
                     f"/device?name={quote(name)}&tab=hubtunnel&msg=" + msg)
+            # Pressed from Platform admin, where this belongs: it is a
+            # hub-wide action, and the routers it exists to rescue are the
+            # ones whose own pages cannot be opened.
+            if flat.get("from") == "superadmin":
+                return self._redirect(
+                    ("/superadmin?ok=" if ok else "/superadmin?error=") + msg)
             return self._redirect("/dashboard")
 
         def _serve_logs(self, user):

@@ -1486,7 +1486,26 @@ def _hub_endpoint_box(hub_ip, hub_port, router_count, csrf,
         f'</label>'
         f'<div style="margin-top:10px"><button class="btn" type="submit">'
         f'Save</button></div>'
-        f'</form></div>')
+        f'</form>'
+        # Hub-wide, so it belongs here. It used to exist only on an
+        # individual router's Hub tunnel tab -- which is unreachable exactly
+        # when it is needed, because that tab has to talk to the router
+        # first, and the routers you want to re-register are the ones that
+        # are not answering.
+        f'<hr style="border:0;border-top:1px solid var(--border);margin:16px 0">'
+        f'<h3 style="margin:0 0 6px;font-size:14px">Re-register every router '
+        f'with WireGuard</h3>'
+        f'<p class="muted" style="font-size:12px;margin:0 0 8px">'
+        f'Rewrites the peer file on this hub from the saved leases and '
+        f'reloads WireGuard. Nothing on any router changes, and nothing is '
+        f're-keyed. Use it when a router is provisioned and configured but '
+        f'its tunnel never comes up.</p>'
+        f'<form method="POST" action="/hub/reload-peers">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<input type="hidden" name="from" value="superadmin">'
+        f'<button class="btn ghost" type="submit">Reload hub peers now'
+        f'</button></form>'
+        f'</div>')
 
 
 def _quote_inbox(quotes, org_names: dict | None = None, csrf: str = "") -> str:
