@@ -1032,6 +1032,39 @@ def _build_diagnostics_report(auth, devices_db, state_file, metrics_db,
                 lines.extend(_why_unreachable(cfg.host, cfg.api_port))
             except Exception as exc:  # noqa: BLE001 — never break the report
                 lines.append(f"  (probe failed: {exc})")
+            # A router that transmits while the hub never answers is either
+            # using a key the hub does not know, or its packets are not
+            # arriving at all. Those want opposite fixes and look identical
+            # from here. The hub's half of the comparison is known, so print
+            # it next to the command that produces the router's half.
+            _hubd = {}
+            try:
+                _hubd = _hub_load(_hub_path(devices_db)) if devices_db else {}
+            except Exception:  # noqa: BLE001
+                _hubd = {}
+            _meta = ((_hubd.get("leases_meta") or {}).get(name)) or {}
+            hub_ip = _hubd.get("hub_ip", "")
+            hub_port = str(_hubd.get("listen_port", "") or "51820")
+            _want_key = _meta.get("pubkey") or ""
+            if _want_key:
+                lines.append("  --- tunnel key this hub expects from this "
+                             "router ---")
+                lines.append(f"  {_want_key}")
+                lines.append("  On the router:  /interface/wireguard/print "
+                             "detail where name=mikromon")
+                lines.append("  If its public-key does NOT match the line "
+                             "above, the hub is discarding every packet this")
+                lines.append("  router sends and will never answer — which "
+                             "looks exactly like a dead link. Fix it without")
+                lines.append("  re-provisioning (no new keys, no site "
+                             "visit):")
+                lines.append(f"      python tools/set_router_key.py "
+                             f"\"{name}\" <the router's public-key>")
+                lines.append("  If it DOES match, the keys are fine and the "
+                             "packets are not getting through: check the")
+                lines.append("  site's firewall for outbound UDP to "
+                             f"{hub_ip or 'this hub'}:"
+                             f"{hub_port or '51820'}.")
         if not conditions:
             lines.append("  conditions: (empty — nothing has ever been "
                          "tracked for this device)")
