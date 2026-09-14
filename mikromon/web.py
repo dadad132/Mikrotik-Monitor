@@ -4161,12 +4161,27 @@ def _provision_script(name, raw, pwuser, pwd, *,
         a("}")
         a("/interface wireguard set [/interface wireguard find name=mikromon] "
           'private-key="' + wg_priv + '" mtu=' + str(_WG_TUNNEL_MTU))
+        # Deleting the interface orphans its address rather than removing
+        # it: RouterOS keeps the row, points it at "unknown" and flags it
+        # invalid. `find interface=mikromon` no longer matches that, so
+        # without this the add below makes a SECOND row and every
+        # delete-and-recreate cycle leaves one more behind. Only rows
+        # carrying our own comment are touched.
+        a(':do { /ip address remove [/ip address find '
+          'comment="mikromon:tunnel:addr" && interface!="mikromon"] } '
+          "on-error={}")
         a(":if ([:len [/ip address find interface=mikromon]] = 0) do={")
         a("  /ip address add address=" + tunnel_ip + "/16 interface=mikromon "
           'comment="mikromon:tunnel:addr"')
         a("}")
         a("/ip address set [/ip address find interface=mikromon] "
           "address=" + tunnel_ip + "/16")
+        # Same orphaning applies to peers: a deleted interface leaves its
+        # peer rows behind. The set below re-points ONE of them, so any
+        # extras from earlier cycles would linger and compete.
+        a(':do { /interface wireguard peers remove [/interface wireguard '
+          'peers find comment="mikromon:tunnel:hub" '
+          '&& interface!="mikromon"] } on-error={}')
         a(":if ([:len [/interface wireguard peers find "
           'comment="mikromon:tunnel:hub"]] = 0) do={')
         a('  /interface wireguard peers add interface=mikromon public-key="'

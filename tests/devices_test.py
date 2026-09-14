@@ -885,6 +885,23 @@ check("...naming the device, so the command can be run as printed",
       '\\"Mobilis Geely Edenvale\\"' in keyed)
 check("...and it still reports the match case plainly",
       "key OK" in keyed)
+# Deleting a WireGuard interface does NOT delete its /ip address: RouterOS
+# keeps the row, points it at "unknown" and flags it invalid. The guard below
+# looks for interface=mikromon, which no longer matches, so without a cleanup
+# every delete-and-recreate cycle leaves another duplicate behind. Seen live
+# with two 10.10.0.2/16 rows carrying our own comment.
+check("orphaned tunnel addresses left by a deleted interface are cleared "
+      "before a new one is added, so re-provisioning does not stack "
+      "duplicates",
+      '/ip address remove [/ip address find comment="mikromon:tunnel:addr" '
+      '&& interface!="mikromon"]' in locked)
+check("...and only rows carrying our own comment are ever removed",
+      "/ip address remove [/ip address find]" not in locked
+      and locked.count("/ip address remove") == 1)
+check("the same orphaning is cleared for peers, which a deleted interface "
+      "leaves behind too",
+      '/interface wireguard peers remove [/interface wireguard peers find '
+      'comment="mikromon:tunnel:hub" && interface!="mikromon"]' in locked)
 check("tunnel-accept firewall rule is moved FIRST so a drop can't block it",
       'move [find comment="mikromon:tunnel:fw"] destination=0' in locked)
 check("provisioning enables WebFig + Winbox for remote management over tunnel",
