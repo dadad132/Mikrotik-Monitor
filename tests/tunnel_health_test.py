@@ -80,11 +80,27 @@ try:
           r["ok"] and "handshake" in r["verdict"])
 
     r = rows["Mobilis Geely Edenvale"]
-    check("a peer the hub HAS loaded but has never heard from is called out "
-          "as exactly that -- the fault is the router's key or its path, "
-          "not anything the hub can fix by rewriting files",
-          not r["ok"] and "NEVER handshaked" in r["verdict"]
+    # Edenvale exactly: loaded, correct key, and a BLANK endpoint. WireGuard
+    # fills the endpoint in from any packet that decrypts with the peer's
+    # key, so blank is proof that nothing belonging to this router has ever
+    # arrived. Separating that from "arrives and is rejected" took days by
+    # hand; it is one field.
+    check("a peer loaded but never heard from, with no endpoint, is called "
+          "out as nothing ever arriving -- not as a key problem, because "
+          "the two need opposite fixes",
+          not r["ok"] and "nothing has EVER arrived" in r["verdict"]
+          and "site's link" in r["verdict"]
           and r["in_file"] and r["loaded"])
+
+    rows_ep = {x["name"]: x for x in with_live(dict(
+        LIVE, **{"QTCW=": {"endpoint": "196.1.2.3:13231",
+                           "allowed": "10.10.157.167/32",
+                           "handshake": 0, "rx": 0, "tx": 0}}))}
+    check("...whereas a peer WITH an endpoint and no handshake is the "
+          "opposite case: packets arrive and are rejected, so the key is "
+          "wrong and set_router_key.py is the fix",
+          "packets ARRIVE" in rows_ep["Mobilis Geely Edenvale"]["verdict"]
+          and "196.1.2.3:13231" in rows_ep["Mobilis Geely Edenvale"]["verdict"])
 
     r = rows["Never Loaded"]
     check("a peer that IS in the file but was never applied is called out as "

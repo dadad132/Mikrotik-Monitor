@@ -2989,9 +2989,24 @@ def _tunnel_health_rows(hub, peers_path):
                            "applied it, so every packet from this router is "
                            "discarded", False)
         elif age is None:
-            verdict, ok = ("loaded, but this router has NEVER handshaked — "
-                           "its own key differs, or its packets are not "
-                           "reaching the hub at all", False)
+            # The endpoint separates the two causes, and it is the one
+            # signal that cannot lie: WireGuard fills it in from any packet
+            # that DECRYPTS with this peer's key. Blank means nothing has
+            # ever arrived that belongs to this router. Present, with no
+            # handshake, means packets arrive and are rejected.
+            #
+            # Working that out by hand cost days on one site.
+            ep = (p.get("endpoint") or "").strip()
+            if ep and ep != "(none)":
+                verdict, ok = (f"packets ARRIVE from {ep} but are rejected — "
+                               f"the router is using a different key than "
+                               f"the one registered here", False)
+            else:
+                verdict, ok = ("nothing has EVER arrived from this router — "
+                               "its config and key here are fine, so the "
+                               "site's link is not letting the tunnel out "
+                               "(UDP blocked upstream, or the router is "
+                               "off)", False)
         elif age > 300:
             verdict, ok = (f"last handshake {int(age // 60)} min ago — the "
                            f"tunnel has stopped", False)
