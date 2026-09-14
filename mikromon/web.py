@@ -21,7 +21,9 @@ import hmac
 import json
 import logging
 import math
+import errno
 import os
+import stat
 import tempfile
 import re
 import secrets
@@ -2781,20 +2783,30 @@ def _device_tunnel_ip(name, devices_db) -> str:
 
 
 def _atomic_write(path, text: str) -> None:
-    """Replace a file's contents in one step.
+    """Replace a file's contents without any reader seeing it half-written.
 
     The hub's peers and routes files are watched by a systemd .path unit that
-    reloads WireGuard the moment they change. Writing in place fires that
-    watcher on the truncate, before any content exists, and `wg syncconf`
-    then applies whatever it managed to read -- dropping every peer it did
-    not see. Renaming into place cannot be observed half-done.
+    reloads WireGuard the moment they change. The obvious open(path, "w")
+    truncates first and writes after, so the watcher fires on an empty file
+    and `wg syncconf` applies whatever it managed to read -- dropping every
+    peer it did not see, while the file on disk ends up perfectly correct.
 
-    Written into the same directory so the rename stays on one filesystem;
-    across a mount boundary os.replace is not atomic and would reintroduce
-    exactly the race this exists to close.
+    Preferred path is a temp file renamed into place, which cannot be
+    observed half-done. The temp file goes in the target's OWN directory:
+    os.replace is only atomic within one filesystem, and /tmp to
+    /etc/wireguard would cross a mount boundary on a real hub.
     """
     d = os.path.dirname(os.path.abspath(path)) or "."
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".mikromon-", suffix=".tmp")
+    try:
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".mikromon-", suffix=".tmp")
+    except OSError as exc:
+        if exc.errno not in (errno.EACCES, errno.EPERM, errno.EROFS):
+            raise
+        # The directory is not writable by this service -- install.sh sets
+        # /etc/wireguard to 750 root:<service user>, which grants read and
+        # traverse but not create. Nothing can be renamed into place there.
+        _inplace_write(path, text)
+        return
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
@@ -2802,6 +2814,18 @@ def _atomic_write(path, text: str) -> None:
             # The rename is atomic, but a crash between rename and writeback
             # could still leave the new name pointing at unwritten blocks.
             os.fsync(f.fileno())
+        # Renaming drops whatever mode/owner the real file had, so carry it
+        # across -- otherwise the peers file becomes 0600 owned by the
+        # service user and the next reload cannot read it.
+        try:
+            st = os.stat(path)
+            os.chmod(tmp, stat.S_IMODE(st.st_mode))
+            try:
+                os.chown(tmp, st.st_uid, st.st_gid)
+            except (AttributeError, PermissionError, OSError):
+                pass        # not root, or not a platform with chown
+        except FileNotFoundError:
+            pass            # first write; the default mode is fine
         os.replace(tmp, path)
     except Exception:
         try:
@@ -2809,6 +2833,44 @@ def _atomic_write(path, text: str) -> None:
         except OSError:
             pass
         raise
+
+
+def _inplace_write(path, text: str) -> None:
+    """Overwrite a file's contents without ever emptying it.
+
+    Used only where the directory forbids creating the temp file a rename
+    needs. Deliberately NOT open(path, "w"): that truncates before writing
+    anything, and a watcher firing on the empty file is precisely what turned
+    a peer-file update into a fleet-wide outage.
+
+    Opening "r+" and truncating AFTER the write means the file is never
+    zero-length. A reader that catches it mid-write sees a complete peer list
+    that is merely a few bytes stale -- which wg syncconf applies harmlessly
+    -- instead of an empty one, which it applies by removing every peer.
+    """
+    raw = text.encode("utf-8")
+    # O_BINARY matters on Windows, where os.open defaults to text mode and
+    # rewrites each newline as a carriage-return pair. The file on disk is
+    # then LONGER than the buffer, so truncating to the buffer's length cuts
+    # the tail off and leaves the last peer block short. Caught by the test
+    # that shrinks the file repeatedly.
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags, 0o640)
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        written = 0
+        while written < len(raw):
+            written += os.write(fd, raw[written:])
+        os.ftruncate(fd, len(raw))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    log.warning(
+        "wrote %s in place rather than atomically: this service cannot "
+        "create files in %s. Run: sudo chmod 770 %s  -- until then a "
+        "reload that lands mid-write can apply a slightly stale peer list.",
+        path, os.path.dirname(os.path.abspath(path)) or ".",
+        os.path.dirname(os.path.abspath(path)) or ".")
 
 
 def _hub_load(path) -> dict:

@@ -135,6 +135,71 @@ check("a write that fails leaves the PREVIOUS contents intact, rather than "
 check("...and still cleans up after itself",
       not [f for f in os.listdir(d) if f.startswith(".mikromon-")])
 
+print("\nWhen the directory forbids creating a temp file")
+
+# install.sh sets /etc/wireguard to 750 root:<service user>: readable and
+# traversable, but NOT writable. mkstemp there raises EACCES -- which is how
+# the first version of this left the peers file unwritable altogether.
+import errno as _errno
+
+_mk = tempfile.mkstemp
+
+
+def _denied(*a, **kw):
+    raise OSError(_errno.EACCES, "Permission denied")
+
+
+p3 = os.path.join(d, "peers-ro-dir.conf")
+_atomic_write(p3, "[Peer]\n# first\n")
+tempfile.mkstemp = _denied
+try:
+    _atomic_write(p3, "[Peer]\n# second\n")
+finally:
+    tempfile.mkstemp = _mk
+check("a directory that forbids new files no longer fails the write "
+      "outright -- that regression left the hub unable to update its peers "
+      "at all, which is worse than the race it was fixing",
+      open(p3).read() == "[Peer]\n# second\n")
+
+# The fallback must never empty the file: an empty peer list is exactly what
+# wg syncconf turns into a fleet-wide outage.
+LONG = "[Peer]\n" + "# padding\n" * 500
+SHORT = "[Peer]\n# tiny\n"
+_atomic_write(p3, LONG)
+seen_empty = []
+stop2 = threading.Event()
+
+
+def watcher2():
+    while not stop2.is_set():
+        try:
+            with open(p3, encoding="utf-8") as fh:
+                if fh.read() == "":
+                    seen_empty.append(1)
+        except (FileNotFoundError, PermissionError):
+            pass
+
+
+t2 = threading.Thread(target=watcher2, daemon=True)
+t2.start()
+tempfile.mkstemp = _denied
+try:
+    for _ in range(40):
+        _atomic_write(p3, LONG)
+        _atomic_write(p3, SHORT)
+finally:
+    tempfile.mkstemp = _mk
+    stop2.set()
+    t2.join(timeout=2)
+
+check("...and shrinking the file never leaves it momentarily EMPTY, which "
+      "is the failure that actually matters: syncconf reading an empty peer "
+      "list removes every peer on the hub",
+      not seen_empty)
+check("the shorter content fully replaces the longer one, with no tail of "
+      "the old file left behind",
+      open(p3).read() == SHORT)
+
 print("\nThe temp file lands beside the target")
 
 # os.replace is only atomic within one filesystem. Writing the temp file to

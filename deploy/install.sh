@@ -460,9 +460,22 @@ set +e
 
   mkdir -p /etc/wireguard
   # The wireguard package sets /etc/wireguard to 700 root:root.  Grant the
-  # service user traverse + read so it can write wg-peers.conf inside.
-  chmod 750 /etc/wireguard
+  # service group traverse, read AND WRITE.
+  #
+  # Write on the DIRECTORY (not just on wg-peers.conf) is what lets the
+  # dashboard replace that file by renaming a temp file over it, which is
+  # the only way to update it without a reader ever seeing it half-written.
+  # The mikromon-wg-reload.path unit watches this file and runs
+  # `wg syncconf` the moment it changes; syncconf removes every peer absent
+  # from the config it is handed, so a reader that catches a truncated file
+  # drops those peers from the running interface -- a fleet-wide outage from
+  # one short read.  At 750 the service falls back to overwriting in place,
+  # which works but reopens a narrower version of that window.
+  chmod 770 /etc/wireguard
   chgrp "${SERVICE_USER}" /etc/wireguard
+  # The hub's own private key stays root-only regardless: group write on the
+  # directory would otherwise let the service replace it.
+  chmod 600 /etc/wireguard/wg0.key 2>/dev/null || true
   [ -f "${WG_PEERS}" ] || install -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
       -m 640 /dev/null "${WG_PEERS}"
   # One site-to-site LAN subnet per line (see the VPN tab) — the reload
