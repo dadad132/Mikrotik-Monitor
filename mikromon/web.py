@@ -3830,6 +3830,35 @@ def _provision_script(name, raw, pwuser, pwd, *,
         _sn_base = ".".join((subnet or _HUB_SUBNET_DEFAULT).split("/")[0].split(".")[:2])
         net = f"{_sn_base}.0.0/16"   # cover all sub-/24 ranges so hub is reachable
         a("")
+        # A router that cannot write to its own flash accepts every command
+        # below and saves none of them -- RouterOS logs "could not save
+        # configuration changes, no free inodes left" and carries on. The
+        # script then reports success, the router reports unprovisioned, and
+        # nothing about that says which of the two is lying. Checked once,
+        # up front, so the answer is on screen before anything is attempted.
+        a("")
+        a("# 4b) Can this router still save configuration at all?")
+        a("{")
+        a(":local mmfree [/system resource get free-hdd-space]")
+        a(":if ($mmfree < 200000) do={")
+        a('  :put "mikromon: STOP - this router has almost no free storage"')
+        a('  :put ("  free space: " . $mmfree . " bytes")')
+        a('  :put "  RouterOS accepts configuration changes in this state and'
+          ' then"')
+        a('  :put "  silently fails to save them, so provisioning will appear'
+          ' to"')
+        a('  :put "  work and change nothing. Clear space first:"')
+        a('  :put "    /file print          (remove old backups, .npk '
+          'packages, fetch"')
+        a('  :put "                          downloads, and user files)"')
+        a('  :put "    /system logging      (set the disk action to memory if'
+          ' logs"')
+        a('  :put "                          are filling it)"')
+        a('  :put "  then reboot and paste this script again."')
+        a("} else={")
+        a('  :put ("mikromon: flash OK, " . $mmfree . " bytes free")')
+        a("}")
+        a("}")
         a("# 5) WireGuard dial-home tunnel (RouterOS 7.1+)")
         a("# Add interface if absent, then always sync settings so re-running")
         a("# this script picks up a new key (generated each time you provision).")
@@ -3950,17 +3979,53 @@ def _provision_script(name, raw, pwuser, pwd, *,
             # `available-from` ("backwards compatible via deprecation", per
             # MikroTik's own changelog) -- so 7.24 still accepts the old name
             # but prints a deprecation warning, and says it will be removed.
-            #
             # This fleet spans 7.18 to 7.24, and 7.18 has never heard of
-            # `available-from`. So try the new name and fall back: new
-            # RouterOS takes it silently, old RouterOS errors on the unknown
-            # keyword and uses the one it knows. No version parsing, no
-            # warning on either, and it keeps working the day MikroTik
-            # actually drops `address`.
+            # `available-from`.
+            #
+            # The obvious shape for that -- try the new name, fall back to the
+            # old one inside on-error -- DOES NOT WORK, and shipped broken:
+            #
+            #     :do { /ip service set api available-from=... }
+            #       on-error={ /ip service set api address=... }
+            #
+            # on-error catches errors raised while a command RUNS. An unknown
+            # property is rejected when the line is PARSED, before either
+            # branch exists, so on 7.20 the whole thing died with "expected
+            # end of command (line 1 column 27)" -- column 27 being exactly
+            # where `available-from` starts -- and neither name was applied.
+            # Seen live on a 7.20.7 board.
+            #
+            # :parse defers compiling the new-name command to run time, which
+            # is inside the :do and therefore catchable. The fallback branch
+            # is written literally because `address` parses on every version
+            # in the fleet; only the new name needs deferring.
             for _svc in ("api", "api-ssl"):
-                a(":do { /ip service set " + _svc + " available-from=" + net
-                  + " } on-error={ /ip service set " + _svc
-                  + " address=" + net + " }")
+                a(":do { :local mmf [:parse \"/ip service set " + _svc
+                  + " available-from=" + net + "\"] ; $mmf } on-error={ "
+                  ":do { /ip service set " + _svc + " address=" + net
+                  + " } on-error={} }")
+            # Read back rather than trusting either branch. A router whose
+            # flash has no free inodes accepts a `set` and logs "could not
+            # save configuration changes" WITHOUT raising, so the command
+            # looks like it worked and the setting is simply not there. That
+            # is invisible from here otherwise, and it is why one site kept
+            # coming back unprovisioned however many times the script was
+            # pasted.
+            a("{")
+            a(":local mmgot \"\"")
+            a(":do { :set mmgot [/ip service get [find name=api] "
+              "available-from] } on-error={"
+              " :do { :set mmgot [/ip service get [find name=api] address] }"
+              " on-error={} }")
+            a(":if ([:len $mmgot] = 0) do={")
+            a('  :put "mikromon: WARNING - could not restrict the API to the '
+              'tunnel."')
+            a('  :put "  Check /log print for \'no free inodes left\' or '
+              '\'could not save"')
+            a('  :put "  configuration changes\' - a full flash accepts '
+              'changes and saves none."')
+            a("}")
+            a("}")
     a("")
     a('/log info "mikromon provisioning done"')
     return "\n".join(L)

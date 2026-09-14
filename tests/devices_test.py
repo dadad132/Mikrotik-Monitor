@@ -824,13 +824,46 @@ check("lock-API binds api + api-ssl to the tunnel subnet (plain API, no cert)",
 # RouterOS 7.24 renamed this property and warns that the old name goes away;
 # 7.18 has never heard of the new one. A fleet spanning both needs each
 # router to pick for itself.
-check("the new property name is tried first, with the old one as a fallback, "
-      "so the same script works on 7.18 and on 7.24 without a warning",
-      ":do { /ip service set api available-from=10.10.0.0/16 } "
-      "on-error={ /ip service set api address=10.10.0.0/16 }" in locked)
+#
+# These two checks used to assert the SHAPE of a fallback that could never
+# work, and passed the whole time it was broken in the field:
+#
+#     :do { ... available-from=... } on-error={ ... address=... }
+#
+# on-error catches errors raised while a command runs; an unknown property is
+# rejected when the line is parsed, so on 7.20 neither branch ran and the
+# paste died with "expected end of command (line 1 column 27)". They now
+# assert the property that made it wrong -- that the new name is never parsed
+# on a router that has not heard of it.
+check("the new name is compiled at RUN time via :parse, which is what puts "
+      "it inside the reach of on-error -- writing it literally means the "
+      "line fails to parse on older RouterOS and neither name is applied",
+      ':do { :local mmf [:parse "/ip service set api '
+      'available-from=10.10.0.0/16"] ; $mmf } on-error=' in locked)
+check("...falling back to the name every version in the fleet accepts",
+      "on-error={ :do { /ip service set api address=10.10.0.0/16 } "
+      "on-error={} }" in locked)
 check("...and the same for api-ssl",
-      ":do { /ip service set api-ssl available-from=10.10.0.0/16 } "
-      "on-error={ /ip service set api-ssl address=10.10.0.0/16 }" in locked)
+      ':do { :local mmf [:parse "/ip service set api-ssl '
+      'available-from=10.10.0.0/16"] ; $mmf } on-error=' in locked
+      and "on-error={ :do { /ip service set api-ssl "
+          "address=10.10.0.0/16 } on-error={} }" in locked)
+_avail_lines = [ln for ln in locked.split(chr(10))
+                if "available-from=" in ln and not ln.strip().startswith("#")]
+check("every line naming the new property either compiles it at run time or "
+      "is the read-back -- a literal one anywhere else is the bug returning",
+      len(_avail_lines) == 2
+      and all("[:parse" in ln for ln in _avail_lines))
+check("the result is read back rather than assumed: a router whose flash is "
+      "full accepts the set, logs that it could not save, and raises "
+      "nothing -- so trusting the command means never finding out",
+      "could not restrict the API to the tunnel" in locked
+      and "no free inodes left" in locked)
+check("provisioning refuses to look successful on a router that cannot save "
+      "configuration at all, which otherwise reports done and changes "
+      "nothing",
+      "free-hdd-space" in locked
+      and "this router has almost no free storage" in locked)
 check("tunnel-accept firewall rule is moved FIRST so a drop can't block it",
       'move [find comment="mikromon:tunnel:fw"] destination=0' in locked)
 check("provisioning enables WebFig + Winbox for remote management over tunnel",
