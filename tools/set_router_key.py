@@ -82,6 +82,52 @@ def _opt(name: str) -> str:
     return ""
 
 
+def _extract_key(text: str) -> str:
+    """A public key from a bare key, or from pasted print-detail output.
+
+    RouterOS prints `public-key="..."` alongside `private-key` and the peer's
+    own key, so the labelled one is preferred and a bare 44-character token
+    is only used when there is no label to go on. Reading the wrong one --
+    the peer's, which is the HUB's key -- registers the hub against itself
+    and nothing works.
+    """
+    text = (text or "").strip().strip('"')
+    m = re.search(r'public-key\s*[:=]\s*"?([A-Za-z0-9+/]{42,43}=)"?', text)
+    if m:
+        return m.group(1)
+    if _KEY_RE.match(text):
+        return text
+    m = re.search(r'\b([A-Za-z0-9+/]{42,43}=)\b', text)
+    return m.group(1) if m else text
+
+
+def _handshook(pubkey: str, iface: str = "wg0") -> bool:
+    """Whether the hub has completed a handshake with this key.
+
+    The only evidence that actually proves the tunnel came up. Everything
+    else -- the file being correct, the service exiting 0, the peer being
+    loaded -- has been true at some point this week while nothing worked.
+    """
+    import subprocess
+    for cmd in (["wg", "show", iface, "dump"],
+                ["sudo", "-n", "wg", "show", iface, "dump"]):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+        except Exception:  # noqa: BLE001
+            return False
+        if r.returncode != 0:
+            continue
+        for line in r.stdout.splitlines()[1:]:
+            f = line.split("\t")
+            if len(f) >= 5 and f[0] == pubkey:
+                try:
+                    return int(f[4] or 0) > 0
+                except ValueError:
+                    return False
+        return False
+    return False
+
+
 def main() -> None:
     argv = sys.argv[1:]
     args, skip = [], False
@@ -98,13 +144,17 @@ def main() -> None:
     if len(args) != 2:
         sys.exit(__doc__.strip() + "\n\nUsage: set_router_key.py "
                  '"<device name>" <public-key>')
-    name, pubkey = args[0], args[1].strip().strip('"')
+    name, pubkey = args[0], _extract_key(args[1])
 
     if not _KEY_RE.match(pubkey):
-        sys.exit(f"{pubkey!r} is not a WireGuard public key (expected 44 "
-                 f"base64 characters ending in '='). Copy the public-key= "
-                 f"value from /interface/wireguard/print detail — not the "
-                 f"peer's key, which is the hub's.")
+        sys.exit(f"{args[1]!r} does not contain a WireGuard public key "
+                 f"(44 base64 characters ending in '=').\n\n"
+                 f"Rather than retyping it, paste the whole line from the "
+                 f"router:\n"
+                 f"  /interface/wireguard/print detail where name=mikromon\n"
+                 f"and pass the output, quoted. One mistyped character "
+                 f"fails exactly like a\nwrong key -- the hub discards it "
+                 f"in silence -- so do not read it by eye.")
 
     cfg = _opt("config")
     if cfg and not os.path.exists(cfg):
@@ -184,12 +234,39 @@ def main() -> None:
         print("The files are correct. Apply them with:")
         print("  sudo systemctl start mikromon-wg-reload.service")
 
-    print("\nNow check the ROUTER — this is the only thing that proves it:")
-    print('  /interface/wireguard/peers/print detail '
-          'where comment="mikromon:tunnel:hub"')
-    print("  rx moving off 0 means the handshake completed.")
-    print("\nDo NOT re-run the provisioning script on this router: it would "
-          "mint another new key and undo this.")
+    # Watch for a real handshake rather than printing instructions and
+    # leaving the operator to find out later. Every other signal -- the file
+    # being right, the service exiting 0, the peer being loaded -- has been
+    # true at some point this week while nothing actually worked.
+    import time as _t
+    print("\nwaiting up to 60s for the router to hand-shake ...", flush=True)
+    deadline = _t.time() + 60
+    up = False
+    while _t.time() < deadline:
+        if _handshook(pubkey):
+            up = True
+            break
+        _t.sleep(3)
+
+    if up:
+        print(f"\nTUNNEL UP - {name} has hand-shaken with the hub.")
+        print("It should show online on the dashboard within a minute.")
+        print("\nDo NOT re-run the provisioning script on this router: it "
+              "would mint another new key and undo this.")
+        return
+
+    print("\nNO HANDSHAKE after 60s. The hub is now expecting:")
+    print(f"  {pubkey}")
+    print("\nTwo causes, and they need opposite fixes:")
+    print("  1. That is not the router's real key. ONE mistyped character")
+    print("     fails exactly like a wrong key, in silence. Do not read it")
+    print("     by eye -- on the router run:")
+    print("       /interface/wireguard/print detail where name=mikromon")
+    print("     and pass the WHOLE output to this tool, quoted:")
+    print(f'       python tools/set_router_key.py "{name}" "<paste output>"')
+    print("  2. The key is right and the packets never arrive: the site is")
+    print("     blocking outbound UDP to the hub. Check Tunnel health on")
+    print("     Platform admin -- 'loaded but never handshaked' is this one.")
 
 
 if __name__ == "__main__":
