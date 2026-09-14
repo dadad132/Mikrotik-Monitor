@@ -40,19 +40,61 @@ _KEY_RE = re.compile(r"^[A-Za-z0-9+/]{42}[A-Za-z0-9+/=]=$")
 
 
 def _devices_db_from(cfg_path: str) -> str:
+    """The devices DB a config points at, as an ABSOLUTE path.
+
+    config.yaml normally says `devices_db: ./devices.db`, and that "." means
+    the directory the service runs in -- not whichever directory somebody
+    happened to be standing in when they ran this. Resolving it against the
+    caller's shell sent this tool looking for hub.json in the wrong place and
+    told the operator the hub was not set up, which was alarming and wrong.
+    """
     try:
         with open(cfg_path, encoding="utf-8") as fh:
             for line in fh:
                 line = line.split("#", 1)[0].strip()
                 if line.startswith("devices_db:"):
-                    return line.split(":", 1)[1].strip().strip("'\"")
+                    val = line.split(":", 1)[1].strip().strip("'\"")
+                    if not val:
+                        break
+                    if os.path.isabs(val):
+                        return val
+                    return os.path.normpath(
+                        os.path.join(os.path.dirname(os.path.abspath(cfg_path)),
+                                     val))
     except OSError as exc:
         sys.exit(f"could not read {cfg_path}: {exc}")
     sys.exit(f"no devices_db: line in {cfg_path}")
 
 
+def _opt(name: str) -> str:
+    """Read --name=value or --name value from argv. Returns "" if absent.
+
+    This existed only in the usage text before: the argument parser dropped
+    anything starting with "--" and then counted the VALUE as a positional,
+    so the documented escape hatch broke the command it was meant to rescue.
+    """
+    argv = sys.argv[1:]
+    for i, a in enumerate(argv):
+        if a == f"--{name}" and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith(f"--{name}="):
+            return a.split("=", 1)[1]
+    return ""
+
+
 def main() -> None:
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    argv = sys.argv[1:]
+    args, skip = [], False
+    for i, a in enumerate(argv):
+        if skip:
+            skip = False
+            continue
+        if a.startswith("--"):
+            # "--config /path" consumes the path; "--config=/path" does not.
+            skip = ("=" not in a and i + 1 < len(argv)
+                    and not argv[i + 1].startswith("--"))
+            continue
+        args.append(a)
     if len(args) != 2:
         sys.exit(__doc__.strip() + "\n\nUsage: set_router_key.py "
                  '"<device name>" <public-key>')
@@ -64,20 +106,34 @@ def main() -> None:
                  f"value from /interface/wireguard/print detail — not the "
                  f"peer's key, which is the hub's.")
 
-    cfg = next((c for c in _DEFAULT_CFGS if os.path.exists(c)), None)
+    cfg = _opt("config")
+    if cfg and not os.path.exists(cfg):
+        sys.exit(f"no config at {cfg}")
     if not cfg:
-        sys.exit("no config.yaml found. Pass one:  "
-                 "python tools/set_router_key.py ... --config /path/config.yaml")
-    devices_db = _devices_db_from(cfg)
+        # The repo this script lives in is a likely home too: somebody who
+        # has just run git pull is standing in it.
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        candidates = list(_DEFAULT_CFGS) + [os.path.join(here, "config.yaml")]
+        cfg = next((c for c in candidates if os.path.exists(c)), None)
+    if not cfg:
+        sys.exit("no config.yaml found. Looked in:\n  "
+                 + "\n  ".join(candidates)
+                 + "\n\nPass one:  python tools/set_router_key.py "
+                   '"<device>" <key> --config /path/config.yaml')
+    devices_db = _opt("devices-db") or _devices_db_from(cfg)
 
     from mikromon.web import (_hub_path, _hub_load, _hub_save,
                               _hub_wg_leases, _write_wg_peers,
                               _WG_PEERS_DEFAULT)
 
-    hub_file = _hub_path(devices_db)
+    hub_file = _opt("hub") or _hub_path(devices_db)
     hub = _hub_load(hub_file)
     if not hub:
-        sys.exit(f"no hub.json at {hub_file} — is the WireGuard hub set up?")
+        sys.exit(f"no hub.json at {hub_file}\n"
+                 f"  (from {cfg}, devices_db={devices_db})\n\n"
+                 f"If the hub lives elsewhere, point at it directly:\n"
+                 f"  python tools/set_router_key.py \"<device>\" <key> "
+                 f"--hub /path/to/hub.json")
 
     leases = hub.setdefault("leases_meta", {})
     if name not in leases:
