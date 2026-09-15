@@ -14,7 +14,6 @@ from .interfaces import InterfaceCheck
 from .security import SecurityCheck
 from .dhcp import DhcpCheck
 from .clients import ClientCountCheck
-from .client_usage import ClientUsageCheck
 
 # Order is the order alerts are produced within a poll.
 ALL_CHECKS = [
@@ -25,7 +24,6 @@ ALL_CHECKS = [
     SecurityCheck,
     DhcpCheck,
     ClientCountCheck,
-    ClientUsageCheck,
 ]
 
 

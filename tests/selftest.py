@@ -24,7 +24,6 @@ from mikromon.checks.resources import ResourceCheck
 from mikromon.checks.interfaces import InterfaceCheck
 from mikromon.checks.security import SecurityCheck
 from mikromon.checks.clients import ClientCountCheck
-from mikromon.checks.client_usage import ClientUsageCheck
 from mikromon.config import (DEFAULT_CHECKS, DEFAULT_THRESHOLDS, DeviceConfig,
                              SmtpConfig, WanConfig, WanEndpoint)
 from mikromon.context import CheckContext
@@ -548,18 +547,6 @@ WanTrafficCheck().run(snap(**ifrow_case(1.25e6)), wt_dev2, ctx3)
 check("case-mismatched interface (Wikiworx vs wikiworx) records a sample",
       any(m == "rx_bps" and lab == "Wikiworx" for m, _, lab in ctx3.samples))
 
-print("Per-client top-talker:")
-def queue(total):
-    return {"queue_simple": [{"name": "pc1", "target": "192.168.88.10",
-            "bytes": f"0/{int(total)}"}], "kid_control": []}
-# 6 Mbit/s steady (7.5 MB / 10s) then a jump to 50 Mbit/s.
-totals = [0, 7.5e6, 15e6, 22.5e6, 30e6, 37.5e6, 100e6]
-cu_dev = mkdev("cu", thresholds={"baseline_warmup": 3, "baseline_z": 2,
-                                 "client_floor_mbit": 5, "client_usage_ratio": 2})
-a = drive(ClientUsageCheck(), cu_dev, StateStore("cu"), [queue(t) for t in totals])
-check("top-talker spike -> alert", any(k == "client_usage:pc1" for k in keys(a))
-      and "Top-talker" in (a[0].title if a else ""))
-
 print("Email rendering:")
 smtp = SmtpConfig(host="localhost", to_addrs=["it@example.com"])
 notifier = EmailNotifier(smtp)
@@ -646,9 +633,15 @@ class _CmdDev:
 class _FactStore:
     def __init__(self):
         self._f = {}
+        self._c = {}
 
     def facts(self, n):
         return self._f.setdefault(n, {})
+
+    def condition(self, device, key):
+        # run_once copies every device's reachability before polling, so a
+        # fleet-wide false alarm can be put back rather than merely unsent.
+        return self._c.setdefault((device, key), {})
 
 
 def _at(y, mo, d, h, mi):
@@ -693,9 +686,24 @@ _ue.state = _FactStore()
 _refuses = _CmdDev(ok=False)
 _ue._maybe_check_updates(_refuses, _ucfg, _at(2026, 8, 25, 9, 0))
 _ue._maybe_check_updates(_refuses, _ucfg, _at(2026, 8, 25, 9, 1))
-check("a router that REFUSES the command (an older read-only monitor login) "
-      "is still only asked once a night, not hammered every poll",
+check("a router that REFUSES the command is not hammered on every poll",
       len(_refuses.calls) == 1)
+# Recording "checked" before knowing the outcome is what made most of the
+# fleet show a dash: ONE refusal -- an API hiccup, a reboot, no DNS that
+# second -- cost a whole day of update state, and a dash looks exactly like
+# "no update available".
+_ue._maybe_check_updates(_refuses, _ucfg, _at(2026, 8, 25, 10, 30))
+check("...but it IS asked again within the hour, so a momentary refusal "
+      "costs minutes of update state rather than the rest of the day",
+      len(_refuses.calls) == 2)
+
+_ue.state = _FactStore()
+_accepts = _CmdDev(ok=True)
+_ue._maybe_check_updates(_accepts, _ucfg, _at(2026, 8, 25, 9, 0))
+_ue._maybe_check_updates(_accepts, _ucfg, _at(2026, 8, 25, 11, 0))
+check("a check the router ACCEPTED is still not repeated until tomorrow -- "
+      "it is a real request out to MikroTik from every router",
+      len(_accepts.calls) == 1)
 
 check("the day is measured in LOCAL time -- in UTC the nightly rollover "
       "would land in the middle of the afternoon for much of the world",
@@ -718,6 +726,7 @@ def _bare_engine():
     e.now_fn = _time.time
     e._in_flight = set()
     e.state = _ty.SimpleNamespace(save=lambda: None, data={},
+                                  condition=lambda d, k: {},
                                   prune_unknown_devices=lambda *a: None)
     e.devices_store = None
     e.metrics = None
@@ -850,10 +859,33 @@ try:
                                name="R")).reachable()
 finally:
     _s.create_connection = _real_conn
-check("the attempts SHARE the timeout budget rather than multiplying it, so "
-      "retrying costs no extra wall-clock on a device that is really down",
+# This used to assert the attempts SHARE a 5s budget -- two tries of 2.5s --
+# and that is precisely what called healthy branches UNREACHABLE. Linux
+# retransmits a SYN at roughly 1s then 3s, so a 2.5s attempt expires before
+# the second retransmit is even sent: two of them together only test whether
+# two packets survive, over WireGuard riding on the LTE and wireless backup
+# links most of this fleet is failed over to.
+check("each attempt outlives BOTH SYN retransmits, so it fails only when "
+      "three packets in a row are lost rather than one",
       len(_seen_timeouts) == _REACH_ATTEMPTS
-      and abs(sum(_seen_timeouts) - 5.0) < 0.01)
+      and all(t >= 4.0 for t in _seen_timeouts))
+check("...and a dead device is still bounded -- the extra wall-clock is the "
+      "trade for not crying wolf, and the poll cycle absorbs it because the "
+      "fleet is polled concurrently",
+      sum(_seen_timeouts) <= 12.0)
+
+# A web page has somebody watching a spinner and would rather say "no answer"
+# quickly; only the unattended monitor needs the patience.
+_seen_timeouts.clear()
+_s.create_connection = _record_timeout
+try:
+    _Device(_t.SimpleNamespace(host="h", api_port=8728, timeout=60,
+                               name="R")).reachable(timeout=4.0, attempts=1)
+finally:
+    _s.create_connection = _real_conn
+check("a caller that asks for one short attempt gets exactly that, so the "
+      "dashboard does not pay the monitor's patience while somebody waits",
+      _seen_timeouts == [4.0])
 
 print()
 

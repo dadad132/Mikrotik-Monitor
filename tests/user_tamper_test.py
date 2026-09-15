@@ -54,9 +54,11 @@ class Snap:
 
 
 def dev(username="mkmonitor", push=""):
-    d = types.SimpleNamespace()
-    d.cfg = types.SimpleNamespace(username=username, push_username=push)
-    return d
+    # engine.py calls check.run(snap, cfg, ctx) -- `dev` IS the DeviceConfig,
+    # with the login fields directly on it. The first version of this fake
+    # wrapped them in a .cfg attribute that nothing real has, so the test
+    # asserted the bug instead of catching it.
+    return types.SimpleNamespace(username=username, push_username=push)
 
 
 def run(before, after, d=None):

@@ -98,10 +98,11 @@ def build_frames(incident: bool = True):
         (8, "primary", _BASE11, True, _RX_NORMAL, _Q_NORMAL, [], [], "router back online"),
     ] if incident else _CALM_PLAN)
     frames = []
-    rx_total, q_total = 0, 0
-    for tick, (cpu, route, macs, reachable, rxd, qd, logs, hist, note) in enumerate(plan):
+    rx_total = 0
+    # _unused was the per-client queue total, gone with the data-usage check.
+    for tick, (cpu, route, macs, reachable, rxd, _unused, logs, hist,
+               note) in enumerate(plan):
         rx_total += rxd
-        q_total += qd
         frames.append({
             "reachable": reachable,
             "note": note,
@@ -110,9 +111,6 @@ def build_frames(incident: bool = True):
             "route": _routes(route),
             "interface": _ifaces(rx_total),
             "dhcp_lease": _leases(macs),
-            "queue_simple": [{"name": "pc-reception", "target": "192.168.88.10",
-                              "bytes": f"0/{q_total}"}],
-            "kid_control": [],
             "log": _BASE_LOG + logs,
             "history": hist,
             "active": _SESSION,
@@ -181,7 +179,7 @@ def _demo_device(name: str) -> DeviceConfig:
         checks={"reachability": True, "wan_failover": True, "internet_down": True,
                 "resources": True, "interfaces": True, "security": True,
                 "dhcp_new_clients": False, "client_count": True,
-                "wan_traffic": True, "client_usage": True},
+                "wan_traffic": True},
         thresholds={
             "cpu_warn": 80, "cpu_crit": 95, "mem_free_warn_pct": 15,
             "mem_free_crit_pct": 7, "disk_free_warn_pct": 15,
@@ -190,7 +188,7 @@ def _demo_device(name: str) -> DeviceConfig:
             "baseline_alpha": 0.3, "baseline_warmup": 3, "baseline_z": 2.0,
             "baseline_buckets": "global", "client_min_count": 5,
             "client_count_ratio": 1.5, "traffic_floor_mbit": 1,
-            "traffic_ratio": 1.5, "client_floor_mbit": 1, "client_usage_ratio": 2.0,
+            "traffic_ratio": 1.5, "client_floor_mbit": 1,
         },
     )
 

@@ -126,8 +126,8 @@ class SecurityCheck(Check):
             # monitoring and the ability to put it back. Seen live, where it
             # was silent -- the router just began failing to authenticate,
             # which reads exactly like a password drifting out of step.
-            ours = {str(getattr(dev.cfg, "username", "") or "").strip(),
-                    str(getattr(dev.cfg, "push_username", "") or "").strip()}
+            ours = {str(getattr(dev, "username", "") or "").strip(),
+                    str(getattr(dev, "push_username", "") or "").strip()}
             ours.discard("")
             for nm in sorted(ours & (known - set(current))):
                 ctx.event(

@@ -43,9 +43,6 @@ DATASETS = {
     # stops, so this reflects real-time layer-2 activity regardless of DHCP or
     # ARP state.
     "bridge_host": ("interface", "bridge", "host"),
-    # per-client usage sources
-    "queue_simple": ("queue", "simple"),
-    "kid_control": ("ip", "kid-control", "device"),
 }
 
 
@@ -70,8 +67,7 @@ _FETCH_FIRST = ("resource", "health")
 
 # Big, slow menus — deliberately last, after every measurement has been taken.
 _FETCH_LAST = ("log", "history", "dhcp_lease", "arp", "bridge_host",
-               "wireless_reg", "wifi_reg", "hotspot_active", "queue_simple",
-               "kid_control")
+               "wireless_reg", "wifi_reg", "hotspot_active")
 
 
 def _fetch_order(datasets):

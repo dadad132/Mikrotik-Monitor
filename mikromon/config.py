@@ -36,7 +36,6 @@ DEFAULT_THRESHOLDS = {
     "traffic_ratio": 1.5,       # must be >=1.5x typical throughput to alert
     # per-client usage anomaly
     "client_floor_mbit": 5,     # ignore clients using less than this
-    "client_usage_ratio": 2.0,  # must be >=2x that client's own typical use
 }
 
 DEFAULT_CHECKS = {
@@ -49,7 +48,6 @@ DEFAULT_CHECKS = {
     "dhcp_new_clients": False,
     "client_count": False,      # abnormally many connected devices
     "wan_traffic": True,        # throughput sampling + abnormal-traffic alerts
-    "client_usage": False,      # per-client top-talkers
 }
 
 
