@@ -197,7 +197,6 @@ check("backup dry-run previews the save",
       "nightly" in p.apply(plan)["diff"])
 check("list_backups exposes the file id (for delete)",
       backups[0].get("id") == "*1")
-# backups are unencrypted so a restore needs no password
 check("plan_backup saves unencrypted",
       plan.ops[0].params.get("dont-encrypt") == "yes")
 # restore = a detached (reboot) run that loads the .backup
@@ -206,6 +205,13 @@ check("plan_restore loads the .backup as a detached reboot run",
       r.ops[0].action == "run" and r.ops[0].detach
       and r.ops[0].params.get("_cmd") == "load"
       and r.ops[0].params.get("name") == "nightly.backup")
+# The comment that used to sit above this block said "backups are
+# unencrypted so a restore needs no password". That is wrong, and it is why
+# restore shipped broken: RouterOS refuses `load` without the parameter
+# whatever the file is, and answers "missing =password=".
+check("plan_restore passes password even for an unencrypted backup -- "
+      "RouterOS rejects the load without it and the restore does nothing",
+      r.ops[0].params.get("password") == "")
 # delete = remove the file by its id; missing file = safe empty plan
 d = p.plan_delete_backup("mikromon-20260101.backup")
 check("plan_delete_backup removes the file by id",
@@ -256,6 +262,12 @@ check("arm adds a scheduler named mikromon-autorevert",
 check("arm fires after the window and can load the pre-change backup",
       op.params.get("interval") == "2m"
       and '/system backup load name="before-scripts-20260101-101010.backup"' in ev)
+# This one matters more than the manual restore. It runs on the router AFTER
+# a change has already cut us off, so a load that RouterOS refuses means no
+# revert happens and nobody can get in to do one by hand.
+check("the auto-revert's load carries a password too -- without it the "
+      "safety net silently does nothing, on a router already cut off",
+      'load name="before-scripts-20260101-101010.backup" password=""' in ev)
 check("revert is gated on a hub connectivity check (not a human guess)",
       "/ping 10.10.0.1 count=4" in ev and ":if (" in ev)
 check("when the router can still reach the hub, the scheduler just clears itself",

@@ -176,8 +176,11 @@ class Pusher:
         detached run (the API session drops — treated as submitted)."""
         if not name.endswith(".backup"):
             name += ".backup"
+        # password="" is REQUIRED even though plan_backup writes these with
+        # dont-encrypt=yes. RouterOS rejects the load without it -- "missing
+        # =password=" -- and the restore fails having changed nothing.
         op = Operation("run", ("system", "backup"),
-                       {"_cmd": "load", "name": name},
+                       {"_cmd": "load", "name": name, "password": ""},
                        desc=f"restore backup '{name}' (REBOOTS the router)",
                        detach=True)
         return Plan(self.cfg.name, [op], summary=f"restore {name}")
@@ -209,8 +212,11 @@ class Pusher:
         when the box is otherwise unreachable from outside."""
         if not backup_name.endswith(".backup"):
             backup_name += ".backup"
+        # password="" for the same reason as plan_restore. It matters more
+        # here: this runs on the router AFTER a change has cut us off, so a
+        # silent failure means no revert and no way in to do one by hand.
         event = (f':if ([/ping {hub_ip} count=4] = 0) do={{'
-                 f'/system backup load name="{backup_name}"'
+                 f'/system backup load name="{backup_name}" password=""'
                  f'}} else={{'
                  f'/system scheduler remove [find name="{_REVERT_SCHED}"]'
                  f'}}')
