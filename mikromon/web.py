@@ -1294,17 +1294,37 @@ def _throughput_chart(rx_pts, tx_pts, width=284) -> str:
 
 # _PAGE_CSS, _nav, _who, _header, _page — imported from web_shared
 
+# Conditions that mean an uplink this site pays for is not carrying
+# traffic. Deliberately only these: the point of the middle state is to be
+# rare enough that seeing it means something.
+_PARTIAL_KEYS = ("wan_failover", "wan_link:")
+
+
 def _severity(d) -> str:
-    """The headline device status: "crit" (shown as Offline) when the
-    device itself is unreachable, "ok" (Healthy) otherwise — deliberately
-    two-valued, not three. Individual problems (WAN failover, high CPU,
-    etc.) still surface as their own alerts/count elsewhere; they no
-    longer flip the main status to an alarming amber "Warning" just for
-    existing, since most of what lands there is the router behaving
-    correctly (e.g. failing over to backup) rather than something wrong
-    with the hardware — a warning here is a suggestion to go look, not a
-    verdict on the unit."""
-    return "crit" if not d["up"] else "ok"
+    """The headline device status: crit (Offline), warn (Partial) or ok.
+
+    Offline means the router itself cannot be reached. Partial means it CAN,
+    but one of its WAN uplinks is down -- running on backup, or a backup line
+    that has failed. Everything else stays Healthy.
+
+    This was two-valued for a long time, on the reasoning that most warnings
+    are the router behaving correctly (failing over IS the feature working)
+    and an amber badge for that is a suggestion to go look rather than a
+    verdict. That still holds for CPU, temperature and the rest, which is why
+    they do not appear here.
+
+    A lost uplink is different in kind. The site is paying for two lines and
+    running on one, with no redundancy left, and nothing about the row said
+    so -- it read "Healthy" next to a silent alert count. That is the case
+    the middle state exists for.
+    """
+    if not d["up"]:
+        return "crit"
+    for p in d.get("problems") or []:
+        key = str(p.get("key", ""))
+        if any(key == k or key.startswith(k) for k in _PARTIAL_KEYS):
+            return "warn"
+    return "ok"
 
 
 # How recent a config change must be to be blamed for a router going offline.
@@ -1507,7 +1527,9 @@ def _render_noc_charts(devs) -> str:
             f'{_donut("Failover", failover)}</div>')
 
 
-_DASH_STATUS_BADGE = {"ok": ("ok", "Healthy"), "crit": ("crit", "Offline")}
+_DASH_STATUS_BADGE = {"ok": ("ok", "Healthy"),
+                      "warn": ("warn", "Partial"),
+                      "crit": ("crit", "Offline")}
 
 
 def _dash_device_rows(devs) -> str:
@@ -1516,9 +1538,18 @@ def _dash_device_rows(devs) -> str:
         sev = _severity(d)
         cls, label = _DASH_STATUS_BADGE[sev]
         n_alerts = len(d["problems"])
-        alert_html = (f'<span class="alert-badge {cls}">&#9650; {n_alerts}</span>'
-                      if n_alerts else '<span class="muted">&mdash;</span>')
         link = f'/device?name={quote(d["device"])}'
+        # Amber whenever there is anything to read, red only when the router
+        # is down. Grey-on-grey made a real count look like a column heading.
+        # Clicking lands on that router's own Active Problems, which is the
+        # question anyone asks next -- "three what, on which one?"
+        abadge = "crit" if cls == "crit" else "warn"
+        alert_html = (
+            f'<a class="alert-badge {abadge}" href="{link}#alerts" '
+            f'title="See the {n_alerts} open alert'
+            f'{"" if n_alerts == 1 else "s"} for this router">'
+            f'&#9650; {n_alerts}</a>'
+            if n_alerts else '<span class="muted">&mdash;</span>')
         rows.append(
             f'<tr data-name="{esc(d["device"].lower())}" data-sev="{sev}">'
             f'<td class="dt-name"><a href="{link}"><span class="dt-ic">'
@@ -1675,6 +1706,9 @@ a{color:var(--accent);text-decoration:none}
 .alert-badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px}
 .alert-badge.ok{background:var(--surface-2);color:var(--text-faint)}
 .alert-badge.crit{background:var(--danger-bg);color:var(--danger)}
+.alert-badge.warn{background:rgba(217,119,6,.14);color:#b45309}
+a.alert-badge{text-decoration:none;display:inline-block}
+a.alert-badge:hover{filter:brightness(.94)}
 @media(max-width:820px){
   .dash-main{padding:16px 16px 28px}
   .dash-topbar{gap:10px}
@@ -2036,8 +2070,11 @@ def _render_dashboard(store, state, user=None, allowed=None, csrf="",
                       ignored=None, seen_tips=None) -> str:
     devs = sorted((d for d in _all_devices(store, state, allowed)
                    if _device_has_data(d)),
-                  key=lambda d: ({"crit": 0, "ok": 1}[_severity(d)],
-                                 d["device"].lower()))
+                  # Offline first, then Partial, then the rest: the order
+                  # somebody scans the list in. .get keeps a severity this
+                  # does not know about from raising instead of rendering.
+                  key=lambda d: ({"crit": 0, "warn": 1, "ok": 2}
+                                 .get(_severity(d), 2), d["device"].lower()))
     summary = _fleet_summary(devs)
     # Shown once, to somebody who has just signed in for the first
     # time. Below the fleet, not above it: the routers are what they
@@ -2221,7 +2258,8 @@ def _render_inventory(store, state, user, allowed) -> str:
     for d in devs:
         f = d["facts"]
         sev = _severity(d)
-        dot = {"ok": "#16a34a", "crit": "#dc2626"}[sev]
+        dot = {"ok": "#16a34a", "warn": "#d97706",
+               "crit": "#dc2626"}.get(sev, "#dc2626")
         ver = f.get("version", "—")
         old = ver[:1] in ("5", "6")
         ver_html = (esc(ver) + (
@@ -2263,7 +2301,7 @@ def _render_device(store, state, name, user, csrf="",
     d = _device_view(store, state, name)
     f = d["facts"]
     sev = _severity(d)
-    badge = {"ok": ("ok", "Healthy"), "crit": ("crit", "Offline")}[sev]
+    badge = _DASH_STATUS_BADGE[sev]
     m = d["metrics"]
     q = quote(name)
 
@@ -2554,7 +2592,8 @@ def _render_device(store, state, name, user, csrf="",
     else:
         phtml = ('<p style="color:#16a34a;font-weight:600;padding:4px 0">'
                  'No active problems</p>')
-    probs_box = (f'<div class="box"><h2 style="margin-bottom:12px">'
+    # id="alerts" is what the dashboard's alert count links to.
+    probs_box = (f'<div class="box" id="alerts"><h2 style="margin-bottom:12px">'
                  f'Active Problems</h2>{phtml}</div>')
 
     # ── right: diagnosis ───────────────────────────────────────────────────────
@@ -5903,7 +5942,8 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
         d = devs_by_name.get(n, {})
         f = d.get("facts") or {}
         sev = _severity(d) if d else "crit"
-        dot = {"ok": "#16a34a", "crit": "#dc2626"}[sev]
+        dot = {"ok": "#16a34a", "warn": "#d97706",
+               "crit": "#dc2626"}.get(sev, "#dc2626")
         ver = f.get("version", "—")
         old = ver[:1] in ("5", "6")
         ver_html = (esc(ver) + (
