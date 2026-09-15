@@ -1789,55 +1789,20 @@ mmSetFilter(mmSaved);
 # work without telling you what, on which router, or where to go. Every entry
 # here names the fix and links straight to the tab that performs it.
 _SUGGESTION_META = [
-    ("reachability", "Cannot be reached", "provision",
-     "Open Provision",
-     "mikromon can't open a connection to this router. Re-provisioning "
-     "resets the tunnel and login together."),
-    ("api_error", "API is refusing or stalling", "provision",
+    ("update", "RouterOS update available", "update",
+     "Review update",
+     "A newer RouterOS has been published for this board. Worth reading the "
+     "changelog and planning a window - this is never applied for you."),
+    ("router_user_gone", "Our monitoring login was DELETED", "provision",
      "Re-provision",
-     "The router answers but the API session fails. Usually the stored "
-     "login no longer matches, or replies are being lost."),
-    ("internet_down", "No internet on any uplink", "wan",
-     "Check WAN uplinks",
-     "No uplink is carrying a usable default route right now."),
-    ("wan_failover", "Running on a backup line", "wan",
-     "Check WAN uplinks",
-     "The primary uplink is down and traffic has moved to a backup. "
-     "Working, but not on the line you pay most for."),
-    ("wan_link", "A backup uplink is down", "wan",
-     "Check WAN uplinks",
-     "A backup line is unavailable, so there is less to fall back on if "
-     "the primary fails."),
-    ("iface_down", "A port has no link", "wan",
-     "Check interfaces",
-     "RouterOS reports this port as not running - cable, SFP, or the "
-     "device on the other end."),
-    ("storage", "Storage is filling up", "backups",
-     "Manage backups",
-     "Low free space stops backups, logging and upgrades. Old backups on "
-     "the router are the usual thing to clear."),
-    ("temperature", "Running hot", "",
-     "Open device",
-     "Sustained heat shortens hardware life - check airflow and ambient "
-     "temperature."),
-    ("memory_anomaly", "Memory unusually high", "",
-     "Open device",
-     "Memory use is well above this router's own normal for the time of "
-     "day. Often a leak or unusual traffic."),
-    ("memory", "Low free memory", "",
-     "Open device",
-     "Low free RAM causes dropped connections and instability."),
-    ("cpu_anomaly", "CPU unusually high", "",
-     "Open device",
-     "CPU is well above this router's own normal for the time of day."),
-    ("cpu", "High CPU", "",
-     "Open device",
-     "Sustained high CPU - traffic spike, a script, or an undersized "
-     "device."),
-    ("wan_traffic", "Unusual throughput", "",
-     "Open device",
-     "Throughput on this interface is well above its own normal. Often "
-     "legitimate, worth a look if unexpected."),
+     "The account this dashboard uses is gone from the router, so monitoring "
+     "and remote changes have both stopped. If nobody removed it "
+     "deliberately, treat it as a compromise."),
+    ("router_user", "A new login was created on the router", "security",
+     "Review logins",
+     "An account appeared that was not there at the previous check. If you "
+     "did not create it, someone with access has given themselves a way "
+     "back in that survives a password change."),
 ]
 
 
@@ -1850,51 +1815,65 @@ def _suggestion_meta(key: str):
     return key.replace("_", " ").capitalize(), "", "Open device", ""
 
 
-def _suggestion_items(devs, ignored_by_device=None) -> list:
-    """Every live suggestion across the fleet, worst-first.
+def _suggestion_items(devs, ignored_by_device=None, events=None) -> list:
+    """Things that need somebody to DECIDE, newest first.
 
-    Split out from the rendering so the ordering and the ignore filter can be
-    reasoned about (and tested) without going through HTML."""
+    Deliberately not "every live condition". That is what the alert count in
+    each row already shows, and duplicating it here produced a number -- "14
+    Suggestions" -- that named nothing and led nowhere. A router running hot
+    is a state to watch; a new account appearing on it is a question.
+
+    `events` is recent alert-log rows (newest first). Account changes are
+    point-in-time events rather than conditions, so they cannot be read off
+    the device the way a WAN state can.
+    """
     ignored_by_device = ignored_by_device or {}
     items = []
     for d in devs:
         name = d["device"]
-        conds = (d.get("_conditions") or {})
         skip = set(ignored_by_device.get(name) or ())
-        for prob in d.get("problems") or []:
-            key = prob["key"]
-            if key in skip:
-                continue
-            label, tab, action, why = _suggestion_meta(key)
-            level = prob.get("level") or "problem"
+        facts = d.get("facts") or {}
+        if facts.get("update_available") is True and "update" not in skip:
+            label, tab, action, why = _suggestion_meta("update")
             items.append({
-                "device": name, "key": key, "label": label, "why": why,
-                "tab": tab, "action": action, "since": prob.get("since"),
-                "crit": level in ("crit", "problem") and not d["up"],
-                "detail": str((conds.get(key) or {}).get("title") or "").strip(),
+                "device": name, "key": "update", "label": label, "why": why,
+                "tab": tab, "action": action,
+                "since": facts.get("updated"), "crit": False,
+                "detail": f"Currently on {facts.get('version', '?')}.",
             })
-        if ((d.get("facts") or {}).get("update_available") is True
-                and "update" not in skip):
-            items.append({
-                "device": name, "key": "update",
-                "label": "RouterOS update available",
-                "why": "A newer RouterOS has been published for this board.",
-                "tab": "update", "action": "Review update", "since": None,
-                "crit": False,
-                "detail": f"Currently on "
-                          f"{(d.get('facts') or {}).get('version', '?')}.",
-            })
-    # Offline routers first, then oldest-first: something wrong for a week
-    # matters more than something from a minute ago. No timestamp sorts LAST
-    # rather than jumping the queue, so an update notice cannot outrank a
-    # fortnight-old fault.
+
+    # Account changes, from the alert log. Only the most recent per
+    # device+key: the same login being reported every poll would be the very
+    # noise this list is being narrowed to escape.
+    seen: set = set()
+    for row in (events or []):
+        key = str(row.get("key", ""))
+        if not (key.startswith("router_user:")
+                or key.startswith("router_user_gone:")):
+            continue
+        if row.get("recovery"):
+            continue
+        name = str(row.get("device", ""))
+        if (name, key) in seen or key in set(ignored_by_device.get(name) or ()):
+            continue
+        seen.add((name, key))
+        label, tab, action, why = _suggestion_meta(key)
+        items.append({
+            "device": name, "key": key, "label": label, "why": why,
+            "tab": tab, "action": action, "since": row.get("ts"),
+            "crit": key.startswith("router_user_gone:"),
+            "detail": str(row.get("title") or "").strip(),
+        })
+
+    # Losing our own login first, then newest: an update published last month
+    # should not sit above an account created ten minutes ago.
     items.sort(key=lambda it: (not it["crit"],
-                               it.get("since") if it.get("since") else 1e18))
+                               -(it.get("since") or 0)))
     return items
 
 
 def _suggestion_panel(devs, csrf="", ignored_by_device=None,
-                      items=None) -> str:
+                      items=None, events=None) -> str:
     """The Suggestions list, collapsed behind the chip that counts it.
 
     Shown only when asked for. Open on every page load it is a wall of text
@@ -1906,7 +1885,7 @@ def _suggestion_panel(devs, csrf="", ignored_by_device=None,
     # on the chip and the rows behind it come from ONE list rather than two
     # that could drift.
     if items is None:
-        items = _suggestion_items(devs, ignored_by_device)
+        items = _suggestion_items(devs, ignored_by_device, events)
     ignored_by_device = ignored_by_device or {}
     n_ignored = sum(len(v or ()) for v in ignored_by_device.values())
 
@@ -2067,7 +2046,7 @@ def _firmware_chip(devs) -> str:
 
 
 def _render_dashboard(store, state, user=None, allowed=None, csrf="",
-                      ignored=None, seen_tips=None) -> str:
+                      ignored=None, seen_tips=None, events=None) -> str:
     devs = sorted((d for d in _all_devices(store, state, allowed)
                    if _device_has_data(d)),
                   # Offline first, then Partial, then the rest: the order
@@ -2086,7 +2065,7 @@ def _render_dashboard(store, state, user=None, allowed=None, csrf="",
     # counts things this dashboard has been told not to show -- a chip
     # reading 10 above a list of 8 just looks broken, and makes ignoring
     # something feel like it did not work.
-    sugg = _suggestion_items(devs, ignored)
+    sugg = _suggestion_items(devs, ignored, events=events)
     chips = (_stat_chip(summary["total"], "Devices")
             + _stat_chip(len(sugg), "Suggestions",
                         "info" if sugg else "",
@@ -2097,7 +2076,7 @@ def _render_dashboard(store, state, user=None, allowed=None, csrf="",
             + _firmware_chip(devs))
     strip = _fleet_status_strip(summary) if devs else ""
     cards = _suggestion_panel(devs, csrf=csrf, ignored_by_device=ignored,
-                              items=sugg) if devs else ""
+                              items=sugg, events=events) if devs else ""
     charts = _render_noc_charts(devs) if devs else ""
     rows = _dash_device_rows(devs)
     empty_msg = ("No devices to show." if not devs
@@ -6613,7 +6592,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         csrf=(_sess["csrf"] if _sess else ""),
                         ignored=_ig,
                         seen_tips=(auth.seen_tips(user["login"])
-                                   if auth else set())),
+                                   if auth else set()),
+                        events=self._recent_account_events(allowed)),
                         "text/html; charset=utf-8")
                 # if path == "/inventory":
                 #     return self._send(200, _render_inventory(store, state, user,
@@ -7900,6 +7880,38 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return None
             from .push import AuditLog
             return AuditLog(push_log_db)
+
+        def _recent_account_events(self, allowed=None, days: int = 30):
+            """Recent account-change events for the routers this person sees.
+
+            Account changes are point-in-time events, not conditions, so they
+            cannot be read off the device the way a WAN state can -- the alert
+            log is the only place they survive.
+
+            Bounded by time and by the caller's own device list: a dashboard
+            is not the place to learn what happened on somebody else's fleet,
+            and a suggestion about a login created two months ago is history
+            rather than something to act on.
+            """
+            log_db = self._alertlog()
+            if log_db is None:
+                return []
+            try:
+                cutoff = time.time() - days * 86400
+                allow = set(allowed) if allowed else None
+                out = []
+                for row in log_db.recent(limit=400):
+                    if (row.get("ts") or 0) < cutoff:
+                        break          # recent() is newest-first
+                    if not str(row.get("key", "")).startswith("router_user"):
+                        continue
+                    if allow is not None and row.get("device") not in allow:
+                        continue
+                    out.append(row)
+                return out
+            except Exception:  # noqa: BLE001 — the dashboard still renders
+                log.exception("could not read account events for suggestions")
+                return []
 
         def _alertlog(self):
             if not alert_log_db:

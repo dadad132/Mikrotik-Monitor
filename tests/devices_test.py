@@ -2044,22 +2044,40 @@ try:
                 "facts": facts or {}, "metrics": {}, "throughput": {},
                 "wan_health": "full"}
 
+    # Suggestions are no longer built from live conditions -- those are the
+    # alert count on the row itself, and repeating them here is what made
+    # "14 Suggestions" a number nobody could act on. The sources are now an
+    # available update and an account change, both of which need a person to
+    # decide something.
     _devs = [
         _sdev("Down One", 0,
               [{"key": "reachability", "since": _now - 86400 * 4,
                 "level": "problem"}],
               {"reachability": {"title": "Device UNREACHABLE"}}),
         _sdev("Busy Box", 1,
-              [{"key": "storage", "since": _now - 86400 * 14, "level": "crit"},
-               {"key": "iface_down:ether3-voip", "since": _now - 3600,
-                "level": "problem"}],
-              {"storage": {}, "iface_down:ether3-voip":
-               {"title": "Interface ether3-voip link DOWN"}}),
+              [{"key": "storage", "since": _now - 86400 * 14, "level": "crit"}],
+              {"storage": {}},
+              {"update_available": True, "version": "7.11.2",
+               "updated": _now - 86400 * 14}),
         _sdev("Old Firmware", 1, [], {},
-              {"update_available": True, "version": "7.12.1"}),
+              {"update_available": True, "version": "7.12.1",
+               "updated": _now - 3600}),
     ]
-    _panel = web._suggestion_panel(_devs, csrf=csrf)
+    _evs = [
+        {"device": "Down One", "key": "router_user_gone:mkmonitor",
+         "ts": _now - 86400 * 4, "recovery": 0,
+         "title": "The monitoring login 'mkmonitor' was DELETED"},
+        {"device": "Busy Box", "key": "router_user:hacker",
+         "ts": _now - 1800, "recovery": 0,
+         "title": "New login 'hacker' created on the router"},
+    ]
 
+    def _panel_of(ig=None, csrf_=None):
+        return web._suggestion_panel(
+            _devs, csrf=(csrf if csrf_ is None else csrf_),
+            ignored_by_device=ig, events=_evs)
+
+    _panel = _panel_of()
     check("the panel is CLOSED on load — the count is the button, and a list "
           "this long is scrolled past when it is always on screen",
           'id="sgPanel" hidden' in _panel)
@@ -2069,6 +2087,12 @@ try:
           and "mmSgToggle()" in web._stat_chip(3, "S", "", onclick="mmSgToggle()"))
     check("...and an ordinary counter chip stays a plain block, not a button",
           "chip-btn" not in web._stat_chip(5, "Devices"))
+
+    check("a live condition is NOT offered as a suggestion any more — "
+          "storage and reachability are the alert count on that router's own "
+          "row, one column away",
+          "Storage is filling up" not in _panel
+          and "Cannot be reached" not in _panel)
 
     check("opening it offers one filter per router that actually has "
           "suggestions, plus All — so you pick whose list to read rather "
@@ -2080,41 +2104,38 @@ try:
           "browser, without a reload that would lose the rest of the page",
           _panel.count('data-sgrow=') == 4)
 
-    check("each suggestion can be ignored, scoped to that exact condition on "
+    check("each suggestion can be ignored, scoped to that exact thing on "
           "that one router",
           _panel.count(">Ignore<") == 4
-          and 'name="key" value="iface_down:ether3-voip"' in _panel
+          and 'name="key" value="router_user:hacker"' in _panel
           and 'action="/dashboard/suggestion"' in _panel)
 
-    _ignored = web._suggestion_panel(
-        _devs, csrf=csrf,
-        ignored_by_device={"Busy Box": ["iface_down:ether3-voip"]})
+    _ignored = _panel_of({"Busy Box": ["router_user:hacker"]})
     check("an ignored suggestion drops out of the list",
-          "ether3-voip" not in _ignored.split("sg-ignored")[0])
+          "hacker" not in _ignored.split("sg-ignored")[0])
     check("...but only that one — the other suggestion on the SAME router "
-          "stays, so dismissing a port that is dark on purpose does not "
-          "silence the port beside it",
-          "Storage is filling up" in _ignored)
+          "stays, so dismissing one does not silence the next",
+          "RouterOS update available" in _ignored)
     check("...and it is listed as ignored with a way to bring it back, "
           "rather than vanishing with no trace",
           "1 ignored suggestion(s)" in _ignored and ">Restore<" in _ignored)
 
     check("ignoring is scoped per DEVICE: the same key ignored on one router "
           "does not hide it on another",
-          "Device UNREACHABLE" in web._suggestion_panel(
-              _devs, csrf=csrf,
-              ignored_by_device={"Busy Box": ["reachability"]}))
+          "RouterOS update available" in _panel_of({"Busy Box": ["update"]}))
 
-    _items = web._suggestion_items(_devs)
-    check("offline routers come first, then oldest-first, with items that "
-          "carry no timestamp last — an update notice must not outrank a "
-          "fortnight-old fault",
-          [i["device"] for i in _items][0] == "Down One"
-          and [i["key"] for i in _items][-1] == "update")
+    _items = web._suggestion_items(_devs, events=_evs)
+    check("losing our own login sorts first — it is the one that ends the "
+          "ability to fix anything else",
+          _items[0]["device"] == "Down One"
+          and _items[0]["key"].startswith("router_user_gone"))
+    check("...then newest first, so a login created half an hour ago "
+          "outranks an update published a fortnight back",
+          _items[1]["key"] == "router_user:hacker")
 
     check("without a csrf token no Ignore button is rendered at all, rather "
           "than one that would be rejected on submit",
-          ">Ignore<" not in web._suggestion_panel(_devs, csrf=""))
+          ">Ignore<" not in _panel_of(csrf_=""))
     check("a healthy fleet says so plainly instead of an empty box",
           "Nothing needs attention" in web._suggestion_panel(
               [_sdev("Fine", 1, [], {})], csrf=csrf))
@@ -2123,22 +2144,21 @@ try:
     # reading 10 above a list of 8 looks broken, and makes ignoring something
     # feel like it did not take.
     for _ig, _want in (({}, 4),
-                       ({"Busy Box": ["iface_down:ether3-voip"]}, 3),
-                       ({"Busy Box": ["iface_down:ether3-voip", "storage"]}, 2)):
-        _it = web._suggestion_items(_devs, _ig)
+                       ({"Busy Box": ["router_user:hacker"]}, 3),
+                       ({"Busy Box": ["router_user:hacker", "update"]}, 2)):
+        _it = web._suggestion_items(_devs, _ig, events=_evs)
         _pn = web._suggestion_panel(_devs, csrf=csrf, ignored_by_device=_ig,
-                                    items=_it)
+                                    items=_it, events=_evs)
         check(f"with {sum(len(v) for v in _ig.values())} ignored, the count "
               f"is {_want} and the panel renders exactly that many rows — "
               f"the number and the list come from one place, so they cannot "
               f"disagree",
               len(_it) == _want and _pn.count("data-sgrow=") == _want)
 
-    check("ignoring something reduces the number on the chip — the raw "
-          "condition total keeps counting things the dashboard has been told "
-          "to hide, which is why it is no longer what gets displayed",
-          len(web._suggestion_items(_devs, {"Busy Box": ["storage"]}))
-          < len(web._suggestion_items(_devs, {})))
+    check("ignoring something reduces the number on the chip",
+          len(web._suggestion_items(_devs, {"Busy Box": ["update"]},
+                                    events=_evs))
+          < len(web._suggestion_items(_devs, {}, events=_evs)))
 
     print("  dashboard fleet strip (latency + what is at risk):")
 

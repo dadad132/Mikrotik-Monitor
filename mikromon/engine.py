@@ -36,6 +36,11 @@ _FLEET_OUTAGE_FRACTION = 0.6
 _FLEET_OUTAGE_MIN_DEVICES = 3
 _CYCLE_BUDGET_FLOOR = 30
 
+# How soon to re-ask a router that REFUSED the update check. Short enough
+# that a momentary refusal costs minutes rather than a day, long enough
+# that a router which always refuses is not asked on every poll.
+_UPDATE_RETRY_SECONDS = 3600
+
 # Each router is asked to check MikroTik's servers for a newer RouterOS once
 # per calendar day, on the first poll after local midnight.
 #
@@ -235,15 +240,38 @@ class Engine:
         once a night rather than on every single poll."""
         facts = self.state.facts(cfg.name)
         last = facts.get("update_checked") or 0
-        # Already asked today. A device that has never been checked (last=0,
-        # i.e. 1970) does not wait until the coming midnight -- a router added
-        # at 09:00 should report its update state the same morning.
-        if last and _local_day(last) == _local_day(now):
-            return
+        ok_last = facts.get("update_check_ok")
+        # Already asked today AND the router accepted it. A device that has
+        # never been checked (last=0, i.e. 1970) does not wait until the
+        # coming midnight -- a router added at 09:00 should report its update
+        # state the same morning.
+        #
+        # A check the router REFUSED is retried within the hour instead of
+        # being left until tomorrow. This used to record "checked" before
+        # knowing the outcome, so one momentary refusal -- an API hiccup, a
+        # reboot, no DNS at that second -- cost a full day of update state,
+        # and nothing said so. Most of the fleet showing a dash is what that
+        # looked like from the outside.
+        if last:
+            if ok_last is False:
+                if now - last < _UPDATE_RETRY_SECONDS:
+                    return
+            elif _local_day(last) == _local_day(now):
+                return
         facts["update_checked"] = now
-        if device.run_command(("system", "package", "update"),
-                              "check-for-updates"):
+        accepted = device.run_command(("system", "package", "update"),
+                                      "check-for-updates")
+        facts["update_check_ok"] = bool(accepted)
+        if accepted:
             log.debug("%s: asked for a RouterOS update check", cfg.name)
+        else:
+            # Worth a real log line, not debug: a router that never accepts
+            # this never reports an update, and the only symptom is a blank
+            # column that looks identical to "nothing to do".
+            log.warning("%s: refused the RouterOS update check -- its update "
+                        "state cannot be read. Usually the stored login "
+                        "lacks the rights, or the router could not reach "
+                        "MikroTik. Retrying within the hour.", cfg.name)
 
     def _flush_metrics(self, ctx) -> None:
         if self.metrics and ctx.samples:
