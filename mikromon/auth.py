@@ -331,6 +331,111 @@ class AuthStore:
             self.db.commit()
 
     # ----- queries ----------------------------------------------------------
+    # ----- cross-company device shares ------------------------------------
+
+    def _ensure_shares(self) -> None:
+        """Create the shares table on first use.
+
+        Added rather than shipped in the original schema, so an existing
+        install takes the update without its database being rebuilt.
+        """
+        with self._lock:
+            self.db.executescript("""
+                CREATE TABLE IF NOT EXISTS device_shares (
+                    device     TEXT    NOT NULL,
+                    email      TEXT    NOT NULL,
+                    owner_org  INTEGER NOT NULL,
+                    can_manage INTEGER NOT NULL DEFAULT 0,
+                    created    REAL    NOT NULL,
+                    created_by TEXT    NOT NULL,
+                    PRIMARY KEY (device, email)
+                );
+                CREATE INDEX IF NOT EXISTS ix_shares_email
+                    ON device_shares(email);
+                CREATE INDEX IF NOT EXISTS ix_shares_org
+                    ON device_shares(owner_org);
+            """)
+            self.db.commit()
+
+    def share_device(self, device: str, email: str, owner_org: int,
+                     can_manage: bool, created_by: str) -> None:
+        """Give one person at another company access to one router.
+
+        `owner_org` is the company that OWNS the router, recorded so a share
+        can only ever be revoked by the company that granted it -- without
+        it, anyone could withdraw anyone else's.
+        """
+        device = (device or "").strip()
+        email = (email or "").strip().lower()
+        if not device or not email:
+            raise ValueError("a router and a person are both required")
+        self._ensure_shares()
+        with self._lock:
+            self.db.execute(
+                "INSERT INTO device_shares (device, email, owner_org, "
+                "can_manage, created, created_by) VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(device, email) DO UPDATE SET "
+                "can_manage=excluded.can_manage, owner_org=excluded.owner_org",
+                (device, email, int(owner_org), 1 if can_manage else 0,
+                 time.time(), str(created_by)))
+            self.db.commit()
+
+    def unshare_device(self, device: str, email: str, owner_org: int) -> bool:
+        """Withdraw a share. Scoped to the granting company on purpose."""
+        self._ensure_shares()
+        with self._lock:
+            cur = self.db.execute(
+                "DELETE FROM device_shares WHERE device = ? AND email = ? "
+                "AND owner_org = ?",
+                ((device or "").strip(), (email or "").strip().lower(),
+                 int(owner_org)))
+            self.db.commit()
+            return cur.rowcount > 0
+
+    def shares_of_org(self, owner_org: int) -> list:
+        """Every share this company has granted, so it can see and undo them.
+
+        Access nobody can enumerate is access nobody revokes.
+        """
+        self._ensure_shares()
+        rows = self.db.execute(
+            "SELECT device, email, can_manage, created, created_by "
+            "FROM device_shares WHERE owner_org = ? "
+            "ORDER BY device, email", (int(owner_org),)).fetchall()
+        return [{"device": r[0], "email": r[1], "can_manage": bool(r[2]),
+                 "created": r[3], "created_by": r[4]} for r in rows]
+
+    def shares_for_device(self, device: str) -> list:
+        self._ensure_shares()
+        rows = self.db.execute(
+            "SELECT email, can_manage, created, created_by FROM device_shares "
+            "WHERE device = ? ORDER BY email", ((device or "").strip(),)
+        ).fetchall()
+        return [{"email": r[0], "can_manage": bool(r[1]), "created": r[2],
+                 "created_by": r[3]} for r in rows]
+
+    def shares_for_user(self, email: str) -> dict:
+        """{device: can_manage} for one person. {} when nothing is shared."""
+        email = (email or "").strip().lower()
+        if not email:
+            return {}
+        self._ensure_shares()
+        rows = self.db.execute(
+            "SELECT device, can_manage FROM device_shares WHERE email = ?",
+            (email,)).fetchall()
+        return {r[0]: bool(r[1]) for r in rows}
+
+    def drop_shares_for_device(self, device: str) -> int:
+        """Forget every share of a router. Called when it is deleted, so a
+        name later reused by another company cannot inherit its guests."""
+        self._ensure_shares()
+        with self._lock:
+            cur = self.db.execute(
+                "DELETE FROM device_shares WHERE device = ?",
+                ((device or "").strip(),))
+            self.db.commit()
+            return cur.rowcount
+
     def get_user(self, identifier: str) -> dict | None:
         """Look up by login identifier — matches EITHER email or username,
         case-insensitively."""
@@ -345,13 +450,24 @@ class AuthStore:
         row = cur.fetchone()
         if not row:
             return None
+        # Carried on the user so can_see and allowed_devices stay pure
+        # functions of what is in front of them. They are called from every
+        # request path, including ones with no database handle to hand.
+        try:
+            shared = self.shares_for_user(row[2] or row[1])
+        except Exception:  # noqa: BLE001 — never block a login over this
+            import logging as _log
+            _log.getLogger(__name__).exception(
+                "could not read device shares for %s", row[2])
+            shared = {}
         return {"id": row[0], "username": row[1], "email": row[2],
                 "pw_hash": row[3], "salt": row[4], "iterations": row[5],
                 "role": row[6], "org_id": row[7],
                 "devices": _load_devices(row[8]), "created": row[9],
                 "login": row[2] or row[1],
                 "is_superadmin": bool(row[10]),
-                "alert_optin": bool(row[11])}
+                "alert_optin": bool(row[11]),
+                "shared": shared}
 
     def list_users(self, org_id: int | None = None) -> list:
         sql = ("SELECT id, username, email, role, org_id, devices, created, "
@@ -779,10 +895,24 @@ class AuthStore:
     # management gates use is_admin, so keep it as an alias.
     is_admin = is_owner
 
+    @staticmethod
+    def shared_with(user: dict, device: str):
+        """None if this router is not shared with this person, else whether
+        the share also lets them change it."""
+        if not user:
+            return None
+        shared = user.get("shared") or {}
+        return shared.get(device)
+
     @classmethod
     def can_see(cls, user: dict, device: str, device_org=None) -> bool:
         if not user:
             return False
+        # A share is the one way across the company boundary, and it is per
+        # router and per person. Checked BEFORE the org gate, because the
+        # whole point is that the router belongs to somebody else.
+        if cls.shared_with(user, device) is not None:
+            return True
         if device_org is not None and user.get("org_id") != device_org:
             return False
         if cls.is_owner(user):
@@ -791,13 +921,47 @@ class AuthStore:
         return devs == "*" or (isinstance(devs, list) and device in devs)
 
     @classmethod
+    def can_manage_device(cls, user: dict, device: str, device_org=None) -> bool:
+        """Whether this person may CHANGE this router, as opposed to watch it.
+
+        Being able to see a shared router is not being able to push config to
+        it: that is a separate tick when the share is made, and defaults off.
+        """
+        if not user:
+            return False
+        share = cls.shared_with(user, device)
+        if share is not None:
+            # A shared router is managed only if the owner said so -- and
+            # never merely because the guest happens to be an owner of their
+            # OWN company.
+            if device_org is not None and user.get("org_id") == device_org:
+                return cls.is_owner(user)
+            return bool(share)
+        if device_org is not None and user.get("org_id") != device_org:
+            return False
+        return cls.is_owner(user)
+
+    @classmethod
     def allowed_devices(cls, user: dict, org_devices) -> list:
-        """Filter `org_devices` (already scoped to the user's org) to what the
-        user may see. Owners (and members with "*") see all of them."""
+        """What this person may see: their own company's, plus anything
+        shared with them by another.
+
+        `org_devices` is already scoped to their own org. Shared routers are
+        by definition not in it, so they are added rather than filtered --
+        and added even for an owner, who would otherwise see everything of
+        their own and nothing of anyone else's.
+        """
         if cls.is_owner(user) or user.get("devices") == "*":
-            return list(org_devices)
-        allow = set(user.get("devices") or [])
-        return [d for d in org_devices if d in allow]
+            out = list(org_devices)
+        else:
+            allow = set(user.get("devices") or [])
+            out = [d for d in org_devices if d in allow]
+        seen = set(out)
+        for name in sorted((user.get("shared") or {})):
+            if name not in seen:
+                out.append(name)
+                seen.add(name)
+        return out
 
     def close(self) -> None:
         with self._lock:

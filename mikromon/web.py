@@ -49,6 +49,7 @@ from .web_auth import (
     _render_admin, _render_guide,
     _render_billing, _render_locked, _grace_banner_html,
     _render_invoice,
+    _share_box,
     _render_superadmin, _render_region_picker, _parse_regions_text,
 )
 
@@ -2132,7 +2133,7 @@ _DEVICE_TABS = ["Overview", "Provision", "Routes", "WAN", "Security",
                 "VPN", "Scripts"]
 _MAINT_ITEMS = [("Update", "update"), ("Backups", "backups"),
                 ("Restrict access", "harden"), ("Remote access", "remote"),
-                ("Temp Access", "tempaccess")]
+                ("Temp Access", "tempaccess"), ("Share", "share")]
 # label -> url slug (all tabs are wired to the engine now)
 _LIVE_TABS = {"Overview": "", "Provision": "provision",
               "Routes": "routes", "WAN": "wan",
@@ -2142,7 +2143,7 @@ _LIVE_TABS = {"Overview": "", "Provision": "provision",
               "Interfaces": "interfaces", "Remote access": "remote",
               "VPN": "tunnel", "Scripts": "scripts",
               "Update": "update", "Backups": "backups",
-              "Temp Access": "tempaccess"}
+              "Temp Access": "tempaccess", "Share": "share"}
 # tabs that WRITE to the router (admins only); Overview is read-only
 # Instant toggles are wrong where the act is not a small reversible change:
 #   update  -- installing RouterOS reboots the router, and a flick of a
@@ -2154,7 +2155,7 @@ _INSTANT_TOGGLE_OFF = {"update", "scripts", "remote"}
 
 _ADMIN_TABS = {"provision", "routes", "wan", "security", "harden", "nextdns",
                "qos", "portfwd", "remote", "tunnel", "scripts",
-               "update", "backups", "tempaccess", "interfaces"}
+               "update", "backups", "tempaccess", "interfaces", "share"}
 
 
 def _help_dot(anchor: str, what: str = "") -> str:
@@ -6562,6 +6563,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if ds:
                 ds.close()
             store.close()
+            # allowed_devices adds anything another company has shared with
+            # this person -- those are not in `known`, which is scoped to
+            # their own org by design.
             allowed = AuthStore.allowed_devices(user, sorted(known))
             return self._serve_data(path, url, user=user, allowed=allowed)
 
@@ -6607,7 +6611,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         user["org_id"] if user else None)
                     if ds:
                         ds.close()
-                    if dev not in known:
+                    # A router shared from another company is deliberately
+                    # not in `known` -- that list is scoped to this person's
+                    # own org. `allowed` is the one that already accounts for
+                    # shares, so it decides, and 404 stays for a name that
+                    # exists nowhere.
+                    shared_here = AuthStore.shared_with(user, dev) is not None
+                    if dev not in known and not shared_here:
                         return self._send(404, "no such device")
                     if allowed is not None and dev not in allowed:
                         return self._send(403, "forbidden")
@@ -6633,6 +6643,19 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                             return self._send(403, "forbidden")
                         return self._device_provision_page(
                             dev, user, msg=q.get("msg", [""])[0])
+                    if tab == "share":
+                        # Owner-only, and only for a router their OWN
+                        # company holds. A guest who was given management
+                        # of a shared router must not be able to pass it
+                        # on -- access that spreads without the owner
+                        # knowing is access nobody can revoke.
+                        if not AuthStore.is_owner(user or {}):
+                            return self._send(403, "forbidden")
+                        if AuthStore.shared_with(user, dev) is not None:
+                            return self._send(403, "forbidden")
+                        return self._device_share_page(
+                            dev, user, msg=q.get("ok", [""])[0],
+                            error=q.get("error", [""])[0])
                     if tab:
                         from .push import FEATURES
                         if tab in FEATURES:
@@ -8532,6 +8555,91 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                               _header(user, "/dashboard") + f'<div class="wrap">{box}</div>'),
                               "text/html; charset=utf-8")
 
+        def _device_share_page(self, name, user, msg="", error=""):
+            """The Share tab: who this router is shared with, and with what."""
+            shares = []
+            try:
+                shares = auth.shares_for_device(name) if auth else []
+            except Exception:  # noqa: BLE001
+                log.exception("could not read shares for %s", name)
+            csrf = (self._session() or {}).get("csrf", "")
+            inner = (f'<div class="wrap" style="max-width:1100px">'
+                     f'<h1>{esc(name)} &middot; Share</h1>'
+                     f'{_device_tabbar(name, "share", True, csrf)}'
+                     f'{_flash(msg, error)}'
+                     f'{_share_box(name, shares, csrf, user.get("org_name", ""))}'
+                     f'<p><a href="/device?name={quote(name)}">&larr; overview'
+                     f'</a></p></div>')
+            return self._send(
+                200, _page(esc(name) + " · Share",
+                           _header(user, "/dashboard") + inner),
+                "text/html; charset=utf-8")
+
+        def _device_share_post(self, flat, user):
+            """Give one person at another company access to one router.
+
+            Owner-only, and only for a router their OWN company owns. A
+            member cannot pass on access to kit they were allocated: that
+            would let it spread without the person accountable for it
+            knowing, and revoking would become guesswork.
+            """
+            if auth is None or not AuthStore.is_owner(user or {}):
+                return self._send(403, "forbidden")
+            name = (flat.get("device") or "").strip()
+            email = (flat.get("email") or "").strip().lower()
+            back = f"/device?name={quote(name)}&tab=share"
+            if not name or not email:
+                return self._redirect(back + "&error=" + quote(
+                    "A router and an email address are both needed."))
+            # The router must belong to the company doing the sharing.
+            ds = self._devstore()
+            try:
+                org = ds.org_of(name) if ds else None
+            finally:
+                if ds:
+                    ds.close()
+            if org is None or org != user.get("org_id"):
+                return self._send(403, "forbidden")
+            target = auth.get_user(email)
+            if not target:
+                return self._redirect(back + "&error=" + quote(
+                    f"No account signed in as {email}. They need to have "
+                    f"signed up before a router can be shared with them."))
+            if target.get("org_id") == user.get("org_id"):
+                return self._redirect(back + "&error=" + quote(
+                    "That person is already in your company — allocate the "
+                    "router to them on the Team page instead."))
+            can_manage = bool(flat.get("can_manage"))
+            try:
+                auth.share_device(name, email, int(user["org_id"]),
+                                  can_manage, user.get("login", "?"))
+            except Exception as exc:  # noqa: BLE001
+                log.exception("could not share %s with %s", name, email)
+                return self._redirect(back + "&error=" + quote(str(exc)))
+            log.info("%s shared router %r with %s (%s) ",
+                     user.get("login", "?"), name, email,
+                     "can change it" if can_manage else "view only")
+            return self._redirect(back + "&ok=" + quote(
+                f"{email} can now {'change' if can_manage else 'view'} this "
+                f"router. They see nothing else of your company."))
+
+        def _device_unshare_post(self, flat, user):
+            """Withdraw a share. Only the company that granted it can."""
+            if auth is None or not AuthStore.is_owner(user or {}):
+                return self._send(403, "forbidden")
+            name = (flat.get("device") or "").strip()
+            email = (flat.get("email") or "").strip().lower()
+            back = f"/device?name={quote(name)}&tab=share"
+            # Scoped to the granting org inside the store too, so this cannot
+            # be used to strip a share another company made.
+            gone = auth.unshare_device(name, email, int(user["org_id"]))
+            if gone:
+                log.info("%s stopped sharing router %r with %s",
+                         user.get("login", "?"), name, email)
+            return self._redirect(back + ("&ok=" + quote(
+                f"{email} no longer has access to this router.") if gone
+                else "&error=" + quote("That share no longer exists.")))
+
         def _device_forget_post(self, flat, user):
             """Remove a device from the dashboard entirely: delete it from the
             devices DB (if managed) and purge its metrics + saved state. Works
@@ -8553,6 +8661,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     store.close()
             result = self._try_offboard(raw, name, uname)
             self._purge_device_data(name)
+            # Otherwise a name later reused by another company would inherit
+            # the guests of the router that used to hold it.
+            if auth is not None:
+                try:
+                    auth.drop_shares_for_device(name)
+                except Exception:  # noqa: BLE001
+                    log.exception("could not clear shares for %s", name)
             page = _render_offboard_page(name, result, "/", user)
             return self._send(200, page, "text/html; charset=utf-8")
 
@@ -10134,6 +10249,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._devices_post(path, flat, multi, user)
             if path == "/device/forget":
                 return self._device_forget_post(flat, user)
+            if path == "/device/share":
+                return self._device_share_post(flat, user)
+            if path == "/device/unshare":
+                return self._device_unshare_post(flat, user)
             if path == "/hub/reload-peers":
                 return self._hub_reload_peers_post(flat, user)
             if path == "/admin/company":
@@ -10230,7 +10349,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 finally:
                     if ds:
                         ds.close()
-            # can_see: owner of the device's org, or a member it's allocated to.
+            # Owner of the device's org, or a member it is allocated to --
+            # and, for a router shared in from another company, only when
+            # that share was granted WITH management. Watching one is not
+            # changing it.
+            if AuthStore.shared_with(user, name) is not None:
+                return AuthStore.can_manage_device(user, name, org)
             return AuthStore.can_see(user, name, org)
 
         def _owns_target(self, flat, user) -> bool:
@@ -10249,7 +10373,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             try:
                 for n in names:
                     org = ds.org_of(n) if ds else None
-                    if org is not None and org != user.get("org_id"):
+                    if org is None or org == user.get("org_id"):
+                        continue
+                    # Another company's router. The only way through is a
+                    # share that was explicitly granted WITH management --
+                    # being able to watch one is not being able to change it.
+                    if not AuthStore.can_manage_device(user, n, org):
                         return False
             finally:
                 if ds:

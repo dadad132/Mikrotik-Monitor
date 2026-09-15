@@ -1392,6 +1392,68 @@ def _tunnel_health_box(rows, wg_err: str = "") -> str:
         f'not arriving at all.</p></div>')
 
 
+def _share_box(device: str, shares, csrf: str, org_name: str = "") -> str:
+    """Give one person at another company access to this one router.
+
+    Listing what has already been granted is half the point. Access nobody
+    can enumerate is access nobody revokes, and a share that outlives the
+    reason for it is the kind of thing found during an incident rather than
+    before one.
+    """
+    rows = ""
+    for sh in shares or []:
+        when = time.strftime("%d %b %Y", time.localtime(sh.get("created") or 0))
+        rights = ('<span class="badge warn">can change it</span>'
+                  if sh.get("can_manage") else
+                  '<span class="badge ok">view only</span>')
+        rows += (
+            f'<tr><td>{esc(sh.get("email", ""))}</td>'
+            f'<td>{rights}</td>'
+            f'<td class="muted" style="white-space:nowrap">{esc(when)}</td>'
+            f'<td><form method="POST" action="/device/unshare" '
+            f'onsubmit="return confirm(\'Stop sharing this router with '
+            f'{esc(sh.get("email", ""))}? They lose access immediately.\')">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="device" value="{esc(device)}">'
+            f'<input type="hidden" name="email" value="{esc(sh.get("email", ""))}">'
+            f'<button class="btn ghost" style="padding:4px 12px" '
+            f'type="submit">Stop sharing</button></form></td></tr>')
+    table = (f'<table style="margin:10px 0"><thead><tr><th>Person</th>'
+             f'<th>Rights</th><th>Since</th><th></th></tr></thead>'
+             f'<tbody>{rows}</tbody></table>' if rows else
+             '<p class="muted" style="font-size:13px;margin:8px 0">'
+             'Not shared with anyone outside this company.</p>')
+
+    return (
+        f'<div class="box"><h2>Share this router</h2>'
+        f'<p class="muted" style="font-size:13px;margin:0 0 10px">'
+        f'Give one person at another company access to <b>this router '
+        f'only</b>. They see nothing else of '
+        f'{esc(org_name) if org_name else "yours"} &mdash; not your other '
+        f'routers, your team, or your billing. Enter the email they sign in '
+        f'with; they must already have an account.</p>'
+        f'{table}'
+        f'<form method="POST" action="/device/share" '
+        f'style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;'
+        f'margin-top:6px">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<input type="hidden" name="device" value="{esc(device)}">'
+        f'<label style="flex:1;min-width:240px">Their email'
+        f'<br><input name="email" type="email" required style="width:100%" '
+        f'placeholder="person@theircompany.co.za"></label>'
+        f'<label class="chk" style="padding-bottom:8px">'
+        f'<input type="checkbox" name="can_manage" value="1"> '
+        f'Let them change it too</label>'
+        f'<button class="btn" type="submit">Share</button>'
+        f'</form>'
+        f'<p class="muted" style="font-size:12px;margin:10px 0 0">'
+        f'Leave the box unticked and they can watch it but not touch it: no '
+        f'config changes, no reboot, no login or provisioning script. You can '
+        f'stop a share at any time, and only you can &mdash; the other '
+        f'company cannot remove itself from this list or add anyone to it.'
+        f'</p></div>')
+
+
 def _parse_regions_text(text: str) -> list:
     """One region per line, "Name|https://url" — the textarea format
     _regions_box's form submits and _post_superadmin_regions parses.
