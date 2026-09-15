@@ -47,7 +47,7 @@ class SecurityCheck(Check):
         seeding = not mem.get("initialized")
 
         self._scan_log(snap, dev, ctx, mem, seeding)
-        self._scan_users(snap, ctx, mem, seeding)
+        self._scan_users(snap, dev, ctx, mem, seeding)
         self._scan_sessions(snap, dev, ctx, mem, seeding)
         self._scan_history(snap, ctx, mem, seeding)
 
@@ -93,7 +93,7 @@ class SecurityCheck(Check):
                       facts={"topics": topics})
 
     # ----- /user (the account list, not sessions) ---------------------------
-    def _scan_users(self, snap, ctx, mem, seeding):
+    def _scan_users(self, snap, dev, ctx, mem, seeding):
         """A login appearing on the router that was not there last poll.
 
         Read from /user directly rather than inferred from log lines. The log
@@ -102,9 +102,13 @@ class SecurityCheck(Check):
         that a busy router overwrites in minutes, and the wording varies
         between RouterOS versions. The account list is the fact itself.
 
-        Deliberately not alerted on removal: an account disappearing is
-        usually us or the operator tidying up, and pairing every add with a
-        remove alert is how people learn to filter the whole lot.
+        Removal of somebody else's account is deliberately not alerted:
+        that is usually us or the operator tidying up, and pairing every add
+        with a remove alert is how people learn to filter the whole lot.
+
+        OUR OWN account is the exception, and it is not a small one. Losing
+        it ends the monitoring and the ability to put it back, and it is the
+        first thing an intruder with full access removes.
         """
         if "users" in snap.errors:
             return                      # could not read it; say nothing
@@ -116,6 +120,31 @@ class SecurityCheck(Check):
 
         known = set(mem.get("router_users", []))
         if not seeding:
+            # Removals are otherwise ignored on purpose (see the docstring),
+            # but OUR OWN account going is the single most consequential
+            # change anyone can make to a router we manage: it ends both the
+            # monitoring and the ability to put it back. Seen live, where it
+            # was silent -- the router just began failing to authenticate,
+            # which reads exactly like a password drifting out of step.
+            ours = {str(getattr(dev.cfg, "username", "") or "").strip(),
+                    str(getattr(dev.cfg, "push_username", "") or "").strip()}
+            ours.discard("")
+            for nm in sorted(ours & (known - set(current))):
+                ctx.event(
+                    f"router_user_gone:{nm}", Severity.CRITICAL,
+                    f"The monitoring login '{nm}' was DELETED from this router",
+                    cause=(f"'{nm}' is the account this dashboard uses to "
+                           f"read and configure the router. It existed at "
+                           f"the last check and is gone now, so monitoring "
+                           f"and remote changes have both stopped. If nobody "
+                           f"removed it deliberately, treat it as a "
+                           f"compromise: whoever did it has full access and "
+                           f"has just removed the thing that would notice. "
+                           f"Re-run Provision from this device's page to "
+                           f"recreate the login on the router and store the "
+                           f"new password here in one step."),
+                    facts={"user": nm},
+                )
             for nm, group in sorted(current.items()):
                 if nm in known:
                     continue
