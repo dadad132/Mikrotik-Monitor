@@ -170,6 +170,50 @@ try:
 finally:
     sc.check_units = _broken
 
+print("\nWhich commit is actually running")
+
+# `git pull` updates the checkout. The service runs an rsynced COPY of it.
+# So a pull alone changes nothing that runs, and the only symptom is a fix
+# that appears not to have worked -- which has burnt real days here, with
+# everyone reasonably concluding the fix itself was wrong.
+vd = tempfile.mkdtemp()
+f = one(sc.check_deployed_version(vd), "version")
+check("with no VERSION file it asks for one rather than claiming a problem "
+      "-- nothing is broken, we simply cannot answer the question",
+      f["ok"] and f["warn"] and "install.sh" in f["fix"])
+
+open(os.path.join(vd, "VERSION"), "w").write(
+    "abc1234\n2026-09-16T08:00:00+02:00\n")
+f = one(sc.check_deployed_version(vd), "version")
+check("with one, the panel names the running commit, so \"is my fix even "
+      "deployed\" is answerable at a glance",
+      f["ok"] and "abc1234" in f["title"])
+check("...and when it was deployed", "2026-09-16" in f["detail"])
+
+_rr = sc._run
+try:
+    sc._run = lambda cmd, timeout=6: (0, "def5678", "")
+    f = one(sc.check_deployed_version(vd), "version")
+    check("a checkout that has moved PAST the running code is the finding "
+          "that matters: the pull happened, the install did not",
+          not f["ok"] and "abc1234" in f["title"] and "def5678" in f["title"])
+    check("...and says which command deploys it", "install.sh" in f["fix"])
+
+    sc._run = lambda cmd, timeout=6: (0, "abc1234", "")
+    check("a checkout sitting at the same commit is not a complaint",
+          one(sc.check_deployed_version(vd), "version")["ok"])
+
+    sc._run = lambda cmd, timeout=6: (128, "", "not a git repository")
+    check("the app directory is normally not a checkout at all, and that is "
+          "the ordinary case rather than an error",
+          one(sc.check_deployed_version(vd), "version")["ok"])
+finally:
+    sc._run = _rr
+
+check("the question is asked by run_all, not left for somebody to remember",
+      any(x["id"] == "version"
+          for x in sc.run_all(app_dir=vd, smtp_cfg={"host": "x"})))
+
 print("\nWhat the panel shows")
 
 _mixed = [sc._finding("fine", True, "fine"),

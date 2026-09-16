@@ -23,3 +23,8 @@ venv/
 env/
 *.egg-info/
 .eggs/
+
+# Written by deploy/install.sh into the app directory: which commit is live.
+VERSION
+install-status.txt
+last-install.log

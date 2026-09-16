@@ -128,6 +128,16 @@ fi
 # Always overwrite requirements.txt so pip can detect changes on upgrade.
 cp "${SRC_DIR}/requirements.txt" "${APP_DIR}/"
 
+# Record WHICH commit is now running. The app directory is an rsync of the
+# checkout, not the checkout itself, so `git pull` alone changes nothing that
+# runs -- and the only symptom is a fix that appears not to have worked. The
+# Platform admin panel reads this file, so the question "is my fix even
+# deployed?" is answerable at a glance instead of by assumption.
+{
+  git -C "${SRC_DIR}" rev-parse --short HEAD
+  git -C "${SRC_DIR}" log -1 --format=%cI
+} > "${APP_DIR}/VERSION" 2>/dev/null || echo "unknown" > "${APP_DIR}/VERSION"
+
 # example config — overwrite so it stays current with the source.
 cp "${SRC_DIR}/config.example.yaml" "${APP_DIR}/config.example.yaml"
 

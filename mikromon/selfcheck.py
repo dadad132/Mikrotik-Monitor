@@ -237,11 +237,53 @@ def check_smtp(smtp_cfg):
         "Platform admin -> Email (SMTP) settings", warn=True)]
 
 
+def check_deployed_version(app_dir=""):
+    """Is the code that is RUNNING the code that was last pulled?
+
+    The app directory is an rsync of the checkout, not the checkout itself,
+    so `git pull` updates the source and changes nothing that runs. The only
+    symptom is a fix that appears not to work -- which has cost real time
+    here, more than once, with everyone assuming the fix was wrong.
+    """
+    # Where the running code actually lives -- not the working directory,
+    # which is whatever systemd or a shell happened to set.
+    app_dir = app_dir or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    vpath = os.path.join(app_dir, "VERSION")
+    running = ""
+    when = ""
+    try:
+        parts = open(vpath, encoding="utf-8").read().split()
+        running = parts[0] if parts else ""
+        when = parts[1] if len(parts) > 1 else ""
+    except OSError:
+        pass
+    if not running or running == "unknown":
+        return [_finding(
+            "version", True,
+            "Running version is not recorded",
+            "Re-run the installer once and it will be, so the next time a "
+            "fix seems not to have taken you can tell at a glance whether "
+            "it is even deployed.", "sudo bash deploy/install.sh", warn=True)]
+
+    # If a checkout is sitting next to us, say whether it has moved on.
+    rc, head, _ = _run(["git", "-C", app_dir, "rev-parse", "--short", "HEAD"])
+    if rc == 0 and head and head != running:
+        return [_finding(
+            "version", False,
+            f"The running code is {running}, but this checkout is at {head}",
+            "A pull updates the checkout; the service runs an rsynced copy. "
+            "Until the installer is re-run, nothing you pulled is live.",
+            "sudo bash deploy/install.sh")]
+    detail = f"deployed {when}" if when else ""
+    return [_finding("version", True, f"Running version {running}", detail)]
+
+
 def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
-            metrics_db="", retention_days=30, smtp_cfg=None):
+            metrics_db="", retention_days=30, smtp_cfg=None, app_dir=""):
     """Every check, in the order a person would want to read them."""
     out = []
-    for fn in (lambda: check_units(),
+    for fn in (lambda: check_deployed_version(app_dir),
+               lambda: check_units(),
                lambda: check_wg_readable(),
                lambda: check_peers_dir(peers_path),
                lambda: check_peers_file(peers_path, expected_peers),
