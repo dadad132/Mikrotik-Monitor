@@ -3171,6 +3171,25 @@ def _adopt_zoho_file(auth, devices_db=""):
     return False
 
 
+def _billing_status():
+    """What the renewal timer last did, or None when it is not running."""
+    try:
+        from .billing_runner import status
+        return status()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _billing_upcoming(billing, auth):
+    """Who is due to be invoiced, and when. Never breaks the panel."""
+    try:
+        from .billing_runner import upcoming
+        return upcoming(billing, auth)
+    except Exception:  # noqa: BLE001
+        log.exception("could not read upcoming invoices")
+        return []
+
+
 def _invoicing_connected(auth) -> bool:
     """Is anything able to send an invoice? None of the callers care which."""
     try:
@@ -3196,7 +3215,7 @@ def _zoho_scopes() -> str:
 
 def _server_selfcheck(devices_db, metrics_db, access_cfg, smtp_cfg,
                       retention_days=30, zoho_cfg=None, billing_db="",
-                      provider_connected=None):
+                      provider_connected=None, runner_status=None):
     """Run the server self-check for the Platform admin panel.
 
     Wrapped so a failing check can never take the page down: this is the
@@ -3216,7 +3235,8 @@ def _server_selfcheck(devices_db, metrics_db, access_cfg, smtp_cfg,
                        access_cfg=access_cfg, metrics_db=metrics_db or "",
                        retention_days=retention_days, smtp_cfg=smtp_cfg,
                        zoho_cfg=zoho_cfg, billing_db=billing_db,
-                       provider_connected=provider_connected)
+                       provider_connected=provider_connected,
+                       runner_status=runner_status)
     except Exception:  # noqa: BLE001
         log.exception("server self-check failed")
         return []
@@ -7089,6 +7109,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 devices_db, metrics_db, access_cfg, smtp_settings,
                 _RETENTION_DAYS_DEFAULT,
                 zoho_cfg=auth.get_zoho() if auth else {},
+                runner_status=_billing_status() if billing else None,
                 billing_db=billing_cfg.get("db", "") if billing else "",
                 provider_connected=_invoicing_connected(auth))
             return self._send(200, _render_superadmin(
@@ -7097,6 +7118,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 error=q.get("error", [""])[0],
                 smtp=smtp_settings, billing_on=billing is not None,
                 billing_contact=auth.get_billing_contact() if auth else None,
+                upcoming=_billing_upcoming(billing, auth),
+                runner_status=_billing_status() if billing else None,
                 hub_ip=hub_ip, hub_port=hub_port, router_count=router_count,
                 hub_pubkey=hub_pubkey_cur,
                 regions=auth.get_regions() if auth else [],

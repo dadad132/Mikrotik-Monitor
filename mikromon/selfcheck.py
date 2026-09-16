@@ -408,7 +408,8 @@ def check_cert_renewal():
         "sudo systemctl enable --now certbot.timer")]
 
 
-def check_billing_ready(billing_db="", provider_connected=None):
+def check_billing_ready(billing_db="", provider_connected=None,
+                        runner_status=None):
     """Companies on a paid packet that will never be invoiced.
 
     Renewal invoicing selects on the paid-up date, so a company without one
@@ -445,6 +446,33 @@ def check_billing_ready(billing_db="", provider_connected=None):
             f"renewal invoicing only considers companies that have one. "
             f"Nothing else about these accounts looks wrong.",
             "Platform admin -> Billing -> re-save the packet for each"))
+    if runner_status is not None and runner_status.get("started"):
+        ran = float(runner_status.get("ran") or 0.0)
+        age = (time.time() - ran) / 60 if ran else None
+        if ran and age is not None and age > 45:
+            out.append(_finding(
+                "billing:runner", False,
+                f"The billing pass has not run for {age:.0f} minutes",
+                "It runs every 15. Either the thread has died or a pass is "
+                "hanging -- invoices are not going out, and nothing else "
+                "would say so.",
+                "sudo systemctl restart mikromon-web"))
+        elif not ran and (time.time() - float(
+                runner_status.get("started") or 0.0)) > 3600:
+            out.append(_finding(
+                "billing:runner", False,
+                "The billing pass has never run since this server started",
+                "It should run within 15 minutes of startup.",
+                "journalctl -u mikromon-web | grep billing"))
+        elif runner_status.get("error"):
+            out.append(_finding(
+                "billing:runner", False, "The last billing pass failed",
+                str(runner_status["error"])[:300],
+                "journalctl -u mikromon-web -n 100 | grep -i billing"))
+        elif ran:
+            out.append(_finding(
+                "billing:runner", True,
+                f"Billing pass ran {age:.0f} minute(s) ago"))
     if provider_connected is False:
         out.append(_finding(
             "billing:provider", False,
@@ -539,7 +567,7 @@ def check_deployed_version(app_dir=""):
 def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
             metrics_db="", retention_days=30, smtp_cfg=None,
             app_dir="", zoho_cfg=None, billing_db="",
-            provider_connected=None):
+            provider_connected=None, runner_status=None):
     """Every check, in the order a person would want to read them."""
     out = []
     for fn in (lambda: check_deployed_version(app_dir),
@@ -552,7 +580,8 @@ def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
                lambda: check_cert_renewal(),
                lambda: check_zoho(app_dir, zoho_cfg),
                lambda: check_billing_ready(billing_db,
-                                           provider_connected),
+                                           provider_connected,
+                                           runner_status),
                lambda: check_nginx(access_cfg),
                lambda: check_retention(metrics_db, retention_days),
                lambda: check_smtp(smtp_cfg)):

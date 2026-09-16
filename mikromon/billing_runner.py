@@ -39,6 +39,15 @@ log = logging.getLogger(__name__)
 # that it is invisible. The work is skipped entirely when Invoice Ninja is
 # not configured, which is the normal state for most installs.
 _TICK_SECONDS = 900
+
+# What the last pass did, so the panel can show it. A thread that stopped
+# looks exactly like a quiet month until somebody can see when it last ran.
+_last = {"ran": 0.0, "raised": 0, "applied": 0, "error": "", "started": 0.0}
+
+
+def status() -> dict:
+    """When the billing pass last ran, and what it did."""
+    return dict(_last)
 _DEFAULT_DAYS_BEFORE = 7
 _DEFAULT_DUE_DAYS = 7
 
@@ -294,6 +303,38 @@ def reconcile_payments(billing, cfg, only_invoice: str = "",
     return applied
 
 
+def upcoming(billing, auth, limit: int = 20) -> list:
+    """Who gets invoiced next, and when. Read-only -- raises nothing.
+
+    The same query the renewal pass uses, run far enough ahead to show what
+    is coming. Being able to see next month's invoices before they go out is
+    the difference between billing you trust and billing you hope about.
+    """
+    if billing is None:
+        return []
+    cfg = _cfg(auth)
+    days_before = float(cfg.get("days_before") or _DEFAULT_DAYS_BEFORE)
+    now = time.time()
+    out = []
+    for row in billing.orgs_due_for_renewal(400, now=now):
+        org_id = int(row["org_id"])
+        plan = plan_by_name(row.get("plan") or "")
+        end = float(row.get("current_period_end") or 0.0)
+        org = (auth.org(org_id) if auth else None) or {}
+        out.append({
+            "org_id": org_id,
+            "name": org.get("name") or f"Company {org_id}",
+            "plan": row.get("plan") or "",
+            "amount": float(plan["price_zar"]) if plan else None,
+            "period_end": end,
+            "invoice_on": end - days_before * 86400,
+            "days_until_invoice": (end - days_before * 86400 - now) / 86400,
+            "already_raised": billing.has_open_order_for_period(org_id, end),
+        })
+    out.sort(key=lambda r: r["invoice_on"])
+    return out[:limit]
+
+
 def run_once(billing, auth, now: float | None = None) -> tuple:
     """One pass of both jobs. Returns (invoices_raised, payments_applied)."""
     prov = provider_for(auth)
@@ -320,6 +361,7 @@ def start(billing, auth, stop: threading.Event | None = None):
     second process writing that database is a race worth not having.
     """
     stop = stop or threading.Event()
+    _last["started"] = time.time()
 
     def loop():
         # Nothing on the first tick: a restart should not fire off invoices
@@ -327,10 +369,13 @@ def start(billing, auth, stop: threading.Event | None = None):
         while not stop.wait(_TICK_SECONDS):
             try:
                 raised, applied = run_once(billing, auth)
+                _last.update({"ran": time.time(), "raised": raised,
+                              "applied": applied, "error": ""})
                 if raised or applied:
                     log.info("billing: %d invoice(s) raised, %d payment(s) "
                              "applied", raised, applied)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                _last.update({"ran": time.time(), "error": str(exc)})
                 log.exception("billing runner tick failed")
 
     t = threading.Thread(target=loop, name="mikromon-billing", daemon=True)

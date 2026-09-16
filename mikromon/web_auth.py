@@ -1242,6 +1242,87 @@ def _yoco_clear_form(csrf: str) -> str:
         f'</button></form>')
 
 
+def _upcoming_box(rows, status=None) -> str:
+    """What the billing timer is going to do, before it does it.
+
+    The renewal pass runs every 15 minutes in a background thread and says
+    nothing unless it acts, so "is anybody actually going to be invoiced?"
+    had no answer short of reading the log -- and a thread that had died
+    looked exactly like a quiet month. Money not arriving is a slow way to
+    find that out.
+    """
+    # `status is None` means billing is not configured on this server at all,
+    # and a self-hosted install has no business being told its billing timer
+    # is dead. An EMPTY status means billing IS in play and the timer is not
+    # running -- which is the loudest thing this panel can say, so it must
+    # not be the case that makes the panel disappear.
+    if not rows and status is None:
+        return ""
+
+    st = status or {}
+    ran = float(st.get("ran") or 0.0)
+    if st.get("error"):
+        beat = (f'<span style="color:#b91c1c">&#9888; the last pass failed: '
+                f'{esc(str(st["error"])[:120])}</span>')
+    elif ran:
+        mins = (time.time() - ran) / 60
+        when = "just now" if mins < 1.5 else f"{mins:.0f} minutes ago"
+        beat = (f'<span style="color:#15803d">&#10003;</span> '
+                f'<span class="muted">Last checked {esc(when)}; '
+                f'again every 15 minutes.</span>')
+    elif st.get("started"):
+        beat = ('<span class="muted">Started. The first pass runs within '
+                '15 minutes.</span>')
+    else:
+        beat = ('<span style="color:#b91c1c">&#9888; the renewal timer is '
+                'not running, so no invoice will go out.</span>')
+
+    if not rows:
+        body = ('<p class="muted" style="margin:0">Nothing is due. Companies '
+                'appear here as soon as they are on a paid packet with a '
+                'renewal date.</p>')
+    else:
+        trs = []
+        for r in rows:
+            days = r["days_until_invoice"]
+            end = time.strftime("%d %b %Y", time.localtime(r["period_end"]))
+            on = time.strftime("%d %b %Y", time.localtime(r["invoice_on"]))
+            amount = (f'R{r["amount"]:,.2f}' if r["amount"] is not None
+                      else '<span class="muted">by hand</span>')
+            if r["already_raised"]:
+                state = ('<span style="color:#15803d">invoice sent</span>')
+            elif days <= 0:
+                state = ('<span style="color:#b45309">due on the next pass'
+                         '</span>')
+            elif days < 1:
+                state = f'<b>today</b>'
+            else:
+                state = f'in {days:.0f} day{"" if 0.5 < days < 1.5 else "s"}'
+            trs.append(
+                f'<tr><td><b>{esc(r["name"])}</b><br>'
+                f'<span class="muted" style="font-size:12px">'
+                f'{esc(r["plan"])}</span></td>'
+                f'<td>{esc(on)}<br><span class="muted" '
+                f'style="font-size:12px">{state}</span></td>'
+                f'<td>{esc(end)}</td>'
+                f'<td style="text-align:right">{amount}</td></tr>')
+        body = (f'<table><thead><tr><th>Company</th><th>Invoice goes out</th>'
+                f'<th>Packet ends</th>'
+                f'<th style="text-align:right">Amount</th></tr></thead>'
+                f'<tbody>{"".join(trs)}</tbody></table>')
+
+    return (f'<div class="box"><h2>Next invoices</h2>'
+            f'<p style="margin:0 0 10px;font-size:12px">{beat}</p>'
+            f'{body}'
+            f'<p class="muted" style="font-size:12px;margin:10px 0 0">'
+            f'This server decides when, not the invoicing system: it checks '
+            f'every 15 minutes for packets about to lapse, raises the '
+            f'invoice and asks for it to be emailed. Payment is then read '
+            f'back from the provider, so a missed callback delays a '
+            f'reactivation by minutes rather than leaving somebody who has '
+            f'paid switched off.</p></div>')
+
+
 def _zoho_box(cfg, csrf: str, scopes: str = "") -> str:
     """Superadmin setting: connect Zoho Invoice, in three pastes.
 
@@ -1882,6 +1963,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        regions=None, nextdns=None, quotes=None,
                        yoco=None, yoco_hook_url: str = "",
                        invoiceninja=None, zoho=None,
+                       upcoming=None, runner_status=None,
                        zoho_scopes="",
                        in_hook_url: str = "",
                        tunnel_rows=None,
@@ -2062,6 +2144,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
              f'{_yoco_box(yoco, csrf, yoco_hook_url)}'
              f'{_invoiceninja_box(invoiceninja, csrf, in_hook_url)}'
              f'{_zoho_box(zoho, csrf, zoho_scopes)}'
+             f'{_upcoming_box(upcoming, runner_status)}'
              f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf, hub_pubkey)}'
              f'{_regions_box(regions or [], csrf)}'
              f'{_nextdns_settings_box(nextdns or {}, csrf)}'
