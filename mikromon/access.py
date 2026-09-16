@@ -151,6 +151,25 @@ class AccessStore:
 
 
 # ===== hub-side rendering (turn grants into nginx config) ===================
+# Emitted once at the top of the generated http include.
+#
+# WebFig is NOT a WebSocket app -- it is ordinary HTTP POSTs to /jsproxy --
+# so almost no request carries an Upgrade header. The block used to send
+# `Connection: upgrade` on every single one, announcing an upgrade that was
+# not happening and inviting RouterOS to close the connection. This is the
+# standard shape: say "upgrade" only when the client actually asked for one.
+_UPGRADE_MAP = (
+    "map $http_upgrade $mm_connection_upgrade {\n"
+    "    default upgrade;\n"
+    "    ''      close;\n"
+    "}\n")
+
+# WebFig uploads firmware packages, backups to restore and certificates.
+# nginx caps a request body at 1 MB by default, so every one of those fails
+# with 413 -- the page loads, and the thing it was opened to do does not.
+_MAX_BODY = "256m"
+
+
 def render_nginx_http(grants, cert: str, key: str) -> str:
     """`http {}`-context server blocks for the WebFig (HTTPS) grants."""
     blocks = []
@@ -163,16 +182,33 @@ def render_nginx_http(grants, cert: str, key: str) -> str:
             f"    listen {g['port']} ssl;\n"
             f"    ssl_certificate {cert};\n"
             f"    ssl_certificate_key {key};\n"
+            f"    client_max_body_size {_MAX_BODY};\n"
             f"    location / {{\n"
             f"        proxy_pass http://{g['tunnel_ip']}:{g['router_port']};\n"
-            f"        proxy_set_header Host $host;\n"
             f"        proxy_http_version 1.1;\n"
+            f"        proxy_set_header Host $http_host;\n"
+            f"        proxy_set_header X-Real-IP $remote_addr;\n"
+            f"        proxy_set_header X-Forwarded-For "
+            f"$proxy_add_x_forwarded_for;\n"
+            f"        proxy_set_header X-Forwarded-Proto https;\n"
             f"        proxy_set_header Upgrade $http_upgrade;\n"
-            f'        proxy_set_header Connection "upgrade";\n'
+            f"        proxy_set_header Connection $mm_connection_upgrade;\n"
+            # WebFig polls for state. Buffering holds small responses back
+            # and makes the UI look stuck or stale.
+            f"        proxy_buffering off;\n"
+            f"        proxy_request_buffering off;\n"
+            # The documented symptom of proxying WebFig is being thrown back
+            # to the login page after roughly ninety seconds. That is the
+            # SEND and CONNECT timeouts, not the read one, which was the
+            # only one set here.
+            f"        proxy_connect_timeout 30s;\n"
+            f"        proxy_send_timeout 3600s;\n"
             f"        proxy_read_timeout 3600s;\n"
             f"    }}\n"
             f"}}")
-    return "\n".join(blocks) + ("\n" if blocks else "")
+    if not blocks:
+        return ""
+    return _UPGRADE_MAP + "\n" + "\n".join(blocks) + "\n"
 
 
 def render_nginx_stream(grants) -> str:

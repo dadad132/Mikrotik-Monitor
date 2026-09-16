@@ -112,6 +112,50 @@ try:
 finally:
     os.chmod(unreadable, 0o644)  # so cleanup can remove tmp/ afterward
 
+print("")
+print("WebFig proxying (the details that decide whether it actually works):")
+
+_g = [{"kind": "webfig", "device": "B1", "port": 9443,
+       "tunnel_ip": "10.10.1.1", "router_port": 80, "expires": 1.0}]
+_http = access.render_nginx_http(_g, "/c.pem", "/k.pem")
+
+# WebFig is NOT a WebSocket app -- it is plain HTTP POSTs to /jsproxy. Sending
+# "Connection: upgrade" on every request announces an upgrade that is not
+# happening, and invites RouterOS to close the connection.
+check("Connection: upgrade is sent only when the CLIENT asked for one, via a "
+      "map -- not hard-coded onto every request",
+      "$mm_connection_upgrade" in _http
+      and "map $http_upgrade $mm_connection_upgrade" in _http
+      and 'Connection "upgrade"' not in _http)
+
+# nginx caps a request body at 1 MB by default, so the page loads and the one
+# thing it was opened to do -- upload a .npk, restore a backup -- fails 413.
+check("uploads are allowed through: firmware, backups and certificates all "
+      "go through this proxy and none of them fit in nginx's 1 MB default",
+      "client_max_body_size" in _http)
+
+# The documented symptom of WebFig behind nginx is being thrown back to the
+# login page after about ninety seconds. That is the send and connect
+# timeouts, not the read one, which was the only one set.
+check("all three timeouts are set, not just the read one",
+      "proxy_read_timeout" in _http and "proxy_send_timeout" in _http
+      and "proxy_connect_timeout" in _http)
+
+check("responses are not buffered -- WebFig polls for state, and buffering "
+      "holds small replies back and makes the UI look stuck",
+      "proxy_buffering off" in _http)
+
+check("the router is told the original scheme and client, rather than seeing "
+      "every request as coming from the hub over plain http",
+      "X-Forwarded-Proto https" in _http and "X-Real-IP" in _http)
+
+check("with no grants the file is empty -- a dangling map with no server "
+      "behind it is just something else to go wrong",
+      access.render_nginx_http([], "/c.pem", "/k.pem") == "")
+
+check("a Winbox grant is never rendered into the http context by mistake",
+      "9443" in _http and "winbox" not in _http.lower())
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")
