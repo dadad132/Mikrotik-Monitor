@@ -950,7 +950,35 @@ PY
   if [[ ${DOM_OK} -eq 0 ]]; then
     log "HTTPS domain ready: https://${DOMAIN}"
     log "HTTP redirects to HTTPS automatically."
-    log "Cert auto-renews via certbot systemd timer."
+    # This line used to say "Cert auto-renews via certbot systemd timer"
+    # without anything having checked that such a timer exists or runs. A
+    # Let's Encrypt certificate lasts 90 days, Let's Encrypt no longer sends
+    # expiry warnings, and a renewal that silently stopped is invisible until
+    # every browser refuses the site at once. So: arm it, then verify it.
+    systemctl enable --now certbot.timer >/dev/null 2>&1 || true
+    RENEW_TIMER=""
+    for t in certbot.timer snap.certbot.renew.timer; do
+      if [[ "$(systemctl is-active "$t" 2>/dev/null)" == "active" ]]; then
+        RENEW_TIMER="$t"; break
+      fi
+    done
+    if [[ -n "${RENEW_TIMER}" ]]; then
+      log "Cert renewal is armed (${RENEW_TIMER})."
+    else
+      log "WARN: nothing is scheduled to renew the TLS certificate."
+      log "      It will simply expire in 90 days. Fix with:"
+      log "        sudo systemctl enable --now certbot.timer"
+    fi
+    if certbot renew --dry-run >/dev/null 2>&1; then
+      log "Renewal dry run passed, so the real one will work too."
+    else
+      log "WARN: 'certbot renew --dry-run' FAILED. Renewal will not happen."
+      log "      Run it by hand to see why: sudo certbot renew --dry-run"
+    fi
+    CERT_END="$(openssl x509 -enddate -noout \
+        -in "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" 2>/dev/null \
+        | cut -d= -f2)"
+    [[ -n "${CERT_END}" ]] && log "Certificate valid until ${CERT_END}."
   else
     log "WARN: domain setup failed. Check: cat ${DOMAIN_LOG}"
     log "      Make sure ${DOMAIN} DNS A record points to this server first."
@@ -1059,6 +1087,39 @@ EOF
 # Post-install: copy log, write status summary
 # ---------------------------------------------------------------------------
 cp "${LOG_FILE}" "${APP_DIR}/last-install.log" 2>/dev/null || true
+
+# Say what is actually present, rather than what was meant to be. Every
+# serious fault here has been something reported as done that was not.
+step "Checking what is actually installed"
+{
+  if [[ -s "${APP_DIR}/zoho-oauth.json" ]] \
+     && grep -q '"refresh_token"' "${APP_DIR}/zoho-oauth.json" 2>/dev/null; then
+    ZORG="$(grep -o '"organization_name"[^,]*' "${APP_DIR}/zoho-oauth.json" \
+            2>/dev/null | cut -d'"' -f4)"
+    log "Zoho credentials: present${ZORG:+ (${ZORG})}"
+    chown "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}/zoho-oauth.json" 2>/dev/null || true
+    chmod 600 "${APP_DIR}/zoho-oauth.json" 2>/dev/null || true
+  elif [[ -e "${APP_DIR}/zoho-oauth.json" ]]; then
+    log "WARN: ${APP_DIR}/zoho-oauth.json exists but holds no refresh token."
+    log "      Re-run: python3 tools/zoho_setup.py"
+  else
+    log "Zoho credentials: not set up (python3 tools/zoho_setup.py)"
+  fi
+
+  for C in /etc/letsencrypt/live/*/fullchain.pem; do
+    [[ -f "$C" ]] || continue
+    D="$(basename "$(dirname "$C")")"
+    E="$(openssl x509 -enddate -noout -in "$C" 2>/dev/null | cut -d= -f2)"
+    if [[ -n "$E" ]]; then
+      if openssl x509 -checkend 604800 -noout -in "$C" >/dev/null 2>&1; then
+        log "Certificate ${D}: valid until ${E}"
+      else
+        log "WARN: certificate ${D} expires within 7 days (${E})."
+        log "      sudo certbot renew --dry-run   # then: sudo certbot renew"
+      fi
+    fi
+  done
+} 2>/dev/null || true
 
 {
   echo "Date   : $(date)"

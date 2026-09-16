@@ -3128,8 +3128,64 @@ def _tunnel_health_rows(hub, peers_path):
 _RETENTION_DAYS_DEFAULT = 30
 
 
+def _adopt_zoho_file(auth, devices_db=""):
+    """Take over credentials written by tools/zoho_setup.py.
+
+    The setup tool exists because a server console has no clipboard. Having
+    used it, nobody should then have to re-enter the same values in a web
+    form -- and a credential sitting in a file the application never reads
+    is indistinguishable, from the dashboard, from not having set it up at
+    all. So: if the file has a refresh token and the settings do not, adopt
+    it. Settings already present always win; this never overwrites.
+    """
+    if auth is None:
+        return False
+    try:
+        if (auth.get_zoho() or {}).get("refresh_token"):
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    import json
+    roots = [os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
+    if devices_db:
+        roots.insert(0, os.path.dirname(os.path.abspath(devices_db)))
+    for root in roots:
+        path = os.path.join(root, "zoho-oauth.json")
+        try:
+            cfg = json.load(open(path, encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not cfg.get("refresh_token"):
+            continue
+        cfg.setdefault("days_before", 7)
+        cfg.setdefault("due_days", 7)
+        try:
+            auth.set_zoho(cfg)
+        except Exception:  # noqa: BLE001
+            log.exception("could not adopt %s", path)
+            return False
+        log.info("adopted Zoho credentials from %s (%s)", path,
+                 cfg.get("organization_name") or cfg.get("organization_id"))
+        return True
+    return False
+
+
+def _zoho_scopes() -> str:
+    """The exact scope string to paste into Zoho's Generate Code box.
+
+    Read from the module that uses it, so the page cannot drift out of step
+    with what the code actually asks for -- a scope missing from the token
+    fails much later, as an invoice that quietly never went out.
+    """
+    try:
+        from .zoho import SCOPES
+        return SCOPES
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _server_selfcheck(devices_db, metrics_db, access_cfg, smtp_cfg,
-                      retention_days=30):
+                      retention_days=30, zoho_cfg=None):
     """Run the server self-check for the Platform admin panel.
 
     Wrapped so a failing check can never take the page down: this is the
@@ -3147,7 +3203,8 @@ def _server_selfcheck(devices_db, metrics_db, access_cfg, smtp_cfg,
                            if (m or {}).get("pubkey"))
         return run_all(peers_path=peers_path, expected_peers=expected,
                        access_cfg=access_cfg, metrics_db=metrics_db or "",
-                       retention_days=retention_days, smtp_cfg=smtp_cfg)
+                       retention_days=retention_days, smtp_cfg=smtp_cfg,
+                       zoho_cfg=zoho_cfg)
     except Exception:  # noqa: BLE001
         log.exception("server self-check failed")
         return []
@@ -6400,6 +6457,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
     from .backup import backups_dir_for
     backups_dir = backups_dir_for(config_path=config_path, devices_db=devices_db)
     billing = None
+    # Credentials the setup tool wrote on the server are useless until the
+    # application reads them -- and from the dashboard, unread is identical
+    # to never set up.
+    try:
+        _adopt_zoho_file(auth, devices_db)
+    except Exception:  # noqa: BLE001 - never block startup on this
+        log.exception("could not check for Zoho credentials on disk")
+
     if billing_cfg.get("db"):
         from .billing import BillingStore
         billing = BillingStore(billing_cfg["db"])
@@ -6987,7 +7052,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             _tunnel_rows, _tunnel_err = _tunnel_panel(devices_db)
             _selfcheck = _server_selfcheck(
                 devices_db, metrics_db, access_cfg, smtp_settings,
-                _RETENTION_DAYS_DEFAULT)
+                _RETENTION_DAYS_DEFAULT,
+                zoho_cfg=auth.get_zoho() if auth else {})
             return self._send(200, _render_superadmin(
                 user, rows, backups, self._session()["csrf"],
                 msg=q.get("ok", [""])[0],
@@ -7003,6 +7069,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 selfcheck=_selfcheck,
                 yoco=auth.get_yoco() if auth else {},
                 invoiceninja=auth.get_invoiceninja() if auth else {},
+                zoho=auth.get_zoho() if auth else {},
+                zoho_scopes=_zoho_scopes(),
                 in_hook_url=(
                     ("https" if secure_cookies else "http") + "://"
                     + self.headers.get("Host", "")
@@ -7236,6 +7304,120 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._redirect("/superadmin?ok=" + quote(
                 f"Connected to Invoice Ninja ({who}). Renewal invoices go "
                 f"out {cur['days_before']} days before a packet lapses."))
+
+        def _post_zoho(self, user):
+            """Superadmin-only: connect Zoho Invoice, or disconnect it.
+
+            The whole OAuth exchange happens here rather than on a terminal,
+            because the values are long, the grant code expires in minutes
+            and is single-use, and a server console has no clipboard. Getting
+            one character wrong produces "invalid_client" -- the same error
+            as the wrong data centre -- so a typo costs another round trip
+            and another code.
+
+            The secret is write-only, like the Yoco keys: a blank box keeps
+            what is saved, so re-saving this panel to change the lead time
+            cannot silently wipe the credential and stop every renewal
+            invoice, a failure that would surface a month later as customers
+            who were never billed.
+            """
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if auth is None:
+                return self._redirect("/superadmin?error=" +
+                                      quote("Auth store is not enabled."))
+            from .zoho import exchange_code, ping, forget_tokens, ZohoError
+
+            cur = dict(auth.get_zoho() or {})
+            if flat.get("clear"):
+                forget_tokens(cur)
+                auth.set_zoho({})
+                log.warning("Zoho disconnected by %s", user.get("email", "?"))
+                return self._redirect("/superadmin?ok=" + quote(
+                    "Zoho disconnected. Renewal invoices will stop going "
+                    "out."))
+
+            cid = (flat.get("client_id") or "").strip()
+            if cid:
+                cur["client_id"] = cid
+            secret = (flat.get("client_secret") or "").strip()
+            if secret:
+                cur["client_secret"] = secret
+            for field, lo, hi, dflt in (("days_before", 1, 30, 7),
+                                        ("due_days", 1, 60, 7)):
+                try:
+                    cur[field] = min(hi, max(lo, int(flat.get(field) or dflt)))
+                except (TypeError, ValueError):
+                    cur[field] = dflt
+
+            code = (flat.get("code") or "").strip()
+            if not code:
+                # Saving settings on an already-connected account, or filling
+                # the first two boxes in before generating a code.
+                auth.set_zoho(cur)
+                if cur.get("refresh_token"):
+                    return self._redirect("/superadmin?ok=" + quote("Saved."))
+                return self._redirect("/superadmin?ok=" + quote(
+                    "Saved. Generate a grant code in the Zoho API console and "
+                    "paste it in to finish connecting."))
+
+            if not (cur.get("client_id") and cur.get("client_secret")):
+                return self._redirect("/superadmin?error=" + quote(
+                    "The client ID and secret are both needed as well as the "
+                    "code."))
+            try:
+                got = exchange_code(cur["client_id"], cur["client_secret"],
+                                    code)
+            except ZohoError as exc:
+                # Deliberately saved first: a failed exchange must not cost
+                # the two values that were typed correctly, or the next
+                # attempt starts from nothing again.
+                auth.set_zoho(cur)
+                return self._redirect("/superadmin?error=" + quote(str(exc)))
+
+            cur.update(got)
+            # A token that was issued is not yet a token the API accepts --
+            # a missing scope gives the first without the second, and the
+            # difference would otherwise surface as an invoice that never
+            # went out.
+            try:
+                from .zoho import organizations
+                orgs = organizations(cur)
+            except ZohoError as exc:
+                auth.set_zoho(cur)
+                return self._redirect("/superadmin?error=" + quote(
+                    f"Connected, but the API refused the token: {exc}"))
+            if orgs:
+                cur["organization_id"] = str(orgs[0].get("organization_id") or "")
+                cur["organization_name"] = str(orgs[0].get("name") or "")
+            auth.set_zoho(cur)
+            log.info("Zoho connected (%s) by %s",
+                     cur.get("organization_name", "?"), user.get("email", "?"))
+            return self._redirect("/superadmin?ok=" + quote(
+                f"Connected to Zoho Invoice "
+                f"({cur.get('organization_name') or 'organisation'}). "
+                f"Renewal invoices go out {cur['days_before']} days before a "
+                f"packet lapses."))
+
+        def _post_zoho_test(self, user):
+            """Superadmin-only: ask the API a real question, right now."""
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            from .zoho import ping, ZohoError
+            try:
+                who = ping(auth.get_zoho() if auth else {})
+            except ZohoError as exc:
+                return self._redirect("/superadmin?error=" + quote(str(exc)))
+            return self._redirect("/superadmin?ok=" + quote(
+                f"Zoho answered: {who}."))
 
         def _post_invoiceninja_run(self, user):
             """Superadmin-only: do the renewal/reconcile pass right now."""
@@ -10293,6 +10475,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_suspend(user, restore=True)
             if path == "/superadmin/yoco":
                 return self._post_superadmin_yoco(user)
+            if path == "/superadmin/zoho":
+                return self._post_zoho(user)
+            if path == "/superadmin/zoho/test":
+                return self._post_zoho_test(user)
+            if path == "/superadmin/zoho/run":
+                return self._post_invoiceninja_run(user)
             if path == "/superadmin/invoiceninja":
                 return self._post_invoiceninja(user)
             if path == "/superadmin/invoiceninja/run":

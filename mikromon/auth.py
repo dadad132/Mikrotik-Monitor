@@ -654,6 +654,22 @@ class AuthStore:
     def set_invoiceninja(self, cfg: dict) -> None:
         self.set_setting("invoiceninja", dict(cfg or {}))
 
+    def get_zoho(self) -> dict:
+        """Zoho Invoice connection settings, set once by a superadmin.
+
+        Holds the OAuth pair (`client_id`, `client_secret`) and the
+        `refresh_token` they were traded for, which does not expire --
+        access tokens are minted from it as needed and never stored.
+        `accounts_host` and `api_base` pin the data centre the account is
+        on; using another one fails in a way that reads like a bad secret.
+        `days_before` and `due_days` shape the renewal run. {} if never set.
+        """
+        d = self.get_setting("zoho")
+        return d if isinstance(d, dict) else {}
+
+    def set_zoho(self, cfg: dict) -> None:
+        self.set_setting("zoho", dict(cfg or {}))
+
     def set_nextdns(self, cfg: dict) -> None:
         self.set_setting("nextdns", cfg)
 

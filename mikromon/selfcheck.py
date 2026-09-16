@@ -300,6 +300,151 @@ def check_smtp(smtp_cfg):
         "Platform admin -> Email (SMTP) settings", warn=True)]
 
 
+def _cert_days_left(path):
+    """Days until this certificate expires, or None if it cannot be read.
+
+    Uses openssl rather than parsing X.509 by hand: it is already installed
+    (the installer uses it to make the fallback cert) and it is the same
+    answer the browser will reach.
+    """
+    rc, out, _ = _run(["openssl", "x509", "-enddate", "-noout", "-in", path])
+    if rc != 0 or "notAfter=" not in (out or ""):
+        return None
+    when = out.split("notAfter=", 1)[1].strip()
+    for fmt in ("%b %d %H:%M:%S %Y %Z", "%b %d %H:%M:%S %Y"):
+        try:
+            import calendar
+            import time as _t
+            return (calendar.timegm(_t.strptime(when, fmt)) - time.time()) / 86400
+        except ValueError:
+            continue
+    return None
+
+
+def _cert_paths(access_cfg):
+    """Every certificate this server actually serves."""
+    import glob
+    paths = []
+    cert = str((access_cfg or {}).get("tls_cert") or "").strip()
+    if cert:
+        paths.append(cert)
+    paths.extend(sorted(glob.glob("/etc/letsencrypt/live/*/fullchain.pem")))
+    seen = set()
+    return [p for p in paths if os.path.exists(p)
+            and not (p in seen or seen.add(p))]
+
+
+def check_tls_expiry(access_cfg=None, warn_days=21, critical_days=7):
+    """How long until the certificate stops working?
+
+    Let's Encrypt certificates last 90 days and are meant to renew
+    themselves. When that quietly stops, nothing says so until the browser
+    does -- and by then it is everybody's problem at once, including the
+    remote-access links and any router dialling in over HTTPS.
+
+    Let's Encrypt no longer emails expiry warnings, so if this server does
+    not look, nothing is looking.
+    """
+    out = []
+    for path in _cert_paths(access_cfg):
+        days = _cert_days_left(path)
+        name = os.path.basename(os.path.dirname(path)) or os.path.basename(path)
+        if days is None:
+            out.append(_finding(f"tls:{path}", False,
+                                f"Cannot read the certificate for {name}",
+                                path, f"sudo openssl x509 -noout -text -in {path}",
+                                warn=True))
+        elif days < 0:
+            out.append(_finding(
+                f"tls:{path}", False,
+                f"The certificate for {name} EXPIRED {abs(days):.0f} days ago",
+                "Browsers are refusing this site now.",
+                "sudo certbot renew --force-renewal && sudo systemctl reload nginx"))
+        elif days < critical_days:
+            out.append(_finding(
+                f"tls:{path}", False,
+                f"The certificate for {name} expires in {days:.0f} days",
+                "Renewal should have happened at 30 days and has not, so it "
+                "is not going to happen on its own before this runs out.",
+                "sudo certbot renew --dry-run   # then: sudo certbot renew"))
+        elif days < warn_days:
+            out.append(_finding(
+                f"tls:{path}", False,
+                f"The certificate for {name} expires in {days:.0f} days",
+                "Still time, but renewal normally happens at 30 days, so "
+                "something is already not working.",
+                "sudo certbot renew --dry-run", warn=True))
+        else:
+            out.append(_finding(f"tls:{path}", True,
+                                f"Certificate for {name} is good for "
+                                f"{days:.0f} more days"))
+    return out
+
+
+def check_cert_renewal():
+    """Is anything actually going to renew the certificate?
+
+    The installer used to print "Cert auto-renews via certbot systemd timer"
+    without ever asking whether that timer exists or runs. It is the same
+    shape as every other fault this system has had: a reassuring line of
+    output that nothing checked.
+    """
+    rc, _, _ = _run(["certbot", "--version"])
+    if rc is None:
+        return []                       # no certbot; nothing to say
+    for unit in ("certbot.timer", "snap.certbot.renew.timer"):
+        state = _unit_state(unit)
+        if state == "active":
+            return [_finding("tls:renew", True,
+                             f"Certificate renewal is armed ({unit})")]
+        if state and state != "inactive":
+            continue
+    return [_finding(
+        "tls:renew", False,
+        "Nothing is scheduled to renew the TLS certificate",
+        "Let's Encrypt certificates last 90 days. Without the timer they "
+        "simply run out, and the first sign is the browser refusing the "
+        "site.",
+        "sudo systemctl enable --now certbot.timer")]
+
+
+def check_zoho(app_dir="", settings=None):
+    """Are the Zoho credentials actually on this server, and usable?
+
+    Credentials that were set up correctly somewhere else are worth nothing
+    here. This says whether the refresh token exists, without ever printing
+    it.
+    """
+    cfg = dict(settings or {})
+    src = "settings"
+    if not cfg.get("refresh_token"):
+        app_dir = app_dir or os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(app_dir, "zoho-oauth.json")
+        if not os.path.exists(path):
+            return []                   # not set up; not a fault
+        src = path
+        try:
+            import json
+            cfg = json.load(open(path, encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return [_finding("zoho", False,
+                             "The Zoho credentials file cannot be read",
+                             f"{path}: {exc}",
+                             "python3 tools/zoho_setup.py")]
+    if not cfg.get("refresh_token"):
+        return [_finding(
+            "zoho", False, "Zoho is half set up: no refresh token",
+            f"Found in {src}, but without the refresh token nothing can "
+            f"authenticate. The grant code was probably never exchanged.",
+            "python3 tools/zoho_setup.py")]
+    org = str(cfg.get("organization_name") or cfg.get("organization_id") or "")
+    dc = str(cfg.get("accounts_host") or "")
+    return [_finding("zoho", True,
+                     f"Zoho credentials are present{f' for {org}' if org else ''}",
+                     f"{dc}  (from {os.path.basename(str(src))})")]
+
+
 def check_deployed_version(app_dir=""):
     """Is the code that is RUNNING the code that was last pulled?
 
@@ -342,7 +487,8 @@ def check_deployed_version(app_dir=""):
 
 
 def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
-            metrics_db="", retention_days=30, smtp_cfg=None, app_dir=""):
+            metrics_db="", retention_days=30, smtp_cfg=None,
+            app_dir="", zoho_cfg=None):
     """Every check, in the order a person would want to read them."""
     out = []
     for fn in (lambda: check_deployed_version(app_dir),
@@ -351,6 +497,9 @@ def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
                lambda: check_peers_dir(peers_path),
                lambda: check_peers_file(peers_path, expected_peers),
                lambda: check_access_host(access_cfg),
+               lambda: check_tls_expiry(access_cfg),
+               lambda: check_cert_renewal(),
+               lambda: check_zoho(app_dir, zoho_cfg),
                lambda: check_nginx(access_cfg),
                lambda: check_retention(metrics_db, retention_days),
                lambda: check_smtp(smtp_cfg)):

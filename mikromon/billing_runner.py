@@ -28,6 +28,7 @@ import logging
 import threading
 import time
 
+from . import zoho as _z
 from .billing import plan_by_name
 from .invoiceninja import (InvoiceNinjaError, create_invoice, email_invoice,
                            ensure_client, invoice_status)
@@ -42,18 +43,143 @@ _DEFAULT_DAYS_BEFORE = 7
 _DEFAULT_DUE_DAYS = 7
 
 
-def _cfg(auth) -> dict:
+class ProviderError(Exception):
+    """Whatever the invoicing system said, in one type the runner can catch."""
+
+
+class _Ninja:
+    """Invoice Ninja, reached with a static API token."""
+
+    name = "invoiceninja"
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.base, self.token = cfg["url"], cfg["token"]
+
+    def ensure_client(self, org_id, name, **kw):
+        try:
+            return ensure_client(self.base, self.token, org_id, name, **kw)
+        except InvoiceNinjaError as exc:
+            raise ProviderError(str(exc)) from exc
+
+    def create_invoice(self, client_id, *, description, amount, due_days,
+                       reference):
+        try:
+            return create_invoice(self.base, self.token, client_id,
+                                  description=description, amount=amount,
+                                  due_days=due_days, reference=reference)
+        except InvoiceNinjaError as exc:
+            raise ProviderError(str(exc)) from exc
+
+    def email_invoice(self, invoice_id):
+        try:
+            email_invoice(self.base, self.token, invoice_id)
+        except InvoiceNinjaError as exc:
+            raise ProviderError(str(exc)) from exc
+
+    def invoice_status(self, invoice_id):
+        try:
+            return invoice_status(self.base, self.token, invoice_id)
+        except InvoiceNinjaError as exc:
+            raise ProviderError(str(exc)) from exc
+
+
+class _Zoho:
+    """Zoho Invoice, reached with an OAuth refresh token.
+
+    Two shape differences are absorbed here rather than leaking upward:
+    Zoho wants an absolute due DATE where Invoice Ninja takes a number of
+    days, and it works in rands where this system counts in cents.
+    """
+
+    name = "zoho"
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+
+    def ensure_client(self, org_id, name, **kw):
+        try:
+            return _z.ensure_client(self.cfg, name, email=kw.get("email", ""),
+                                 phone=kw.get("phone", ""))
+        except _z.ZohoError as exc:
+            raise ProviderError(str(exc)) from exc
+
+    def create_invoice(self, client_id, *, description, amount, due_days,
+                       reference):
+        due = time.strftime("%Y-%m-%d",
+                            time.localtime(time.time() + due_days * 86400))
+        try:
+            return _z.create_invoice(self.cfg, client_id, description=description,
+                                  amount_cents=int(round(amount * 100)),
+                                  due_date=due, reference=reference)
+        except _z.ZohoError as exc:
+            raise ProviderError(str(exc)) from exc
+
+    def email_invoice(self, invoice_id):
+        try:
+            _z.email_invoice(self.cfg, invoice_id)
+        except _z.ZohoError as exc:
+            raise ProviderError(str(exc)) from exc
+
+    def invoice_status(self, invoice_id):
+        try:
+            return _z.invoice_status(self.cfg, invoice_id)
+        except _z.ZohoError as exc:
+            raise ProviderError(str(exc)) from exc
+
+
+def provider_from_cfg(cfg):
+    """The adapter for a settings dict, whichever provider it belongs to.
+
+    Callers that were handed a cfg should use it rather than going back to
+    the settings store: it is what they were given, and re-reading could
+    quietly act on a different provider than the caller meant.
+    """
+    cfg = cfg or {}
+    if cfg.get("refresh_token") and cfg.get("api_base"):
+        return _Zoho(cfg)
+    if cfg.get("url") and cfg.get("token"):
+        return _Ninja(cfg)
+    return None
+
+
+def provider_for(auth):
+    """Whichever invoicing system is connected, or None.
+
+    Zoho is preferred when both are: an OAuth connection is deliberate and
+    recent, where a stale Invoice Ninja URL can sit in settings for months
+    after anybody stopped using it.
+    """
+    if auth is None:
+        return None
     try:
-        return auth.get_invoiceninja() or {}
+        z = auth.get_zoho() or {}
     except Exception:  # noqa: BLE001
-        return {}
+        z = {}
+    if z.get("refresh_token") and z.get("api_base"):
+        return _Zoho(z)
+    try:
+        n = auth.get_invoiceninja() or {}
+    except Exception:  # noqa: BLE001
+        n = {}
+    if n.get("url") and n.get("token"):
+        return _Ninja(n)
+    return None
+
+
+def _cfg(auth) -> dict:
+    """The settings of whichever provider is connected. {} if none."""
+    p = provider_for(auth)
+    return dict(p.cfg) if p else {}
 
 
 def _enabled(cfg: dict) -> bool:
-    return bool(cfg.get("url") and cfg.get("token"))
+    return bool((cfg.get("url") and cfg.get("token"))
+                or cfg.get("refresh_token"))
 
 
-def raise_due_invoices(billing, auth, cfg, now: float | None = None) -> int:
+def raise_due_invoices(billing, auth, cfg, now: float | None = None,
+                       provider=None) -> int:
     """Invoice every company whose packet is about to lapse. Returns how many.
 
     The invoice is for the packet they are ON -- this is a renewal, not an
@@ -62,7 +188,9 @@ def raise_due_invoices(billing, auth, cfg, now: float | None = None) -> int:
     they agreed to would be a genuinely serious thing to get wrong.
     """
     now = now if now is not None else time.time()
-    base, token = cfg["url"], cfg["token"]
+    prov = provider or provider_from_cfg(cfg) or provider_for(auth)
+    if prov is None:
+        return 0
     days_before = float(cfg.get("days_before") or _DEFAULT_DAYS_BEFORE)
     due_days = int(cfg.get("due_days") or _DEFAULT_DUE_DAYS)
     raised = 0
@@ -91,34 +219,34 @@ def raise_due_invoices(billing, auth, cfg, now: float | None = None) -> int:
         to = owner or (emails[0] if emails else "")
         amount = float(plan["price_zar"])
         try:
-            client_id = ensure_client(
-                base, token, org_id, name, email=to,
+            client_id = prov.ensure_client(
+                org_id, name, email=to,
                 address=org.get("address", ""), phone=org.get("phone", ""),
                 vat=org.get("vat_number", ""))
             from .billing import payment_reference
             when = time.strftime("%d %B %Y", time.localtime(period_end))
-            inv = create_invoice(
-                base, token, client_id,
+            inv = prov.create_invoice(
+                client_id,
                 description=(f"Router monitoring — up to {plan['devices']} "
                              f"devices. Renewal for the period starting "
                              f"{when}."),
                 amount=amount, due_days=due_days,
                 reference=payment_reference(org_id, name))
-        except InvoiceNinjaError as exc:
+        except ProviderError as exc:
             log.error("renewal: could not invoice org %s (%s): %s",
                       org_id, name, exc)
             continue
         order_id = billing.create_order(
             org_id, plan["name"], int(round(amount * 100)), months=1,
-            provider="invoiceninja", due=period_end)
+            provider=prov.name, due=period_end)
         billing.set_order_external(order_id, inv["id"])
         raised += 1
         log.info("renewal: invoice %s (%s) raised for org %s (%s), R%.2f, "
                  "packet lapses %s", inv["number"], inv["id"], org_id, name,
                  amount, time.strftime("%Y-%m-%d", time.localtime(period_end)))
         try:
-            email_invoice(base, token, inv["id"])
-        except InvoiceNinjaError as exc:
+            prov.email_invoice(inv["id"])
+        except ProviderError as exc:
             # The invoice exists and will be reconciled either way; only the
             # email failed, and Invoice Ninja's own reminders still run.
             log.error("renewal: invoice %s was raised but could not be "
@@ -126,33 +254,37 @@ def raise_due_invoices(billing, auth, cfg, now: float | None = None) -> int:
     return raised
 
 
-def reconcile_payments(billing, cfg, only_invoice: str = "") -> int:
+def reconcile_payments(billing, cfg, only_invoice: str = "",
+                       provider=None, auth=None) -> int:
     """Ask Invoice Ninja which open invoices have been settled. Returns how many.
 
     `only_invoice` narrows it to one, which is what a webhook does: the
     callback says "look at this one now" rather than being believed.
     """
-    base, token = cfg["url"], cfg["token"]
+    prov = provider or provider_from_cfg(cfg) or provider_for(auth)
+    if prov is None:
+        return 0
     applied = 0
-    orders = billing.open_orders(provider="invoiceninja")
+    orders = billing.open_orders(provider=prov.name)
     if only_invoice:
         orders = [o for o in orders if o.get("external_id") == only_invoice]
     for order in orders:
         inv_id = order.get("external_id") or ""
         try:
-            st = invoice_status(base, token, inv_id)
-        except InvoiceNinjaError as exc:
+            st = prov.invoice_status(inv_id)
+        except ProviderError as exc:
             log.warning("reconcile: could not read invoice %s: %s", inv_id, exc)
             continue
         if st.get("is_deleted"):
-            log.info("reconcile: invoice %s was deleted in Invoice Ninja; "
+            log.info("reconcile: invoice %s was deleted at the provider; "
                      "cancelling order %s", inv_id, order["id"])
             continue
         if not st.get("paid"):
             continue
         # mark_order_paid returns True only the first time, so a webhook and
         # the timer both finding the same payment applies it once.
-        if not billing.mark_order_paid(order["id"], f"in:{inv_id}"):
+        if not billing.mark_order_paid(order["id"],
+                                       f"{prov.name[:2]}:{inv_id}"):
             continue
         billing.apply_paid_order(order)
         applied += 1
@@ -164,16 +296,17 @@ def reconcile_payments(billing, cfg, only_invoice: str = "") -> int:
 
 def run_once(billing, auth, now: float | None = None) -> tuple:
     """One pass of both jobs. Returns (invoices_raised, payments_applied)."""
-    cfg = _cfg(auth)
-    if not _enabled(cfg) or billing is None:
+    prov = provider_for(auth)
+    if prov is None or billing is None:
         return (0, 0)
+    cfg = prov.cfg
     raised = applied = 0
     try:
-        applied = reconcile_payments(billing, cfg)
+        applied = reconcile_payments(billing, cfg, provider=prov)
     except Exception:  # noqa: BLE001 — never let one pass kill the thread
         log.exception("reconcile pass failed")
     try:
-        raised = raise_due_invoices(billing, auth, cfg, now=now)
+        raised = raise_due_invoices(billing, auth, cfg, now=now, provider=prov)
     except Exception:  # noqa: BLE001
         log.exception("renewal invoicing pass failed")
     return (raised, applied)

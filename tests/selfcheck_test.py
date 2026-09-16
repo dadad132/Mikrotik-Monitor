@@ -297,6 +297,104 @@ check("the question is asked by run_all, not left for somebody to remember",
       any(x["id"] == "version"
           for x in sc.run_all(app_dir=vd, smtp_cfg={"host": "x"})))
 
+print("\nThe certificate, which nobody is warned about any more")
+
+# Let's Encrypt stopped sending expiry emails, and certificates last 90 days.
+# If this server does not look, nothing looks -- and the first sign is every
+# browser refusing the site on the same morning.
+_rr, _rcert = sc._run, sc._cert_days_left
+try:
+    sc._cert_paths = lambda cfg: ["/etc/letsencrypt/live/x.co.za/fullchain.pem"]
+
+    sc._cert_days_left = lambda p: 60.0
+    f = one(sc.check_tls_expiry({}), "tls:/etc/letsencrypt/live/x.co.za/fullchain.pem")
+    check("a certificate with months left passes quietly, naming the days",
+          f["ok"] and "60" in f["title"])
+
+    sc._cert_days_left = lambda p: 14.0
+    f = sc.check_tls_expiry({})[0]
+    check("two weeks out is a WARNING, not a failure: renewal happens at 30 "
+          "days, so something has already stopped working",
+          not f["ok"] and f["warn"] and "x.co.za" in f["title"])
+
+    sc._cert_days_left = lambda p: 3.0
+    f = sc.check_tls_expiry({})[0]
+    check("three days out stops being a warning -- it will not fix itself "
+          "now", not f["ok"] and not f["warn"])
+    check("...and says so, rather than leaving the reader to infer it",
+          "not going to happen on its own" in f["detail"])
+
+    sc._cert_days_left = lambda p: -2.0
+    f = sc.check_tls_expiry({})[0]
+    check("an already-expired certificate says browsers are refusing the "
+          "site NOW, in the present tense",
+          not f["ok"] and "EXPIRED" in f["title"]
+          and "refusing this site now" in f["detail"])
+
+    sc._cert_days_left = lambda p: None
+    f = sc.check_tls_expiry({})[0]
+    check("a certificate that cannot be read is reported as unread, not as "
+          "fine and not as expired", not f["ok"] and "Cannot read" in f["title"])
+finally:
+    sc._run, sc._cert_days_left = _rr, _rcert
+    del sc._cert_paths
+
+print("\nWhether anything will renew it")
+
+_rs = sc._unit_state
+try:
+    sc._run = lambda cmd, timeout=6: (0, "certbot 2.9", "")
+    sc._unit_state = lambda u: "active" if u == "certbot.timer" else ""
+    check("an armed timer passes and names it",
+          sc.check_cert_renewal()[0]["ok"])
+
+    sc._unit_state = lambda u: ("active" if u == "snap.certbot.renew.timer"
+                                else "inactive")
+    check("the snap timer counts too -- certbot installs both ways and only "
+          "one of them is called certbot.timer",
+          sc.check_cert_renewal()[0]["ok"])
+
+    sc._unit_state = lambda u: "inactive"
+    f = sc.check_cert_renewal()[0]
+    check("no timer at all is a real finding: the installer used to PRINT "
+          "that renewal was handled without anything having checked",
+          not f["ok"] and "Nothing is scheduled" in f["title"])
+    check("...and gives the one command that arms it",
+          "enable --now certbot.timer" in f["fix"])
+
+    sc._run = lambda cmd, timeout=6: (None, "", "not installed")
+    check("a server without certbot says nothing -- it may not use "
+          "Let's Encrypt at all", sc.check_cert_renewal() == [])
+finally:
+    sc._run, sc._unit_state = _rr, _rs
+
+print("\nAre the Zoho credentials actually on THIS server?")
+
+zd = tempfile.mkdtemp()
+check("no credentials anywhere is not a fault -- it is a feature nobody has "
+      "switched on", sc.check_zoho(zd) == [])
+
+f = one(sc.check_zoho("", {"refresh_token": "rt", "organization_name": "EasyMikrotik",
+                           "accounts_host": "accounts.zoho.eu"}), "zoho")
+check("settings holding a refresh token pass, naming the organisation",
+      f["ok"] and "EasyMikrotik" in f["title"])
+
+open(os.path.join(zd, "zoho-oauth.json"), "w").write(
+    '{"refresh_token": "rt", "organization_name": "EasyMikrotik"}')
+check("credentials written by the setup tool are found on disk, so work done "
+      "on the server shows up on the dashboard instead of looking like it "
+      "never happened", one(sc.check_zoho(zd), "zoho")["ok"])
+
+open(os.path.join(zd, "zoho-oauth.json"), "w").write('{"client_id": "1000.x"}')
+f = one(sc.check_zoho(zd), "zoho")
+check("a half-finished setup -- client id but no refresh token -- is called "
+      "out, because it looks identical to a finished one from the outside",
+      not f["ok"] and "half set up" in f["title"])
+
+open(os.path.join(zd, "zoho-oauth.json"), "w").write("{not json")
+check("an unreadable credentials file is reported rather than skipped",
+      not one(sc.check_zoho(zd), "zoho")["ok"])
+
 print("\nWhat the panel shows")
 
 _mixed = [sc._finding("fine", True, "fine"),

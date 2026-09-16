@@ -1223,6 +1223,111 @@ def _yoco_clear_form(csrf: str) -> str:
         f'</button></form>')
 
 
+def _zoho_box(cfg, csrf: str, scopes: str = "") -> str:
+    """Superadmin setting: connect Zoho Invoice, in three pastes.
+
+    Written for somebody doing this once, probably annoyed, quite possibly
+    on their second grant code because the first one expired while they read
+    the instructions. So the steps are on the page rather than in a document,
+    in the order they have to happen, and the field that expires is last.
+    """
+    c = cfg or {}
+    live = bool(str(c.get("refresh_token") or "").strip())
+    org_name = str(c.get("organization_name") or "")
+    org_id = str(c.get("organization_id") or "")
+    dc = str(c.get("accounts_host") or "")
+    days = int(c.get("days_before") or 7)
+    due = int(c.get("due_days") or 7)
+    has_secret = bool(str(c.get("client_secret") or "").strip())
+    cid = str(c.get("client_id") or "")
+
+    if live:
+        state = (f'<p style="margin:0 0 10px;font-size:12px;padding:8px 10px;'
+                 f'border-radius:6px;background:rgba(22,163,74,0.12);'
+                 f'color:#15803d">&#10003; <b>Connected</b> to '
+                 f'<b>{esc(org_name or org_id)}</b> on {esc(dc)}. Each '
+                 f'company is invoiced <b>{days} days</b> before its packet '
+                 f'lapses, payable within {due}. When Zoho records the '
+                 f'payment the packet simply carries on.</p>')
+    else:
+        state = ('<p class="muted" style="margin:0 0 10px;font-size:12px">'
+                 'Not connected. No renewal invoices are going out.</p>')
+
+    steps = ('' if live else
+             f'<ol style="font-size:12px;line-height:1.7;margin:0 0 12px;'
+             f'padding-left:20px">'
+             f'<li>At <b>api-console.zoho.com</b>, add a client of type '
+             f'<b>Self Client</b>. Copy the Client ID and Client Secret into '
+             f'the first two boxes below.</li>'
+             f'<li>On its <b>Generate Code</b> tab, paste these scopes '
+             f'exactly &mdash; <b>commas, no spaces</b>, or Zoho rejects the '
+             f'lot as an invalid scope:<br>'
+             f'<code style="font-size:11px;word-break:break-all">'
+             f'{esc(scopes)}</code></li>'
+             f'<li>Choose <b>10 minutes</b>, pick your organisation, and copy '
+             f'the code into the last box. It is single-use and short-lived, '
+             f'so generate it <b>last</b> &mdash; if it expires, the first '
+             f'two boxes are remembered and you only paste the code again.'
+             f'</li></ol>')
+
+    code_field = ('' if live else
+                  f'<label style="grid-column:1/-1">Grant code '
+                  f'<span class="muted">(expires in minutes)</span><br>'
+                  f'<input name="code" placeholder="1000.xxxx.yyyy" '
+                  f'style="width:100%"></label>')
+
+    run = ('' if not live else
+           f'<form method="POST" action="/superadmin/zoho/run" '
+           f'style="margin-top:8px;display:inline">'
+           f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+           f'<button class="btn ghost" type="submit">Run the billing pass '
+           f'now</button></form> ')
+    test = ('' if not live else
+            f'<form method="POST" action="/superadmin/zoho/test" '
+            f'style="margin-top:8px;display:inline">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<button class="btn ghost" type="submit">Test connection'
+            f'</button></form> ')
+    disconnect = ('' if not live else
+                  f'<form method="POST" action="/superadmin/zoho" '
+                  f'style="margin-top:8px;display:inline" onsubmit="return '
+                  f'confirm(&#39;Disconnect Zoho? Renewal invoices stop going '
+                  f'out, and packets will lapse with nothing having been '
+                  f'sent.&#39;)">'
+                  f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+                  f'<input type="hidden" name="clear" value="1">'
+                  f'<button class="btn ghost" type="submit">Disconnect'
+                  f'</button></form>')
+
+    return (
+        f'<div class="box"><h2>Renewal invoicing (Zoho Invoice)</h2>'
+        f'{state}{steps}'
+        f'<form method="POST" action="/superadmin/zoho">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<div style="display:grid;grid-template-columns:'
+        f'repeat(auto-fit,minmax(240px,1fr));gap:10px">'
+        f'<label>Client ID<br><input name="client_id" '
+        f'value="{esc(cid)}" placeholder="1000.XXXXXXXX" '
+        f'style="width:100%"></label>'
+        f'<label>Client Secret<br><input name="client_secret" '
+        f'type="password" placeholder='
+        f'"{"saved - leave blank to keep" if has_secret else "from the API console"}" '
+        f'style="width:100%"></label>'
+        f'<label>Invoice this many days before it lapses<br>'
+        f'<input name="days_before" type="number" min="1" max="30" '
+        f'value="{days}" style="width:100%"></label>'
+        f'<label>Payable within (days)<br>'
+        f'<input name="due_days" type="number" min="1" max="60" '
+        f'value="{due}" style="width:100%"></label>'
+        f'{code_field}'
+        f'</div>'
+        f'<div style="margin-top:10px"><button class="btn" type="submit">'
+        f'{"Save" if live else "Connect"}</button></div>'
+        f'</form>'
+        f'<div>{test}{run}{disconnect}</div>'
+        f'</div>')
+
+
 def _invoiceninja_box(cfg, csrf: str, hook_url: str = "") -> str:
     """Superadmin setting: connect Invoice Ninja, and say what it will do.
 
@@ -1757,7 +1862,8 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        router_count: int = 0, hub_pubkey: str = "",
                        regions=None, nextdns=None, quotes=None,
                        yoco=None, yoco_hook_url: str = "",
-                       invoiceninja=None,
+                       invoiceninja=None, zoho=None,
+                       zoho_scopes="",
                        in_hook_url: str = "",
                        tunnel_rows=None,
                        tunnel_err: str = "",
@@ -1936,6 +2042,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
              f'{_billing_contact_box(billing_contact, csrf)}'
              f'{_yoco_box(yoco, csrf, yoco_hook_url)}'
              f'{_invoiceninja_box(invoiceninja, csrf, in_hook_url)}'
+             f'{_zoho_box(zoho, csrf, zoho_scopes)}'
              f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf, hub_pubkey)}'
              f'{_regions_box(regions or [], csrf)}'
              f'{_nextdns_settings_box(nextdns or {}, csrf)}'
