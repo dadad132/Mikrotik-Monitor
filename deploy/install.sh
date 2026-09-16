@@ -733,11 +733,29 @@ PY
     systemctl enable --now easymikrotik-access-reload.path
     systemctl enable --now easymikrotik-access-reload.timer
 
+    # Two narrow sudo rules for the web service, both read-only-ish and both
+    # scoped to one command:
+    #
+    #   * start the reload unit, so opening remote access applies IMMEDIATELY
+    #     and the dashboard can report the outcome, instead of writing a file
+    #     and trusting a chain it cannot see. The unit was failing on every
+    #     trigger from the day this shipped and nothing said so.
+    #   * read WireGuard state, which is the one fact that separates "this
+    #     router's key is wrong" from "its packets never arrive" -- two
+    #     problems with opposite fixes that look identical without it.
+    cat > /etc/sudoers.d/mikromon-access <<SUDO
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl start easymikrotik-access-reload.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/wg show *
+SUDO
+    chmod 440 /etc/sudoers.d/mikromon-access
+    visudo -cf /etc/sudoers.d/mikromon-access >/dev/null       || rm -f /etc/sudoers.d/mikromon-access
+
     if command -v ufw >/dev/null 2>&1; then
       ufw allow 20000:24999/tcp comment 'easymikrotik WebFig'
       ufw allow 25000:29999/tcp comment 'easymikrotik Winbox'
     fi
     nginx -t && { systemctl reload nginx || systemctl restart nginx; }
+    cd "${APP_DIR}"
     "${APP_DIR}/.venv/bin/python" -m mikromon access-apply -c "${CONFIG_FILE}"
   ) >"${ACCESS_LOG}" 2>&1
   if [ $? -eq 0 ]; then

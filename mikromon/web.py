@@ -8577,10 +8577,48 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if not tunnel_ip:
                 return self._send(400, "this device has no hub tunnel yet")
             try:
-                store.open(name, kind, tunnel_ip, ttl=self._access_ttl())
+                g = store.open(name, kind, tunnel_ip, ttl=self._access_ttl())
             except (ValueError, RuntimeError, OSError) as exc:
                 return self._send(400, f"Error: {exc}")
+            # Writing the grant is only half of it. Ask for the apply now and
+            # wait briefly for the port, rather than trusting a chain whose
+            # every link is invisible from here.
+            err = self._apply_access_now(g)
+            if err:
+                log.warning("remote access for %r was granted but the port "
+                            "did not open: %s", name, err)
             return self._redirect(f"/device?name={q}")
+
+        def _apply_access_now(self, grant, wait: float = 6.0) -> str:
+            """Trigger the reload unit and wait for the port. "" when it works.
+
+            The web service is not root, so the work still happens in
+            easymikrotik-access-reload.service; this only asks systemd to run
+            it NOW instead of waiting for the .path unit to notice. Without
+            permission to do that it does nothing and returns "", because the
+            .path unit and the once-a-minute timer are still in place -- the
+            page will simply tell the reader if the port never opens.
+            """
+            import subprocess
+            import time as _t
+            port = (grant or {}).get("port")
+            if not port:
+                return ""
+            if _port_is_listening(port, timeout=0.5):
+                return ""
+            try:
+                subprocess.run(
+                    ["sudo", "-n", "systemctl", "start",
+                     "easymikrotik-access-reload.service"],
+                    capture_output=True, text=True, timeout=20)
+            except Exception:  # noqa: BLE001 — not permitted, or no systemd
+                pass
+            deadline = _t.time() + wait
+            while _t.time() < deadline:
+                if _port_is_listening(port, timeout=0.5):
+                    return ""
+                _t.sleep(0.4)
+            return f"nothing is listening on port {port}"
 
         def _device_confirm_post(self, flat, user):
             """Approve a safe-mode change: connect and cancel the pending
