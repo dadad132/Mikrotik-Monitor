@@ -498,16 +498,50 @@ class BillingStore:
         # is_locked() is False for this state, so stay consistent with it.
         return "none"
 
-    def set_plan(self, org_id: int, plan_name: str) -> None:
+    def set_plan(self, org_id: int, plan_name: str, months: int = 1,
+                 period_end: float | None = None) -> None:
         """Superadmin MANUALLY activates a paid plan for a company (payment
         handled off-platform, e.g. EFT/manual). Sets the device cap from the
-        plan and marks the org active with no grace deadline."""
+        plan and marks the org active with no grace deadline.
+
+        It also sets a paid-up date, which it did not used to. Renewal
+        invoicing only considers companies with one, so an account activated
+        by hand looked perfectly correct on the Billing page -- active, right
+        packet, right device cap -- and was never invoiced again, for as long
+        as it existed. Nothing could report that, because nothing was wrong
+        with it except an absence.
+
+        An existing date in the future is kept: re-saving a packet to correct
+        a device cap must not silently move somebody's paid-up date, in
+        either direction.
+        """
         plan = plan_by_name(plan_name)
         if plan is None:
             raise ValueError(f"Unknown plan: {plan_name!r}")
+        end = period_end
+        if end is None:
+            now = time.time()
+            current = float((self.get(org_id) or {}).get(
+                "current_period_end") or 0.0)
+            end = current if current > now else now + months * 30 * 86400
         self._upsert(org_id, status="active", plan=plan_name,
                      device_limit=plan["devices"], grace_period_end=None,
-                     pf_token=None)
+                     current_period_end=float(end), pf_token=None)
+
+    def orgs_never_invoiced(self) -> list:
+        """Companies on a priced packet with no paid-up date.
+
+        They are invisible to renewal invoicing: it selects on
+        current_period_end, so a NULL there means this company is never
+        billed and nothing anywhere says so.
+        """
+        rows = self.db.execute(
+            "SELECT org_id, plan FROM billing "
+            "WHERE current_period_end IS NULL "
+            "AND plan IS NOT NULL AND plan != '' "
+            "AND status IN ('active','grace')").fetchall()
+        return [{"org_id": r[0], "plan": r[1]} for r in rows
+                if plan_by_name(r[1]) is not None]
 
     # --- orders (a packet somebody is paying for) --------------------------
 

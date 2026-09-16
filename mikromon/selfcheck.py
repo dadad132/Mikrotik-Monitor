@@ -408,6 +408,56 @@ def check_cert_renewal():
         "sudo systemctl enable --now certbot.timer")]
 
 
+def check_billing_ready(billing_db="", provider_connected=None):
+    """Companies on a paid packet that will never be invoiced.
+
+    Renewal invoicing selects on the paid-up date, so a company without one
+    is skipped every pass. Activating a packet by hand used to leave it
+    unset, which produced an account that is correct in every visible way --
+    active, right packet, right device cap -- and silently never billed.
+
+    This is the only fault here whose symptom is money not arriving, so it
+    is worth asking about on a page somebody already looks at.
+    """
+    if not billing_db or not os.path.exists(billing_db):
+        return []
+    import sqlite3
+    try:
+        con = sqlite3.connect(f"file:{billing_db}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "SELECT org_id, plan FROM billing "
+                "WHERE current_period_end IS NULL "
+                "AND plan IS NOT NULL AND plan != '' "
+                "AND plan != 'unlimited' "
+                "AND status IN ('active','grace')").fetchall()
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001 — no billing table yet is not a fault
+        return []
+    out = []
+    if rows:
+        who = ", ".join(f"company {r[0]} ({r[1]})" for r in rows[:5])
+        out.append(_finding(
+            "billing:never", False,
+            f"{len(rows)} paid company(ies) will never be invoiced",
+            f"{who}. They are on a priced packet with no paid-up date, and "
+            f"renewal invoicing only considers companies that have one. "
+            f"Nothing else about these accounts looks wrong.",
+            "Platform admin -> Billing -> re-save the packet for each"))
+    if provider_connected is False:
+        out.append(_finding(
+            "billing:provider", False,
+            "Nothing is connected to send invoices",
+            "Packets will lapse into grace and then suspension with no "
+            "invoice ever having gone out.",
+            "Platform admin -> Renewal invoicing", warn=True))
+    if not out:
+        out.append(_finding("billing:never", True,
+                            "Every paid company has a renewal date"))
+    return out
+
+
 def check_zoho(app_dir="", settings=None):
     """Are the Zoho credentials actually on this server, and usable?
 
@@ -488,7 +538,8 @@ def check_deployed_version(app_dir=""):
 
 def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
             metrics_db="", retention_days=30, smtp_cfg=None,
-            app_dir="", zoho_cfg=None):
+            app_dir="", zoho_cfg=None, billing_db="",
+            provider_connected=None):
     """Every check, in the order a person would want to read them."""
     out = []
     for fn in (lambda: check_deployed_version(app_dir),
@@ -500,6 +551,8 @@ def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
                lambda: check_tls_expiry(access_cfg),
                lambda: check_cert_renewal(),
                lambda: check_zoho(app_dir, zoho_cfg),
+               lambda: check_billing_ready(billing_db,
+                                           provider_connected),
                lambda: check_nginx(access_cfg),
                lambda: check_retention(metrics_db, retention_days),
                lambda: check_smtp(smtp_cfg)):

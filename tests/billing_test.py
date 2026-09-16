@@ -360,6 +360,55 @@ check("the device count is deliberately NOT in the reference -- it changes as "
       payment_reference(42, "My IT Africa") == "MYITAFRICA-0042")
 
 print()
+print("")
+print("A packet activated by hand is actually billed:")
+
+# set_plan is the path a superadmin uses to move somebody off free and onto a
+# paid packet. It used to leave current_period_end NULL -- and renewal
+# invoicing selects on exactly that, so the company was never invoiced again,
+# for as long as it existed. Every visible thing about the account was right:
+# active, correct packet, correct device cap. Only an absence was wrong, and
+# absences are what nothing reports.
+_bd = tempfile.mkdtemp()
+_bs = billing.BillingStore(os.path.join(_bd, "hand.db"))
+_plan = billing.PLANS[0]["name"]
+_bs.set_plan(4242, _plan)
+_row = _bs.get(4242)
+
+check("activating a packet by hand gives the company a paid-up date",
+      (_row.get("current_period_end") or 0) > time.time())
+check("...roughly a month out, not some arbitrary distance",
+      25 < ((_row["current_period_end"] - time.time()) / 86400) < 35)
+check("...and the renewal run can actually see it, which is the entire "
+      "point and what was silently untrue before",
+      4242 in [o["org_id"] for o in _bs.orgs_due_for_renewal(40)])
+check("it is not invoiced YET -- a month away is not seven days away",
+      4242 not in [o["org_id"] for o in _bs.orgs_due_for_renewal(7)])
+
+_was = _bs.get(4242)["current_period_end"]
+_bs.set_plan(4242, _plan)
+check("re-saving the packet leaves the paid-up date exactly where it was: "
+      "correcting a device cap must never move somebody's renewal date, in "
+      "either direction", _bs.get(4242)["current_period_end"] == _was)
+
+_past = time.time() - 86400
+_bs.set_plan(4243, _plan, period_end=_past)
+_bs.set_plan(4243, _plan)
+check("an EXPIRED date is replaced rather than preserved, so a lapsed "
+      "account reactivated by hand starts a fresh period",
+      _bs.get(4243)["current_period_end"] > time.time())
+
+_bs.set_plan(4244, _plan, months=3)
+check("a longer period can be granted for somebody who paid up front",
+      80 < ((_bs.get(4244)["current_period_end"] - time.time()) / 86400) < 95)
+
+check("nothing is left in the never-invoiced state", _bs.orgs_never_invoiced() == [])
+
+_bs.set_free(4242)
+check("putting a company back on free takes it out of the renewal run "
+      "rather than invoicing somebody who is not paying",
+      4242 not in [o["org_id"] for o in _bs.orgs_due_for_renewal(400)])
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

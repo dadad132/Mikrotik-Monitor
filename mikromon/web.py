@@ -3170,6 +3170,15 @@ def _adopt_zoho_file(auth, devices_db=""):
     return False
 
 
+def _invoicing_connected(auth) -> bool:
+    """Is anything able to send an invoice? None of the callers care which."""
+    try:
+        from .billing_runner import provider_for
+        return provider_for(auth) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _zoho_scopes() -> str:
     """The exact scope string to paste into Zoho's Generate Code box.
 
@@ -3185,7 +3194,8 @@ def _zoho_scopes() -> str:
 
 
 def _server_selfcheck(devices_db, metrics_db, access_cfg, smtp_cfg,
-                      retention_days=30, zoho_cfg=None):
+                      retention_days=30, zoho_cfg=None, billing_db="",
+                      provider_connected=None):
     """Run the server self-check for the Platform admin panel.
 
     Wrapped so a failing check can never take the page down: this is the
@@ -3204,7 +3214,8 @@ def _server_selfcheck(devices_db, metrics_db, access_cfg, smtp_cfg,
         return run_all(peers_path=peers_path, expected_peers=expected,
                        access_cfg=access_cfg, metrics_db=metrics_db or "",
                        retention_days=retention_days, smtp_cfg=smtp_cfg,
-                       zoho_cfg=zoho_cfg)
+                       zoho_cfg=zoho_cfg, billing_db=billing_db,
+                       provider_connected=provider_connected)
     except Exception:  # noqa: BLE001
         log.exception("server self-check failed")
         return []
@@ -7053,7 +7064,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             _selfcheck = _server_selfcheck(
                 devices_db, metrics_db, access_cfg, smtp_settings,
                 _RETENTION_DAYS_DEFAULT,
-                zoho_cfg=auth.get_zoho() if auth else {})
+                zoho_cfg=auth.get_zoho() if auth else {},
+                billing_db=billing_cfg.get("db", "") if billing else "",
+                provider_connected=_invoicing_connected(auth))
             return self._send(200, _render_superadmin(
                 user, rows, backups, self._session()["csrf"],
                 msg=q.get("ok", [""])[0],

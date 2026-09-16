@@ -395,6 +395,47 @@ open(os.path.join(zd, "zoho-oauth.json"), "w").write("{not json")
 check("an unreadable credentials file is reported rather than skipped",
       not one(sc.check_zoho(zd), "zoho")["ok"])
 
+print("\nCompanies that would never be invoiced")
+
+bdb = os.path.join(d, "billing.db")
+con = sqlite3.connect(bdb)
+con.execute("CREATE TABLE billing (org_id INTEGER PRIMARY KEY, plan TEXT,"
+            " status TEXT, current_period_end REAL)")
+con.execute("INSERT INTO billing VALUES (1, 'd5', 'active', ?)",
+            (time.time() + 86400 * 20,))
+con.commit()
+check("a paid company with a renewal date passes",
+      one(sc.check_billing_ready(bdb), "billing:never")["ok"])
+
+con.execute("INSERT INTO billing VALUES (2, 'd5', 'active', NULL)")
+con.commit()
+f = one(sc.check_billing_ready(bdb), "billing:never")
+check("a paid company with NO renewal date is the finding -- it is active, "
+      "on the right packet, with the right device cap, and will never be "
+      "invoiced for as long as it exists",
+      not f["ok"] and "1 paid company" in f["title"])
+check("...naming which company, because the whole problem is that nothing "
+      "about the account looks wrong", "company 2" in f["detail"])
+
+con.execute("INSERT INTO billing VALUES (3, 'unlimited', 'active', NULL)")
+con.execute("INSERT INTO billing VALUES (4, NULL, 'inactive', NULL)")
+con.commit()
+f = one(sc.check_billing_ready(bdb), "billing:never")
+check("a comped unlimited account and a free one are NOT flagged: neither "
+      "is supposed to be invoiced", "1 paid company" in f["title"])
+con.close()
+
+check("no billing database at all is silent",
+      sc.check_billing_ready(os.path.join(d, "none.db")) == [])
+
+f = one(sc.check_billing_ready(bdb, provider_connected=False),
+        "billing:provider")
+check("no invoicing provider connected warns that packets will lapse with "
+      "nothing having been sent", not f["ok"] and f["warn"])
+check("...and that is a warning, not a failure -- the fleet still works",
+      one(sc.check_billing_ready(bdb, provider_connected=True),
+          "billing:provider") is None)
+
 print("\nWhat the panel shows")
 
 _mixed = [sc._finding("fine", True, "fine"),
