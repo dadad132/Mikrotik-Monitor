@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import secrets
 import threading
 import time
@@ -69,11 +70,36 @@ class AccessStore:
         return data
 
     def _save(self, data: dict) -> None:
+        """Replace the grants file, keeping whoever owned it owning it.
+
+        This file is written by BOTH the web service (as its own user, when
+        somebody opens or closes access) and the reload unit (as root, when
+        it sweeps expired grants). A rename installs a brand-new inode, so
+        without carrying the owner across, the first root write left the file
+        root:root 0600 -- and the web service could no longer record a grant
+        at all. Clicking Open then did nothing at all: the grant was written
+        nowhere, and the button came straight back.
+        """
         tmp = f"{self.path}.tmp"
         # 0600 — the grants file maps devices to tunnel IPs and open ports.
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            st = os.stat(self.path)
+        except FileNotFoundError:
+            st = None
+        if st is not None:
+            try:
+                os.chmod(tmp, stat.S_IMODE(st.st_mode))
+            except OSError:
+                pass
+            try:
+                os.chown(tmp, st.st_uid, st.st_gid)
+            except (AttributeError, PermissionError, OSError):
+                pass        # not root, or a platform without chown
         os.replace(tmp, self.path)
 
     # ----- queries ----------------------------------------------------------
@@ -124,8 +150,14 @@ class AccessStore:
         now = time.time() if now is None else now
         with self._lock:
             data = self._load()
+            before = len(data["grants"])
             self._prune(data, now)
-            self._save(data)
+            # Only write when something actually expired. The reload timer
+            # runs every minute as root; rewriting an unchanged file that
+            # often is pure risk for no gain, and it is how this file came
+            # to be re-owned in the first place.
+            if len(data["grants"]) != before:
+                self._save(data)
             return len(data["grants"])
 
     # ----- helpers ----------------------------------------------------------

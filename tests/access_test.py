@@ -197,6 +197,70 @@ finally:
 check("the probe says no for a port nothing holds",
       not _w._port_is_listening(1))
 
+print("")
+print("The grants file is written by two different users:")
+
+# The web service writes it when somebody opens or closes access. The reload
+# unit writes it as ROOT when it sweeps expired grants. A rename installs a
+# brand-new inode, so without carrying the owner across, the first root write
+# left it root:root 0600 and the web service could no longer record anything.
+# Clicking Open then did nothing at all -- the grant went nowhere and the
+# button came straight back.
+_gd = tempfile.mkdtemp()
+_gp = os.path.join(_gd, "grants.json")
+_gs = access.AccessStore(_gp)
+_grant = _gs.open("B1", "webfig", "10.10.1.1", ttl=900)
+
+check("a grant is recorded and can be read back",
+      _grant["port"] > 0 and _gs.grant_for("B1", "webfig") is not None)
+
+_seen = {"chmod": 0, "chown": 0}
+_rc, _ro = os.chmod, getattr(os, "chown", None)
+
+
+def _spy_chmod(path, mode):
+    _seen["chmod"] += 1
+    return _rc(path, mode)
+
+
+def _spy_chown(path, uid, gid):
+    _seen["chown"] += 1
+    if _ro:
+        return _ro(path, uid, gid)
+
+
+os.chmod = _spy_chmod
+if _ro:
+    os.chown = _spy_chown
+try:
+    _gs.open("B2", "webfig", "10.10.1.2", ttl=900)
+finally:
+    os.chmod = _rc
+    if _ro:
+        os.chown = _ro
+
+check("rewriting it carries the existing owner and mode across, rather than "
+      "installing a fresh root-owned file the web service cannot touch",
+      _seen["chmod"] >= 1 and (_seen["chown"] >= 1 or _ro is None))
+
+# The reload timer runs once a minute as root. Rewriting an unchanged file
+# that often is pure risk for no gain -- and is how it came to be re-owned.
+_mt = os.stat(_gp).st_mtime_ns
+_tm.sleep(0.02)
+_gs.sweep()
+check("a sweep with nothing expired does not rewrite the file at all",
+      os.stat(_gp).st_mtime_ns == _mt)
+check("...and leaves the live grants alone",
+      _gs.grant_for("B1", "webfig") is not None)
+
+_gs.open("B3", "winbox", "10.10.1.3", ttl=1)
+_tm.sleep(1.1)
+_gs.sweep()
+check("an expired grant IS swept, which is the job the timer exists for",
+      _gs.grant_for("B3", "winbox") is None)
+check("...without taking the live ones with it",
+      _gs.grant_for("B1", "webfig") is not None)
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")
