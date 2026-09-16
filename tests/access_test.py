@@ -156,6 +156,47 @@ check("with no grants the file is empty -- a dangling map with no server "
 check("a Winbox grant is never rendered into the http context by mistake",
       "9443" in _http and "winbox" not in _http.lower())
 
+print("")
+print("A grant is not a working link (ERR_CONNECTION_REFUSED, reported live):")
+
+import socket as _sk
+import mikromon.web as _w
+import time as _tm
+
+# A grant is a row in a JSON file. Between it and a link that works sit
+# nginx, a systemd path unit, a rendered server block and a certificate --
+# and when any of them is missing the browser only says "connection refused".
+_g = {"webfig": {"port": 1, "expires": _tm.time() + 900}, "winbox": None}
+_html = _w._access_box("B1", "TOK", "38.54.63.107", "10.10.1.1",
+                       {"user": "u", "pwd": "p"}, _g)
+check("a granted port with nothing listening is called out instead of being "
+      "offered as a link that can only fail",
+      "not listening on port 1" in _html
+      and "https://38.54.63.107:1" not in _html)
+check("...with the command that fixes it, since the failure is on the hub "
+      "and not on the router",
+      "easymikrotik-access-reload.service" in _html)
+check("...and Close is still offered, so a broken grant can be cleared",
+      'value="close"' in _html)
+
+# A port that IS listening must still produce the ordinary link.
+_srv = _sk.socket()
+_srv.bind(("127.0.0.1", 0))
+_srv.listen(1)
+_port = _srv.getsockname()[1]
+try:
+    _g2 = {"webfig": {"port": _port, "expires": _tm.time() + 900}, "winbox": None}
+    _html2 = _w._access_box("B1", "TOK", "38.54.63.107", "10.10.1.1",
+                            {"user": "u", "pwd": "p"}, _g2)
+    check("a port that IS listening gives the normal link and no warning",
+          f"https://38.54.63.107:{_port}" in _html2
+          and "not listening" not in _html2)
+finally:
+    _srv.close()
+
+check("the probe says no for a port nothing holds",
+      not _w._port_is_listening(1))
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

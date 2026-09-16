@@ -2606,6 +2606,27 @@ def _render_device(store, state, name, user, csrf="",
     return _page(esc(name), _header(user, "/dashboard") + inner)
 
 
+def _port_is_listening(port: int, timeout: float = 1.0) -> bool:
+    """Whether something on THIS machine accepts connections on `port`.
+
+    The hub proxies remote access, so the listener is local and this is a
+    loopback connect -- fast, and truthful in a way the grant record is not.
+    A grant is a row in a JSON file; it says what was asked for, never what
+    happened.
+    """
+    import socket as _sock
+    for family, addr in ((_sock.AF_INET, "127.0.0.1"),
+                         (_sock.AF_INET6, "::1")):
+        try:
+            with _sock.socket(family, _sock.SOCK_STREAM) as sk:
+                sk.settimeout(timeout)
+                if sk.connect_ex((addr, int(port))) == 0:
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 def _access_box(name, csrf, hub_host, tunnel_ip, creds, grants) -> str:
     """On-demand remote access through the hub. `grants` maps kind -> active
     grant dict (or None). Each kind shows either an Open button or the live
@@ -2622,11 +2643,40 @@ def _access_box(name, csrf, hub_host, tunnel_ip, creds, grants) -> str:
                 'open WebFig / Winbox here.</p></div>')
     u, pw = esc(creds.get("user", "")), esc(creds.get("pwd", ""))
 
+    def close_btn(kind):
+        return (f'<form method="POST" action="/device/access" '
+                f'style="display:inline">'
+                f'<input type="hidden" name="csrf" value="{csrf}">'
+                f'<input type="hidden" name="device" value="{q}">'
+                f'<input type="hidden" name="kind" value="{kind}">'
+                f'<input type="hidden" name="action" value="close">'
+                f'<button class="btn ghost" type="submit">Close</button>'
+                f'</form>')
+
     def row(kind, label, how):
         g = grants.get(kind)
         if g:
             port = g["port"]
             exp = int(g["expires"])
+            # A grant is a row in a file: it records what was asked for, not
+            # what happened. Between here and a working link sit nginx, a
+            # systemd path unit, a rendered server block and a certificate --
+            # and when any of them is missing the browser just says
+            # ERR_CONNECTION_REFUSED with nothing to point at.
+            if not _port_is_listening(port):
+                return (
+                    f'<div class="linkrow" style="display:block">'
+                    f'<b>{label}</b> '
+                    f'<span style="color:#b91c1c">&#9888; the hub is not '
+                    f'listening on port {port}</span><br>'
+                    f'<span class="muted">The access was granted but nginx '
+                    f'never opened the port, so the link would only give you '
+                    f'"connection refused". On the server:<br>'
+                    f'<code>sudo systemctl start '
+                    f'easymikrotik-access-reload.service</code><br>'
+                    f'<code>sudo nginx -t &amp;&amp; sudo systemctl status '
+                    f'easymikrotik-access-reload.service</code></span>'
+                    f' &nbsp;{close_btn(kind)}</div>')
             if kind == "webfig":
                 target = (f'<a href="https://{esc(hub_host)}:{port}" '
                           f'target="_blank" rel="noopener">'
@@ -2634,13 +2684,7 @@ def _access_box(name, csrf, hub_host, tunnel_ip, creds, grants) -> str:
             else:
                 target = (f'<code>{esc(hub_host)}:{port}</code> '
                           f'<span class="muted">(enter in the Winbox client)</span>')
-            close = (f'<form method="POST" action="/device/access" '
-                     f'style="display:inline">'
-                     f'<input type="hidden" name="csrf" value="{csrf}">'
-                     f'<input type="hidden" name="device" value="{q}">'
-                     f'<input type="hidden" name="kind" value="{kind}">'
-                     f'<input type="hidden" name="action" value="close">'
-                     f'<button class="btn ghost" type="submit">Close</button></form>')
+            close = close_btn(kind)
             return (f'<div class="linkrow" style="display:block">'
                     f'<b>{label}</b> &nbsp;{target} &nbsp;'
                     f'<span class="muted" data-expires="{exp}">'
