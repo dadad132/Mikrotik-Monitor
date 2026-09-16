@@ -3082,6 +3082,36 @@ def _tunnel_health_rows(hub, peers_path):
     return rows, wg_err
 
 
+# What config.example.yaml ships. The self-check only needs to know
+# roughly where the retention window is, to spot data far outside it.
+_RETENTION_DAYS_DEFAULT = 30
+
+
+def _server_selfcheck(devices_db, metrics_db, access_cfg, smtp_cfg,
+                      retention_days=30):
+    """Run the server self-check for the Platform admin panel.
+
+    Wrapped so a failing check can never take the page down: this is the
+    page somebody opens BECAUSE something is broken, and a diagnostic that
+    breaks the panel it lives on is worse than none at all.
+    """
+    try:
+        from .selfcheck import run_all
+        peers_path = ""
+        expected = 0
+        if devices_db:
+            hub = _hub_load(_hub_path(devices_db))
+            peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
+            expected = sum(1 for m in (hub.get("leases_meta") or {}).values()
+                           if (m or {}).get("pubkey"))
+        return run_all(peers_path=peers_path, expected_peers=expected,
+                       access_cfg=access_cfg, metrics_db=metrics_db or "",
+                       retention_days=retention_days, smtp_cfg=smtp_cfg)
+    except Exception:  # noqa: BLE001
+        log.exception("server self-check failed")
+        return []
+
+
 def _tunnel_panel(devices_db):
     """(rows, error) for the Platform admin tunnel table, computed once per
     request. Wrapped so a failure here can never take the page down: this is
@@ -6914,6 +6944,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 hub_pubkey_cur = hub_for_sa.get("hub_pubkey", "")
                 router_count = len(hub_for_sa.get("leases_meta") or {})
             _tunnel_rows, _tunnel_err = _tunnel_panel(devices_db)
+            _selfcheck = _server_selfcheck(
+                devices_db, metrics_db, access_cfg, smtp_settings,
+                _RETENTION_DAYS_DEFAULT)
             return self._send(200, _render_superadmin(
                 user, rows, backups, self._session()["csrf"],
                 msg=q.get("ok", [""])[0],
@@ -6926,6 +6959,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 nextdns=auth.get_nextdns() if auth else {},
                 quotes=open_quotes,
                 tunnel_rows=_tunnel_rows, tunnel_err=_tunnel_err,
+                selfcheck=_selfcheck,
                 yoco=auth.get_yoco() if auth else {},
                 invoiceninja=auth.get_invoiceninja() if auth else {},
                 in_hook_url=(

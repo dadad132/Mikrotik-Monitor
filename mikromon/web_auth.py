@@ -1454,6 +1454,75 @@ def _share_box(device: str, shares, csrf: str, org_name: str = "") -> str:
         f'</p></div>')
 
 
+def _selfcheck_box(findings) -> str:
+    """What is wrong with this server, and the command that fixes it.
+
+    Every serious fault this system has had was silent: a unit failing on
+    every trigger, a peers file the kernel had lost half of, a service
+    reporting success because its last command was a `while` loop. None
+    needed cleverness to find -- they needed somebody to look.
+
+    Failures first, then warnings. What is fine is folded away, because a
+    page that leads with twelve green ticks trains people to skip it, and
+    this is the one they will open when something is broken.
+    """
+    if not findings:
+        return ""
+    bad = [f for f in findings if not f["ok"] and not f["warn"]]
+    warn = [f for f in findings if not f["ok"] and f["warn"]]
+    good = [f for f in findings if f["ok"]]
+
+    def row(f, colour):
+        fix = (f'<div style="margin-top:6px"><code style="font-size:12px;'
+               f'word-break:break-all">{esc(f["fix"])}</code></div>'
+               if f.get("fix") else "")
+        detail = (f'<div class="muted" style="font-size:12px;margin-top:4px">'
+                  f'{esc(f["detail"])}</div>' if f.get("detail") else "")
+        return (f'<div style="padding:10px 12px;margin:6px 0;border-radius:6px;'
+                f'border-left:3px solid {colour};background:{colour}12">'
+                f'<b style="font-size:13px">{esc(f["title"])}</b>'
+                f'{detail}{fix}</div>')
+
+    if not bad and not warn:
+        head = ('<p style="margin:0 0 4px;font-size:13px;padding:8px 10px;'
+                'border-radius:6px;background:rgba(22,163,74,0.12);'
+                'color:#15803d">&#10003; Nothing is wrong with this server.'
+                '</p>')
+    else:
+        n, wn = len(bad), len(warn)
+        if n:
+            msg = f"{n} thing{'' if n == 1 else 's'} need"
+            msg += "s" if n == 1 else ""
+            msg += " fixing"
+            if wn:
+                msg += f", plus {wn} worth a look"
+            bg, fg = "rgba(220,38,38,0.10)", "#b91c1c"
+        else:
+            msg = f"{wn} thing{'' if wn == 1 else 's'} worth a look"
+            bg, fg = "rgba(217,119,6,0.12)", "#b45309"
+        head = (f'<p style="margin:0 0 8px;font-size:13px;padding:8px 10px;'
+                f'border-radius:6px;background:{bg};color:{fg}">'
+                f'&#9888; {msg}.</p>')
+
+    body = "".join(row(f, "#dc2626") for f in bad)
+    body += "".join(row(f, "#d97706") for f in warn)
+    if good:
+        ticks = "".join(f'<li>{esc(f["title"])}</li>' for f in good)
+        body += (f'<details style="margin-top:10px"><summary class="muted" '
+                 f'style="cursor:pointer;font-size:12px">'
+                 f'{len(good)} check(s) passed</summary>'
+                 f'<ul class="muted" style="font-size:12px;margin:6px 0 0 18px">'
+                 f'{ticks}</ul></details>')
+
+    return (f'<div class="box"><h2>Server health</h2>{head}{body}'
+            f'<p class="muted" style="font-size:12px;margin-top:10px">'
+            f'Checked when this page loads. These are the specific failures '
+            f'that have cost real time here &mdash; a reload unit failing '
+            f'silently, a peers file the kernel never loaded, retention not '
+            f'running &mdash; each with the command that repairs it.</p>'
+            f'</div>')
+
+
 def _parse_regions_text(text: str) -> list:
     """One region per line, "Name|https://url" — the textarea format
     _regions_box's form submits and _post_superadmin_regions parses.
@@ -1691,7 +1760,8 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        invoiceninja=None,
                        in_hook_url: str = "",
                        tunnel_rows=None,
-                       tunnel_err: str = "") -> str:
+                       tunnel_err: str = "",
+                       selfcheck=None) -> str:
     """Platform superadmin panel — shows all orgs, billing status, and device counts."""
     note = _flash(msg, error)
 
@@ -1859,6 +1929,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
         quotes or [], {r["id"]: r.get("name", "") for r in rows}, csrf)
 
     inner = (f'<div class="wrap"><h1>Platform admin</h1>{note}{tiles}'
+             f'{_selfcheck_box(selfcheck or [])}'
              f'{_tunnel_health_box(tunnel_rows or [], tunnel_err)}'
              f'{quote_html}{table}'
              f'{_smtp_settings_box(smtp, csrf)}'
