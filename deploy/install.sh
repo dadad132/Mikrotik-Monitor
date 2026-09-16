@@ -724,7 +724,11 @@ PY
     chown "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}/access-grants.json"
 
     # Reload units: .path applies on open/close, .timer expires grants (auto-close).
+    # These are copied verbatim rather than generated, so the /opt/mikromon
+    # baked into them has to be rewritten for a non-default APP_DIR -- every
+    # other unit gets APP_DIR substituted because it is written by a heredoc.
     cp "${SRC_DIR}/deploy/easymikrotik-access-reload."* /etc/systemd/system/
+    sed -i "s#/opt/mikromon#${APP_DIR}#g"         /etc/systemd/system/easymikrotik-access-reload.service         /etc/systemd/system/easymikrotik-access-reload.path         /etc/systemd/system/easymikrotik-access-reload.timer
     systemctl daemon-reload
     systemctl enable --now easymikrotik-access-reload.path
     systemctl enable --now easymikrotik-access-reload.timer

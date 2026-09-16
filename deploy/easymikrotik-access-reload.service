@@ -9,4 +9,11 @@ Wants=nginx.service
 
 [Service]
 Type=oneshot
+# Without this the unit runs from / and `-m mikromon` fails with "No module
+# named mikromon": the package is not pip-installed into the venv, it is
+# found via the working directory, exactly as mikromon.service does it.
+# Missing here since this feature shipped, so remote access has never once
+# opened a port -- the grant was recorded, nginx was never given a config,
+# and the browser's only reply was ERR_CONNECTION_REFUSED.
+WorkingDirectory=/opt/mikromon
 ExecStart=/opt/mikromon/.venv/bin/python -m mikromon access-apply -c /opt/mikromon/config.yaml
