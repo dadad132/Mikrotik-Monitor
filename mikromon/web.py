@@ -2101,10 +2101,11 @@ def _render_dashboard(store, state, user=None, allowed=None, csrf="",
         f'{"none" if devs else "block"}">{esc(empty_msg)}</p>'
         f'</div>')
     brand = esc(_BRAND)
+    from .brand import favicon_tags as _favicon_tags
     return f"""<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-{_THEME_INIT_JS}
+{_THEME_INIT_JS}{_favicon_tags()}
 <meta http-equiv="refresh" content="10">
 <title>{brand} &middot; Dashboard</title>
 <style>{_THEME_VARS}{_SHELL_CSS}{_DASH_CSS}</style></head>
@@ -6605,6 +6606,29 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             path = url.path
             if path == "/health":
                 return self._send(200, "ok")
+
+            # The artwork is served before any auth check: the landing page
+            # and the login page both need it, and neither has a session.
+            if path in ("/favicon.svg", "/favicon.ico", "/logo", "/logo.svg"):
+                from . import brand as _brand
+                root = os.path.dirname(os.path.abspath(devices_db)) \
+                    if devices_db else ""
+                if path.startswith("/favicon"):
+                    ctype, blob = _brand.favicon_bytes()
+                else:
+                    ctype, blob = _brand.logo_bytes(root)
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(blob)))
+                # Long enough to stop a refetch on every page, short enough
+                # that replacing logo.svg shows up the same day.
+                self.send_header("Cache-Control", "public, max-age=3600")
+                self.end_headers()
+                try:
+                    self.wfile.write(blob)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                return
 
             # Also reachable directly for previewing the landing page in
             # isolation — the real entry point is "/" below.

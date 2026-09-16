@@ -20,10 +20,17 @@ from .web_shared import (
 )
 
 
-_AUTH_BRAND = ('<div class="brand" style="justify-content:center;color:var(--text);'
-               'font-size:22px;margin-bottom:6px">'
-               '<span class="logo" style="color:var(--accent)">&#9670;</span>'
-               + _BRAND + '</div>')
+def _auth_brand() -> str:
+    from .brand import logo_img
+    return ('<div class="brand" style="justify-content:center;'
+            'align-items:center;gap:9px;color:var(--text);'
+            'font-size:22px;margin-bottom:6px">'
+            + logo_img(30) + _BRAND + '</div>')
+
+
+def _auth_favicon() -> str:
+    from .brand import favicon_tags
+    return favicon_tags()
 
 
 def _auth_page(title, body) -> str:
@@ -35,12 +42,12 @@ def _auth_page(title, body) -> str:
     # Confirmed live: exactly this — invisible input boxes, invisible button.
     return (f'<!doctype html><html><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1">'
-            f'{_THEME_INIT_JS}<title>{esc(title)}</title>'
+            f'{_THEME_INIT_JS}{_auth_favicon()}<title>{esc(title)}</title>'
             f'<style>{_THEME_VARS}{_PAGE_CSS}</style></head><body>'
             f'<div class="wrap" style="max-width:400px;margin-top:9vh">'
             f'<div style="display:flex;justify-content:center;margin-bottom:6px">'
             f'{_theme_toggle_btn()}</div>'
-            f'{_AUTH_BRAND}<div class="box">{body}</div></div>'
+            f'{_auth_brand()}<div class="box">{body}</div></div>'
             f'{_THEME_TOGGLE_JS}</body></html>')
 
 
@@ -631,6 +638,18 @@ def _orders_box(orders) -> str:
             f'</div>')
 
 
+def _invoice_logo() -> str:
+    """The mark and wordmark, for a document somebody prints or saves.
+
+    Inlined rather than linked: an invoice gets saved as a PDF, emailed, and
+    opened months later on a machine that cannot reach this server, and a
+    logo that resolves to a broken image then is worse than no logo.
+    """
+    from .brand import lockup_svg
+    return ('<div style="display:flex;justify-content:flex-end">'
+            + lockup_svg(34) + '</div>')
+
+
 def _render_invoice(user, org: dict, order: dict, contact: dict | None,
                     brand: str = "") -> str:
     """A printable invoice for one paid order.
@@ -663,8 +682,8 @@ def _render_invoice(user, org: dict, order: dict, contact: dict | None,
         f'<div><h1 style="margin:0 0 4px">Invoice</h1>'
         f'<div class="muted">#{int(order["id"]):05d} &middot; {esc(paid_on)}</div>'
         f'</div>'
-        f'<div style="text-align:right"><b style="font-size:17px">'
-        f'{esc(brand)}</b>{seller}</div></div>'
+        f'<div style="text-align:right">{_invoice_logo()}'
+        f'{seller}</div></div>'
         f'<hr style="border:0;border-top:1px solid var(--border);margin:18px 0">'
         f'<div style="display:flex;gap:30px;flex-wrap:wrap;margin-bottom:18px">'
         f'<div><div class="muted" style="font-size:11px;text-transform:uppercase;'

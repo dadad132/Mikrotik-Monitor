@@ -380,6 +380,7 @@ _SHELL_CSS = """
 .dash-logo{display:flex;align-items:center;gap:8px;font-weight:700;
   font-size:16px;color:var(--text);text-decoration:none;flex-shrink:0}
 .dash-logo .dot{color:var(--accent);font-size:17px}
+.brand-mark{display:block;flex:0 0 auto;vertical-align:middle}
 .dash-nav{display:flex;flex-direction:row;align-items:center;gap:2px;flex:1;
   min-width:0;overflow-x:auto;-webkit-overflow-scrolling:touch;
   scrollbar-width:none}
@@ -536,8 +537,9 @@ def _header(user, active="/dashboard") -> str:
     """The persistent left sidebar: logo, nav, and the account/theme footer.
     Same markup on every authenticated page (via _page) and on the
     dashboard itself, so the chrome never changes when you navigate."""
+    from .brand import logo_img
     brand = (f'<a class="dash-logo" href="/dashboard">'
-             f'<span class="dot">&#9670;</span>{esc(_BRAND)}</a>')
+             f'{logo_img(26)}{esc(_BRAND)}</a>')
     if not user:
         return f'<aside class="dash-side">{brand}</aside>'
     org = user.get("org_name", "")
@@ -618,10 +620,16 @@ def _flash(msg: str = "", error: str = "") -> str:
     return out
 
 
+def _favicon() -> str:
+    """The icon tags for <head>. Every tab was blank without these."""
+    from .brand import favicon_tags
+    return favicon_tags()
+
+
 def _page(title: str, body: str) -> str:
     return (f'<!doctype html><html><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1">'
-            f'{_THEME_INIT_JS}'
+            f'{_THEME_INIT_JS}{_favicon()}'
             f'<title>{esc(title)}</title>'
             f'<style>{_THEME_VARS}{_SHELL_CSS}{_PAGE_CSS}</style></head>'
             f'<body class="has-sidebar">{body}{_THEME_TOGGLE_JS}{_BUSY_JS}</body></html>')

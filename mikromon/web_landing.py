@@ -468,6 +468,9 @@ def render_landing() -> str:
     price_cards = "\n".join(_price_card(p) for p in _PLANS)
     tier_rows = _tier_rows()
     brand = esc(_BRAND)
+    from .brand import logo_img, favicon_tags
+    mark = logo_img(26)
+    favicon = favicon_tags()
 
     return f"""<!doctype html>
 <html lang="en">
@@ -475,6 +478,7 @@ def render_landing() -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Monitor and manage every MikroTik router from one dashboard. Real-time alerts, WAN failover, safe config push, automated backups, and remote WebFig access — even behind NAT.">
+  {favicon}
   <title>{esc(_TITLE)}</title>
   {_THEME_INIT_JS}
   <style>{_THEME_VARS}{_CSS}</style>
@@ -484,7 +488,7 @@ def render_landing() -> str:
 <!-- ── NAV ─────────────────────────────────────── -->
 <nav class="lnav" id="lnav">
   <a class="lnav-logo" href="/">
-    <span class="dot">&#9670;</span>{brand}
+    {mark}{brand}
   </a>
   <div class="lnav-links" id="lnav-links">
     <a href="#features">Features</a>
@@ -604,7 +608,7 @@ def render_landing() -> str:
     <div class="foot-top">
       <div>
         <a class="foot-logo" href="/">
-          <span class="dot">&#9670;</span>{brand}
+          {mark}{brand}
         </a>
         <p class="foot-tag">MikroTik monitoring &amp; remote management for IT teams and MSPs.</p>
       </div>
