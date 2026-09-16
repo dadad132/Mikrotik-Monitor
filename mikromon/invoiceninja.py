@@ -29,6 +29,11 @@ log = logging.getLogger(__name__)
 
 _TIMEOUT = 25.0
 
+# Self-hosted Invoice Ninja has no published cap, but "no cap" is not a
+# reason to hammer somebody's own server -- and a runaway loop hurts them
+# either way.
+_LIMIT_PER_MINUTE = 120
+
 
 class InvoiceNinjaError(Exception):
     """A call did not succeed. The message is fit to show an admin, who is
@@ -56,10 +61,21 @@ def _api(base: str, token: str, path: str, *, method: str = "GET",
                  # CSRF-ish guard and costs nothing to send.
                  "X-Requested-With": "XMLHttpRequest",
                  "User-Agent": "mikromon"})
+    from .ratelimit import limiter, RateLimited, retry_after_seconds
+    lim = limiter("Invoice Ninja", _LIMIT_PER_MINUTE)
+    try:
+        lim.acquire()
+    except RateLimited as exc:
+        raise InvoiceNinjaError(str(exc)) from exc
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8") or "{}"
     except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            lim.note_429(retry_after_seconds(exc.headers))
+            raise InvoiceNinjaError(
+                "Invoice Ninja is rate limiting us; the call was not made.") \
+                from exc
         detail = ""
         try:
             detail = exc.read().decode("utf-8", "replace")[:300]

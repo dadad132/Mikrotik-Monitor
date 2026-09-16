@@ -286,18 +286,96 @@ def check_retention(metrics_db, retention_days=30):
                      f"({age_days:.0f} days, {size_mb:.0f} MB)")]
 
 
-def check_smtp(smtp_cfg):
-    """Alerts nobody receives are not alerts."""
-    if isinstance(smtp_cfg, dict):
-        host = str(smtp_cfg.get("host", "") or "").strip()
-    else:
-        host = str(getattr(smtp_cfg, "host", "") or "").strip() if smtp_cfg else ""
-    if host:
-        return [_finding("smtp", True, "Email is configured")]
-    return [_finding(
-        "smtp", False, "No email server is configured",
-        "Every alert this system raises has nowhere to go.",
-        "Platform admin -> Email (SMTP) settings", warn=True)]
+_SMTP_CACHE: dict = {}
+_SMTP_CACHE_SECONDS = 300
+
+
+def _smtp_cache(key, findings):
+    _SMTP_CACHE[key] = (time.time(), list(findings))
+    return findings
+
+
+def _smtp_field(cfg, name, default=""):
+    if isinstance(cfg, dict):
+        return cfg.get(name, default)
+    return getattr(cfg, name, default) if cfg else default
+
+
+def check_smtp(smtp_cfg, probe: bool = True):
+    """Does email actually work -- not "is a host written in the settings".
+
+    The old version answered the second question and reported the first.
+    "Email is configured" was equally true of a host that does not resolve,
+    a port nothing listens on, a password rotated last month, and a TLS
+    handshake that fails. Every alert this system raises goes down this
+    path, so a tick that cannot tell those from a working relay is worse
+    than no tick: it is why nobody looks twice.
+
+    The probe connects, negotiates TLS and logs in. It never sends a
+    message, so it is safe to run on every page load.
+    """
+    host = str(_smtp_field(smtp_cfg, "host", "") or "").strip()
+    if not host:
+        return [_finding(
+            "smtp", False, "No email server is configured",
+            "Every alert this system raises has nowhere to go.",
+            "Platform admin -> Email (SMTP) settings", warn=True)]
+    if not probe:
+        return [_finding("smtp", True, f"Email is configured ({host})")]
+
+    # Cached briefly. This runs on the page somebody opens BECAUSE something
+    # is broken, and making them wait on a mail server handshake every reload
+    # would be its own small failure.
+    key = f"{host}:{_smtp_field(smtp_cfg, 'port', '')}:"           f"{_smtp_field(smtp_cfg, 'username', '')}"
+    hit = _SMTP_CACHE.get(key)
+    if hit and time.time() - hit[0] < _SMTP_CACHE_SECONDS:
+        return list(hit[1])
+
+    import smtplib
+    import socket
+    import ssl
+    port = int(_smtp_field(smtp_cfg, "port", 0) or 0)
+    use_ssl = bool(_smtp_field(smtp_cfg, "use_ssl", False))
+    use_tls = bool(_smtp_field(smtp_cfg, "use_tls", True))
+    user = str(_smtp_field(smtp_cfg, "username", "") or "")
+    pwd = str(_smtp_field(smtp_cfg, "password", "") or "")
+    port = port or (465 if use_ssl else 587)
+
+    try:
+        ctx = ssl.create_default_context()
+        if use_ssl:
+            srv = smtplib.SMTP_SSL(host, port, timeout=8, context=ctx)
+        else:
+            srv = smtplib.SMTP(host, port, timeout=8)
+        try:
+            srv.ehlo()
+            if not use_ssl and use_tls:
+                srv.starttls(context=ctx)
+                srv.ehlo()
+            if user:
+                srv.login(user, pwd)
+            srv.noop()
+        finally:
+            try:
+                srv.quit()
+            except Exception:  # noqa: BLE001
+                pass
+    except smtplib.SMTPAuthenticationError as exc:
+        return _smtp_cache(key, [_finding(
+            "smtp", False, "The email server rejected our sign-in",
+            f"{host}:{port} answered: {str(exc)[:200]}. Every alert this "
+            f"system raises is going nowhere.",
+            "Platform admin -> Email (SMTP) settings")])
+    except (smtplib.SMTPException, socket.timeout, socket.error, OSError,
+            ssl.SSLError) as exc:
+        return _smtp_cache(key, [_finding(
+            "smtp", False, f"Cannot reach the email server ({host}:{port})",
+            f"{type(exc).__name__}: {str(exc)[:200]}. Every alert this "
+            f"system raises is going nowhere.",
+            f"telnet {host} {port}   # from this server")])
+    detail = "signed in successfully" if user else "connected (no sign-in)"
+    return _smtp_cache(key, [_finding("smtp", True,
+                                      f"Email works ({host}:{port})", detail)])
 
 
 def _cert_days_left(path):

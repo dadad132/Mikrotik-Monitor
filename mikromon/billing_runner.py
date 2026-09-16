@@ -49,6 +49,19 @@ def status() -> dict:
     """When the billing pass last ran, and what it did."""
     return dict(_last)
 _DEFAULT_DAYS_BEFORE = 7
+
+# Raising invoices is a once-a-day decision: "whose packet lapses within
+# seven days" does not change between 09:00 and 09:15. Asking every fifteen
+# minutes spent 96x the API calls to learn the same thing.
+_RAISE_HOUR = 8                 # local time; nobody wants a 03:00 invoice
+_RAISE_STATE_KEY = "billing_last_raise"
+
+# Payments DO want to be noticed promptly, but one call per open invoice
+# every fifteen minutes is 1440 calls/day at fifteen invoices -- over Zoho's
+# free cap of 1000. A callback still triggers an immediate re-read, so this
+# only paces the safety net.
+_RECONCILE_COOLDOWN = 1800.0
+_checked: dict = {}             # invoice id -> when it was last read
 _DEFAULT_DUE_DAYS = 7
 
 
@@ -277,8 +290,17 @@ def reconcile_payments(billing, cfg, only_invoice: str = "",
     orders = billing.open_orders(provider=prov.name)
     if only_invoice:
         orders = [o for o in orders if o.get("external_id") == only_invoice]
+    now = time.time()
     for order in orders:
         inv_id = order.get("external_id") or ""
+        # A callback names one invoice and that one is always re-read: it is
+        # the fast path, and the whole point of treating it as a nudge is
+        # that acting on it is cheap. The rest are paced.
+        if not only_invoice:
+            last = _checked.get(inv_id, 0.0)
+            if now - last < _RECONCILE_COOLDOWN:
+                continue
+            _checked[inv_id] = now
         try:
             st = prov.invoice_status(inv_id)
         except ProviderError as exc:
@@ -301,6 +323,39 @@ def reconcile_payments(billing, cfg, only_invoice: str = "",
                  "%s", st.get("number") or inv_id, inv_id, order["org_id"],
                  order["plan"])
     return applied
+
+
+def _today() -> str:
+    return time.strftime("%Y-%m-%d")
+
+
+def raise_is_due(auth, now: float | None = None) -> bool:
+    """Has the daily invoice run already happened today?
+
+    Kept in settings rather than in memory so a restart does not re-run it.
+    It cannot double-invoice anybody either way -- has_open_order_for_period
+    sees to that -- but a service that restarts in a loop would otherwise
+    re-read every due company on every boot, for nothing.
+    """
+    now = now if now is not None else time.time()
+    lt = time.localtime(now)
+    if lt.tm_hour < _RAISE_HOUR:
+        return False
+    try:
+        last = str((auth.get_setting(_RAISE_STATE_KEY) or "") if auth else "")
+    except Exception:  # noqa: BLE001
+        last = ""
+    return last != time.strftime("%Y-%m-%d", lt)
+
+
+def mark_raised(auth, now: float | None = None) -> None:
+    now = now if now is not None else time.time()
+    try:
+        if auth:
+            auth.set_setting(_RAISE_STATE_KEY,
+                             time.strftime("%Y-%m-%d", time.localtime(now)))
+    except Exception:  # noqa: BLE001
+        log.exception("could not record the daily invoice run")
 
 
 def upcoming(billing, auth, limit: int = 20) -> list:
@@ -335,8 +390,15 @@ def upcoming(billing, auth, limit: int = 20) -> list:
     return out[:limit]
 
 
-def run_once(billing, auth, now: float | None = None) -> tuple:
-    """One pass of both jobs. Returns (invoices_raised, payments_applied)."""
+def run_once(billing, auth, now: float | None = None,
+             force_raise: bool = False) -> tuple:
+    """One pass of both jobs. Returns (invoices_raised, payments_applied).
+
+    The two run on different clocks: payments are reconciled every tick so a
+    customer who has paid is not left suspended, while invoices are raised
+    once a day. `force_raise` is the "Run the billing pass now" button, which
+    means exactly that and does not consume the day's run.
+    """
     prov = provider_for(auth)
     if prov is None or billing is None:
         return (0, 0)
@@ -346,10 +408,15 @@ def run_once(billing, auth, now: float | None = None) -> tuple:
         applied = reconcile_payments(billing, cfg, provider=prov)
     except Exception:  # noqa: BLE001 — never let one pass kill the thread
         log.exception("reconcile pass failed")
-    try:
-        raised = raise_due_invoices(billing, auth, cfg, now=now, provider=prov)
-    except Exception:  # noqa: BLE001
-        log.exception("renewal invoicing pass failed")
+    # The invoice run is daily; reconciliation above is not.
+    if force_raise or raise_is_due(auth, now):
+        try:
+            raised = raise_due_invoices(billing, auth, cfg, now=now,
+                                        provider=prov)
+            if not force_raise:
+                mark_raised(auth, now)
+        except Exception:  # noqa: BLE001
+            log.exception("renewal invoicing pass failed")
     return (raised, applied)
 
 

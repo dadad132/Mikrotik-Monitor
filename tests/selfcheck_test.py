@@ -228,11 +228,35 @@ check("no metrics database at all is silent",
 
 print("\nEmail, because an alert nobody receives is not an alert")
 
-check("configured passes", sc.check_smtp({"host": "smtp.x"})[0]["ok"])
 check("unconfigured warns rather than fails -- the fleet still works",
       not sc.check_smtp({})[0]["ok"] and sc.check_smtp({})[0]["warn"])
 check("an SmtpConfig object is read the same as a settings dict",
-      sc.check_smtp(types.SimpleNamespace(host="h"))[0]["ok"])
+      sc.check_smtp(types.SimpleNamespace(host="h"), probe=False)[0]["ok"])
+
+# "Email is configured" used to be the whole check. It was equally true of a
+# host that does not resolve, a port nothing listens on, and a password
+# rotated last month -- so it passed in exactly the cases worth catching.
+check("a host that cannot be reached is a FAILURE, not a tick: every alert "
+      "this system raises goes down that path",
+      not sc.check_smtp({"host": "no-such-host.invalid",
+                         "port": 587})[0]["ok"])
+check("...naming what went wrong and where, rather than 'email failed'",
+      "no-such-host.invalid:587"
+      in sc.check_smtp({"host": "no-such-host.invalid", "port": 587})[0]["title"])
+check("...and saying plainly that alerts are going nowhere",
+      "going nowhere" in sc.check_smtp({"host": "no-such-host.invalid",
+                                        "port": 587})[0]["detail"])
+
+_t0 = time.time()
+for _ in range(20):
+    sc.check_smtp({"host": "no-such-host.invalid", "port": 587})
+check("the probe is cached, so the page somebody opens BECAUSE something is "
+      "broken does not wait on a mail handshake every reload",
+      time.time() - _t0 < 1.0)
+
+check("probe=False still answers the cheap question, for callers that only "
+      "want to know whether a relay is set",
+      sc.check_smtp({"host": "smtp.x"}, probe=False)[0]["ok"])
 
 print("\nnginx is only this server's business when remote access is set up")
 

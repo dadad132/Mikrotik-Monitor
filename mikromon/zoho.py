@@ -63,6 +63,19 @@ SCOPES = ("ZohoInvoice.contacts.CREATE,ZohoInvoice.contacts.READ,"
 # holding one that expires mid-flight.
 _EARLY_REFRESH = 300.0
 
+# Zoho publishes 100 requests/minute per organisation and, on the free plan,
+# 1000/day. Both figures are shaded down: sitting exactly on a published
+# limit means one retry or one clock skew puts you over it, and what comes
+# back then is a 429 that looks like an outage.
+_LIMIT_PER_MINUTE = 80
+_LIMIT_PER_DAY = 900
+
+
+def _limiter():
+    from .ratelimit import limiter
+    return limiter("Zoho Invoice", _LIMIT_PER_MINUTE, _LIMIT_PER_DAY)
+
+
 _tokens: dict = {}          # refresh_token -> (access_token, expires_at)
 _tokens_lock = threading.Lock()
 
@@ -96,10 +109,23 @@ def _request(url: str, *, method: str = "GET", headers: dict | None = None,
     hdrs.setdefault("Accept", "application/json")
     hdrs.setdefault("User-Agent", "mikromon")
     req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
+    # Counted before it is sent, so a burst waits here rather than arriving
+    # at Zoho and being refused.
+    from .ratelimit import RateLimited, retry_after_seconds
+    lim = _limiter()
+    try:
+        lim.acquire()
+    except RateLimited as exc:
+        raise ZohoError(str(exc)) from exc
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            lim.note_429(retry_after_seconds(exc.headers))
+            raise ZohoError(
+                "Zoho is rate limiting us. The call was not made; it will be "
+                "retried on the next pass.") from exc
         raw = ""
         try:
             raw = exc.read().decode("utf-8", "replace")

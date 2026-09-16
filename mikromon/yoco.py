@@ -81,10 +81,20 @@ def create_checkout(secret_key: str, amount_cents: int, *, currency: str = "ZAR"
                  # document one for checkouts; the order row is what stops a
                  # double charge being applied twice on our side.
                  "User-Agent": "mikromon"})
+    from .ratelimit import limiter, RateLimited, retry_after_seconds
+    _lim = limiter("Yoco", 60, 0)
+    try:
+        _lim.acquire()
+    except RateLimited as exc:
+        raise YocoError(str(exc)) from exc
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            _lim.note_429(retry_after_seconds(exc.headers))
+            raise YocoError(
+                "Yoco is rate limiting us; the call was not made.") from exc
         detail = ""
         try:
             detail = exc.read().decode("utf-8", "replace")[:300]
@@ -212,10 +222,20 @@ def register_webhook(secret_key: str, url: str, name: str = "mikromon",
                  "Content-Type": "application/json",
                  "Accept": "application/json",
                  "User-Agent": "mikromon"})
+    from .ratelimit import limiter, RateLimited, retry_after_seconds
+    _lim = limiter("Yoco", 60, 0)
+    try:
+        _lim.acquire()
+    except RateLimited as exc:
+        raise YocoError(str(exc)) from exc
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             out = json.loads(resp.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            _lim.note_429(retry_after_seconds(exc.headers))
+            raise YocoError(
+                "Yoco is rate limiting us; the call was not made.") from exc
         detail = ""
         try:
             detail = exc.read().decode("utf-8", "replace")[:300]

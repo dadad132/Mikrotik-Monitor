@@ -7488,7 +7488,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if sess is None or flat.get("csrf") != sess["csrf"]:
                 return self._send(400, "bad csrf token")
             from .billing_runner import run_once
-            raised, applied = run_once(billing, auth)
+            raised, applied = run_once(billing, auth, force_raise=True)
             return self._redirect("/superadmin?ok=" + quote(
                 f"Billing run finished: {raised} invoice(s) raised, "
                 f"{applied} payment(s) applied."))

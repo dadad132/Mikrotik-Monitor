@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import smtplib
+import time as _time
 import socket
 import ssl
 from email.message import EmailMessage
@@ -16,6 +17,19 @@ from . import render
 from .base import Notifier
 
 log = logging.getLogger(__name__)
+
+
+# The last delivery attempt, so the health panel can say whether alerts are
+# actually arriving rather than whether a relay is written in the settings.
+_last_send = {"when": 0.0, "ok": None, "error": ""}
+
+
+def last_send() -> dict:
+    return dict(_last_send)
+
+
+def _record(ok: bool, error: str) -> None:
+    _last_send.update({"when": _time.time(), "ok": ok, "error": error})
 
 
 class EmailNotifier(Notifier):
@@ -66,8 +80,13 @@ class EmailNotifier(Notifier):
                         srv.starttls(context=ssl.create_default_context())
                     self._login_send(srv, msg)
             log.info("Email sent: %s", subject)
+            _record(True, "")
         except (smtplib.SMTPException, OSError, socket.error) as exc:
+            # Logged AND recorded. Logging alone meant the caller believed
+            # the alert had gone out, and an alert nobody received that the
+            # system thinks it sent is the worst of the three states.
             log.error("Failed to send email '%s': %s", subject, exc)
+            _record(False, f"{type(exc).__name__}: {exc}")
 
     def _login_send(self, srv, msg):
         if self.cfg.username:

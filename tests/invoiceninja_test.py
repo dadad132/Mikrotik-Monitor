@@ -171,8 +171,24 @@ try:
     print("\nPaying it carries the service on, with nobody intervening")
 
     paid_invoices.add("inv-1")
+
+    # Each open invoice is re-read at most every half hour: one call per
+    # invoice per fifteen-minute pass is 1440 calls a day at fifteen open
+    # invoices, over Zoho's free daily cap of 1000. The invoice above was
+    # read moments ago, so the next timed pass deliberately skips it.
+    check("an invoice read moments ago is not read again on the next pass",
+          billing_runner.reconcile_payments(store, CFG) == 0)
+    check("...but a payment callback naming it bypasses that entirely, so "
+          "somebody who has paid is not left suspended for half an hour",
+          billing_runner.reconcile_payments(store, CFG,
+                                            only_invoice="inv-1") == 1)
+
+    # Half an hour later, for the rest of this section.
+    billing_runner._checked.clear()
     applied = billing_runner.reconcile_payments(store, CFG)
-    check("the payment is picked up and applied", applied == 1)
+    check("the payment is applied exactly once, whichever path found it "
+          "first -- the callback and the timer both seeing it must not "
+          "extend the packet twice", applied == 0)
     row = store.get(1)
     check("...the packet continues, extended from where it was rather than "
           "from today, so nothing already paid for is lost",

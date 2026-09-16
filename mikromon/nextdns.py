@@ -38,11 +38,21 @@ def _request(method: str, path: str, api_key: str, body: dict | None = None) -> 
         "Content-Type": "application/json",
         "User-Agent": _USER_AGENT,
     })
+    from .ratelimit import limiter, RateLimited, retry_after_seconds
+    _lim = limiter("NextDNS", 60, 0)
+    try:
+        _lim.acquire()
+    except RateLimited as exc:
+        raise NextDnsError(str(exc)) from exc
     try:
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
             raw = r.read()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            _lim.note_429(retry_after_seconds(exc.headers))
+            raise NextDnsError(
+                "NextDNS is rate limiting us; the call was not made.") from exc
         detail = ""
         try:
             detail = exc.read().decode("utf-8", "replace")

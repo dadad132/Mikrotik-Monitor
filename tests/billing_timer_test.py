@@ -129,18 +129,35 @@ try:
     check("an unpaid invoice extends nothing",
           R.reconcile_payments(store, ZCFG) == 0)
 
+    check("...and that invoice is NOT re-read on the very next pass -- one "
+          "call per open invoice every fifteen minutes is 1440 calls a day "
+          "at fifteen invoices, over Zoho's free cap of 1000",
+          R.reconcile_payments(store, ZCFG) == 0 and len(R._checked) == 1)
+
+    # A payment callback names one invoice, and that one is always re-read:
+    # it is the fast path, and pacing it would defeat the point.
+    paid_now = {"paid": True, "status": "paid", "balance": 0.0,
+                "total": PRICE, "number": "INV-0001"}
+    R._z.invoice_status = lambda cfg, iid: paid_now
+    inv_id = order["external_id"]
+    check("a payment callback bypasses the cooldown entirely, so somebody "
+          "who has paid is not left suspended for half an hour",
+          R.reconcile_payments(store, ZCFG, only_invoice=inv_id) == 1)
+
+    # Back to the timed path for the rest.
+    R._checked.clear()
+    store2 = store
     was = store.get(2)["current_period_end"]
     R._z.invoice_status = lambda cfg, iid: {"paid": True, "status": "paid",
                                             "balance": 0.0, "total": PRICE,
                                             "number": "INV-0001"}
-    check("a paid invoice is applied once",
-          R.reconcile_payments(store, ZCFG) == 1)
-    check("...and the packet carries on, extended from where it ended rather "
-          "than from today, so nothing already paid for is lost",
-          store.get(2)["current_period_end"] > was)
-    check("...and applying it twice does not extend twice, which a webhook "
-          "and the timer both finding it would otherwise do",
+    check("the payment was already applied by the callback, so the timed "
+          "pass finds nothing more -- a webhook and the timer both seeing "
+          "the same payment must not extend the packet twice",
           R.reconcile_payments(store, ZCFG) == 0)
+    check("...and the packet did carry on, extended from where it ENDED "
+          "rather than from today, so nothing already paid for is lost",
+          store.get(2)["current_period_end"] > time.time() + 25 * DAY)
 
     print("\nBeing able to see it coming")
 
@@ -164,6 +181,48 @@ try:
               key=lambda n: by_name[n]["invoice_on"]))
 finally:
     R._z.ensure_client, R._z.create_invoice, R._z.email_invoice = _real
+
+print("\nThe invoice run is daily, not every fifteen minutes")
+
+# "Whose packet lapses within seven days" has the same answer at 09:00 and
+# 09:15. Asking 96 times a day spent 96x the API calls to learn nothing --
+# and on Zoho's free plan those calls come out of a budget of 1000.
+
+
+class SettingAuth(FakeAuth):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.settings = {}
+
+    def get_setting(self, k, default=None):
+        return self.settings.get(k, default)
+
+    def set_setting(self, k, v):
+        self.settings[k] = v
+
+
+sa = SettingAuth(ZCFG)
+early = time.mktime(time.strptime("2026-09-16 02:00", "%Y-%m-%d %H:%M"))
+morning = time.mktime(time.strptime("2026-09-16 09:00", "%Y-%m-%d %H:%M"))
+evening = time.mktime(time.strptime("2026-09-16 21:00", "%Y-%m-%d %H:%M"))
+tomorrow = time.mktime(time.strptime("2026-09-17 09:00", "%Y-%m-%d %H:%M"))
+
+check("at 02:00 nothing is raised -- nobody wants an invoice timestamped "
+      "three in the morning", not R.raise_is_due(sa, early))
+check("at 09:00 it is due", R.raise_is_due(sa, morning))
+
+R.mark_raised(sa, morning)
+check("once it has run, it does not run again that day, however many times "
+      "the fifteen-minute tick comes round",
+      not R.raise_is_due(sa, morning) and not R.raise_is_due(sa, evening))
+check("and it runs again tomorrow", R.raise_is_due(sa, tomorrow))
+check("the marker is kept in settings, not memory, so a service restarting "
+      "in a loop does not re-read every due company on every boot",
+      sa.settings.get("billing_last_raise") == "2026-09-16")
+check("an auth store that cannot remember the day still lets billing run -- "
+      "it just cannot skip a second run",
+      R.raise_is_due(FakeAuth(ZCFG), morning) is True)
+
 
 print("\nA timer nobody can see is the whole problem")
 
