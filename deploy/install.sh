@@ -663,6 +663,20 @@ if [[ -z "${ACCESS_HOST:-}" ]]; then
   ACCESS_HOST="$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null \
     || hostname -I 2>/dev/null | awk '{print $1}')"
   ACCESS_HOST="${ACCESS_HOST:-}"
+  # The fallback returns whatever `hostname -I` lists first, which on a NATed
+  # server is a private address. Everything then installs cleanly, every port
+  # really does open -- and every WebFig link times out, because the address
+  # in it exists only on this LAN. Say so here rather than leaving it to be
+  # discovered a browser tab at a time.
+  case "${ACCESS_HOST}" in
+    10.*|127.*|192.168.*|169.254.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*)
+      log "WARN: remote access auto-detected ${ACCESS_HOST}, a PRIVATE address."
+      log "      WebFig/Winbox links built from it only work on this LAN."
+      log "      Re-run with ACCESS_HOST=your.public.hostname to fix it."
+      log "      (Links fall back to the address you browse the dashboard on,"
+      log "       so this is a warning, not a dead feature.)"
+      ;;
+  esac
 fi
 if [[ -n "${ACCESS_HOST}" ]]; then
   step "Setting up remote access (nginx) for ${ACCESS_HOST}"
@@ -756,6 +770,7 @@ PY
     cat > /etc/sudoers.d/mikromon-access <<SUDO
 ${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl start easymikrotik-access-reload.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/wg show *
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/sbin/nginx -t
 SUDO
     chmod 440 /etc/sudoers.d/mikromon-access
     visudo -cf /etc/sudoers.d/mikromon-access >/dev/null       || rm -f /etc/sudoers.d/mikromon-access

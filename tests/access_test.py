@@ -261,6 +261,55 @@ check("an expired grant IS swept, which is the job the timer exists for",
 check("...without taking the live ones with it",
       _gs.grant_for("B1", "webfig") is not None)
 
+print("")
+print("Which address a remote-access link points at:")
+
+# The whole feature can be working perfectly -- grant recorded, nginx
+# listening, port open, firewall allowing it -- and still be useless, because
+# the address in the link is one the reader's browser cannot route to. That is
+# what a NATed server's auto-detected 172.16.x.x host does, and the only
+# symptom is a browser timing out with nothing to point at.
+from mikromon.web import _access_link_host, _host_is_unroutable, _strip_port
+
+check("a private address is known to be unreachable from elsewhere",
+      all(_host_is_unroutable(h) for h in
+          ("172.16.1.246", "10.1.2.3", "192.168.0.1", "127.0.0.1",
+           "localhost", "169.254.1.1", "")))
+check("a public address and a hostname are not",
+      not any(_host_is_unroutable(h) for h in
+              ("38.54.63.107", "easymikrotik.co.za", "8.8.8.8")))
+
+check("a port is stripped off the Host header",
+      _strip_port("easymikrotik.co.za:8080") == "easymikrotik.co.za"
+      and _strip_port("[::1]:80") == "::1"
+      and _strip_port("example.com") == "example.com")
+
+check("a configured PUBLIC host is used as-is, whatever the browser used -- "
+      "an explicit setting is a decision, not a guess to second-guess",
+      _access_link_host({"hub_host": "hub.example.com"},
+                        "10.0.0.9:8080") == "hub.example.com")
+
+check("a configured PRIVATE host is overridden by the address the browser "
+      "actually reached us on, because that address demonstrably routes here",
+      _access_link_host({"hub_host": "172.16.1.246"},
+                        "easymikrotik.co.za") == "easymikrotik.co.za")
+
+check("...including when the dashboard is on a non-default port",
+      _access_link_host({"hub_host": "172.16.1.246"},
+                        "38.54.63.107:8080") == "38.54.63.107")
+
+check("a private host stays when the browser is ALSO on the LAN -- that "
+      "reader can reach it, and swapping in their own address helps nobody",
+      _access_link_host({"hub_host": "172.16.1.246"},
+                        "192.168.8.2") == "172.16.1.246")
+
+check("no Host header at all falls back to what is configured",
+      _access_link_host({"hub_host": "172.16.1.246"}, "") == "172.16.1.246")
+
+check("nothing configured and nothing to fall back on stays empty, which "
+      "switches the feature off rather than inventing a link",
+      _access_link_host({}, "") == "")
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

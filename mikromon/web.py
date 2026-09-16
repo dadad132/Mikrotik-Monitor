@@ -2627,6 +2627,47 @@ def _port_is_listening(port: int, timeout: float = 1.0) -> bool:
     return False
 
 
+def _host_is_unroutable(host: str) -> bool:
+    """Can a browser somewhere else reach this address at all?
+
+    Private, loopback and link-local addresses are reachable only from
+    inside the server's own network. A hostname is assumed routable -- it is
+    whoever set it up who decides what it resolves to.
+    """
+    h = (host or "").strip().strip("[]").split("%")[0]
+    if not h or h == "localhost":
+        return True
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    return bool(ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_unspecified)
+
+
+def _strip_port(host: str) -> str:
+    """"example.com:8080" -> "example.com"; "[::1]:80" -> "::1"."""
+    h = (host or "").strip()
+    if h.startswith("["):
+        return h.split("]")[0].lstrip("[")
+    return h.split(":")[0] if h.count(":") == 1 else h
+
+
+def _access_link_host(access_cfg, request_host: str) -> str:
+    """The address a remote-access link should point at.
+
+    The configured host wins whenever it can actually be reached. It is only
+    overridden when it demonstrably cannot -- a private address on a NATed
+    server -- and the browser is already talking to us on one that can.
+    """
+    cfg = str((access_cfg or {}).get("hub_host", "") or "").strip()
+    req = _strip_port(request_host)
+    if req and _host_is_unroutable(cfg) and not _host_is_unroutable(req):
+        return req
+    return cfg
+
+
 def _access_box(name, csrf, hub_host, tunnel_ip, creds, grants) -> str:
     """On-demand remote access through the hub. `grants` maps kind -> active
     grant dict (or None). Each kind shows either an Open button or the live
@@ -7537,6 +7578,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
         def _access_ttl(self):
             return int(access_cfg.get("ttl_minutes", 15)) * 60
 
+        def _link_host(self):
+            """Where remote-access links should send the reader's browser.
+
+            Not necessarily the configured host: see _access_link_host.
+            """
+            return _access_link_host(access_cfg, self.headers.get("Host", ""))
+
         def _access_box_html(self, name, csrf):
             store = self._access_store()
             if store is None:
@@ -7549,7 +7597,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             creds = {"user": raw.get("username", ""),
                      "pwd": raw.get("password", "")}
             grants = {k: store.grant_for(name, k) for k in ("webfig", "winbox")}
-            return _access_box(name, csrf, access_cfg.get("hub_host", ""),
+            return _access_box(name, csrf, self._link_host(),
                                _device_tunnel_ip(name, devices_db), creds, grants)
 
         @staticmethod
@@ -11132,7 +11180,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     f'background:#f1f5f9;border-radius:6px;border-left:3px solid #38bdf8">'
                     f'<b>No VPN needed:</b> along with the login, you will get public '
                     f'Winbox and WebFig addresses proxied through '
-                    f'<code>{esc(access_cfg.get("hub_host", ""))}</code>. They close '
+                    f'<code>{esc(self._link_host())}</code>. They close '
                     f'automatically when the login expires.</p>')
             else:
                 sec_note = (
@@ -11241,7 +11289,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if astore is not None:
                 tunnel_ip = _device_tunnel_ip(name, devices_db)
                 if tunnel_ip:
-                    hub = access_cfg.get("hub_host", "")
+                    hub = self._link_host()
                     ttl = duration_mins * 60
                     try:
                         wb = astore.open(name, "winbox", tunnel_ip, ttl=ttl)

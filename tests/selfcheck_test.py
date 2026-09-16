@@ -115,6 +115,89 @@ check("a path that does not exist yet is silent, not a failure",
 check("a writable directory means the file can be replaced atomically",
       one(sc.check_peers_dir(p), "wg:dir")["ok"])
 
+print("\nThe address the links actually point at")
+
+# Detection falls back to `hostname -I` when the public-IP lookup fails. On a
+# NATed server that is 172.16.x.x: grants get created, nginx really listens,
+# every tick stays green -- and the browser times out, because the address in
+# the link exists only on the server's own LAN. Nothing in the system said so.
+for bad in ("172.16.1.246", "10.0.0.5", "192.168.1.10", "127.0.0.1",
+            "localhost", "169.254.1.1"):
+    f = one(sc.check_access_host({"hub_host": bad}), "access:host")
+    check(f"{bad} is called out as unreachable from anywhere else",
+          f is not None and not f["ok"] and bad in f["title"])
+
+f = one(sc.check_access_host({"hub_host": "172.16.1.246"}), "access:host")
+check("...explaining that the port IS open and it is the address that is "
+      "wrong, since 'connection timed out' reads like the opposite",
+      "the address just does not reach it" in f["detail"])
+check("...and naming the way to set it", "ACCESS_HOST=" in f["fix"])
+
+for good in ("38.54.63.107", "easymikrotik.co.za", "hub.example.com"):
+    check(f"{good} is fine and says where links point",
+          one(sc.check_access_host({"hub_host": good}), "access:host")["ok"])
+
+check("nothing configured means nothing to say",
+      sc.check_access_host({}) == [] and sc.check_access_host(None) == [])
+
+print("\nnginx: a check that cannot tell working from broken")
+
+_rr = sc._run
+try:
+    # `nginx -t` reads the TLS key, which is root-only. Run as the web service
+    # user it fails on a perfectly good config -- and then says "nginx refuses
+    # its own configuration" in red, sending you after the wrong thing while
+    # the real fault sits elsewhere. That happened, and cost a round trip.
+    _denied = ("nginx: [emerg] cannot load certificate key ... "
+               "Permission denied:calling fopen(...) "
+               "nginx: configuration file /etc/nginx/nginx.conf test failed")
+
+    def _fake(cmd, timeout=6):
+        if cmd[0] == "nginx" and "-v" in cmd:
+            return 0, "", "nginx/1.24"
+        if cmd[:2] == ["sudo", "-n"]:
+            return 1, "", _denied          # sudo not permitted either
+        if "is-failed" in cmd or "is-active" in cmd:
+            return 0, "active", ""
+        return 1, "", _denied
+
+    sc._run = _fake
+    f = one(sc.check_nginx({"nginx_http_conf": "/etc/nginx/x.conf"}),
+            "nginx:conf")
+    check("a permission error reading the key is NOT reported as a broken "
+          "nginx config -- it is reported as a check that could not run",
+          f["ok"] and f["warn"])
+    check("...and carries the sudoers line that would let it run",
+          "sudoers.d/mikromon-nginx" in f["fix"])
+
+    def _sudo_works(cmd, timeout=6):
+        if cmd[0] == "nginx" and "-v" in cmd:
+            return 0, "", "nginx/1.24"
+        if cmd[:2] == ["sudo", "-n"]:
+            return 0, "syntax is ok", ""
+        if "is-failed" in cmd or "is-active" in cmd:
+            return 0, "active", ""
+        return 1, "", _denied
+
+    sc._run = _sudo_works
+    check("when sudo IS permitted the config is really tested, and passes",
+          one(sc.check_nginx({"nginx_http_conf": "/x"}), "nginx:running")["ok"])
+
+    def _really_broken(cmd, timeout=6):
+        if cmd[0] == "nginx" and "-v" in cmd:
+            return 0, "", "nginx/1.24"
+        if "is-failed" in cmd or "is-active" in cmd:
+            return 0, "active", ""
+        return 1, "", "nginx: [emerg] unknown directive \"proxy_passs\""
+
+    sc._run = _really_broken
+    f = one(sc.check_nginx({"nginx_http_conf": "/x"}), "nginx:conf")
+    check("a genuinely bad config is still reported, loudly -- softening the "
+          "permission case must not soften this one",
+          not f["ok"] and "proxy_passs" in f["detail"])
+finally:
+    sc._run = _rr
+
 print("\nRetention, which stopped running once and made every page slow")
 
 mdb = os.path.join(d, "m.db")

@@ -174,14 +174,77 @@ def check_nginx(access_cfg):
         return [_finding("nginx:running", False,
                          f"nginx is {state} -- remote access cannot work", "",
                          "sudo systemctl start nginx")]
+    # `nginx -t` has to read the TLS key, which is root-only. Run as the web
+    # service user it therefore fails on a PERFECTLY GOOD config -- and then
+    # says so in red, on the page people open when something is wrong. A
+    # check that cannot tell working from broken is worse than no check: it
+    # sends you after the wrong thing, which is exactly what it did here.
     rc2, _, err2 = _run(["nginx", "-t"])
     if rc2 not in (0, None):
+        rc3, _, err3 = _run(["sudo", "-n", "nginx", "-t"])
+        if rc3 == 0:
+            return [_finding("nginx:running", True, "nginx is running and "
+                                                    "its configuration is valid")]
+        if rc3 is not None and _denied(err2) and _denied(err3):
+            user = os.environ.get("USER") or "mikromon"
+            return [_finding(
+                "nginx:conf", True,
+                "Could not verify the nginx configuration",
+                "Testing it means reading the TLS private key, which only "
+                "root may do -- so this says nothing either way about nginx.",
+                f"echo '{user} ALL=(root) NOPASSWD: /usr/sbin/nginx -t' "
+                f"| sudo tee /etc/sudoers.d/mikromon-nginx", warn=True)]
         return [_finding("nginx:conf", False,
                          "nginx refuses its own configuration",
-                         (err2 or "")[-400:],
+                         ((err3 or err2) or "")[-400:],
                          "sudo nginx -t")]
     return [_finding("nginx:running", True, "nginx is running and its "
                                             "configuration is valid")]
+
+
+def check_access_host(access_cfg):
+    """Can anyone actually OPEN the remote-access links this server hands out?
+
+    `access.hub_host` is detected at install time, and the detection falls
+    back to `hostname -I` when the public-IP lookup fails. On a server behind
+    NAT that yields a 172.16.x.x address: grants are created, nginx listens,
+    every green tick stays green -- and the browser times out, because the
+    address in the link exists only on the server's own LAN.
+    """
+    host = str((access_cfg or {}).get("hub_host", "") or "").strip()
+    if not host:
+        return []
+    if not _unroutable_host(host):
+        return [_finding("access:host", True,
+                         f"Remote-access links point at {host}")]
+    return [_finding(
+        "access:host", False,
+        f"Remote-access links point at {host}, which only works inside this "
+        f"server's own network",
+        "This is a private address. WebFig and Winbox links built from it "
+        "time out for anyone browsing from anywhere else -- the port really "
+        "is open, the address just does not reach it. Links now fall back to "
+        "whatever address the browser used to reach the dashboard, so set "
+        "this to the public hostname to make it deliberate.",
+        "sudo ACCESS_HOST=your.public.hostname bash deploy/install.sh")]
+
+
+def _unroutable_host(host):
+    """Private / loopback / link-local. A hostname is assumed routable."""
+    import ipaddress
+    h = (host or "").strip().strip("[]").split("%")[0]
+    if not h or h == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    return bool(ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_unspecified)
+
+
+def _denied(err):
+    return "permission denied" in (err or "").lower()
 
 
 def check_retention(metrics_db, retention_days=30):
@@ -287,6 +350,7 @@ def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
                lambda: check_wg_readable(),
                lambda: check_peers_dir(peers_path),
                lambda: check_peers_file(peers_path, expected_peers),
+               lambda: check_access_host(access_cfg),
                lambda: check_nginx(access_cfg),
                lambda: check_retention(metrics_db, retention_days),
                lambda: check_smtp(smtp_cfg)):
