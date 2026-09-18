@@ -218,14 +218,18 @@ def raise_due_invoices(billing, auth, cfg, now: float | None = None,
                 vat=org.get("vat_number", ""))
             from .billing import payment_reference
             when = time.strftime("%d %B %Y", time.localtime(period_end))
+            ref = payment_reference(org_id, name)
             inv = prov.create_invoice(
                 client_id,
+                # The reference is written into the description as well as
+                # the reference field. It cannot be reconstructed afterwards
+                # from money arriving in a bank account, so it must not be
+                # possible for a template setting to hide it.
                 description=(f"Router monitoring — up to {plan['devices']} "
                              f"devices. Renewal for the period starting "
-                             f"{when}."),
+                             f"{when}. Please quote {ref} on your payment."),
                 amount=amount, due_days=due_days,
-                reference=payment_reference(org_id, name),
-                currency=currency)
+                reference=ref, currency=currency)
         except ProviderError as exc:
             log.error("renewal: could not invoice org %s (%s): %s",
                       org_id, name, exc)

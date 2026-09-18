@@ -555,74 +555,6 @@ def _change_packet_box(csrf, current_plan, device_count, period_end,
         f'invoice is paid.</p></div></div>')
 
 
-def _eft_reference_box(org_id, contact: dict | None = None,
-                       org_name: str = "") -> str:
-    """The company's own EFT reference, plus where to actually send the money.
-
-    A bank statement line only says who a payment is from and what they typed
-    in the reference field. If the customer was never given a reference, there
-    is nothing on the deposit tying it to an account, and reconciling it means
-    guessing from the name. So the reference has to be handed out up front --
-    it cannot be worked out afterwards from the money arriving.
-
-    Deliberately plain and copyable rather than decorative: it gets retyped
-    into a banking app by hand, and every character is a chance to get it
-    wrong.
-
-    The bank details matter as much as the reference. A reference with no
-    account to send it to is half an instruction, and a customer who cannot
-    work out where to pay is a customer who does not pay. When no details have
-    been configured this says so and points at whatever contact HAS been set,
-    rather than showing a bare code and leaving them to guess."""
-    from .billing import payment_reference
-
-    ref = payment_reference(org_id, org_name)
-    contact = contact or {}
-    bank = ""
-    if contact:
-        fields = [("Bank", contact.get("bank_name")),
-                  ("Account name", contact.get("bank_holder")),
-                  ("Account number", contact.get("bank_account")),
-                  ("Branch code", contact.get("bank_branch"))]
-        filled = [(lbl, val) for lbl, val in fields if str(val or "").strip()]
-        if filled:
-            bank = ('<div style="margin-top:12px;font-size:13px">'
-                    + "".join(
-                        f'<div><span class="muted" '
-                        f'style="display:inline-block;min-width:120px">'
-                        f'{esc(lbl)}</span><b>{esc(str(val))}</b></div>'
-                        for lbl, val in filled)
-                    + "</div>")
-    if not bank:
-        who = " or ".join(x for x in (esc(str(contact.get("name") or "")),
-                                      esc(str(contact.get("email") or "")))
-                          if x)
-        bank = ('<div style="margin-top:12px;font-size:13px;padding:10px 12px;'
-                'border-radius:8px;background:var(--surface-2);'
-                'border:1px solid var(--border)">'
-                'Bank details are not published here yet &mdash; '
-                + (f'contact <b>{who}</b> for them, quoting the reference '
-                   f'above.' if who else
-                   'contact your provider for them, quoting the reference '
-                   'above.')
-                + '</div>')
-    return (
-        f'<div class="box"><h2>Paying by EFT</h2>'
-        f'<p class="muted" style="margin-top:0">Use this reference on the '
-        f'payment so it can be matched to your account. Without it a deposit '
-        f'arrives with nothing to identify it by.</p>'
-        f'<div style="display:flex;align-items:center;gap:12px;margin:10px 0">'
-        f'<code style="font-size:22px;font-weight:700;letter-spacing:1px;'
-        f'padding:8px 14px;border-radius:8px;background:var(--surface-2);'
-        f'border:1px solid var(--border)" id="eftRef">{esc(ref)}</code>'
-        f'<button class="btn ghost" type="button" onclick="'
-        f'navigator.clipboard&amp;&amp;navigator.clipboard.writeText('
-        f"'{ref}'" f');this.textContent=&quot;Copied&quot;">Copy</button>'
-        f'</div>{bank}'
-        f'<p class="muted" style="font-size:12px;margin-bottom:0">This '
-        f'reference belongs to your account and never changes.</p></div>')
-
-
 def _fitting_tier(device_count: int):
     """The smallest packet that holds this many devices, or None if the
     company is past the last tier (and so needs a quote) or has none yet.
@@ -891,14 +823,12 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                   f'justify-content:space-between;flex-wrap:wrap;gap:10px">'
                   f'{status_html}{cancel_btn}</div>'
                   f'</div>'
-                  # The EFT reference stays. A customer has to quote it on
-                  # the payment itself, and it cannot be worked out
-                  # afterwards from money arriving in a bank account -- so
-                  # handing it over before they pay is the mechanism, not a
-                  # convenience. The invoice carries it too; both saying the
-                  # same thing is the point.
-                  + _eft_reference_box(user.get("org_id"), contact,
-                                       user.get("org_name", ""))
+                  # No bank-details panel here. Invoices go out through
+                  # Zoho in USD, so a South African account shown on the
+                  # dashboard would be a second set of payment instructions
+                  # contradicting the one on the invoice -- and the invoice
+                  # is what somebody paying is actually reading. The
+                  # reference rides on the invoice instead, twice.
                   + _change_packet_box(
                       csrf, plan_name, device_count,
                       (bill or {}).get("current_period_end"),
@@ -1040,11 +970,27 @@ def _locked_pay_block(user, csrf: str, yoco_on: bool, bill,
             f'text-align:center">Paid by card on Yoco. Your account comes '
             f'back on by itself the moment the payment clears.</p>'
             f'</form>')
-    # No card payment on this server: give them the reference and the bank
-    # details, which is the whole reason they were sent here.
-    return (f'<div style="margin-top:18px;text-align:left">'
-            f'{_eft_reference_box(user.get("org_id", 0), contact, org_name)}'
-            f'</div>')
+    # No card payment on this server. This page exists to tell a locked-out
+    # customer how to get back on, so it has to answer that -- the reference
+    # to quote, and where the rest of the detail is. Not the bank details
+    # themselves: those are on the invoice, and two copies could only ever
+    # disagree.
+    from .billing import payment_reference
+    ref = payment_reference(user.get("org_id", 0), org_name or "")
+    return (
+        f'<div style="margin-top:18px;text-align:left;padding:14px;'
+        f'border-radius:8px;background:rgba(148,163,184,0.12)">'
+        f'<p style="margin:0 0 8px"><b>To switch everything back on</b>, '
+        f'settle the outstanding invoice. Quote this reference on the '
+        f'payment so it can be matched to your account:</p>'
+        f'<code style="display:inline-block;font-size:17px;padding:8px 12px;'
+        f'border-radius:6px;background:var(--surface);'
+        f'border:1px solid var(--border)">{esc(ref)}</code>'
+        f'<p class="muted" style="font-size:12px;margin:10px 0 0">'
+        f'The bank details are on your invoice. This reference belongs to '
+        f'your account and never changes. Everything comes back on by '
+        f'itself once the payment is confirmed &mdash; nobody here has to '
+        f'do anything.</p></div>')
 
 
 def _render_locked(user, contact: dict | None = None,

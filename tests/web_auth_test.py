@@ -616,9 +616,9 @@ try:
     # The old page's only button linked to /billing, which redirects a
     # locked company straight back here -- a customer told to pay, with
     # nowhere to pay and no reference to quote.
-    check("...and gives them somewhere to actually pay: with card "
-          "payment off, the EFT reference for their own company",
-          "PAYLESSCO-" in body)
+    check("...and names the reference for their own company, so a person "
+          "who wants to pay right now can, without waiting for the next "
+          "invoice to arrive", "PAYLESSCO-" in body)
     check("...instead of the old button back to the billing page, which "
           "redirects locked companies straight to this same notice",
           "View payment details" not in body
@@ -1247,8 +1247,10 @@ check("prices still show when card payment is not switched on -- a customer "
       all(f'>{n}</td>' in _nopf for n in range(5, _MAXD + 1, 5)))
 check("...with no subscribe buttons, since there is nothing behind them",
       'action="/billing/subscribe"' not in _nopf)
-check("...and they are pointed at the payment route that does work",
-      "EFT" in _nopf and "Capitec" in _nopf)
+check("...and they are pointed at what they can actually do here, which is "
+      "change packet -- the bank details live on the invoice now, where the "
+      "person about to pay is looking",
+      "Change your packet" in _nopf and "Capitec" not in _nopf)
 for _leak in ("PayFast", "payfast", "config.yaml", "not configured",
               "not yet configured"):
     check(f"the billing page never says {_leak!r} to a customer -- server "
@@ -1329,66 +1331,35 @@ _bill_html = _wa._render_billing(
      "org_name": "My IT Africa"},
     {"status": "active", "plan": "starter", "device_limit": 5},
     False, "CSRF", contact={"bank_name": "Capitec", "bank_account": "123456"})
-check("the company sees its own reference on the billing page BEFORE paying "
-      "-- it cannot be worked out afterwards from money arriving, so handing "
-      "it over up front is the whole mechanism",
-      _pref(42, "My IT Africa") in _bill_html
-      and "Paying by EFT" in _bill_html)
-check("...and the reference carries their company name, so the superadmin "
-      "reading a bank statement knows who paid without a lookup",
-      _pref(42, "My IT Africa") in _bill_html
-      and "MYITAFRICA-0042" in _bill_html)
-check("...along with the bank details to pay into, when they are configured "
-      "-- a reference with nowhere to send the money is half an instruction",
-      "Capitec" in _bill_html and "123456" in _bill_html)
+# The invariant has not changed: a customer must learn the reference BEFORE
+# they pay, because it cannot be reconstructed afterwards from money arriving
+# in a bank account. What changed is where. Invoices go out through Zoho in
+# USD, so a South African bank account on the dashboard would be a second set
+# of payment instructions contradicting the one on the invoice -- and the
+# invoice is what somebody paying is reading.
+check("the reference is derived from the company, so a superadmin reading a "
+      "bank statement knows who paid without a lookup",
+      _pref(42, "My IT Africa") == "MYITAFRICA-0042")
+check("...and it is stable for a company, which is what makes it usable as "
+      "a saved beneficiary reference",
+      _pref(42, "My IT Africa") == _pref(42, "My IT Africa"))
+check("...and carries the org id, so it resolves even if the name is "
+      "unreadable on a statement", "0042" in _pref(42, "My IT Africa"))
 
-_full = _wa._render_billing(
-    {"org_id": 42, "email": "a@b.c", "role": "owner"}, None, False, "CSRF",
-    contact={"email": "b@x.c", "bank_name": "Capitec",
-             "bank_holder": "My IT Africa (Pty) Ltd",
-             "bank_account": "1234567890", "bank_branch": "470010"})
-check("every bank field the superadmin filled in is shown, labelled",
-      all(x in _full for x in ("Capitec", "My IT Africa (Pty) Ltd",
-                               "1234567890", "470010")))
-check("...and a partly-filled set shows only what was entered, rather than "
-      "empty rows for the rest",
-      "Branch code" not in _wa._render_billing(
-          {"org_id": 7, "email": "a@b.c", "role": "owner"}, None, False, "C",
-          contact={"email": "b@x.c", "bank_name": "Capitec"}))
+check("the billing page no longer shows bank details: they would contradict "
+      "the invoice, which is the document somebody paying is looking at",
+      "Paying by EFT" not in _bill_html)
+check("...and it offers the thing a customer actually came here to do, "
+      "which is change packet", "Change your packet" in _bill_html)
 
-# The case that actually bites on day one: nobody has filled the bank details
-# in yet, so the customer is looking at a reference and no account to send it
-# to. Showing the code alone would read as a complete instruction and quietly
-# stall every payment.
-_nobank = _wa._render_billing(
-    {"org_id": 7, "email": "a@b.c", "role": "owner", "org_name": "Kyotech"},
-    None, False, "C", contact={"name": "Jaco", "email": "b@x.c"})
-check("with no bank details configured the customer is told who to ask, "
-      "rather than being left with a reference and nowhere to send the money",
-      "not published" in _nobank and "b@x.c" in _nobank)
-_nothing = _wa._render_billing(
-    {"org_id": 7, "email": "a@b.c", "role": "owner", "org_name": "Kyotech"},
-    None, False, "C", contact=None)
-check("...and with nothing configured at all it still says so plainly "
-      "instead of rendering an empty gap",
-      "not published" in _nothing and "contact your provider" in _nothing)
+# On the invoice, twice: as the reference field and written into the line,
+# where no template setting can hide it.
+import mikromon.billing_runner as _br  # noqa: E402
 
-_form = _wa._render_superadmin(
-    {"email": "s@x.c", "role": "owner", "is_superadmin": True},
-    [], [], csrf="C", billing_on=True,
-    billing_contact={"email": "b@x.c", "bank_name": "Capitec"})
-check("the superadmin can actually EDIT those bank details — they are shown "
-      "to every customer, so they had to be reachable from the panel rather "
-      "than only settable in a config file",
-      all(f'name="{f}"' in _form for f in
-          ("bank_name", "bank_account", "bank_holder", "bank_branch")))
-check("...and the form comes back filled in with what was saved",
-      'value="Capitec"' in _form)
-check("...and it is shown even with card payment switched off, since an EFT "
-      "customer needs it either way",
-      "Paying by EFT" in _wa._render_billing(
-          {"org_id": 7, "email": "a@b.c", "role": "owner"},
-          None, False, "CSRF"))
+_src = open(_br.__file__, encoding="utf-8").read()
+check("the renewal invoice carries the reference in its description as well "
+      "as its reference field, so a template that hides one still shows the "
+      "other", "Please quote {ref} on your payment" in _src)
 
 # The superadmin has no other way to notice: their own panel looks fine while
 # every customer's billing page is quietly missing the account to pay into.
