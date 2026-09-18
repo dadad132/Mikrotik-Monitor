@@ -449,10 +449,22 @@ _svc = {i for i, _ in _NEXTDNS_SERVICES}
 _cat = {i for i, _ in _NEXTDNS_CATEGORIES}
 check("Prime Video is 'primevideo', not 'prime-video'",
       "primevideo" in _svc and "prime-video" not in _svc)
-check("Disney+ is 'disney+', not 'disney-plus'",
-      "disney+" in _svc and "disney-plus" not in _svc)
-check("there is no 'messenger' service, so it is not offered",
-      "messenger" not in _svc)
+# Read from NextDNS's own metadata repository at the last commit before it
+# was emptied -- not inferred from product names. Two rounds of
+# reasonable-looking spellings were both rejected, because an id is a fact
+# about NextDNS rather than something derivable from what a thing is called.
+check("Disney+ is 'disneyplus' -- not 'disney-plus', and not 'disney+' "
+      "either, which was the second wrong guess",
+      "disneyplus" in _svc
+      and not ({"disney+", "disney-plus"} & _svc))
+check("'messenger' IS a real service and is offered again -- it was removed "
+      "on a guess that turned out to be wrong too", "messenger" in _svc)
+check("the whole catalogue is there, not a hand-picked handful: forty "
+      "services, so nobody has to type an id into the escape-hatch box for "
+      "something NextDNS has always supported", len(_svc) == 40)
+check("every id is lowercase with no spaces or plus signs, which is the "
+      "shape NextDNS actually uses",
+      all(i == i.lower() and " " not in i and "+" not in i for i in _svc))
 check("the pornography category is 'porn', which is NextDNS's own documented "
       "id -- the same one-bad-id failure was waiting here",
       "porn" in _cat and "pornography" not in _cat)

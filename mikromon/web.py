@@ -4128,32 +4128,42 @@ _NEXTDNS_PARENTAL_BOOLS = [
 # new router. Best-effort ids (not published as a fixed catalog by
 # NextDNS's API) — the "add another" field below covers anything missing
 # or misspelled here, same safety net as the blocklist box.
+# The complete set, from the same source as the services above. There are
+# only seven, and "porn" is their id -- not "pornography", which is the sort
+# of reasonable-looking guess that fails the whole PATCH.
 _NEXTDNS_CATEGORIES = [
-    ("dating", "Dating"), ("gambling", "Gambling"), ("gaming", "Online Gaming"),
-    ("piracy", "Piracy"),
-    # NextDNS's own documented id is "porn", not "pornography". Same failure
-    # shape as the services: one wrong id and the whole PATCH is refused.
-    ("porn", "Pornography"),
-    ("social-networks", "Social Networks"),
+    ("dating", "Dating"), ("gambling", "Gambling"),
+    ("gaming", "Online Gaming"), ("piracy", "Piracy"),
+    ("porn", "Pornography"), ("social-networks", "Social Networks"),
     ("video-streaming", "Video Streaming"),
 ]
+# Read from NextDNS's own metadata repository (github.com/nextdns/metadata,
+# one JSON file per service) at commit 6f9b6cd -- the last before the repo
+# was deprecated and emptied in January 2023. NOT inferred from product
+# names: two rounds of sensible-looking spellings were both rejected,
+# because an id here is a fact about NextDNS rather than something derivable
+# from what a thing is called. "disneyplus", not "disney+" or "disney-plus".
+#
+# It will drift -- they have added services since. That is what
+# set_parental_entries is for: a rejected id names itself and costs one
+# checkbox rather than the whole section.
 _NEXTDNS_SERVICES = [
-    ("tiktok", "TikTok"), ("instagram", "Instagram"), ("facebook", "Facebook"),
-    ("snapchat", "Snapchat"), ("twitter", "Twitter / X"), ("youtube", "YouTube"),
-    ("reddit", "Reddit"), ("roblox", "Roblox"), ("telegram", "Telegram"),
-    ("whatsapp", "WhatsApp"), ("discord", "Discord"), ("netflix", "Netflix"),
-    ("twitch", "Twitch"), ("spotify", "Spotify"), ("minecraft", "Minecraft"),
-    ("fortnite", "Fortnite"), ("steam", "Steam"), ("pinterest", "Pinterest"),
-    ("tinder", "Tinder"), ("tumblr", "Tumblr"),
-    # NextDNS spells these two without separators, and has no "messenger"
-    # service at all -- a wrong id fails the WHOLE services PATCH with an
-    # opaque 400, taking every other service the customer just ticked with
-    # it. Confirmed against NextDNS's own documented ids.
-    ("primevideo", "Prime Video"), ("disney+", "Disney+"),
-    ("hulu", "Hulu"), ("vimeo", "Vimeo"), ("dailymotion", "Dailymotion"),
-    ("9gag", "9GAG"), ("imgur", "Imgur"), ("vk", "VK"), ("skype", "Skype"),
-    ("zoom", "Zoom"), ("ebay", "eBay"), ("amazon", "Amazon"),
-    ("blizzard", "Blizzard"), ("leagueoflegends", "League of Legends"),
+    ("9gag", "9GAG"), ("amazon", "Amazon"), ("bereal", "BeReal"),
+    ("blizzard", "Blizzard"), ("dailymotion", "Dailymotion"),
+    ("discord", "Discord"), ("disneyplus", "Disney+"), ("ebay", "eBay"),
+    ("facebook", "Facebook"), ("fortnite", "Fortnite"),
+    ("hbomax", "HBO Max"), ("hulu", "Hulu"), ("imgur", "Imgur"),
+    ("instagram", "Instagram"), ("leagueoflegends", "League of Legends"),
+    ("messenger", "Messenger"), ("minecraft", "Minecraft"),
+    ("netflix", "Netflix"), ("pinterest", "Pinterest"),
+    ("playstation-network", "PlayStation Network"),
+    ("primevideo", "Prime Video"), ("reddit", "Reddit"),
+    ("roblox", "Roblox"), ("signal", "Signal"), ("skype", "Skype"),
+    ("snapchat", "Snapchat"), ("spotify", "Spotify"), ("steam", "Steam"),
+    ("telegram", "Telegram"), ("tiktok", "TikTok"), ("tinder", "Tinder"),
+    ("tumblr", "Tumblr"), ("twitch", "Twitch"), ("twitter", "Twitter / X"),
+    ("vimeo", "Vimeo"), ("vk", "VK"), ("whatsapp", "WhatsApp"),
+    ("xboxlive", "Xbox Live"), ("youtube", "YouTube"), ("zoom", "Zoom"),
 ]
 
 
