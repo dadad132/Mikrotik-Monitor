@@ -29,7 +29,7 @@ import threading
 import time
 
 from . import zoho as _z
-from .billing import plan_by_name
+from .billing import BILLING_CURRENCY, money, plan_by_name
 from .invoiceninja import (InvoiceNinjaError, create_invoice, email_invoice,
                            ensure_client, invoice_status)
 
@@ -85,7 +85,7 @@ class _Ninja:
             raise ProviderError(str(exc)) from exc
 
     def create_invoice(self, client_id, *, description, amount, due_days,
-                       reference):
+                       reference, currency=""):
         try:
             return create_invoice(self.base, self.token, client_id,
                                   description=description, amount=amount,
@@ -127,13 +127,14 @@ class _Zoho:
             raise ProviderError(str(exc)) from exc
 
     def create_invoice(self, client_id, *, description, amount, due_days,
-                       reference):
+                       reference, currency=""):
         due = time.strftime("%Y-%m-%d",
                             time.localtime(time.time() + due_days * 86400))
         try:
             return _z.create_invoice(self.cfg, client_id, description=description,
                                   amount_cents=int(round(amount * 100)),
-                                  due_date=due, reference=reference)
+                                  due_date=due, reference=reference,
+                                     currency=currency)
         except _z.ZohoError as exc:
             raise ProviderError(str(exc)) from exc
 
@@ -239,7 +240,12 @@ def raise_due_invoices(billing, auth, cfg, now: float | None = None,
                 owner = u["email"]
                 break
         to = owner or (emails[0] if emails else "")
-        amount = float(plan["price_zar"])
+        # The price, in the currency it was decided and advertised in. This
+        # read price_zar, so the site quoted dollars and the invoice charged
+        # rands converted at a constant in the source -- under-charging by
+        # the drift, every month, on every account, silently.
+        amount = float(plan["price"])
+        currency = str(plan.get("currency") or BILLING_CURRENCY)
         try:
             client_id = prov.ensure_client(
                 org_id, name, email=to,
@@ -253,19 +259,21 @@ def raise_due_invoices(billing, auth, cfg, now: float | None = None,
                              f"devices. Renewal for the period starting "
                              f"{when}."),
                 amount=amount, due_days=due_days,
-                reference=payment_reference(org_id, name))
+                reference=payment_reference(org_id, name),
+                currency=currency)
         except ProviderError as exc:
             log.error("renewal: could not invoice org %s (%s): %s",
                       org_id, name, exc)
             continue
         order_id = billing.create_order(
             org_id, plan["name"], int(round(amount * 100)), months=1,
-            provider=prov.name, due=period_end)
+            currency=currency, provider=prov.name, due=period_end)
         billing.set_order_external(order_id, inv["id"])
         raised += 1
-        log.info("renewal: invoice %s (%s) raised for org %s (%s), R%.2f, "
+        log.info("renewal: invoice %s (%s) raised for org %s (%s), %s, "
                  "packet lapses %s", inv["number"], inv["id"], org_id, name,
-                 amount, time.strftime("%Y-%m-%d", time.localtime(period_end)))
+                 money(amount, currency),
+                 time.strftime("%Y-%m-%d", time.localtime(period_end)))
         try:
             prov.email_invoice(inv["id"])
         except ProviderError as exc:
@@ -380,7 +388,9 @@ def upcoming(billing, auth, limit: int = 20) -> list:
             "org_id": org_id,
             "name": org.get("name") or f"Company {org_id}",
             "plan": row.get("plan") or "",
-            "amount": float(plan["price_zar"]) if plan else None,
+            "amount": float(plan["price"]) if plan else None,
+            "currency": str(plan.get("currency") or BILLING_CURRENCY)
+            if plan else BILLING_CURRENCY,
             "period_end": end,
             "invoice_on": end - days_before * 86400,
             "days_until_invoice": (end - days_before * 86400 - now) / 86400,

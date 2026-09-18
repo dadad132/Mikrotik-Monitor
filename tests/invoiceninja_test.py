@@ -143,7 +143,7 @@ try:
     check("...for the packet it is already on, not a bigger one -- a renewal "
           "is not an upsell, and putting a larger figure on it would be a "
           "serious thing to get wrong",
-          abs(raised_calls[0]["amount"] - plan["price_zar"]) < 0.01)
+          abs(raised_calls[0]["amount"] - plan["price"]) < 0.01)
     check("...quoting the same reference the customer uses for an EFT, so a "
           "bank line, an Invoice Ninja record and an order can be tied "
           "together by eye",

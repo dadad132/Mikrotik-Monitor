@@ -11063,10 +11063,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if months not in (1, 3, 6, 12):
                 months = 1
 
+            # Yoco settles in ZAR and cannot take anything else, so this
+            # one path converts -- explicitly, and recorded as ZAR on the
+            # order. Everything invoiced goes out in the currency the price
+            # was decided in; only a card charge is converted, and only here.
             amount_cents = int(round(plan["price_zar"] * 100)) * months
             org_id = user["org_id"]
             order_id = billing.create_order(org_id, plan["name"], amount_cents,
-                                            months=months)
+                                            months=months, currency="ZAR")
             host = self.headers.get("Host", "localhost")
             base = ("https" if secure_cookies else "http") + "://" + host
             try:

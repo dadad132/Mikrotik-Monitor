@@ -37,7 +37,8 @@ def check(name, ok):
 
 
 PLAN = B.PLANS[0]["name"]
-PRICE = B.PLANS[0]["price_zar"]
+# The price actually charged, which is the one the website advertises.
+PRICE = B.PLANS[0]["price"]
 DAY = 86400.0
 
 
@@ -83,7 +84,7 @@ try:
     R._z.ensure_client = lambda cfg, name, email="", phone="", known_id="": "C1"
 
     def spy_create(cfg, contact_id, *, description, amount_cents,
-                   due_date="", reference=""):
+                   due_date="", reference="", currency=""):
         sent.append({"cents": amount_cents, "desc": description,
                      "due": due_date, "ref": reference})
         return {"id": f"INV{len(sent)}", "number": f"INV-{len(sent):04d}"}

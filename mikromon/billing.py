@@ -57,11 +57,31 @@ TIER_STEP = 5
 MAX_TIER_DEVICES = 100
 QUOTE_ABOVE_DEVICES = MAX_TIER_DEVICES
 
-# PayFast settles in ZAR whatever currency we display, so every USD price
-# carries a ZAR twin built at this rate. It is a constant rather than a live
-# lookup on purpose -- a subscription amount that drifted with the exchange
-# rate would re-quote every existing customer every month.
+# What customers are invoiced in. It is USD because that is the currency the
+# prices were decided in and the currency every page quotes -- and because
+# the alternative was a rand figure derived from a constant that was right on
+# the day it was written and silently wrong every day after.
+BILLING_CURRENCY = "USD"
+CURRENCY_SYMBOL = {"USD": "$", "ZAR": "R", "EUR": "\u20ac", "GBP": "\u00a3"}
+
+# ONLY for the card gateways. PayFast and Yoco settle in ZAR and cannot take
+# anything else, so a rand figure has to exist for them. It is not a price:
+# nothing is quoted or invoiced from it, and no invoice is raised in rands.
+# A constant rather than a live rate on purpose -- an amount that drifted
+# with the exchange rate would re-quote every existing customer every month.
 _ZAR_PER_USD = 18.4
+
+
+def money(amount, currency: str = BILLING_CURRENCY) -> str:
+    """Format an amount for a person to read, in the currency it is in.
+
+    Takes the currency explicitly rather than assuming, because the whole
+    fault this replaces was a figure displayed in one currency and charged
+    in another.
+    """
+    sym = CURRENCY_SYMBOL.get((currency or "").upper(), "")
+    return f"{sym}{float(amount):,.2f}" if sym else \
+        f"{float(amount):,.2f} {currency}"
 
 
 def tier_rate_usd(devices: int) -> float:
@@ -90,8 +110,14 @@ def _make_tier(devices: int) -> dict:
         "name": f"d{devices}",
         "label": f"{devices} devices",
         "devices": devices,
+        # `price` is what is charged, in BILLING_CURRENCY. The two named
+        # fields exist so nothing has to guess which one a caller meant --
+        # picking the wrong one is precisely what charged rands for a price
+        # quoted in dollars.
+        "price": float(usd),
+        "currency": BILLING_CURRENCY,
         "price_usd": usd,
-        "price_zar": round(usd * _ZAR_PER_USD, 2),
+        "price_zar": round(usd * _ZAR_PER_USD, 2),   # card gateways only
     }
 
 
@@ -124,7 +150,8 @@ def plan_by_name(plan_name: str):
     if tier is not None:
         return tier
     return {"name": plan_name, "label": f"Custom ({devices} devices)",
-            "devices": devices, "price_usd": 0, "price_zar": 0.0}
+            "devices": devices, "price": 0.0,
+            "currency": BILLING_CURRENCY, "price_usd": 0, "price_zar": 0.0}
 
 
 def needs_quote(devices: int) -> bool:
@@ -385,6 +412,10 @@ class BillingStore:
         self._add_col_if_missing("orders", "provider", "TEXT")
         self._add_col_if_missing("orders", "external_id", "TEXT")
         self._add_col_if_missing("orders", "due", "REAL")
+        # An amount with no currency is a number waiting to be read in
+        # the wrong one. Orders raised before this default to the
+        # currency they were actually raised in at the time.
+        self._add_col_if_missing("orders", "currency", "TEXT")
         self._add_col_if_missing("billing", "trial_end", "REAL")
         self._add_col_if_missing("billing", "pf_token", "TEXT")
         self._add_col_if_missing("billing", "payment_id", "TEXT")
@@ -551,13 +582,18 @@ class BillingStore:
                    "created", "paid")
 
     def create_order(self, org_id: int, plan: str, amount_cents: int,
-                     months: int = 1, currency: str = "ZAR",
+                     months: int = 1, currency: str = BILLING_CURRENCY,
                      provider: str = "yoco", due: float | None = None) -> int:
         """Record what is being bought, before sending anyone to pay.
 
         The amount is stored here rather than recomputed when the webhook
         lands, so a price change between clicking Pay and the card settling
         cannot charge one figure and grant another.
+
+        `currency` defaults to what we bill in rather than to rands. It used
+        to default to ZAR and no caller passed it, so every order recorded a
+        currency it was not raised in -- the same fault as the price itself,
+        one layer down.
         """
         with self._lock:
             cur = self.db.execute(

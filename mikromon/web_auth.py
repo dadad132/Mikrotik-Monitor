@@ -9,7 +9,9 @@ import time
 
 from . import guide_art, guide_tabs
 from .auth import AuthStore
-from .billing import (payment_reference, PLANS, GRACE_DAYS, FREE_DEVICES,
+from .billing import (payment_reference, PLANS, GRACE_DAYS,
+                      FREE_DEVICES, BILLING_CURRENCY,
+                      CURRENCY_SYMBOL,
                       TRIAL_DEVICES, _TRIAL_DAYS, TIER_STEP,
                       MAX_TIER_DEVICES, QUOTE_ABOVE_DEVICES, needs_quote,
                       plan_by_name)
@@ -152,7 +154,7 @@ def _plan_upgrade_box(csrf: str, bill, device_count: int = 0,
 
     opts = "".join(
         f'<option value="{esc(p["name"])}">{p["devices"]} devices '
-        f'&mdash; R{p["price_zar"]:,.0f} per month</option>' for p in bigger)
+        f'&mdash; ${p["price_usd"]:,.0f} per month</option>' for p in bigger)
     if not yoco_on:
         # Card payment off: say where to go rather than showing a button that
         # cannot charge anything.
@@ -619,7 +621,9 @@ def _orders_box(orders) -> str:
         plan = plan_by_name(o.get("plan", ""))
         what = (f'{plan["devices"]} devices' if plan else o.get("plan", "?"))
         months = int(o.get("months") or 1)
-        amount = f'R{(o.get("amount_cents") or 0) / 100:,.2f}'
+        _sym = CURRENCY_SYMBOL.get(
+            str(o.get("currency") or BILLING_CURRENCY).upper(), "")
+        amount = f'{_sym}{(o.get("amount_cents") or 0) / 100:,.2f}'
         if o.get("status") == "paid":
             state = '<span class="badge ok">Paid</span>'
             act = (f'<a class="btn ghost" style="padding:4px 12px" '
@@ -666,6 +670,11 @@ def _render_invoice(user, org: dict, order: dict, contact: dict | None,
     devices = plan["devices"] if plan else "?"
     months = max(1, int(order.get("months") or 1))
     total = (order.get("amount_cents") or 0) / 100
+    # The currency the order was RAISED in, not whatever the reader assumes.
+    # A figure printed in the wrong currency on a document somebody files is
+    # the one mistake here that is genuinely expensive.
+    cur = str(order.get("currency") or BILLING_CURRENCY).upper()
+    sym = CURRENCY_SYMBOL.get(cur, "")
     unit = total / months if months else total
     paid_on = time.strftime("%d %B %Y", time.localtime(
         order.get("paid") or order.get("created") or 0))
@@ -696,15 +705,15 @@ def _render_invoice(user, org: dict, order: dict, contact: dict | None,
         f'<th style="text-align:right">Amount</th></tr></thead><tbody>'
         f'<tr><td>Router monitoring &mdash; up to {devices} devices'
         f'<br><span class="muted" style="font-size:12px">'
-        f'R{unit:,.2f} per month</span></td>'
+        f'{esc(sym)}{unit:,.2f} per month</span></td>'
         f'<td>{months}</td>'
-        f'<td style="text-align:right">R{total:,.2f}</td></tr>'
+        f'<td style="text-align:right">{esc(sym)}{total:,.2f}</td></tr>'
         f'</tbody></table>'
         f'<div style="display:flex;justify-content:flex-end;margin-top:14px">'
         f'<div style="min-width:220px">'
         f'<div style="display:flex;justify-content:space-between;'
         f'font-size:18px;font-weight:700"><span>Total paid</span>'
-        f'<span>R{total:,.2f}</span></div>'
+        f'<span>{esc(sym)}{total:,.2f} {esc(cur)}</span></div>'
         f'<div class="muted" style="font-size:12px;text-align:right;'
         f'margin-top:4px">Paid by card on {esc(paid_on)}</div></div></div>'
         f'<p class="muted" style="font-size:12px;margin-top:22px">'
@@ -813,6 +822,10 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
             # sends only which packet was chosen -- never the amount, which
             # would otherwise be a number a customer could edit before
             # paying it.
+            # Yoco settles in rands, so a card is charged the converted
+            # figure. Saying both is the honest version of a page that
+            # advertises dollars: the surprise is the charge appearing in
+            # another currency, not the number itself.
             _zar = p["price_zar"]
             btn = (f'<form method="POST" action="/billing/checkout">'
                    f'<input type="hidden" name="csrf" value="{csrf}">'
@@ -823,7 +836,10 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                    f'<option value="6">6 months</option>'
                    f'<option value="12">12 months</option></select>'
                    f'<button class="btn" type="submit" style="padding:6px 14px">'
-                   f'Pay R{_zar:,.0f}</button></form>')
+                   f'Pay R{_zar:,.0f}</button></form>'
+                   f'<div class="muted" style="font-size:11px;margin-top:4px">'
+                   f'${p["price_usd"]:,.0f}/mo, charged in rands because the '
+                   f'card gateway settles in ZAR</div>')
         elif pf_enabled:
             btn = (f'<form method="POST" action="/billing/subscribe">'
                    f'<input type="hidden" name="csrf" value="{csrf}">'
@@ -903,7 +919,7 @@ def _locked_pay_block(user, csrf: str, yoco_on: bool, bill,
         opts = "".join(
             f'<option value="{esc(p["name"])}"'
             f'{" selected" if p["devices"] == want else ""}>'
-            f'{p["devices"]} devices &mdash; R{p["price_zar"]:,.0f} per month'
+            f'{p["devices"]} devices &mdash; ${p["price_usd"]:,.0f} per month'
             f'</option>' for p in PLANS)
         return (
             f'<form method="POST" action="/billing/checkout" '
@@ -1287,7 +1303,9 @@ def _upcoming_box(rows, status=None) -> str:
             days = r["days_until_invoice"]
             end = time.strftime("%d %b %Y", time.localtime(r["period_end"]))
             on = time.strftime("%d %b %Y", time.localtime(r["invoice_on"]))
-            amount = (f'R{r["amount"]:,.2f}' if r["amount"] is not None
+            _c = str(r.get("currency") or BILLING_CURRENCY).upper()
+            _s = CURRENCY_SYMBOL.get(_c, "")
+            amount = (f'{_s}{r["amount"]:,.2f}' if r["amount"] is not None
                       else '<span class="muted">by hand</span>')
             if r["already_raised"]:
                 state = ('<span style="color:#15803d">invoice sent</span>')

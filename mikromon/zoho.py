@@ -364,7 +364,7 @@ def ensure_client(cfg: dict, name: str, email: str = "", phone: str = "",
 
 def create_invoice(cfg: dict, contact_id: str, *, description: str,
                    amount_cents: int, due_date: str = "",
-                   reference: str = "") -> dict:
+                   reference: str = "", currency: str = "") -> dict:
     """Raise an invoice. Returns {"id", "number"}.
 
     Zoho works in major units, so the cents this system counts in have to be
@@ -380,6 +380,13 @@ def create_invoice(cfg: dict, contact_id: str, *, description: str,
                         "rate": round(int(amount_cents) / 100.0, 2),
                         "quantity": 1}],
     }
+    if currency:
+        # Without this the invoice takes the organisation's base currency,
+        # whatever that happens to be -- so a price decided in dollars goes
+        # out as the same NUMBER in rands, at face value. Saying it
+        # explicitly means a misconfigured organisation is a rejected
+        # invoice rather than a wrong one.
+        body["currency_code"] = currency.upper()
     if due_date:
         body["due_date"] = due_date
     if reference:

@@ -326,7 +326,7 @@ sent = {}
 _real = (z.create_invoice, z.ensure_client, z.email_invoice)
 try:
     def spy_create(cfg, contact_id, *, description, amount_cents,
-                   due_date="", reference=""):
+                   due_date="", reference="", currency=""):
         sent.update({"cents": amount_cents, "due": due_date,
                      "ref": reference, "contact": contact_id})
         return {"id": "INV9", "number": "INV-0009"}
