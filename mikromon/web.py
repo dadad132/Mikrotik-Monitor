@@ -4077,11 +4077,19 @@ _NEXTDNS_SECURITY_FIELDS = [
 ]
 
 
-def _nextdns_toggle_rows(prefix, fields, current: dict) -> str:
+def _nextdns_toggle_rows(prefix, fields, current: dict,
+                         instant: bool = True) -> str:
+    """Rows of switches. `instant` makes each one apply when it is clicked.
+
+    Every other tab on a device works that way, so a switch here that waits
+    for a Save button below it reads as a switch that did not work -- the
+    gesture is the same, and only this tab quietly ignored it.
+    """
+    inst = ' data-mm-instant="1"' if instant else ""
     return "".join(
         f'<label class="chk" style="display:flex;margin:6px 0">'
         f'<input type="checkbox" name="{prefix}_{key}" value="1" class="switch"'
-        f'{" checked" if current.get(key) else ""}> '
+        f'{inst}{" checked" if current.get(key) else ""}> '
         f'<span><b>{esc(label)}</b><br><span class="muted">{esc(help_)}</span></span>'
         f'</label>'
         for key, label, help_ in fields)
@@ -4090,12 +4098,14 @@ def _nextdns_toggle_rows(prefix, fields, current: dict) -> str:
 def _nextdns_security_box(name, csrf, security: dict) -> str:
     return (
         f'<div class="box"><h2>NextDNS — Security</h2>'
-        f'<form method="POST" action="/device/nextdns-security">'
+        f'<form method="POST" action="/device/nextdns-security" data-mm-instant-form="1">'
         f'<input type="hidden" name="csrf" value="{csrf}">'
         f'<input type="hidden" name="device" value="{esc(name)}">'
         f'{_nextdns_toggle_rows("f", _NEXTDNS_SECURITY_FIELDS, security)}'
         f'<div class="actions" style="margin-top:12px">'
-        f'<button class="btn" type="submit">Save</button></div></form></div>')
+        f'<button class="btn" type="submit">Save</button>'
+        f'<span class="muted" style="margin-left:10px;font-size:12px">'
+        f'Switches apply as you click them.</span></div></form></div>')
 
 
 # NextDNS profiles don't expose an "all possible bool fields" catalog for
@@ -4169,7 +4179,7 @@ def _nextdns_parental_box(name, csrf, pc: dict) -> str:
         pc.get("services") or [])
     return (
         f'<div class="box"><h2>NextDNS — Parental Control</h2>'
-        f'<form method="POST" action="/device/nextdns-parental">'
+        f'<form method="POST" action="/device/nextdns-parental" data-mm-instant-form="1">'
         f'<input type="hidden" name="csrf" value="{csrf}">'
         f'<input type="hidden" name="device" value="{q}">'
         f'{_nextdns_toggle_rows("b", _NEXTDNS_PARENTAL_BOOLS, pc)}'
@@ -4186,7 +4196,12 @@ def _nextdns_parental_box(name, csrf, pc: dict) -> str:
         f'netflix, epic-games, and so on).</p>'
         f'</div>'
         f'<div class="actions" style="margin-top:12px">'
-        f'<button class="btn" type="submit">Save</button></div></form></div>')
+        f'<button class="btn" type="submit">Save</button>'
+        f'<span class="muted" style="margin-left:10px;font-size:12px">'
+        f'The three switches above apply as you click them. Categories '
+        f'and services save with this button &mdash; ticking twenty of '
+        f'them one call at a time is what NextDNS rate limits.</span>'
+        f'</div></form></div>')
 
 
 _NEXTDNS_PRIVACY_BOOLS = [
@@ -4242,12 +4257,16 @@ def _nextdns_privacy_box(name, csrf, privacy: dict) -> str:
         f'<p class="muted" style="margin-top:6px">Popular ones: {esc(known_hint)}.</p>'
         f'</form>'
         f'<h3 style="font-size:13px;margin:16px 0 6px">Other privacy settings</h3>'
-        f'<form method="POST" action="/device/nextdns-privacy-settings">'
+        f'<form method="POST" action="/device/nextdns-privacy-settings" '
+        f'data-mm-instant-form="1">'
         f'<input type="hidden" name="csrf" value="{csrf}">'
         f'<input type="hidden" name="device" value="{q}">'
         f'{_nextdns_toggle_rows("b", _NEXTDNS_PRIVACY_BOOLS, privacy)}'
         f'<div class="actions" style="margin-top:10px">'
-        f'<button class="btn" type="submit">Save</button></div></form></div>')
+        f'<button class="btn" type="submit">Save</button>'
+        f'<span class="muted" style="margin-left:10px;font-size:12px">'
+        f'Switches apply as you click them.</span>'
+        f'</div></form></div>')
 
 
 def _remote_regenerate_box(name, users, csrf) -> str:

@@ -185,6 +185,164 @@ check("doh_url embeds the profile id for RouterOS's use-doh-server field",
 check("setup_url points at that profile's own NextDNS dashboard page",
       nextdns.setup_url("abc123") == "https://my.nextdns.io/abc123/setup")
 
+print("")
+print("Reading the profile without being rate limited off the page:")
+
+# Opening the DNS tab reads the whole profile. Nothing cached it, so every
+# page load, every redirect after saving a toggle, and every mirror of the
+# template settings was a fresh call -- and NextDNS answers 429 well before
+# that feels excessive, because the panel is read several times for every
+# time it is changed. What the customer saw was "Could not load this
+# profile's settings", which reads like NextDNS being broken rather than
+# like us asking too often.
+_calls = []
+_real_request = nextdns._request
+
+
+def _fake(method, path, api_key, body=None, _retried=False):
+    _calls.append((method, path))
+    return {"data": {"security": {"threatIntelligenceFeeds": True},
+                     "denylist": [], "allowlist": []}}
+
+
+nextdns._request = _fake
+try:
+    nextdns.invalidate()
+    for _ in range(3):
+        nextdns.get_profile("KEY", "83f58f")
+    check("three page loads of the DNS tab cost ONE call, not three",
+          len(_calls) == 1)
+
+    _n = len(_calls)
+    nextdns.get_profile("KEY", "OTHER")
+    check("a different profile is not served another router's cached copy",
+          len(_calls) == _n + 1)
+
+    _n = len(_calls)
+    nextdns.update_section("KEY", "83f58f", "security", {"x": True})
+    nextdns.get_profile("KEY", "83f58f")
+    check("saving a setting invalidates the cache, so the page straight "
+          "after a save shows what was saved -- a stale panel there reads "
+          "exactly like the save having failed",
+          len(_calls) == _n + 2)
+
+    for writer, args in ((nextdns.add_list_entry, ("KEY", "83f58f", "denylist", "x.com")),
+                         (nextdns.remove_list_entry, ("KEY", "83f58f", "denylist", "x.com")),
+                         (nextdns.rename_profile, ("KEY", "83f58f", "New name"))):
+        nextdns.get_profile("KEY", "83f58f")
+        _n = len(_calls)
+        writer(*args)
+        nextdns.get_profile("KEY", "83f58f")
+        check(f"{writer.__name__} invalidates too", len(_calls) > _n + 1)
+
+    _n = len(_calls)
+    nextdns.get_profile("KEY", "83f58f", max_age=0)
+    check("max_age=0 forces a fresh read, for the places that must not "
+          "guess", len(_calls) == _n + 1)
+finally:
+    nextdns._request = _real_request
+    nextdns.invalidate()
+
+print("")
+print("When NextDNS does say no:")
+
+_attempts = []
+
+
+def _rate_limited(method, path, api_key, body=None, _retried=False):
+    _attempts.append(_retried)
+    import urllib.error
+    raise urllib.error.HTTPError(path, 429, "Too Many Requests",
+                                 {"Retry-After": "0"}, None)
+
+
+_real_urlopen = nextdns.urllib.request.urlopen
+
+
+class _Resp:
+    def __init__(self, body):
+        self._b = body
+
+    def read(self):
+        return self._b
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+_seq = []
+
+
+def _fake_urlopen(req, timeout=None):
+    import urllib.error
+    if _seq and _seq.pop(0) == 429:
+        raise urllib.error.HTTPError(
+            req.full_url, 429, "Too Many Requests",
+            {"Retry-After": "0"}, None)
+    return _Resp(b'{"data":{"security":{}}}')
+
+
+nextdns.urllib.request.urlopen = _fake_urlopen
+try:
+    nextdns.invalidate()
+    _seq[:] = [429]
+    got = nextdns.get_profile("KEY", "retry-me")
+    check("a single 429 is retried rather than failing the page -- the first "
+          "one almost always means 'wait a moment', and losing the whole "
+          "panel for a second's patience is a poor trade",
+          isinstance(got, dict))
+
+    nextdns.invalidate()
+    _seq[:] = [429, 429]
+    try:
+        nextdns.get_profile("KEY", "still-limited")
+        check("two 429s in a row raises", False)
+    except nextdns.NextDnsError as exc:
+        check("a second 429 gives up rather than hammering",
+              True)
+        check("...and says the settings are fine and we asked too often, "
+              "rather than implying NextDNS is broken",
+              "asked once too often" in str(exc))
+finally:
+    nextdns.urllib.request.urlopen = _real_urlopen
+    nextdns.invalidate()
+
+print("")
+print("A switch does the thing when you click it:")
+
+from mikromon.web import (_nextdns_security_box, _nextdns_parental_box,
+                          _nextdns_privacy_box, _nextdns_list_box)
+
+for _fn, _label in ((_nextdns_security_box, "Security"),
+                    (_nextdns_parental_box, "Parental control"),
+                    (_nextdns_privacy_box, "Privacy")):
+    _html = _fn("R1", "csrf", {})
+    check(f"{_label}: the form applies on change, the way every other "
+          f"device tab already did", 'data-mm-instant-form="1"' in _html)
+    check(f"{_label}: its switches are the ones that trigger it",
+          'data-mm-instant="1"' in _html)
+    check(f"{_label}: the Save button stays, because that is what works "
+          f"with no JavaScript", "type=\"submit\"" in _html)
+    check(f"{_label}: and the page says which controls are instant",
+          "apply as you click" in _html)
+
+# Deliberately NOT instant: twenty-odd category and service checkboxes, one
+# API call per click, is how the rate limiting started.
+_par = _nextdns_parental_box("R1", "csrf", {})
+check("the category and service checkboxes are NOT instant -- ticking twenty "
+      "of them one call at a time is exactly what NextDNS rate limits",
+      _par.count('data-mm-instant="1"') == 3)
+check("...and the page says so, instead of leaving it to be discovered",
+      "save with this button" in _par)
+
+_lst = _nextdns_list_box("R1", "csrf", "Blocked", "denylist", [])
+check("the denylist is not instant either: adding a domain is typing, not "
+      "flicking, and there is nothing to submit on change",
+      'data-mm-instant="1"' not in _lst)
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")
