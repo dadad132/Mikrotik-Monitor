@@ -152,10 +152,10 @@ check("ten threads taking fifty each account for exactly five hundred, with "
 
 print("\nEvery provider that calls out is actually limited")
 
-from mikromon import invoiceninja, nextdns, yoco, zoho  # noqa: E402
+from mikromon import nextdns, yoco, zoho  # noqa: E402
 
-for mod, name in ((zoho, "zoho"), (invoiceninja, "invoiceninja"),
-                  (yoco, "yoco"), (nextdns, "nextdns")):
+for mod, name in ((zoho, "zoho"), (yoco, "yoco"),
+                  (nextdns, "nextdns")):
     src = open(mod.__file__, encoding="utf-8").read()
     check(f"{name} acquires budget before calling out",
           ".acquire()" in src)

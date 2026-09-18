@@ -478,6 +478,83 @@ def _grace_banner_html(days_left: float, contact: dict | None = None) -> str:
             f'</div>')
 
 
+def _change_packet_box(csrf, current_plan, device_count, period_end,
+                       pending=None, currency="USD") -> str:
+    """Pick a different packet, and choose when it takes effect.
+
+    Deliberately shows both prices before anything is chosen. The customer
+    is deciding between paying part of a month now and waiting a fortnight,
+    and they cannot make that decision from a list of monthly prices alone.
+    """
+    from .billing import (PLANS, plan_by_name, upgrade_quote, money,
+                          BILLING_DAY)
+    cur = plan_by_name(current_plan) if current_plan else None
+    when = (time.strftime("%d %B %Y", time.localtime(period_end))
+            if period_end else f"the {BILLING_DAY}th")
+
+    if pending:
+        from_txt = time.strftime("%d %B %Y", time.localtime(pending["from"]))
+        return (
+            f'<div class="box"><h2>Packet change booked</h2>'
+            f'<p style="margin:0 0 10px">You move to '
+            f'<b>{esc(pending["label"])}</b> on <b>{esc(from_txt)}</b>. '
+            f'Nothing changes before then, and nothing more is owed.</p>'
+            f'<form method="POST" action="/billing/change-plan">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="cancel" value="1">'
+            f'<button class="btn ghost" type="submit">Cancel this change'
+            f'</button></form></div>')
+
+    rows = []
+    for p in PLANS:
+        q = upgrade_quote(cur, p, period_end) if period_end else None
+        if cur and p["name"] == cur["name"]:
+            note = "current packet"
+        elif q and q["kind"] == "upgrade":
+            note = f'{money(q["due_now"], currency)} now, or free on the {BILLING_DAY}th'
+        elif q and q["kind"] == "downgrade":
+            note = f'free, from the {BILLING_DAY}th'
+        else:
+            note = money(p["price"], currency) + "/mo"
+        fits = "" if p["devices"] >= device_count else " — too small for your "
+        fits += f"{device_count} devices" if fits else ""
+        rows.append(
+            f'<option value="{esc(p["name"])}"'
+            f'{" selected" if cur and p["name"] == cur["name"] else ""}'
+            f'{" disabled" if p["devices"] < device_count else ""}>'
+            f'{p["devices"]} devices &mdash; {money(p["price"], currency)}/mo'
+            f' ({esc(note)}){esc(fits)}</option>')
+
+    return (
+        f'<div class="box"><h2>Change your packet</h2>'
+        f'<p class="muted" style="margin:0 0 12px">You are on '
+        f'<b>{esc((cur or {}).get("label", "the free packet"))}</b>, renewing '
+        f'<b>{esc(when)}</b>. Every account renews on the '
+        f'{BILLING_DAY}th.</p>'
+        f'<form method="POST" action="/billing/change-plan">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<label class="f">Packet<br>'
+        f'<select name="plan" style="width:100%;max-width:420px;padding:7px">'
+        f'{"".join(rows)}</select></label>'
+        f'<div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap">'
+        f'<button class="btn" type="submit" name="when" value="renewal">'
+        f'Change on the {BILLING_DAY}th</button>'
+        f'<button class="btn ghost" type="submit" name="when" value="now">'
+        f'Change now &mdash; invoice me the difference</button></div>'
+        f'</form>'
+        f'<div style="margin-top:14px;padding:10px 12px;border-radius:6px;'
+        f'background:rgba(148,163,184,0.12);font-size:12px">'
+        f'<p style="margin:0 0 6px"><b>Change on the {BILLING_DAY}th</b> '
+        f'costs nothing now. Your next invoice is simply the new price. A '
+        f'smaller packet can only be taken this way &mdash; what you have '
+        f'already paid for runs to the end of the month.</p>'
+        f'<p style="margin:0"><b>Change now</b> invoices you the difference '
+        f'between the two packets for the days left in this month, and '
+        f'nothing else. Your renewal date does not move, so you never pay '
+        f'twice for the same days. The bigger packet arrives when that '
+        f'invoice is paid.</p></div></div>')
+
+
 def _eft_reference_box(org_id, contact: dict | None = None,
                        org_name: str = "") -> str:
     """The company's own EFT reference, plus where to actually send the money.
@@ -727,6 +804,22 @@ def _render_invoice(user, org: dict, order: dict, contact: dict | None,
     return _page("Invoice", _header(user, "/billing") + inner)
 
 
+def _pending_from_row(bill) -> dict | None:
+    """A booked packet change, read off the billing row.
+
+    Read here rather than queried again so the page cannot show a status and
+    a pending change that came from two different reads of the same row.
+    """
+    name = (bill or {}).get("pending_plan")
+    if not name:
+        return None
+    from .billing import plan_by_name
+    plan = plan_by_name(name) or {}
+    return {"plan": name, "label": plan.get("label", name),
+            "devices": plan.get("devices"), "price": plan.get("price"),
+            "from": float((bill or {}).get("pending_from") or 0.0)}
+
+
 def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                     msg: str = "", error: str = "", contact: dict | None = None,
                     device_count: int = 0, yoco_on: bool = False,
@@ -798,11 +891,18 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                   f'justify-content:space-between;flex-wrap:wrap;gap:10px">'
                   f'{status_html}{cancel_btn}</div>'
                   f'</div>'
-                  # Shown whether or not card payment is switched on: a
-                  # customer paying by EFT needs the reference regardless,
-                  # and needs it BEFORE they pay rather than after.
+                  # The EFT reference stays. A customer has to quote it on
+                  # the payment itself, and it cannot be worked out
+                  # afterwards from money arriving in a bank account -- so
+                  # handing it over before they pay is the mechanism, not a
+                  # convenience. The invoice carries it too; both saying the
+                  # same thing is the point.
                   + _eft_reference_box(user.get("org_id"), contact,
-                                      user.get("org_name", "")))
+                                       user.get("org_name", ""))
+                  + _change_packet_box(
+                      csrf, plan_name, device_count,
+                      (bill or {}).get("current_period_end"),
+                      pending=_pending_from_row(bill)))
 
     # --- packet ladder --------------------------------------------------
     # Twenty tiers is a lot to read, so the row that actually fits this
@@ -1446,105 +1546,6 @@ def _zoho_box(cfg, csrf: str, scopes: str = "") -> str:
         f'</div>')
 
 
-def _invoiceninja_box(cfg, csrf: str, hook_url: str = "") -> str:
-    """Superadmin setting: connect Invoice Ninja, and say what it will do.
-
-    Deliberately states the whole loop in plain words. The person setting
-    this up is agreeing that a program will email their customers and switch
-    services back on without asking anybody, which is worth spelling out
-    before it starts happening rather than after.
-    """
-    c = cfg or {}
-    url = str(c.get("url") or "")
-    has_token = bool(str(c.get("token") or "").strip())
-    live = bool(url and has_token)
-    days = int(c.get("days_before") or 7)
-    due = int(c.get("due_days") or 7)
-    secret = str(c.get("webhook_secret") or "")
-
-    if live:
-        state = (f'<p style="margin:0 0 10px;font-size:12px;padding:8px 10px;'
-                 f'border-radius:6px;background:rgba(22,163,74,0.12);'
-                 f'color:#15803d">&#10003; <b>Connected.</b> Each company is '
-                 f'invoiced <b>{days} days</b> before its packet lapses, '
-                 f'payable within {due}. When Invoice Ninja records the '
-                 f'payment the packet simply carries on &mdash; nobody here '
-                 f'has to do anything.</p>')
-    else:
-        state = ('<p class="muted" style="margin:0 0 10px;font-size:12px">'
-                 'Not connected. Renewal invoices are not being sent, and '
-                 'packets lapse into the grace period and then suspension '
-                 'with no invoice having gone out.</p>')
-
-    hook = ""
-    if live and hook_url:
-        sec = (f'<p class="muted" style="font-size:12px;margin:6px 0 0">'
-               f'Add a custom header so only Invoice Ninja can call it:<br>'
-               f'<code>X-Mikromon-Token: {esc(secret)}</code></p>'
-               if secret else
-               '<p class="muted" style="font-size:12px;margin:6px 0 0">'
-               'Set a shared token above and add it as a custom header on '
-               'the webhook, so a stranger who finds the address cannot '
-               'prod it.</p>')
-        hook = (f'<div style="margin-top:14px;padding:10px;border-radius:6px;'
-                f'background:rgba(148,163,184,0.12)">'
-                f'<p style="margin:0 0 4px;font-size:12px"><b>Optional:</b> '
-                f'in Invoice Ninja, add a webhook on <b>Create Payment</b> '
-                f'pointing at:</p>'
-                f'<code style="font-size:12px">{esc(hook_url)}</code>'
-                f'{sec}'
-                f'<p class="muted" style="font-size:12px;margin:8px 0 0">'
-                f'Only a shortcut. Payments are checked against Invoice '
-                f'Ninja every 15 minutes regardless, so a webhook that never '
-                f'arrives delays a reactivation by minutes rather than '
-                f'leaving somebody who has paid switched off.</p></div>')
-
-    run = ('' if not live else
-           f'<form method="POST" action="/superadmin/invoiceninja/run" '
-           f'style="margin-top:8px">'
-           f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
-           f'<button class="btn ghost" type="submit">Run the billing pass '
-           f'now</button></form>')
-    disconnect = ('' if not live else
-                  f'<form method="POST" action="/superadmin/invoiceninja" '
-                  f'style="margin-top:8px" onsubmit="return confirm('
-                  f'&#39;Disconnect Invoice Ninja? Renewal invoices stop '
-                  f'going out, and packets will lapse with nothing having '
-                  f'been sent.&#39;)">'
-                  f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
-                  f'<input type="hidden" name="clear" value="1">'
-                  f'<button class="btn ghost" type="submit">Disconnect'
-                  f'</button></form>')
-
-    return (
-        f'<div class="box"><h2>Renewal invoicing (Invoice Ninja)</h2>'
-        f'{state}'
-        f'<form method="POST" action="/superadmin/invoiceninja">'
-        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
-        f'<div style="display:grid;grid-template-columns:'
-        f'repeat(auto-fit,minmax(240px,1fr));gap:10px">'
-        f'<label>Invoice Ninja address<br><input name="url" '
-        f'value="{esc(url)}" placeholder="https://billing.yourdomain.com" '
-        f'style="width:100%"></label>'
-        f'<label>API token<br><input name="token" type="password" '
-        f'placeholder="{"saved - leave blank to keep" if has_token else "from Settings &rarr; API Tokens"}" '
-        f'style="width:100%"></label>'
-        f'<label>Invoice this many days before it lapses<br>'
-        f'<input name="days_before" type="number" min="1" max="30" '
-        f'value="{days}" style="width:100%"></label>'
-        f'<label>Payable within (days)<br>'
-        f'<input name="due_days" type="number" min="1" max="60" '
-        f'value="{due}" style="width:100%"></label>'
-        f'<label>Shared webhook token<br><input name="webhook_secret" '
-        f'type="password" placeholder='
-        f'"{"saved - leave blank to keep" if secret else "any long random string"}" '
-        f'style="width:100%"></label>'
-        f'</div>'
-        f'<div style="margin-top:10px"><button class="btn" type="submit">'
-        f'Save and test the connection</button></div></form>'
-        f'{hook}{run}{disconnect}</div>')
-
-
 def _tunnel_health_box(rows, wg_err: str = "") -> str:
     """Intended -> written -> loaded -> heard, per router, in one table.
 
@@ -1980,10 +1981,9 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        router_count: int = 0, hub_pubkey: str = "",
                        regions=None, nextdns=None, quotes=None,
                        yoco=None, yoco_hook_url: str = "",
-                       invoiceninja=None, zoho=None,
+                       zoho=None,
                        upcoming=None, runner_status=None,
                        zoho_scopes="",
-                       in_hook_url: str = "",
                        tunnel_rows=None,
                        tunnel_err: str = "",
                        selfcheck=None) -> str:
@@ -2160,7 +2160,6 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
              f'{_smtp_settings_box(smtp, csrf)}'
              f'{_billing_contact_box(billing_contact, csrf)}'
              f'{_yoco_box(yoco, csrf, yoco_hook_url)}'
-             f'{_invoiceninja_box(invoiceninja, csrf, in_hook_url)}'
              f'{_zoho_box(zoho, csrf, zoho_scopes)}'
              f'{_upcoming_box(upcoming, runner_status)}'
              f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf, hub_pubkey)}'

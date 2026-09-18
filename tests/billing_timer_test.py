@@ -50,9 +50,6 @@ class FakeAuth:
     def get_zoho(self):
         return self.cfg
 
-    def get_invoiceninja(self):
-        return {}
-
     def org(self, org_id):
         return self.orgs.get(org_id, {"name": f"Company {org_id}"})
 

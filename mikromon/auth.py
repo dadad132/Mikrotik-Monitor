@@ -639,21 +639,6 @@ class AuthStore:
     def set_yoco(self, cfg: dict) -> None:
         self.set_setting("yoco", dict(cfg or {}))
 
-    def get_invoiceninja(self) -> dict:
-        """Invoice Ninja connection settings, set once by a superadmin.
-
-        `url` and `token` reach the API. `webhook_secret` is the value
-        Invoice Ninja is told to send in a custom header -- it is a shared
-        password, not a signature, which is why a callback carrying it is
-        treated as a hint to re-check rather than as proof of payment.
-        `days_before` and `due_days` shape the renewal run. {} if never set.
-        """
-        d = self.get_setting("invoiceninja")
-        return d if isinstance(d, dict) else {}
-
-    def set_invoiceninja(self, cfg: dict) -> None:
-        self.set_setting("invoiceninja", dict(cfg or {}))
-
     def get_zoho(self) -> dict:
         """Zoho Invoice connection settings, set once by a superadmin.
 

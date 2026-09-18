@@ -287,36 +287,25 @@ import mikromon.billing_runner as br
 
 
 class FakeAuth:
-    def __init__(self, zoho=None, ninja=None):
-        self._z, self._n = zoho or {}, ninja or {}
+    def __init__(self, zoho=None):
+        self._z = zoho or {}
 
     def get_zoho(self):
         return self._z
 
-    def get_invoiceninja(self):
-        return self._n
 
-
-NINJA = {"url": "https://bill.example.com", "token": "tok"}
-
-check("with only Invoice Ninja connected, nothing changes",
-      br.provider_for(FakeAuth(ninja=NINJA)).name == "invoiceninja")
-check("with only Zoho connected, Zoho is used",
+check("with Zoho connected, Zoho is used",
       br.provider_for(FakeAuth(zoho=CFG)).name == "zoho")
-check("with BOTH connected Zoho wins -- an OAuth connection was made "
-      "deliberately and recently, where a stale Invoice Ninja URL can sit in "
-      "settings for months after anybody stopped using it",
-      br.provider_for(FakeAuth(zoho=CFG, ninja=NINJA)).name == "zoho")
-check("with neither, there is no provider and the runner does nothing at all",
+check("with nothing connected there is no provider, and the runner does "
+      "nothing at all rather than half of something",
       br.provider_for(FakeAuth()) is None)
 check("a half-connected Zoho -- token but no data centre -- does not count "
       "as connected, because every call would fail on a missing api_base",
       br.provider_for(FakeAuth(zoho={"refresh_token": "rt"})) is None)
 
-check("a cfg handed to a function picks the provider, rather than the "
-      "function going back to settings and possibly acting on the other one",
+check("a cfg handed to a function picks the provider from the cfg, rather "
+      "than going back to settings and possibly acting on something else",
       br.provider_from_cfg(CFG).name == "zoho"
-      and br.provider_from_cfg(NINJA).name == "invoiceninja"
       and br.provider_from_cfg({}) is None)
 
 # The two APIs disagree about units and about how a due date is expressed.

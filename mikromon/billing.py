@@ -84,6 +84,116 @@ def money(amount, currency: str = BILLING_CURRENCY) -> str:
         f"{float(amount):,.2f} {currency}"
 
 
+# Every account renews on this day of the month. The 28th because it is the
+# only late-month day that exists in February, so there is no clamping rule
+# and therefore no clamping bug. Periods used to advance by 30-day steps,
+# which drifted a packet's renewal date backwards about five days a year.
+BILLING_DAY = 28
+
+
+def next_billing_date(after: float | None = None) -> float:
+    """The next BILLING_DAY strictly after `after`, at the start of that day.
+
+    Start of day rather than the same clock time, so two accounts created
+    minutes apart do not renew minutes apart, and so a renewal never lands
+    at 23:58 and looks like it happened the day before.
+    """
+    now = after if after is not None else time.time()
+    lt = time.localtime(now)
+    year, month = lt.tm_year, lt.tm_mon
+    if lt.tm_mday >= BILLING_DAY:
+        month += 1
+        if month > 12:
+            month, year = 1, year + 1
+    return time.mktime((year, month, BILLING_DAY, 0, 0, 0, 0, 0, -1))
+
+
+def add_billing_months(period_end: float, months: int = 1) -> float:
+    """Advance a paid-up date by whole calendar months, staying on the 28th.
+
+    Adding 30 days repeatedly is what made the date drift. Adding months
+    keeps it exactly where the customer expects it, in every month, without
+    a special case for February.
+    """
+    lt = time.localtime(period_end)
+    month = lt.tm_mon + max(1, int(months))
+    year = lt.tm_year + (month - 1) // 12
+    month = (month - 1) % 12 + 1
+    return time.mktime((year, month, BILLING_DAY, 0, 0, 0, 0, 0, -1))
+
+
+def days_in_period(period_end: float) -> float:
+    """The length of the period ENDING at `period_end`, in days."""
+    lt = time.localtime(period_end)
+    month = lt.tm_mon - 1
+    year = lt.tm_year
+    if month < 1:
+        month, year = 12, year - 1
+    start = time.mktime((year, month, BILLING_DAY, 0, 0, 0, 0, 0, -1))
+    return max(1.0, (period_end - start) / 86400)
+
+
+def prorata(amount: float, period_end: float,
+            now: float | None = None) -> dict:
+    """What to charge for the part of a period that is actually left.
+
+    Returns {"amount", "days_left", "days_in_period", "fraction"}.
+
+    Used for two things that are the same sum: the first part-month after
+    signing up, and the difference owed when somebody upgrades mid-month.
+    Charging a full month for four days of service, or nothing at all for
+    twenty-six, are both ways of being wrong about the same number.
+
+    Rounded to the cent, and never negative -- a downgrade produces no
+    credit here, because refunding money automatically is a decision nobody
+    made.
+    """
+    now = now if now is not None else time.time()
+    total_days = days_in_period(period_end)
+    days_left = max(0.0, (period_end - now) / 86400)
+    days_left = min(days_left, total_days)
+    fraction = days_left / total_days if total_days else 0.0
+    return {"amount": max(0.0, round(float(amount) * fraction, 2)),
+            "days_left": days_left, "days_in_period": total_days,
+            "fraction": fraction}
+
+
+def upgrade_quote(old_plan: dict | None, new_plan: dict,
+                  period_end: float, now: float | None = None) -> dict:
+    """What changing packet costs, and when it takes effect.
+
+    An UPGRADE is charged the difference between the two packets for the
+    days remaining in the period they have already paid for -- so nobody
+    pays twice for the same days, and nobody gets a bigger packet free until
+    the 28th. Their renewal date does not move: they keep the billing day
+    they already have, and the next full invoice is the new price.
+
+    A DOWNGRADE takes effect at the next renewal and costs nothing now. No
+    automatic refund: money going back out without a person deciding is not
+    something this should do on its own.
+    """
+    now = now if now is not None else time.time()
+    old_price = float((old_plan or {}).get("price") or 0.0)
+    new_price = float(new_plan.get("price") or 0.0)
+    pr = prorata(new_price - old_price, period_end, now)
+    if new_price > old_price:
+        return {"kind": "upgrade", "due_now": pr["amount"],
+                "effective": now, "period_end": period_end,
+                "days_left": pr["days_left"],
+                "currency": new_plan.get("currency", BILLING_CURRENCY),
+                "old_price": old_price, "new_price": new_price}
+    if new_price < old_price:
+        return {"kind": "downgrade", "due_now": 0.0,
+                "effective": period_end, "period_end": period_end,
+                "days_left": pr["days_left"],
+                "currency": new_plan.get("currency", BILLING_CURRENCY),
+                "old_price": old_price, "new_price": new_price}
+    return {"kind": "same", "due_now": 0.0, "effective": now,
+            "period_end": period_end, "days_left": pr["days_left"],
+            "currency": new_plan.get("currency", BILLING_CURRENCY),
+            "old_price": old_price, "new_price": new_price}
+
+
 def tier_rate_usd(devices: int) -> float:
     """Per-device monthly price at a given packet size.
 
@@ -416,6 +526,13 @@ class BillingStore:
         # the wrong one. Orders raised before this default to the
         # currency they were actually raised in at the time.
         self._add_col_if_missing("orders", "currency", "TEXT")
+        # A packet change that has been asked for but has not taken effect.
+        self._add_col_if_missing("billing", "pending_plan", "TEXT")
+        self._add_col_if_missing("billing", "pending_from", "REAL")
+        # Renewal or upgrade. A renewal extends the period; an upgrade
+        # changes the packet and leaves the renewal date exactly where it
+        # is, so nobody pays twice for the same days.
+        self._add_col_if_missing("orders", "kind", "TEXT")
         self._add_col_if_missing("billing", "trial_end", "REAL")
         self._add_col_if_missing("billing", "pf_token", "TEXT")
         self._add_col_if_missing("billing", "payment_id", "TEXT")
@@ -433,14 +550,15 @@ class BillingStore:
     def get(self, org_id: int) -> dict | None:
         row = self.db.execute(
             "SELECT org_id, pf_token, payment_id, status, plan, "
-            "device_limit, current_period_end, grace_period_end, trial_end "
+            "device_limit, current_period_end, grace_period_end, trial_end, "
+            "pending_plan, pending_from "
             "FROM billing WHERE org_id = ?",
             (int(org_id),)).fetchone()
         if not row:
             return None
         keys = ("org_id", "pf_token", "payment_id", "status", "plan",
                 "device_limit", "current_period_end", "grace_period_end",
-                "trial_end")
+                "trial_end", "pending_plan", "pending_from")
         return dict(zip(keys, row))
 
     def device_limit(self, org_id: int) -> int:
@@ -554,7 +672,9 @@ class BillingStore:
             now = time.time()
             current = float((self.get(org_id) or {}).get(
                 "current_period_end") or 0.0)
-            end = current if current > now else now + months * 30 * 86400
+            end = current if current > now else next_billing_date(now)
+            if months > 1 and end == next_billing_date(now):
+                end = add_billing_months(end, months - 1)
         self._upsert(org_id, status="active", plan=plan_name,
                      device_limit=plan["devices"], grace_period_end=None,
                      current_period_end=float(end), pf_token=None)
@@ -574,16 +694,81 @@ class BillingStore:
         return [{"org_id": r[0], "plan": r[1]} for r in rows
                 if plan_by_name(r[1]) is not None]
 
+    def schedule_plan_change(self, org_id: int, plan_name: str,
+                             effective: float) -> None:
+        """Record a packet change that has not happened yet.
+
+        Kept as an intention rather than applied early, because "you will be
+        on 25 devices from the 28th" and "you are on 25 devices" are
+        different statements and only one of them is true today.
+        """
+        if plan_by_name(plan_name) is None:
+            raise ValueError(f"Unknown plan: {plan_name!r}")
+        self._upsert(org_id, pending_plan=str(plan_name),
+                     pending_from=float(effective))
+
+    def cancel_plan_change(self, org_id: int) -> None:
+        self._upsert(org_id, pending_plan=None, pending_from=None)
+
+    def pending_change(self, org_id: int) -> dict | None:
+        """The packet change waiting to happen, or None."""
+        row = self.get(org_id) or {}
+        name = row.get("pending_plan")
+        if not name:
+            return None
+        plan = plan_by_name(name)
+        return {"plan": name, "label": (plan or {}).get("label", name),
+                "devices": (plan or {}).get("devices"),
+                "price": (plan or {}).get("price"),
+                "from": float(row.get("pending_from") or 0.0)}
+
+    def apply_pending_change(self, org_id: int,
+                             now: float | None = None) -> str:
+        """Put a due packet change into effect. Returns the plan name or "".
+
+        Called when a period rolls over. A change scheduled for the 28th has
+        to be applied by something on the 28th, or it is not a scheduled
+        change, it is a note in a database.
+        """
+        now = now if now is not None else time.time()
+        pend = self.pending_change(org_id)
+        if not pend or pend["from"] > now:
+            return ""
+        plan = plan_by_name(pend["plan"])
+        if plan is None:
+            self.cancel_plan_change(org_id)
+            return ""
+        self._upsert(org_id, plan=plan["name"],
+                     device_limit=plan["devices"],
+                     pending_plan=None, pending_from=None)
+        return plan["name"]
+
+    def apply_upgrade(self, org_id: int, plan_name: str) -> None:
+        """A paid mid-period upgrade: bigger packet, same renewal date.
+
+        The date deliberately does not move. They already paid for these
+        days on the old packet and have just paid the difference; extending
+        the period as well would be giving away a month for the price of a
+        fortnight.
+        """
+        plan = plan_by_name(plan_name)
+        if plan is None:
+            raise ValueError(f"Unknown plan: {plan_name!r}")
+        self._upsert(org_id, status="active", plan=plan["name"],
+                     device_limit=plan["devices"], grace_period_end=None,
+                     pending_plan=None, pending_from=None)
+
     # --- orders (a packet somebody is paying for) --------------------------
 
     _ORDER_COLS = ("id", "org_id", "plan", "months", "amount_cents",
                    "provider", "external_id", "due",
                    "currency", "status", "checkout_id", "payment_id",
-                   "created", "paid")
+                   "created", "paid", "kind")
 
     def create_order(self, org_id: int, plan: str, amount_cents: int,
                      months: int = 1, currency: str = BILLING_CURRENCY,
-                     provider: str = "yoco", due: float | None = None) -> int:
+                     provider: str = "yoco", due: float | None = None,
+                     kind: str = "renewal") -> int:
         """Record what is being bought, before sending anyone to pay.
 
         The amount is stored here rather than recomputed when the webhook
@@ -598,10 +783,11 @@ class BillingStore:
         with self._lock:
             cur = self.db.execute(
                 "INSERT INTO orders (org_id, plan, months, amount_cents, "
-                "currency, created, provider, due) VALUES (?,?,?,?,?,?,?,?)",
+                "currency, created, provider, due, kind) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
                 (int(org_id), str(plan), max(1, int(months)),
                  int(amount_cents), str(currency), time.time(),
-                 str(provider), due))
+                 str(provider), due, str(kind)))
             self.db.commit()
             return int(cur.lastrowid)
 
@@ -735,11 +921,18 @@ class BillingStore:
             return
         org_id = int(order["org_id"])
         row = self.get(org_id) or {}
+        # An upgrade is not a renewal: the customer paid the difference for
+        # days they had already bought, so the packet changes and the
+        # renewal date stays exactly where it was. Extending it as well
+        # would hand over a month for the price of a fortnight.
+        if str(order.get("kind") or "") == "upgrade":
+            self.apply_upgrade(int(order["org_id"]), order["plan"])
+            return
         base = max(float(row.get("current_period_end") or 0.0), time.time())
         months = max(1, int(order.get("months") or 1))
         self._upsert(org_id, status="active", plan=plan["name"],
                      device_limit=plan["devices"],
-                     current_period_end=base + months * 30 * 86400,
+                     current_period_end=add_billing_months(base, months),
                      grace_period_end=None)
 
     # --- quote requests (companies past the last tier) --------------------

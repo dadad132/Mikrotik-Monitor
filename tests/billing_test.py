@@ -377,8 +377,12 @@ _row = _bs.get(4242)
 
 check("activating a packet by hand gives the company a paid-up date",
       (_row.get("current_period_end") or 0) > time.time())
-check("...roughly a month out, not some arbitrary distance",
-      25 < ((_row["current_period_end"] - time.time()) / 86400) < 35)
+check("...on the 28th, like every other account -- the 28th because it is "
+      "the only late-month day that exists in February, so there is no "
+      "clamping rule and therefore no clamping bug",
+      time.localtime(_row["current_period_end"]).tm_mday == billing.BILLING_DAY)
+check("...and within the next month, not some arbitrary distance",
+      0 < ((_row["current_period_end"] - time.time()) / 86400) <= 32)
 check("...and the renewal run can actually see it, which is the entire "
       "point and what was silently untrue before",
       4242 in [o["org_id"] for o in _bs.orgs_due_for_renewal(40)])
@@ -399,8 +403,14 @@ check("an EXPIRED date is replaced rather than preserved, so a lapsed "
       _bs.get(4243)["current_period_end"] > time.time())
 
 _bs.set_plan(4244, _plan, months=3)
-check("a longer period can be granted for somebody who paid up front",
-      80 < ((_bs.get(4244)["current_period_end"] - time.time()) / 86400) < 95)
+_end3 = _bs.get(4244)["current_period_end"]
+check("a longer period can be granted for somebody who paid up front, and "
+      "still lands on the 28th",
+      time.localtime(_end3).tm_mday == billing.BILLING_DAY)
+check("...three whole calendar months on, not ninety days -- which are not "
+      "the same thing and drifted a renewal date backwards five days a year",
+      _end3 == billing.add_billing_months(
+          billing.next_billing_date(time.time()), 2))
 
 check("nothing is left in the never-invoiced state", _bs.orgs_never_invoiced() == [])
 

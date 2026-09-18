@@ -3190,6 +3190,15 @@ def _billing_upcoming(billing, auth):
         return []
 
 
+def _invoicing_provider(auth):
+    """The connected invoicing provider, or None."""
+    try:
+        from .billing_runner import provider_for
+        return provider_for(auth)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _invoicing_connected(auth) -> bool:
     """Is anything able to send an invoice? None of the callers care which."""
     try:
@@ -7168,13 +7177,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 tunnel_rows=_tunnel_rows, tunnel_err=_tunnel_err,
                 selfcheck=_selfcheck,
                 yoco=auth.get_yoco() if auth else {},
-                invoiceninja=auth.get_invoiceninja() if auth else {},
                 zoho=auth.get_zoho() if auth else {},
                 zoho_scopes=_zoho_scopes(),
-                in_hook_url=(
-                    ("https" if secure_cookies else "http") + "://"
-                    + self.headers.get("Host", "")
-                    + "/billing/invoiceninja-webhook"),
                 yoco_hook_url=(
                     ("https" if secure_cookies else "http") + "://"
                     + self.headers.get("Host", "")
@@ -7345,65 +7349,128 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._redirect("/superadmin?ok=" +
                                   quote("Email (SMTP) settings saved."))
 
-        def _post_invoiceninja(self, user):
-            """Superadmin-only: connect Invoice Ninja, or disconnect it.
+        def _post_change_plan(self, user):
+            """A company changing its own packet.
 
-            The token is write-only, like the Yoco keys: a blank box keeps
-            what is saved, so re-saving this panel to change the lead time
-            cannot silently wipe the credential and stop every renewal
-            invoice -- a failure that shows up a month later as customers who
-            were never billed.
+            Two routes, and they are different decisions rather than two
+            buttons for one:
+
+              * at the next renewal -- costs nothing, takes effect on the
+                28th. The only route for a downgrade, because nothing is
+                refunded and what they have paid for runs its course.
+              * now -- the difference for the days remaining is invoiced,
+                and the bigger packet arrives when that invoice is PAID.
+                Not when it is asked for: a device cap that rises on a click
+                is a cap that rises for anyone who clicks.
             """
-            if not (user and user.get("is_superadmin")):
+            if not user:
                 return self._send(403, "forbidden")
             flat, _ = self._form()
             sess = self._session()
             if sess is None or flat.get("csrf") != sess["csrf"]:
                 return self._send(400, "bad csrf token")
-            if auth is None:
-                return self._redirect("/superadmin?error=" +
-                                      quote("Auth store is not enabled."))
-            cur = dict(auth.get_invoiceninja() or {})
-            if flat.get("clear"):
-                auth.set_invoiceninja({})
-                log.warning("Invoice Ninja disconnected by %s",
-                            user.get("email", "?"))
-                return self._redirect("/superadmin?ok=" + quote(
-                    "Invoice Ninja disconnected. Renewal invoices will stop "
-                    "going out."))
-            url = (flat.get("url") or "").strip().rstrip("/")
-            if url:
-                cur["url"] = url
-            tok = (flat.get("token") or "").strip()
-            if tok:
-                cur["token"] = tok
-            hook = (flat.get("webhook_secret") or "").strip()
-            if hook:
-                cur["webhook_secret"] = hook
-            for field, lo, hi, dflt in (("days_before", 1, 30, 7),
-                                        ("due_days", 1, 60, 7)):
-                try:
-                    cur[field] = min(hi, max(lo, int(flat.get(field) or dflt)))
-                except (TypeError, ValueError):
-                    cur[field] = dflt
-            if not (cur.get("url") and cur.get("token")):
-                auth.set_invoiceninja(cur)
-                return self._redirect("/superadmin?ok=" + quote(
-                    "Saved. Add both the address and an API token to switch "
-                    "renewal invoicing on."))
-            # Prove it works now, rather than finding out when the first
-            # invoice silently fails to go out.
-            from .invoiceninja import ping, InvoiceNinjaError
+            if billing is None:
+                return self._redirect("/billing?error=" +
+                                      quote("Billing is not enabled here."))
+            if user.get("role") not in ("owner", "admin"):
+                return self._redirect("/billing?error=" + quote(
+                    "Only an owner or admin can change the packet."))
+            org_id = int(user.get("org_id") or 0)
+
+            from .billing import (plan_by_name, upgrade_quote, money,
+                                  BILLING_DAY, BILLING_CURRENCY)
+
+            if flat.get("cancel"):
+                billing.cancel_plan_change(org_id)
+                return self._redirect("/billing?ok=" + quote(
+                    "Packet change cancelled. Nothing will change."))
+
+            plan = plan_by_name((flat.get("plan") or "").strip())
+            if plan is None:
+                return self._redirect("/billing?error=" +
+                                      quote("Unknown packet."))
+            row = billing.get(org_id) or {}
+            current = plan_by_name(row.get("plan") or "")
+            period_end = float(row.get("current_period_end") or 0.0)
+            if not period_end:
+                return self._redirect("/billing?error=" + quote(
+                    "This company has no renewal date yet, so there is "
+                    "nothing to pro-rate against. Ask us to set the packet."))
+
+            # A packet smaller than what is in use would lock devices the
+            # customer is actively monitoring, and they would find out by
+            # being unable to work rather than by being told.
+            in_use = self._org_device_count(org_id) if devices_db else 0
+            if plan["devices"] and in_use > plan["devices"]:
+                return self._redirect("/billing?error=" + quote(
+                    f"{plan['label']} is smaller than the {in_use} devices "
+                    f"you are monitoring. Remove devices first, or pick a "
+                    f"bigger packet."))
+
+            quote_ = upgrade_quote(current, plan, period_end)
+            when = (flat.get("when") or "renewal").strip()
+
+            if quote_["kind"] == "same":
+                return self._redirect("/billing?ok=" + quote(
+                    "That is the packet you are already on."))
+
+            if when != "now" or quote_["kind"] == "downgrade":
+                # A downgrade can only ever go this way.
+                billing.schedule_plan_change(org_id, plan["name"], period_end)
+                on = time.strftime("%d %B %Y", time.localtime(period_end))
+                return self._redirect("/billing?ok=" + quote(
+                    f"Booked: you move to {plan['label']} on {on}. Nothing "
+                    f"is owed now, and nothing changes before then."))
+
+            # Upgrade now: invoice the difference for the days remaining.
+            prov = _invoicing_provider(auth)
+            if prov is None:
+                billing.schedule_plan_change(org_id, plan["name"], period_end)
+                return self._redirect("/billing?ok=" + quote(
+                    "Invoicing is not connected, so the change is booked for "
+                    "your renewal date instead. Nothing is owed now."))
+            amount = float(quote_["due_now"])
+            cur = str(quote_.get("currency") or BILLING_CURRENCY)
+            if amount <= 0:
+                billing.apply_upgrade(org_id, plan["name"])
+                return self._redirect("/billing?ok=" + quote(
+                    f"Moved to {plan['label']}. There was nothing left in "
+                    f"this month to charge for."))
             try:
-                who = ping(cur["url"], cur["token"])
-            except InvoiceNinjaError as exc:
-                return self._redirect("/superadmin?error=" + quote(str(exc)))
-            auth.set_invoiceninja(cur)
-            log.info("Invoice Ninja connected (%s) by %s", who,
-                     user.get("email", "?"))
-            return self._redirect("/superadmin?ok=" + quote(
-                f"Connected to Invoice Ninja ({who}). Renewal invoices go "
-                f"out {cur['days_before']} days before a packet lapses."))
+                org = (auth.org(org_id) if auth else None) or {}
+                to = ""
+                for u in (auth.list_users(org_id) if auth else []) or []:
+                    if u.get("role") == "owner" and u.get("email"):
+                        to = u["email"]
+                        break
+                from .billing import payment_reference
+                client_id = prov.ensure_client(
+                    org_id, org.get("name") or f"Company {org_id}", email=to)
+                days = int(round(quote_["days_left"]))
+                inv = prov.create_invoice(
+                    client_id,
+                    description=(f"Upgrade to {plan['label']} — {days} day"
+                                 f"{'' if days == 1 else 's'} remaining of "
+                                 f"this month, charged at the difference "
+                                 f"between packets."),
+                    amount=amount, due_days=7,
+                    reference=payment_reference(org_id, org.get("name", "")),
+                    currency=cur)
+                prov.email_invoice(inv["id"])
+            except Exception as exc:  # noqa: BLE001
+                log.exception("upgrade invoice failed for org %s", org_id)
+                return self._redirect("/billing?error=" + quote(
+                    f"Could not raise the upgrade invoice: {exc}"))
+            order_id = billing.create_order(
+                org_id, plan["name"], int(round(amount * 100)), months=1,
+                currency=cur, provider=prov.name, kind="upgrade",
+                due=period_end)
+            billing.set_order_external(order_id, inv["id"])
+            return self._redirect("/billing?ok=" + quote(
+                f"Invoice {inv.get('number') or inv['id']} for "
+                f"{money(amount, cur)} is on its way. You move to "
+                f"{plan['label']} as soon as it is paid — your renewal date "
+                f"does not change."))
 
         def _post_zoho(self, user):
             """Superadmin-only: connect Zoho Invoice, or disconnect it.
@@ -7519,7 +7586,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._redirect("/superadmin?ok=" + quote(
                 f"Zoho answered: {who}."))
 
-        def _post_invoiceninja_run(self, user):
+        def _post_billing_run(self, user):
             """Superadmin-only: do the renewal/reconcile pass right now."""
             if not (user and user.get("is_superadmin")):
                 return self._send(403, "forbidden")
@@ -10570,8 +10637,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_billing_itn()
             if path == "/billing/yoco-webhook":
                 return self._post_yoco_webhook()
-            if path == "/billing/invoiceninja-webhook":
-                return self._post_invoiceninja_webhook()
             if auth is None:
                 return self._send(404, "not found")
             if path == "/signup":
@@ -10613,16 +10678,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_suspend(user, restore=True)
             if path == "/superadmin/yoco":
                 return self._post_superadmin_yoco(user)
+            if path == "/billing/change-plan":
+                return self._post_change_plan(user)
             if path == "/superadmin/zoho":
                 return self._post_zoho(user)
             if path == "/superadmin/zoho/test":
                 return self._post_zoho_test(user)
             if path == "/superadmin/zoho/run":
-                return self._post_invoiceninja_run(user)
-            if path == "/superadmin/invoiceninja":
-                return self._post_invoiceninja(user)
-            if path == "/superadmin/invoiceninja/run":
-                return self._post_invoiceninja_run(user)
+                return self._post_billing_run(user)
             if path == "/superadmin/billing-contact":
                 return self._post_superadmin_billing_contact(user)
             if path == "/superadmin/hub-endpoint":
@@ -10979,58 +11042,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             except Exception:
                 log.exception("could not mark quote handled")
             return self._redirect("/superadmin?ok=" + quote("Quote marked handled"))
-
-        def _post_invoiceninja_webhook(self):
-            """Invoice Ninja saying a payment was recorded.
-
-            Treated as a NUDGE, not as proof. Invoice Ninja signs nothing --
-            it can send a static header, which is a password rather than a
-            signature -- and the payload shape has moved between releases. So
-            this reads which invoice is being talked about and then asks the
-            Invoice Ninja API whether that invoice is actually settled.
-
-            That also means losing one of these is survivable: the same
-            question is asked on a timer by billing_runner, so a callback
-            dropped by a restart costs minutes rather than suspending
-            somebody who has paid.
-            """
-            length = int(self.headers.get("Content-Length", 0) or 0)
-            raw = self.rfile.read(length) if length else b""
-            if not billing or auth is None:
-                return self._send(200, "ok")
-            cfg = auth.get_invoiceninja() or {}
-            if not (cfg.get("url") and cfg.get("token")):
-                return self._send(200, "ok")
-            secret = str(cfg.get("webhook_secret") or "")
-            if secret:
-                sent = (self.headers.get("X-Mikromon-Token")
-                        or self.headers.get("x-mikromon-token") or "")
-                if not hmac.compare_digest(sent, secret):
-                    log.warning("Invoice Ninja webhook rejected: wrong or "
-                                "missing token header")
-                    return self._send(401, "unverified")
-            try:
-                payload = json.loads(raw.decode("utf-8") or "{}")
-            except ValueError:
-                payload = {}
-            from .invoiceninja import invoice_ids_in
-            from .billing_runner import reconcile_payments
-            ids = invoice_ids_in(payload)
-            applied = 0
-            try:
-                if ids:
-                    for inv_id in ids:
-                        applied += reconcile_payments(billing, cfg,
-                                                      only_invoice=inv_id)
-                else:
-                    # Nothing recognisable in the body: check everything
-                    # open rather than ignoring the callback.
-                    applied = reconcile_payments(billing, cfg)
-            except Exception:  # noqa: BLE001
-                log.exception("Invoice Ninja webhook: reconcile failed")
-            log.info("Invoice Ninja webhook: %d invoice(s) named, %d payment(s) "
-                     "applied", len(ids), applied)
-            return self._send(200, "ok")
 
         def _post_billing_checkout(self, flat, user):
             """Send an owner to Yoco to pay for a packet.

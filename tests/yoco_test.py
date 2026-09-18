@@ -257,18 +257,25 @@ try:
     bill = store.get(3)
     check("paying moves the company onto the packet it paid for",
           bill["plan"] == "d25" and bill["device_limit"] == 25)
-    _left = (bill["current_period_end"] - time.time()) / 86400
-    check(f"...for the months it paid for (~90 days, got {_left:.0f})",
-          88 < _left < 92)
+    from mikromon.billing import BILLING_DAY, add_billing_months
+    _end = bill["current_period_end"]
+    check("...for the months it paid for: three whole calendar months, "
+          "landing on the 28th like every other account",
+          time.localtime(_end).tm_mday == BILLING_DAY)
+    _months = ((time.localtime(_end).tm_year - time.localtime().tm_year) * 12
+               + time.localtime(_end).tm_mon - time.localtime().tm_mon)
+    check(f"...three months on, not ninety days (got {_months})",
+          2 <= _months <= 4)
 
     # Renewing early must add to what is left, not restart from today.
     oid2 = store.create_order(3, "d25", cents, months=1)
     store.mark_order_paid(oid2, "p_def")
     store.apply_paid_order(store.order(oid2))
-    _left2 = (store.get(3)["current_period_end"] - time.time()) / 86400
-    check(f"renewing early adds to the time already paid for rather than "
-          f"throwing it away (~120 days, got {_left2:.0f})",
-          118 < _left2 < 122)
+    _end2 = store.get(3)["current_period_end"]
+    check("renewing early adds to the time already paid for rather than "
+          "throwing it away -- one more calendar month past where it "
+          "already ended, not one month from today",
+          _end2 == add_billing_months(_end, 1))
 
     # A suspended company that pays should come back on its own.
     store.suspend(3)

@@ -30,8 +30,6 @@ import time
 
 from . import zoho as _z
 from .billing import BILLING_CURRENCY, money, plan_by_name
-from .invoiceninja import (InvoiceNinjaError, create_invoice, email_invoice,
-                           ensure_client, invoice_status)
 
 log = logging.getLogger(__name__)
 
@@ -67,43 +65,6 @@ _DEFAULT_DUE_DAYS = 7
 
 class ProviderError(Exception):
     """Whatever the invoicing system said, in one type the runner can catch."""
-
-
-class _Ninja:
-    """Invoice Ninja, reached with a static API token."""
-
-    name = "invoiceninja"
-
-    def __init__(self, cfg):
-        self.cfg = cfg
-        self.base, self.token = cfg["url"], cfg["token"]
-
-    def ensure_client(self, org_id, name, **kw):
-        try:
-            return ensure_client(self.base, self.token, org_id, name, **kw)
-        except InvoiceNinjaError as exc:
-            raise ProviderError(str(exc)) from exc
-
-    def create_invoice(self, client_id, *, description, amount, due_days,
-                       reference, currency=""):
-        try:
-            return create_invoice(self.base, self.token, client_id,
-                                  description=description, amount=amount,
-                                  due_days=due_days, reference=reference)
-        except InvoiceNinjaError as exc:
-            raise ProviderError(str(exc)) from exc
-
-    def email_invoice(self, invoice_id):
-        try:
-            email_invoice(self.base, self.token, invoice_id)
-        except InvoiceNinjaError as exc:
-            raise ProviderError(str(exc)) from exc
-
-    def invoice_status(self, invoice_id):
-        try:
-            return invoice_status(self.base, self.token, invoice_id)
-        except InvoiceNinjaError as exc:
-            raise ProviderError(str(exc)) from exc
 
 
 class _Zoho:
@@ -161,17 +122,15 @@ def provider_from_cfg(cfg):
     cfg = cfg or {}
     if cfg.get("refresh_token") and cfg.get("api_base"):
         return _Zoho(cfg)
-    if cfg.get("url") and cfg.get("token"):
-        return _Ninja(cfg)
     return None
 
 
 def provider_for(auth):
     """Whichever invoicing system is connected, or None.
 
-    Zoho is preferred when both are: an OAuth connection is deliberate and
-    recent, where a stale Invoice Ninja URL can sit in settings for months
-    after anybody stopped using it.
+    Zoho is the only one now. Invoice Ninja was retired: its hosted free
+    plan has no API at all, and keeping a second provider alive meant two
+    code paths for the same job where only one of them was ever exercised.
     """
     if auth is None:
         return None
@@ -181,12 +140,6 @@ def provider_for(auth):
         z = {}
     if z.get("refresh_token") and z.get("api_base"):
         return _Zoho(z)
-    try:
-        n = auth.get_invoiceninja() or {}
-    except Exception:  # noqa: BLE001
-        n = {}
-    if n.get("url") and n.get("token"):
-        return _Ninja(n)
     return None
 
 
@@ -197,8 +150,7 @@ def _cfg(auth) -> dict:
 
 
 def _enabled(cfg: dict) -> bool:
-    return bool((cfg.get("url") and cfg.get("token"))
-                or cfg.get("refresh_token"))
+    return bool(cfg.get("refresh_token"))
 
 
 def raise_due_invoices(billing, auth, cfg, now: float | None = None,
@@ -219,6 +171,19 @@ def raise_due_invoices(billing, auth, cfg, now: float | None = None,
     raised = 0
     for row in billing.orgs_due_for_renewal(days_before, now=now):
         org_id = int(row["org_id"])
+        # A packet change booked for this renewal takes effect BEFORE the
+        # invoice is worked out. The other order would bill them for the
+        # packet they are leaving, which is the one figure on the invoice
+        # they would certainly notice.
+        try:
+            moved = billing.apply_pending_change(org_id, now)
+            if moved:
+                log.info("renewal: org %s moves to %s as booked",
+                         org_id, moved)
+                row = dict(row, plan=moved)
+        except Exception:  # noqa: BLE001 — one company must not stop the pass
+            log.exception("could not apply the booked packet change for "
+                          "org %s", org_id)
         period_end = float(row.get("current_period_end") or 0.0)
         plan = plan_by_name(row.get("plan") or "")
         if plan is None:
