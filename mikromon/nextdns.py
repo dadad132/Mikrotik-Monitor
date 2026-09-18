@@ -241,6 +241,74 @@ def delete_profile(api_key: str, profile_id: str) -> None:
     # re-rendered from a stale read.
     invalidate(api_key, profile_id)
 
+def _is_invalid_id_error(exc) -> bool:
+    """Did NextDNS reject the CONTENT rather than the request?
+
+    A 400 carrying {"errors":[{"code":"invalid"}]} means one of the ids in
+    the list is not one they know. Anything else -- auth, rate limiting, a
+    network failure -- must not be mistaken for it, or we would sit there
+    picking a list apart while the real problem was the API key.
+    """
+    text = str(exc)
+    return "400" in text and "invalid" in text.lower()
+
+
+def set_parental_entries(api_key: str, profile_id: str, kind: str,
+                         entries: list, suspect_ids=()) -> tuple:
+    """Write categories or services, surviving an id NextDNS does not know.
+
+    Returns (saved_entries, rejected_ids).
+
+    The happy path is one call. On an "invalid" rejection it retries without
+    the ids that just changed -- proving the rest are fine -- and then adds
+    those back one at a time to find which is actually refused. That is a
+    handful of calls on a path that should almost never run, in exchange for
+    never again losing a whole section to one bad id.
+
+    `suspect_ids` is what the reader just ticked. Without it every id is a
+    suspect and this costs one call each, so callers should pass it.
+    """
+    entries = list(entries or [])
+    try:
+        update_section(api_key, profile_id, "parentalControl",
+                       {kind: entries})
+        return entries, []
+    except NextDnsError as exc:
+        if not _is_invalid_id_error(exc):
+            raise
+
+    suspects = {str(i) for i in (suspect_ids or ())}
+    if not suspects:
+        suspects = {str(e.get("id")) for e in entries if e.get("id")}
+
+    # Everything that was not just touched. If this fails too, the bad id is
+    # one already saved on the profile, so fall back to suspecting all.
+    base = [e for e in entries if str(e.get("id")) not in suspects]
+    try:
+        update_section(api_key, profile_id, "parentalControl", {kind: base})
+    except NextDnsError as exc:
+        if not _is_invalid_id_error(exc):
+            raise
+        base, suspects = [], {str(e.get("id")) for e in entries if e.get("id")}
+        update_section(api_key, profile_id, "parentalControl", {kind: base})
+
+    saved, rejected = list(base), []
+    for entry in entries:
+        eid = str(entry.get("id") or "")
+        if eid not in suspects:
+            continue
+        try:
+            update_section(api_key, profile_id, "parentalControl",
+                           {kind: saved + [entry]})
+            saved.append(entry)
+        except NextDnsError as exc:
+            if not _is_invalid_id_error(exc):
+                raise
+            rejected.append(eid)
+    invalidate(api_key, profile_id)
+    return saved, rejected
+
+
 def doh_url(profile_id: str) -> str:
     """The DNS-over-HTTPS URL for this profile — what gets pushed into
     RouterOS's /ip/dns use-doh-server field."""

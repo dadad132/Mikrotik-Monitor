@@ -1673,12 +1673,14 @@ try:
         st, loc = post_loc(admin, "/device/nextdns-parental",
                            {"csrf": csrf, "device": "WebR1",
                             "cat_gambling": "1", "b_safeSearch": "1"})
-        check("a rejected category patch is reported, but doesn't stop the "
-              "booleans and services patches from being attempted and "
-              "succeeding (three independent PATCH calls, not one "
-              "all-or-nothing one)",
-              "categories: FAILED" in loc and "booleans: saved" in loc
-              and "services: saved" in loc)
+        check("one id NextDNS refuses no longer fails its whole section: "
+              "the valid entries save, and the refused id is NAMED so there "
+              "is something to act on rather than 'categories: FAILED'",
+              "gambling" in loc and "does not recognise" in loc)
+        check("...and the switches and services alongside it still save, "
+              "which is three independent patches rather than one "
+              "all-or-nothing one",
+              "switches: saved" in loc and "services: saved" in loc)
 
         # The actual regression: an UNCHECKED curated category must never be
         # submitted at all — confirmed live, including every curated id

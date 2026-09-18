@@ -4130,7 +4130,10 @@ _NEXTDNS_PARENTAL_BOOLS = [
 # or misspelled here, same safety net as the blocklist box.
 _NEXTDNS_CATEGORIES = [
     ("dating", "Dating"), ("gambling", "Gambling"), ("gaming", "Online Gaming"),
-    ("piracy", "Piracy"), ("pornography", "Pornography"),
+    ("piracy", "Piracy"),
+    # NextDNS's own documented id is "porn", not "pornography". Same failure
+    # shape as the services: one wrong id and the whole PATCH is refused.
+    ("porn", "Pornography"),
     ("social-networks", "Social Networks"),
     ("video-streaming", "Video Streaming"),
 ]
@@ -4141,8 +4144,16 @@ _NEXTDNS_SERVICES = [
     ("whatsapp", "WhatsApp"), ("discord", "Discord"), ("netflix", "Netflix"),
     ("twitch", "Twitch"), ("spotify", "Spotify"), ("minecraft", "Minecraft"),
     ("fortnite", "Fortnite"), ("steam", "Steam"), ("pinterest", "Pinterest"),
-    ("tinder", "Tinder"), ("tumblr", "Tumblr"), ("messenger", "Messenger"),
-    ("prime-video", "Prime Video"), ("disney-plus", "Disney+"),
+    ("tinder", "Tinder"), ("tumblr", "Tumblr"),
+    # NextDNS spells these two without separators, and has no "messenger"
+    # service at all -- a wrong id fails the WHOLE services PATCH with an
+    # opaque 400, taking every other service the customer just ticked with
+    # it. Confirmed against NextDNS's own documented ids.
+    ("primevideo", "Prime Video"), ("disney+", "Disney+"),
+    ("hulu", "Hulu"), ("vimeo", "Vimeo"), ("dailymotion", "Dailymotion"),
+    ("9gag", "9GAG"), ("imgur", "Imgur"), ("vk", "VK"), ("skype", "Skype"),
+    ("zoom", "Zoom"), ("ebay", "eBay"), ("amazon", "Amazon"),
+    ("blizzard", "Blizzard"), ("leagueoflegends", "League of Legends"),
 ]
 
 
@@ -9942,20 +9953,58 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # plain boolean toggles from saving (confirmed live: it did,
             # every single time, as long as a bad id stayed on the form).
             results = []
-            for label, section_patch in (
-                ("booleans", {key: (f"b_{key}" in flat)
-                             for key, _l, _h in _NEXTDNS_PARENTAL_BOOLS}),
-                ("categories", {"categories": merge(
-                    _NEXTDNS_CATEGORIES, "categories", "cat", "add_category")}),
-                ("services", {"services": merge(
-                    _NEXTDNS_SERVICES, "services", "svc", "add_service")}),
+            rejected_all = []
+
+            # The plain on/off switches are safe to send as one patch: their
+            # keys are fixed and NextDNS knows all of them.
+            try:
+                nextdns_client.update_section(
+                    api_key, pid, "parentalControl",
+                    {key: (f"b_{key}" in flat)
+                     for key, _l, _h in _NEXTDNS_PARENTAL_BOOLS})
+                results.append("switches: saved")
+            except nextdns_client.NextDnsError as exc:
+                results.append(f"switches: FAILED ({exc})")
+
+            # Categories and services are lists of ids NextDNS validates as a
+            # whole, so ONE id it does not recognise used to fail the entire
+            # section and discard everything else the customer had ticked.
+            # Now the valid ones save and the refused id is named.
+            for label, kind, catalog, prefix, add_field in (
+                ("categories", "categories", _NEXTDNS_CATEGORIES, "cat",
+                 "add_category"),
+                ("services", "services", _NEXTDNS_SERVICES, "svc",
+                 "add_service"),
             ):
+                entries = merge(catalog, kind, prefix, add_field)
+                was_on = {str(e.get("id")) for e in (pc.get(kind) or [])
+                          if e.get("active")}
+                now_on = {str(e["id"]) for e in entries if e.get("active")}
+                touched = (now_on ^ was_on) or now_on
                 try:
-                    nextdns_client.update_section(
-                        api_key, pid, "parentalControl", section_patch)
-                    results.append(f"{label}: saved")
+                    _saved, _bad = nextdns_client.set_parental_entries(
+                        api_key, pid, kind, entries, suspect_ids=touched)
                 except nextdns_client.NextDnsError as exc:
                     results.append(f"{label}: FAILED ({exc})")
+                    continue
+                if _bad:
+                    rejected_all.extend(_bad)
+                    results.append(
+                        f"{label}: saved, except {', '.join(sorted(_bad))} "
+                        f"which NextDNS does not recognise")
+                else:
+                    results.append(f"{label}: saved")
+
+            if rejected_all and auth is not None:
+                # Remember them, so the same dead checkbox is not offered
+                # again tomorrow. NextDNS publishes no catalogue, so the only
+                # way to learn an id is wrong is to have it refused.
+                try:
+                    known = set(auth.get_setting("nextdns_bad_ids") or [])
+                    auth.set_setting("nextdns_bad_ids",
+                                     sorted(known | set(rejected_all)))
+                except Exception:  # noqa: BLE001
+                    log.exception("could not record rejected NextDNS ids")
             msg = "Parental control — " + "; ".join(results)
             return self._redirect(
                 f"/device?name={quote(name)}&tab=nextdns&msg=" + quote(msg))

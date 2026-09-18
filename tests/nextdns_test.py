@@ -343,6 +343,122 @@ check("the denylist is not instant either: adding a domain is typing, not "
       "flicking, and there is nothing to submit on change",
       'data-mm-instant="1"' not in _lst)
 
+print("")
+print("One id NextDNS does not know must not take the whole section:")
+
+# NextDNS validates parentalControl.services as a whole, so a single
+# unrecognised id fails the entire PATCH with HTTP 400
+# {"errors":[{"code":"invalid"}]} -- discarding every other service the
+# customer had just ticked. The message named the section, not the id, so
+# there was nothing to act on and the section was simply unusable.
+#
+# Three of our ids were wrong. But NextDNS publishes no catalogue -- their
+# metadata repository is empty and the API docs give two examples -- so any
+# hardcoded list here rots the next time they rename something. Being wrong
+# has to be survivable, not merely avoided.
+
+_BAD = {"messenger", "prime-video"}
+_patches = []
+
+
+def _fake_update(api_key, profile_id, section, patch):
+    _patches.append(patch)
+    for kind in ("services", "categories"):
+        for e in patch.get(kind, []) or []:
+            if str(e.get("id")) in _BAD:
+                raise nextdns.NextDnsError(
+                    f"NextDNS API PATCH /profiles/{profile_id}/{section} "
+                    f'failed: HTTP 400 — {{"errors":[{{"code":"invalid"}}]}}')
+    return {}
+
+
+_real_update = nextdns.update_section
+nextdns.update_section = _fake_update
+try:
+    _patches.clear()
+    good = [{"id": "tiktok", "active": True},
+            {"id": "youtube", "active": True}]
+    saved, bad = nextdns.set_parental_entries("K", "p1", "services", good,
+                                              suspect_ids={"tiktok"})
+    check("a list NextDNS accepts is written in ONE call, with nothing "
+          "clever happening", saved == good and not bad and len(_patches) == 1)
+
+    _patches.clear()
+    mixed = [{"id": "tiktok", "active": True},
+             {"id": "youtube", "active": True},
+             {"id": "messenger", "active": True}]
+    saved, bad = nextdns.set_parental_entries("K", "p1", "services", mixed,
+                                              suspect_ids={"messenger"})
+    check("with one bad id, the GOOD ones still save -- which is the whole "
+          "point: ticking four services and getting none of them is what "
+          "made this section unusable",
+          {e["id"] for e in saved} == {"tiktok", "youtube"})
+    check("...and the bad one is NAMED, so there is something to act on "
+          "instead of 'services: FAILED'", bad == ["messenger"])
+
+    _patches.clear()
+    two_bad = [{"id": "tiktok", "active": True},
+               {"id": "messenger", "active": True},
+               {"id": "prime-video", "active": True}]
+    saved, bad = nextdns.set_parental_entries(
+        "K", "p1", "services", two_bad,
+        suspect_ids={"messenger", "prime-video"})
+    check("two bad ids are both found, not just the first",
+          sorted(bad) == ["messenger", "prime-video"]
+          and [e["id"] for e in saved] == ["tiktok"])
+
+    # The id already sitting on the profile is the awkward case: it is not a
+    # suspect, so removing the suspects does not help and everything has to
+    # be suspected.
+    _patches.clear()
+    stale = [{"id": "messenger", "active": True},
+             {"id": "tiktok", "active": True}]
+    saved, bad = nextdns.set_parental_entries("K", "p1", "services", stale,
+                                              suspect_ids={"tiktok"})
+    check("an id that was already saved on the profile and has since been "
+          "renamed by NextDNS is found too, rather than blocking every "
+          "future save forever",
+          bad == ["messenger"] and [e["id"] for e in saved] == ["tiktok"])
+
+    # Anything that is NOT a content rejection must propagate: sitting there
+    # taking a list apart one id at a time because the API key is wrong
+    # would be a slow way to learn nothing.
+    def _auth_fail(api_key, profile_id, section, patch):
+        _patches.append(patch)
+        raise nextdns.NextDnsError("HTTP 403 — forbidden")
+
+    nextdns.update_section = _auth_fail
+    _patches.clear()
+    try:
+        nextdns.set_parental_entries("K", "p1", "services", good,
+                                     suspect_ids={"tiktok"})
+        check("a non-content error raises", False)
+    except nextdns.NextDnsError as exc:
+        check("an auth or network failure is raised immediately, not "
+              "mistaken for a bad id and picked apart one call at a time",
+              "403" in str(exc) and len(_patches) == 1)
+finally:
+    nextdns.update_section = _real_update
+
+print("")
+print("The ids we ship are the ones NextDNS actually uses:")
+
+from mikromon.web import _NEXTDNS_SERVICES, _NEXTDNS_CATEGORIES
+
+_svc = {i for i, _ in _NEXTDNS_SERVICES}
+_cat = {i for i, _ in _NEXTDNS_CATEGORIES}
+check("Prime Video is 'primevideo', not 'prime-video'",
+      "primevideo" in _svc and "prime-video" not in _svc)
+check("Disney+ is 'disney+', not 'disney-plus'",
+      "disney+" in _svc and "disney-plus" not in _svc)
+check("there is no 'messenger' service, so it is not offered",
+      "messenger" not in _svc)
+check("the pornography category is 'porn', which is NextDNS's own documented "
+      "id -- the same one-bad-id failure was waiting here",
+      "porn" in _cat and "pornography" not in _cat)
+check("no id has a stray space or capital, which NextDNS rejects",
+      all(i == i.strip().lower() and " " not in i for i in _svc | _cat))
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")
