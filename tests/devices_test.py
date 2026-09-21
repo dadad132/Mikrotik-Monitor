@@ -1368,6 +1368,26 @@ try:
     _hub_cleanup.pop("hub_pubkey", None)
     web._hub_save(web._hub_path(wdb), _hub_cleanup)
 
+    print("  a tab that reads nothing from the router must not dial it:")
+    # The Speed test tab renders a button and the runs already on file. It
+    # needs nothing from the router. But the feature-tab handler connected
+    # to the device and subscripted feature["read"] unconditionally -- a
+    # KeyError on a feature that deliberately has none, and KeyError is not
+    # one of the exceptions it catches. The connection closed with NO
+    # response, which is the one failure a status check cannot see: nginx
+    # reported it as 502 Bad Gateway and the tab was simply unusable.
+    import time as _t502
+    _t0 = _t502.time()
+    _st, _body = get(admin, "/device?name=WebR1&tab=speedtest")
+    _took = _t502.time() - _t0
+    check("the Speed test tab answers at all, rather than closing the "
+          "connection and leaving nginx to report a bad gateway",
+          _st == 200)
+    check("...and renders its button", "Run the test" in _body)
+    check("...without connecting to the router, so it works on exactly the "
+          "site somebody opens it for: the one that is down "
+          f"(took {_took:.1f}s)", _took < 3.0)
+
     # --- Superadmin: "NextDNS" — platform API key + per-router profiles ---
     # /device/nextdns redirects to the live tab page, which (like the VPN
     # tab) tries a real connect to the router first — WebR1's host (9.9.9.9)

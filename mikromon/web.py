@@ -8753,7 +8753,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             cfg = build_device(raw, defaults)  # device metadata (no router needed)
             summary_lines = fields = unmanaged = None
             extra_html = extra_actions = ""
-            if slug == "nextdns":
+            if slug == "speedtest":
+                # Built here, before the live-read block, because it needs
+                # nothing from the router: a button and the runs already on
+                # file. Connecting just to draw it would make the tab fail
+                # whenever the site is down -- which is exactly when
+                # somebody opens it.
+                extra_html = _speedtest_box(
+                    name, csrf, history=_speedtest_history(name, devices_db))
+            elif slug == "nextdns":
                 # The real NextDNS.io cloud enable/disable box only needs
                 # local device state (cfg, the platform API key) — computed
                 # here, before the live-read try block below, so a failure
@@ -8808,7 +8816,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # off (an absent fo_enabled reads as "turn it off" to routes_plan).
             wan_failover_on = False
             _report_html = report_html  # local copy; may be overridden below
-            if preview is None and not error:
+            # A feature that declares no read is a legitimate thing to be --
+            # Speed test measures on demand and shows nothing until asked.
+            # This used to subscript feature["read"] regardless, which threw
+            # KeyError, which is not one of the exceptions below: the
+            # connection died with no response and nginx returned 502.
+            if preview is None and not error and feature.get("read"):
                 from .device import DeviceError
                 from .push import Pusher, PushError, rw_device
                 from .push.api import PushApi
@@ -8818,7 +8831,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 try:
                     api.connect()
                     pusher = Pusher(cfg, api)
-                    current = feature["read"](pusher, cfg)
+                    current = feature["read"](pusher, cfg)  # guarded above
                     wan_failover_on = bool((current or {}).get("failover_routes"))
                     if slug == "tunnel" and devices_db:
                         hub = _hub_load(_hub_path(devices_db))
@@ -8871,9 +8884,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         extra_html, extra_actions = _update_box(name, csrf, current)
                     elif slug == "interfaces":
                         extra_html = _interfaces_table(current)
-                    elif slug == "speedtest":
-                        extra_html = _speedtest_box(
-                            name, csrf, history=_speedtest_history(name))
                 except (DeviceError, PushError) as exc:
                     error = str(exc)
                     # Show hub-side diagnostics even when the device is unreachable
@@ -11546,6 +11556,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                      order_id, payment_id, order["org_id"], order["plan"],
                      order["months"])
             try:
+                # Fire and forget: the packet is already granted, and the
+                # acknowledgement Yoco is waiting for must not be held up by
+                # a mail server.
                 self._email_invoice(order)
             except Exception:  # noqa: BLE001 - the packet is already granted
                 log.exception("could not email the invoice for order %s",
@@ -11555,9 +11568,25 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
         def _email_invoice(self, order) -> None:
             """Tell the company their payment landed, and where the invoice is.
 
-            Best effort on purpose: the packet has already been granted by the
-            time this runs, so an SMTP problem must never undo a payment.
+            Sent on a background thread, because the caller is a payment
+            webhook. It used to send inline, so the 200 that acknowledges
+            the payment could not go out until the mail server answered --
+            and the sender retries until it gets a 2xx, so a slow relay
+            became repeated deliveries of the same payment and a mail outage
+            became a payment-processing problem.
+
+            Best effort on purpose either way: the packet is granted before
+            this runs, so an SMTP problem must never undo a payment.
             """
+            if auth is None:
+                return
+            import threading
+            threading.Thread(target=self._email_invoice_now, args=(order,),
+                             name="mikromon-invoice-mail",
+                             daemon=True).start()
+
+        def _email_invoice_now(self, order) -> None:
+            """The actual send. Runs on a thread; never call from a handler."""
             if auth is None:
                 return
             org_id = int(order["org_id"])

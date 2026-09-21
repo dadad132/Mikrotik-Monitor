@@ -788,7 +788,18 @@ try:
         check("...and after all of that the company still has not been "
               "upgraded", _yb.get(_yoid)["device_limit"] == 5)
 
+        # The receipt email used to be sent INLINE here, to whatever SMTP
+        # host is configured, with a 45-second timeout -- so the 200 that
+        # tells Yoco "received" waited on somebody else's mail server. Yoco
+        # retries until it gets a 2xx, so a slow relay meant the same payment
+        # delivered again and again. This test hung on it for weeks, which
+        # was the flake nobody could pin down.
+        _t_hook = time.time()
         check("the genuine callback is accepted", _post_hook(_good) == 200)
+        check("...promptly, without waiting on a mail server: the sender "
+              "retries until it is acknowledged, so a slow relay would "
+              "become the same payment delivered over and over",
+              time.time() - _t_hook < 3.0)
         check("...and the packet switches on by itself, with nobody at our "
               "end having to notice the payment",
               _yb.get(_yoid)["device_limit"] == 25
