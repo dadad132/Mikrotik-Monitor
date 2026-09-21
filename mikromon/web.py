@@ -2534,7 +2534,10 @@ def _render_device(store, state, name, user, csrf="",
     now_t = time.time()
     hourly = store.up_hourly(name, now_t - 86400, now_t) if store else []
     if hourly:
-        # Weighted overall uptime across all polls in the window
+        # Uptime across the polls that were actually taken. An hour with no
+        # rows is NOT a down hour -- `up` is recorded as 0 on every failed
+        # poll, so no rows means nothing asked, which is this server having
+        # stopped rather than the router.
         total_polls = sum(cnt for _, _, cnt in hourly)
         up_polls = sum(cnt * avg for _, avg, cnt in hourly)
         avail = (up_polls / total_polls * 100) if total_polls else 100.0
@@ -2545,22 +2548,51 @@ def _render_device(store, state, name, user, csrf="",
             idx = 23 - int(h_ago)
             if 0 <= idx < 24:
                 buckets[idx] = avg_val
-        bars_h = "".join(
-            '<div style="flex:1;height:28px;background:'
-            + ("#e2e8f0" if b is None
-               else "#16a34a" if b >= 0.9
-               else "#dc2626" if b < 0.1
-               else "#f97316")
-            + ';border-radius:2px;min-width:2px"></div>'
-            for b in buckets)
+        # The current hour is only partly elapsed, and the oldest is only
+        # partly inside the window, so neither is a gap worth reporting.
+        gaps = sum(1 for b in buckets[1:23] if b is None)
+
+        def _bar(i, b):
+            when = 23 - i
+            ago = "this hour" if when == 0 else f"{when}h ago"
+            if b is None:
+                colour, tip = "#e2e8f0", f"{ago}: not measured"
+            elif b >= 0.9:
+                colour, tip = "#16a34a", f"{ago}: up"
+            elif b < 0.1:
+                colour, tip = "#dc2626", f"{ago}: down"
+            else:
+                colour, tip = "#f97316", f"{ago}: up {b * 100:.0f}% of polls"
+            return (f'<div title="{esc(tip)}" style="flex:1;height:28px;'
+                    f'background:{colour};border-radius:2px;'
+                    f'min-width:2px"></div>')
+
+        bars_h = "".join(_bar(i, b) for i, b in enumerate(buckets))
+
+        # The grey blocks used to sit there unexplained beside "100.0%
+        # uptime" -- the bar saying there was a hole and the number saying
+        # there was not. Only one of them could be right.
+        gap_note = ("" if not gaps else
+                    f'<p class="muted" style="font-size:12px;margin:8px 0 0">'
+                    f'<span style="display:inline-block;width:9px;height:9px;'
+                    f'background:#e2e8f0;border-radius:2px;'
+                    f'vertical-align:middle"></span> '
+                    f'{gaps} hour{"" if gaps == 1 else "s"} not measured, so '
+                    f'the figure above covers the other '
+                    f'{24 - gaps}. Grey is missing data, not downtime &mdash; '
+                    f'nothing asked during those hours. If every router shows '
+                    f'the same gap, it was this server that stopped, not the '
+                    f'sites.</p>')
+
         avail_box = (
             f'<div class="box"><h2 style="margin-bottom:12px">Online Availability</h2>'
             f'<div style="display:flex;gap:2px;margin-bottom:8px">{bars_h}</div>'
             f'<div style="display:flex;justify-content:space-between;'
             f'font-size:12px;color:#64748b">'
             f'<span>24h ago</span>'
-            f'<span style="font-weight:700;color:{acol}">{avail:.1f}% uptime</span>'
-            f'<span>now</span></div></div>')
+            f'<span style="font-weight:700;color:{acol}">{avail:.1f}% uptime'
+            f'{"" if not gaps else " of what was measured"}</span>'
+            f'<span>now</span></div>{gap_note}</div>')
 
     # ── right: active problems ─────────────────────────────────────────────────
     _lc = {"warn": "#d97706", "crit": "#dc2626"}

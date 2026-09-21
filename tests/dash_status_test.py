@@ -14,6 +14,7 @@ Run:  ./.venv/Scripts/python.exe tests/dash_status_test.py
 from __future__ import annotations
 
 import os
+import os as _os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -91,6 +92,68 @@ check("the list sorts Offline first, then Partial, then the rest",
       [order[_severity(d)] for d in
        (dev("x", False, "reachability"), dev("y", True, "wan_failover"),
         dev("z", True))] == [0, 1, 2])
+
+print("")
+print("The availability bar, and what a grey block means:")
+
+# `up` is written as 0 on every failed poll and 1 on every good one, so an
+# hour with NO rows does not mean the router was down -- it means nothing
+# asked, which is this server having stopped. The bar drew those hours grey
+# and the headline averaged only over the hours that HAD rows, so three
+# unmonitored hours rendered as "100.0% uptime" beside a visible hole that
+# nothing on the page explained. The bar said there was a gap and the number
+# said there was not; only one of them could be right.
+import re as _re
+import tempfile as _tf
+import time as _tm
+
+from mikromon.metrics import MetricsStore as _MS
+from mikromon.web import _render_device as _rd
+
+_now = _tm.time()
+_user = {"role": "admin", "org_name": "X", "email": "a@b.c", "name": "A"}
+_state = {"devices": {"R1": {"status": "ok", "problems": [], "facts": {}}}}
+
+
+def _bar_html(skip_hours):
+    st = _MS(_os.path.join(_tf.mkdtemp(), "m.db"))
+    st.record([(_now - h * 3600 - m * 60, "R1", "up", "", 1.0)
+               for h in range(24) if h not in skip_hours
+               for m in range(0, 60, 5)])
+    return _rd(st, _state, "R1", _user)
+
+
+_gap = _bar_html({3, 4, 5})
+check("three unmonitored hours are named as unmonitored, instead of a grey "
+      "gap nothing explains", "3 hours not measured" in _gap)
+check("...and the headline no longer claims plain '100% uptime' over hours "
+      "it never looked at", "100.0% uptime of what was measured" in _gap)
+check("...saying which hours it DOES cover, so the number means something",
+      "covers the other 21" in _gap)
+check("...and stating outright that grey is missing data, not downtime",
+      "not downtime" in _gap)
+check("...and pointing at the likely cause when every router shows it, "
+      "because a fleet-wide gap is this server and not twenty sites",
+      "this server that stopped" in _gap)
+check("each grey block says which hour it is, on hover",
+      _re.search(r'title="4h ago: not measured"', _gap) is not None)
+
+_full = _bar_html(set())
+check("a fully-monitored day says plain '100.0% uptime' with no caveat, "
+      "because there is nothing to caveat",
+      "100.0% uptime" in _full and "of what was measured" not in _full)
+check("...and no note about missing hours", "not measured" not in _full)
+
+_down = _MS(_os.path.join(_tf.mkdtemp(), "m.db"))
+_down.record([(_now - h * 3600 - m * 60, "R1", "up", "",
+               0.0 if h in (2, 3) else 1.0)
+              for h in range(24) for m in range(0, 60, 5)])
+_dh = _rd(_down, _state, "R1", _user)
+check("a router that really WAS down is red, counted against uptime, and "
+      "not confused with an hour nobody measured",
+      "100.0% uptime" not in _dh and "not measured" not in _dh)
+check("...and those hours say 'down' rather than 'not measured'",
+      _re.search(r'title="\dh ago: down"', _dh) is not None)
 
 print()
 if FAILS:
