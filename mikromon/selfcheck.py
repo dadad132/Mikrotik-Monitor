@@ -288,6 +288,8 @@ def check_retention(metrics_db, retention_days=30):
 
 _SMTP_CACHE: dict = {}
 _SMTP_CACHE_SECONDS = 300
+_SMTP_RUNNING: set = set()
+_SMTP_LOCK = __import__("threading").Lock()
 
 
 def _smtp_cache(key, findings):
@@ -323,14 +325,57 @@ def check_smtp(smtp_cfg, probe: bool = True):
     if not probe:
         return [_finding("smtp", True, f"Email is configured ({host})")]
 
-    # Cached briefly. This runs on the page somebody opens BECAUSE something
-    # is broken, and making them wait on a mail server handshake every reload
-    # would be its own small failure.
-    key = f"{host}:{_smtp_field(smtp_cfg, 'port', '')}:"           f"{_smtp_field(smtp_cfg, 'username', '')}"
+    # The probe NEVER runs inline. This is the page somebody opens
+    # because something is already broken, and a mail server that is
+    # slow or firewalled would make it indistinguishable from a dead
+    # dashboard -- eight seconds of nothing, on the one page they need
+    # right then.
+    key = f"{host}:{_smtp_field(smtp_cfg, 'port', '')}:" + str(_smtp_field(smtp_cfg, "username", ""))
     hit = _SMTP_CACHE.get(key)
-    if hit and time.time() - hit[0] < _SMTP_CACHE_SECONDS:
+    if not (hit and time.time() - hit[0] < _SMTP_CACHE_SECONDS):
+        _probe_smtp_async(key, smtp_cfg)
+    if hit:
         return list(hit[1])
+    return [_finding("smtp", True, f"Checking email ({host})\u2026",
+                     "The result appears here once the mail server "
+                     "answers. It is checked in the background so this "
+                     "page never waits on it.")]
 
+
+def _probe_smtp_async(key, smtp_cfg) -> None:
+    """Start one background probe for this configuration, at most.
+
+    At most one, because the panel reloads and a probe per reload would
+    open a connection to somebody's mail server every few seconds --
+    which is how a health check becomes the thing being complained
+    about.
+    """
+    import threading
+    with _SMTP_LOCK:
+        if key in _SMTP_RUNNING:
+            return
+        _SMTP_RUNNING.add(key)
+
+    def run():
+        try:
+            _SMTP_CACHE[key] = (time.time(), _probe_smtp(smtp_cfg))
+        except Exception:  # noqa: BLE001 - never take a thread out
+            log.exception("the SMTP probe failed")
+        finally:
+            with _SMTP_LOCK:
+                _SMTP_RUNNING.discard(key)
+
+    threading.Thread(target=run, name="mikromon-smtp-probe",
+                     daemon=True).start()
+
+
+def _probe_smtp(smtp_cfg):
+    """Connect, negotiate TLS and sign in. Never sends a message.
+
+    Runs on a background thread. Nothing here may be called from inside
+    a request.
+    """
+    host = str(_smtp_field(smtp_cfg, "host", "") or "").strip()
     import smtplib
     import socket
     import ssl
@@ -361,21 +406,21 @@ def check_smtp(smtp_cfg, probe: bool = True):
             except Exception:  # noqa: BLE001
                 pass
     except smtplib.SMTPAuthenticationError as exc:
-        return _smtp_cache(key, [_finding(
+        return [_finding(
             "smtp", False, "The email server rejected our sign-in",
             f"{host}:{port} answered: {str(exc)[:200]}. Every alert this "
             f"system raises is going nowhere.",
-            "Platform admin -> Email (SMTP) settings")])
+            "Platform admin -> Email (SMTP) settings")]
     except (smtplib.SMTPException, socket.timeout, socket.error, OSError,
             ssl.SSLError) as exc:
-        return _smtp_cache(key, [_finding(
+        return [_finding(
             "smtp", False, f"Cannot reach the email server ({host}:{port})",
             f"{type(exc).__name__}: {str(exc)[:200]}. Every alert this "
             f"system raises is going nowhere.",
-            f"telnet {host} {port}   # from this server")])
+            f"telnet {host} {port}   # from this server")]
     detail = "signed in successfully" if user else "connected (no sign-in)"
-    return _smtp_cache(key, [_finding("smtp", True,
-                                      f"Email works ({host}:{port})", detail)])
+    return [_finding("smtp", True, f"Email works ({host}:{port})",
+                     detail)]
 
 
 def _cert_days_left(path):

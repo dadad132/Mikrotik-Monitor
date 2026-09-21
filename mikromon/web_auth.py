@@ -1763,7 +1763,7 @@ def _share_box(device: str, shares, csrf: str, org_name: str = "") -> str:
         f'placeholder="person@theircompany.co.za"></label>'
         f'<label class="chk" style="padding-bottom:8px">'
         f'<input type="checkbox" name="can_manage" value="1"> '
-        f'Let them change it too</label>'
+        f'Let them manage</label>'
         f'<button class="btn" type="submit">Share</button>'
         f'</form>'
         f'<p class="muted" style="font-size:12px;margin:10px 0 0">'

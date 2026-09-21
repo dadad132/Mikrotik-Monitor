@@ -236,23 +236,38 @@ check("an SmtpConfig object is read the same as a settings dict",
 # "Email is configured" used to be the whole check. It was equally true of a
 # host that does not resolve, a port nothing listens on, and a password
 # rotated last month -- so it passed in exactly the cases worth catching.
-check("a host that cannot be reached is a FAILURE, not a tick: every alert "
-      "this system raises goes down that path",
-      not sc.check_smtp({"host": "no-such-host.invalid",
-                         "port": 587})[0]["ok"])
+_dead = {"host": "no-such-host.invalid", "port": 587}
+_probed = sc._probe_smtp(_dead)[0]
+check("the probe itself finds a host that cannot be reached, and calls it a "
+      "FAILURE rather than a tick: every alert this system raises goes down "
+      "that path", not _probed["ok"])
 check("...naming what went wrong and where, rather than 'email failed'",
-      "no-such-host.invalid:587"
-      in sc.check_smtp({"host": "no-such-host.invalid", "port": 587})[0]["title"])
+      "no-such-host.invalid:587" in _probed["title"])
 check("...and saying plainly that alerts are going nowhere",
-      "going nowhere" in sc.check_smtp({"host": "no-such-host.invalid",
-                                        "port": 587})[0]["detail"])
+      "going nowhere" in _probed["detail"])
 
+# The probe opens a TCP connection, negotiates TLS and signs in. Doing that
+# inside a page render meant Platform admin could not paint until somebody
+# else's mail server answered -- and this is the page you open BECAUSE
+# something is already broken. A slow mail server then looks like a dead
+# dashboard. It hung a test for exactly that reason.
 _t0 = time.time()
 for _ in range(20):
-    sc.check_smtp({"host": "no-such-host.invalid", "port": 587})
-check("the probe is cached, so the page somebody opens BECAUSE something is "
-      "broken does not wait on a mail handshake every reload",
-      time.time() - _t0 < 1.0)
+    _first = sc.check_smtp(_dead)
+check("check_smtp never opens a connection itself: twenty calls take no "
+      "measurable time, because the probe runs in the background",
+      time.time() - _t0 < 0.5)
+check("...and the first answer says it is checking, which is honest and "
+      "costs nothing, rather than an invented tick",
+      _first[0]["ok"] and "Checking email" in _first[0]["title"])
+
+for _ in range(40):
+    if any("Cannot reach" in f["title"] for f in sc.check_smtp(_dead)):
+        break
+    time.sleep(0.1)
+check("...and once the background probe answers, the real result is what "
+      "the page shows",
+      "Cannot reach" in sc.check_smtp(_dead)[0]["title"])
 
 check("probe=False still answers the cheap question, for callers that only "
       "want to know whether a relay is set",

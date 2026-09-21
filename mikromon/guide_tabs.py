@@ -284,7 +284,7 @@ TABS = [
              "contractor, the branch's own manager.",
      "steps": ["Enter the email they sign in with. They need an account "
                "already; this does not create one.",
-               "Leave 'let them change it too' unticked unless they really "
+               "Leave 'let them manage' unticked unless they really "
                "need to push config. They can always watch it either way.",
                "Share. They see this one router on their own dashboard, "
                "and none of your others, your team or your billing.",
