@@ -1388,6 +1388,20 @@ try:
           "site somebody opens it for: the one that is down "
           f"(took {_took:.1f}s)", _took < 3.0)
 
+    # Ninety seconds of measuring -- thirty each of ping, download and
+    # upload -- cannot happen inside a request. nginx gives up and the
+    # browser gets 502 with nothing to explain it, which is exactly what it
+    # did. So the POST starts a thread and redirects at once.
+    _t0 = _t502.time()
+    _st, _body2 = post(admin, "/device/speedtest",
+                       {"csrf": csrf, "device": "WebR1"})
+    _took = _t502.time() - _t0
+    check("starting a test answers immediately instead of holding the "
+          "request open for the ninety seconds the test takes "
+          f"(took {_took:.1f}s)", _st == 200 and _took < 5.0)
+    check("...landing back on the tab, where the progress is shown",
+          "Speed test" in _body2)
+
     # --- Superadmin: "NextDNS" — platform API key + per-router profiles ---
     # /device/nextdns redirects to the live tab page, which (like the VPN
     # tab) tries a real connect to the router first — WebR1's host (9.9.9.9)

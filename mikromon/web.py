@@ -4069,8 +4069,8 @@ def _speedtest_history(name, devices_db="") -> list:
         return []
 
 
-def _speedtest_record(name, result, devices_db="") -> None:
-    """Keep the last few runs. One run is weather; three is the line.
+def _speedtest_record(name, run, devices_db="") -> None:
+    """File a finished run. One run is weather; three is the line.
 
     Best-effort: a test that could not be filed is still a test that was
     run, and losing the history must never lose the answer on the screen.
@@ -4083,13 +4083,15 @@ def _speedtest_record(name, result, devices_db="") -> None:
                 all_runs = json.load(f) or {}
         except (OSError, ValueError):
             all_runs = {}
-        p = result.get("ping") or {}
-        d = result.get("download") or {}
+        p = run.get("ping") or {}
+        d = run.get("download") or {}
+        u = run.get("upload") or {}
         all_runs.setdefault(name, []).insert(0, {
             "when": time.strftime("%d %b %H:%M"),
-            "ts": result.get("when") or time.time(),
+            "ts": run.get("finished") or time.time(),
             "loss_pct": p.get("loss_pct"), "avg_ms": p.get("avg_ms"),
-            "jitter_ms": p.get("jitter_ms"), "mbps": d.get("mbps"),
+            "jitter_ms": p.get("jitter_ms"),
+            "mbps": d.get("mbps"), "up_mbps": u.get("mbps"),
         })
         all_runs[name] = all_runs[name][:_SPEEDTEST_KEEP]
         _atomic_write(path, json.dumps(all_runs, indent=1))
@@ -4097,83 +4099,124 @@ def _speedtest_record(name, result, devices_db="") -> None:
         log.exception("could not record the speed test for %r", name)
 
 
-def _speedtest_box(name, csrf, result=None, history=()) -> str:
-    """Run a line test from the router, and show what came back.
+def _speedtest_box(name, csrf, run=None, history=()) -> str:
+    """The test: start it, watch it, read it.
 
-    Latency and loss first, because that is what is wrong most of the time
-    and what somebody is describing when they say it keeps cutting out. A
-    line can pass a throughput test and still be unusable.
+    `run` is the live state from mikromon.speedtest.status(). While a test
+    is running the page refreshes itself, because ninety seconds is far too
+    long to leave somebody looking at a button wondering whether it worked.
     """
     q = esc(name)
-    run = (f'<form method="POST" action="/device/speedtest">'
-           f'<input type="hidden" name="csrf" value="{csrf}">'
-           f'<input type="hidden" name="device" value="{q}">'
-           f'<button class="btn" type="submit">Run the test</button>'
-           f'<span class="muted" style="margin-left:10px;font-size:12px">'
-           f'Takes about {"" if result else "ten to thirty "}seconds. The '
-           f'router does the measuring; nothing is written to its '
-           f'storage.</span></form>')
+    run = run or {}
+    running = bool(run.get("running"))
+    phase = str(run.get("phase") or "")
+    secs = int(run.get("phase_seconds") or 30)
+
+    if running:
+        order = [("ping", "Ping"), ("download", "Download"),
+                 ("upload", "Upload")]
+        done_i = next((i for i, (k, _) in enumerate(order) if k == phase), -1)
+        steps = []
+        for i, (key, label) in enumerate(order):
+            if i < done_i:
+                mark, colour = "&#10003;", "#15803d"
+            elif i == done_i:
+                mark, colour = "&#9679;", "#2563eb"
+            else:
+                mark, colour = "&#9675;", "#94a3b8"
+            steps.append(f'<span style="color:{colour};margin-right:14px">'
+                         f'{mark} {label}</span>')
+        head = (f'<p style="margin:14px 0 6px">{"".join(steps)}</p>'
+                f'<p class="muted" style="font-size:12px;margin:0">'
+                f'Each phase runs for {secs} seconds, one at a time &mdash; '
+                f'downloading while pinging would measure the download\'s '
+                f'effect on the latency rather than the line\'s own. This '
+                f'page refreshes itself; you can leave it.</p>')
+        return (f'<div class="box"><h2>Speed test'
+                f'{_help_dot("speedtest", "the speed test")}</h2>'
+                f'<p class="muted" style="margin:0">Running on the router '
+                f'now.</p>{head}'
+                # Reloads itself until the run finishes. Ninety seconds is
+                # far too long to leave somebody looking at a button
+                # wondering whether anything happened.
+                f'<script>setTimeout(function(){{location.reload();}},'
+                f'5000);</script></div>')
+
+    run_btn = (f'<form method="POST" action="/device/speedtest">'
+               f'<input type="hidden" name="csrf" value="{csrf}">'
+               f'<input type="hidden" name="device" value="{q}">'
+               f'<button class="btn" type="submit">Run the test</button>'
+               f'<span class="muted" style="margin-left:10px;font-size:12px">'
+               f'Ping, download and upload, {secs} seconds each &mdash; about '
+               f'{secs * 3 // 60} minutes. Nothing is written to the '
+               f'router\'s storage.</span></form>')
 
     body = ""
-    if result:
-        p = result.get("ping") or {}
-        d = result.get("download") or {}
+    if run and not running:
+        p = run.get("ping") or {}
+        d = run.get("download") or {}
+        u = run.get("upload") or {}
 
-        def stat(label, value, unit="", tone=""):
+        def stat(label, value, unit="", tone="", sub=""):
             colour = {"bad": "#b91c1c", "warn": "#b45309",
                       "good": "#15803d"}.get(tone, "var(--text)")
             shown = "&mdash;" if value is None else f"{value}{unit}"
-            return (f'<div style="min-width:120px">'
+            return (f'<div style="min-width:118px">'
                     f'<div class="muted" style="font-size:11px;'
                     f'text-transform:uppercase;letter-spacing:.07em">{label}'
-                    f'</div><div style="font-size:22px;font-weight:700;'
-                    f'color:{colour}">{shown}</div></div>')
+                    f'</div><div style="font-size:24px;font-weight:700;'
+                    f'color:{colour};line-height:1.2">{shown}</div>'
+                    f'<div class="muted" style="font-size:11px">{sub}</div>'
+                    f'</div>')
 
         loss = p.get("loss_pct")
-        loss_tone = ("bad" if loss is not None and loss >= 5 else
-                     "warn" if loss is not None and loss > 0 else "good")
         avg = p.get("avg_ms")
-        lat_tone = ("bad" if avg is not None and avg >= 150 else
-                    "warn" if avg is not None and avg >= 60 else "good")
         jit = p.get("jitter_ms")
-        jit_tone = ("bad" if jit is not None and jit >= 30 else
-                    "warn" if jit is not None and jit >= 10 else "good")
-        mbps = d.get("mbps")
+        body += (
+            '<div style="display:flex;gap:24px;flex-wrap:wrap;margin:18px 0 8px">'
+            + stat("Download", d.get("mbps"), " Mbit/s", "",
+                   f'peak {d.get("peak_mbps")}' if d.get("peak_mbps") else "")
+            + stat("Upload", u.get("mbps"), " Mbit/s", "",
+                   "not supported" if u.get("skipped") else
+                   (f'peak {u.get("peak_mbps")}' if u.get("peak_mbps") else ""))
+            + stat("Ping", avg, " ms",
+                   "bad" if avg is not None and avg >= 150 else
+                   "warn" if avg is not None and avg >= 60 else "good",
+                   f'{p.get("min_ms")}\u2013{p.get("max_ms")} ms'
+                   if p.get("min_ms") is not None else "")
+            + stat("Packet loss", loss, "%",
+                   "bad" if loss is not None and loss >= 5 else
+                   "warn" if loss else "good",
+                   f'{p.get("received", 0)}/{p.get("sent", 0)} replies')
+            + stat("Jitter", jit, " ms",
+                   "bad" if jit is not None and jit >= 30 else
+                   "warn" if jit is not None and jit >= 10 else "good")
+            + "</div>")
 
-        body += (f'<div style="display:flex;gap:26px;flex-wrap:wrap;'
-                 f'margin:16px 0 6px">'
-                 + stat("Packet loss", loss, "%", loss_tone)
-                 + stat("Latency", avg, " ms", lat_tone)
-                 + stat("Jitter", jit, " ms", jit_tone)
-                 + stat("Download", mbps, " Mbit/s")
-                 + '</div>')
-
-        note = []
+        notes = []
+        if run.get("error"):
+            notes.append(f'The test stopped early: {esc(str(run["error"]))}')
         if loss is not None and loss >= 5:
-            note.append("Packet loss this high makes voice and video unusable "
-                        "whatever the speed says. That is the fault to chase.")
+            notes.append("Packet loss this high makes voice and video "
+                         "unusable whatever the speed says. That is the "
+                         "fault to chase, not the megabits.")
         elif loss:
-            note.append("Some packet loss. Worth watching; not yet the thing "
-                        "breaking calls.")
+            notes.append("Some packet loss. Worth watching; not yet the "
+                         "thing breaking calls.")
         if jit is not None and jit >= 30:
-            note.append("Jitter this high breaks calls even when latency and "
-                        "speed both look fine.")
-        if p.get("error"):
-            note.append(f'The ping did not run: {esc(p["error"])}')
+            notes.append("Jitter this high breaks calls even when latency "
+                         "and speed both look fine.")
+        if u.get("skipped"):
+            notes.append(f'Upload was skipped: {esc(str(u.get("error", "")))}')
+        elif u.get("error"):
+            notes.append(f'Upload did not complete: {esc(str(u["error"]))}')
         if d.get("error"):
-            note.append(f'The download did not complete: {esc(d["error"])} '
-                        f'&mdash; latency and loss above are still valid.')
-        if not note and mbps:
-            note.append("Nothing wrong with the line at the moment this ran.")
-
-        body += (f'<p class="muted" style="font-size:12px;margin:4px 0 0">'
-                 f'{" ".join(note)}</p>')
-        body += (f'<p class="muted" style="font-size:12px;margin:10px 0 0">'
-                 f'Pinged <code>{esc(str(p.get("target", "")))}</code> '
-                 f'{p.get("received", 0)}/{p.get("sent", 0)} replies'
-                 + (f' &middot; downloaded {d["bytes"] / 1e6:.1f} MB in '
-                    f'{d["seconds"]}s' if d.get("bytes") else "")
-                 + '</p>')
+            notes.append(f'Download did not complete: {esc(str(d["error"]))}')
+        if not notes:
+            notes.append("Nothing wrong with the line at the moment this "
+                         "ran.")
+        body += (f'<p class="muted" style="font-size:12px;margin:2px 0 0">'
+                 f'{" ".join(notes)}</p>')
 
     hist = ""
     if history:
@@ -4182,24 +4225,25 @@ def _speedtest_box(name, csrf, result=None, history=()) -> str:
 
         rows = "".join(
             f'<tr><td>{esc(str(h.get("when", "")))}</td>'
-            f'<td>{cell(h.get("loss_pct"), "%")}</td>'
+            f'<td>{cell(h.get("mbps"), " Mbit/s")}</td>'
+            f'<td>{cell(h.get("up_mbps"), " Mbit/s")}</td>'
             f'<td>{cell(h.get("avg_ms"), " ms")}</td>'
-            f'<td>{cell(h.get("mbps"), " Mbit/s")}</td></tr>'
+            f'<td>{cell(h.get("loss_pct"), "%")}</td></tr>'
             for h in history)
-        hist = (f'<h3 style="font-size:14px;margin:18px 0 6px">Previous runs'
-                f'</h3><table><thead><tr><th>When</th><th>Loss</th>'
-                f'<th>Latency</th><th>Download</th></tr></thead>'
+        hist = (f'<h3 style="font-size:14px;margin:20px 0 6px">Previous runs'
+                f'</h3><table><thead><tr><th>When</th><th>Down</th>'
+                f'<th>Up</th><th>Ping</th><th>Loss</th></tr></thead>'
                 f'<tbody>{rows}</tbody></table>'
                 f'<p class="muted" style="font-size:12px;margin:6px 0 0">'
                 f'One slow run is weather. The same figure three times is '
-                f'the line.</p>')
+                f'the line, and that is what an ISP will act on.</p>')
 
     return (f'<div class="box"><h2>Speed test'
             f'{_help_dot("speedtest", "the speed test")}</h2>'
             f'<p class="muted" style="margin:0 0 10px">Measured by the router '
             f'itself, over its own internet connection &mdash; not through '
             f'the tunnel, so this is what the site actually gets.</p>'
-            f'{run}{body}{hist}</div>')
+            f'{run_btn}{body}{hist}</div>')
 
 
 def _nextdns_test_box(name, csrf) -> str:
@@ -8755,12 +8799,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             extra_html = extra_actions = ""
             if slug == "speedtest":
                 # Built here, before the live-read block, because it needs
-                # nothing from the router: a button and the runs already on
-                # file. Connecting just to draw it would make the tab fail
-                # whenever the site is down -- which is exactly when
-                # somebody opens it.
+                # nothing from the router: the live state of any run, and
+                # the runs already on file. Connecting just to draw it would
+                # make the tab fail on exactly the site somebody opens it
+                # for -- the one that is down.
+                from . import speedtest as _st
                 extra_html = _speedtest_box(
-                    name, csrf, history=_speedtest_history(name, devices_db))
+                    name, csrf, _st.status(name),
+                    _speedtest_history(name, devices_db))
             elif slug == "nextdns":
                 # The real NextDNS.io cloud enable/disable box only needs
                 # local device state (cfg, the platform API key) — computed
@@ -10464,12 +10510,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 f"/device?name={quote(name)}&tab=nextdns&msg=" + quote(msg))
 
         def _device_speedtest_post(self, flat, user):
-            """Measure the site's line, from the router.
+            """Start a line test and return at once.
 
-            Read-only as far as the router's configuration goes, and nothing
-            is written to its flash -- the download is discarded as it
-            arrives. A test that wore out a customer's storage would be a
-            poor way to check on their service.
+            The test takes ninety seconds -- thirty each of ping, download
+            and upload. That cannot happen inside a request: nginx gives up
+            and the browser gets a 502 with nothing to explain it, which is
+            exactly what it did. So this starts a thread and redirects, and
+            the tab shows the progress.
             """
             name = (flat.get("device") or "").strip()
             if not name:
@@ -10479,45 +10526,44 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             raw = self._device_raw(name)
             if raw is None:
                 return self._send(404, "not found")
-            sess = self._session()
-            csrf = sess["csrf"] if sess else ""
+
             from .config import build_device
-            from .device import DeviceError
-            from .push import PushError, rw_device
-            from .push.features import speed_test
+            from . import speedtest as st
+            from .push import rw_device
+            from .push.api import PushApi
 
             cfg = build_device(raw, defaults)
-            result, error = None, ""
-            try:
-                with rw_device(cfg) as dev:
-                    from .push.api import PushApi
-                    result = speed_test(PushApi(dev))
-            except (DeviceError, PushError) as exc:
-                error = str(exc)
-            except Exception as exc:  # noqa: BLE001
-                log.exception("speed test failed for %r", name)
-                error = str(exc)
 
-            if result:
-                _speedtest_record(name, result, devices_db)
-                audit = self._auditlog()
-                if audit:
-                    p = result.get("ping") or {}
-                    d = result.get("download") or {}
-                    audit.append(name, (user or {}).get("login", ""),
-                                 "speedtest",
-                                 f'loss {p.get("loss_pct")}%, '
-                                 f'{p.get("avg_ms")}ms, '
-                                 f'{d.get("mbps")} Mbit/s')
-                    audit.close()
+            class _Conn:
+                """Connect when the thread runs, not when the page renders."""
 
-            page = _render_feature_tab(
-                name, user, "speedtest", _FEATURES.get("speedtest", {}), csrf,
-                error=error, cfg=cfg,
-                extra_html=_speedtest_box(
-                    name, csrf, result,
-                    _speedtest_history(name, devices_db)))
-            return self._send(200, page, "text/html; charset=utf-8")
+                def __enter__(self):
+                    self._dev = rw_device(cfg)
+                    api = PushApi(self._dev)
+                    api.connect()
+                    return api
+
+                def __exit__(self, *exc):
+                    try:
+                        self._dev.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return False
+
+            def _finished(dev_name, run):
+                _speedtest_record(dev_name, run, devices_db)
+
+            if not st.start(name, _Conn, on_done=_finished):
+                return self._redirect(
+                    f"/device?name={quote(name)}&tab=speedtest&msg="
+                    + quote("A test is already running on this router."))
+            audit = self._auditlog()
+            if audit:
+                audit.append(name, (user or {}).get("login", ""),
+                             "speedtest", "run", "started",
+                             "ping, download and upload")
+                audit.close()
+            return self._redirect(f"/device?name={quote(name)}&tab=speedtest")
 
         def _device_nextdns_test_post(self, flat, user):
             """Run the router-side proof and show it on the DNS tab.
