@@ -409,6 +409,18 @@ def email_invoice(cfg: dict, invoice_id: str) -> None:
     _api(cfg, f"/invoices/{invoice_id}/email", method="POST")
 
 
+def _looks_like_scope_refusal(exc) -> bool:
+    """Is this "your token may not do that", rather than a real failure?
+
+    Zoho says it several ways depending on which layer refuses, and none of
+    them mention scopes -- which is exactly why it needs translating.
+    """
+    text = str(exc).lower()
+    return any(p in text for p in (
+        "not authorized", "not authorised", "unauthorized", "unauthorised",
+        "oauth_scope", "invalid oauth", "scope", "permission"))
+
+
 def record_payment(cfg: dict, invoice_id: str, contact_id: str,
                    amount: float, mode: str = "banktransfer",
                    reference: str = "") -> str:
@@ -436,7 +448,23 @@ def record_payment(cfg: dict, invoice_id: str, contact_id: str,
     }
     if reference:
         body["reference_number"] = reference
-    res = _api(cfg, "/customerpayments", method="POST", body=body)
+    try:
+        res = _api(cfg, "/customerpayments", method="POST", body=body)
+    except ZohoError as exc:
+        # A refresh token carries the scopes it was issued with, and that
+        # list cannot be widened later. A connection made before payments
+        # were part of it is refused here -- with a generic authorisation
+        # error that reads like the credential is broken. It is not; it is
+        # narrower than what is now being asked of it.
+        if _looks_like_scope_refusal(exc):
+            raise ZohoError(
+                "Zoho refused this because the connection was made before "
+                "mikromon asked for permission to record payments. The "
+                "credential is fine, it is just narrower than this needs. "
+                "Reconnect on Platform admin -> Renewal invoicing: the "
+                "client ID and secret are remembered, so it is one fresh "
+                "grant code.") from exc
+        raise
     pay = res.get("payment") or {}
     pid = str(pay.get("payment_id") or "")
     if not pid:

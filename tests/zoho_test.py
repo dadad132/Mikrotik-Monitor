@@ -352,6 +352,53 @@ try:
 finally:
     z.create_invoice, z.ensure_client, z.email_invoice = _real
 
+print("\nWhen the connection is narrower than what is asked of it")
+
+# A refresh token carries the scopes it was issued with, and that list is
+# fixed when the grant code is exchanged. So a connection that works
+# perfectly for invoices is refused for payments -- with a generic
+# authorisation error that reads like the credential is broken. It is not;
+# it is narrower than the new thing being asked of it, and the fix is one
+# fresh grant code.
+_real_api = z._api
+try:
+    for _msg in ("You are not authorized to perform this operation",
+                 "INVALID_OAUTH_SCOPE", "permission denied"):
+        z._api = lambda *a, _m=_msg, **k: (_ for _ in ()).throw(z.ZohoError(_m))
+        try:
+            z.record_payment({"api_base": "x", "refresh_token": "r"},
+                             "INV1", "C1", 25.0)
+            check(f"{_msg!r} raises", False)
+        except z.ZohoError as exc:
+            check(f"{_msg[:28]!r} is recognised as a scope problem and "
+                  f"translated", "Reconnect" in str(exc))
+            check("...saying the credential is fine, since 'not authorized' "
+                  "reads like it is broken", "credential is fine" in str(exc))
+            check("...and that it is one paste, not a re-setup",
+                  "remembered" in str(exc))
+            break
+
+    # A real failure must NOT be dressed up as a scope problem: telling
+    # somebody to reconnect when the invoice was deleted sends them to do
+    # something pointless and leaves the actual fault in place.
+    z._api = lambda *a, **k: (_ for _ in ()).throw(
+        z.ZohoError("Invoice does not exist"))
+    try:
+        z.record_payment({"api_base": "x", "refresh_token": "r"},
+                         "INV1", "C1", 25.0)
+        check("a genuine failure raises", False)
+    except z.ZohoError as exc:
+        check("a failure that is NOT about permissions is passed through "
+              "untouched, rather than sending somebody to reconnect for no "
+              "reason", "Invoice does not exist" in str(exc)
+              and "Reconnect" not in str(exc))
+finally:
+    z._api = _real_api
+
+check("the scope is actually asked for, so a NEW connection can record "
+      "payments without any of this",
+      "ZohoInvoice.customerpayments.CREATE" in z.SCOPES)
+
 z._request = _real_request
 
 print()
