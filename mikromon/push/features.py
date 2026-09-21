@@ -1900,6 +1900,139 @@ _WG_RW_TAG = "mikromon:wg-rw:"
 _VPN_ROUTE_TAG = "mikromon:vpnroute:"
 
 
+# A plain-HTTP endpoint, on purpose. HTTPS would make a small router measure
+# its own encryption speed instead of the line -- a hEX will cap out on CPU
+# long before a decent fibre link does, and "5 Mbit/s" that really means
+# "this CPU cannot do TLS faster" is worse than no number at all.
+SPEEDTEST_URL_DEFAULT = "http://speed.cloudflare.com/__down?bytes=5000000"
+SPEEDTEST_BYTES_DEFAULT = 5_000_000
+SPEEDTEST_PING_TARGET = "1.1.1.1"
+SPEEDTEST_PING_COUNT = 10
+
+
+def _ping_stats(api, target: str, count: int) -> dict:
+    """Latency, jitter and loss, measured by the router.
+
+    Loss is the figure worth reading first. A line that drops packets is
+    unusable for voice and video long before a throughput number looks bad,
+    and it is what somebody is describing when they say it keeps cutting
+    out.
+    """
+    out = {"target": target, "sent": 0, "received": 0, "loss_pct": None,
+           "min_ms": None, "avg_ms": None, "max_ms": None, "jitter_ms": None,
+           "error": ""}
+    try:
+        rows = list(api.device.api.path("ping")(
+            "", address=str(target), count=str(int(count))))
+    except Exception as exc:  # noqa: BLE001 - an unreachable target IS a result
+        out["error"] = str(exc)
+        return out
+
+    times = []
+    for r in rows:
+        out["sent"] = max(out["sent"], int(r.get("sent") or 0) or out["sent"] + 1)
+        got = r.get("time")
+        if got in (None, ""):
+            continue
+        ms = _ms(got)
+        if ms is not None:
+            times.append(ms)
+    out["received"] = len(times)
+    if not out["sent"]:
+        out["sent"] = len(rows) or count
+    if out["sent"]:
+        out["loss_pct"] = round(
+            100.0 * (out["sent"] - out["received"]) / out["sent"], 1)
+    if times:
+        out["min_ms"] = round(min(times), 1)
+        out["max_ms"] = round(max(times), 1)
+        out["avg_ms"] = round(sum(times) / len(times), 1)
+        # Mean absolute difference between consecutive replies: what a call
+        # actually suffers from, rather than the spread between two extremes.
+        if len(times) > 1:
+            deltas = [abs(b - a) for a, b in zip(times, times[1:])]
+            out["jitter_ms"] = round(sum(deltas) / len(deltas), 1)
+    return out
+
+
+def _ms(value) -> float | None:
+    """RouterOS writes times as "1ms200us", "980us", "1s100ms"."""
+    import re as _re
+    s = str(value or "").strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    total, found = 0.0, False
+    for num, unit in _re.findall(r"(\d+(?:\.\d+)?)\s*(us|ms|s|m)", s):
+        found = True
+        n = float(num)
+        total += {"us": n / 1000.0, "ms": n, "s": n * 1000.0,
+                  "m": n * 60000.0}[unit]
+    return total if found else None
+
+
+def speed_test(api, *, url: str = "", ping_target: str = "",
+               ping_count: int = 0) -> dict:
+    """Latency, loss and download speed, measured BY the router.
+
+    Read-only as far as the router's configuration goes, and nothing is
+    written to its flash: the download is discarded as it arrives. A test
+    that wore out a customer's storage would be a poor way to check on
+    their service.
+    """
+    import time as _t
+
+    url = (url or SPEEDTEST_URL_DEFAULT).strip()
+    target = (ping_target or SPEEDTEST_PING_TARGET).strip()
+    count = int(ping_count or SPEEDTEST_PING_COUNT)
+
+    result = {"ping": _ping_stats(api, target, count),
+              "download": {"url": url, "bytes": 0, "seconds": 0.0,
+                           "mbps": None, "error": ""},
+              "ros": _ros_version(api), "when": _t.time()}
+
+    dl = result["download"]
+    started = _t.monotonic()
+    try:
+        # output=none discards the body as it arrives: measured, never
+        # stored. Without it this writes a file to the router's flash, and
+        # a speed test that wears out storage is not a service anybody
+        # wants running regularly.
+        rows = list(api.device.api.path("tool", "fetch")(
+            "", url=url, mode="http", output="none",
+            **{"check-certificate": "no"}))
+    except Exception as exc:  # noqa: BLE001
+        dl["error"] = str(exc)
+        dl["seconds"] = round(_t.monotonic() - started, 2)
+        return result
+
+    dl["seconds"] = round(_t.monotonic() - started, 2)
+    got = 0
+    for r in rows:
+        for key in ("downloaded", "total"):
+            raw = r.get(key)
+            if raw in (None, ""):
+                continue
+            try:
+                # RouterOS reports KiB here.
+                got = max(got, int(float(str(raw).strip())) * 1024)
+            except ValueError:
+                continue
+    if not got:
+        got = SPEEDTEST_BYTES_DEFAULT if "bytes=" not in url else int(
+            url.rsplit("bytes=", 1)[-1].split("&")[0] or 0)
+    dl["bytes"] = got
+    if got and dl["seconds"] > 0.05:
+        dl["mbps"] = round((got * 8) / dl["seconds"] / 1_000_000, 2)
+    else:
+        dl["error"] = dl["error"] or ("the download finished too quickly to "
+                                      "measure -- try a larger file")
+    return result
+
+
 def _ros_version(api):
     """Return (major, minor, full_string) from /system/resource.
 
@@ -3407,6 +3540,11 @@ FEATURES = {
     "update": {"title": "Update RouterOS", "write": True, "read": update_read,
                "summary": update_summary, "form": update_form,
                "plan": update_plan},
+    # Read-only: it measures and records, and changes nothing on the router.
+    # No read() either -- the tab has nothing to show until somebody asks
+    # for a measurement, and quietly running one on every page load would
+    # pull five megabytes down a customer's line for nobody.
+    "speedtest": {"title": "Speed test", "write": False},
 }
 
 # tab label -> url slug (Overview/Backups handled elsewhere)
@@ -3414,7 +3552,8 @@ TAB_SLUGS = {"Routes": "routes", "WAN": "wan", "Security": "security",
              "Restrict access": "harden", "DNS": "nextdns",
              "QoS": "qos", "Port forwarding": "portfwd", "Interfaces": "interfaces",
              "Remote access": "remote", "VPN": "tunnel",
-             "Scripts": "scripts", "Update": "update"}
+             "Scripts": "scripts", "Update": "update",
+             "Speed test": "speedtest"}
 
 
 # ===========================================================================

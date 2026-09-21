@@ -256,6 +256,26 @@ TABS = [
      "warn": "Installing an upgrade reboots the router. Everything at that "
              "site is offline for 1–2 minutes, so do it out of hours."},
 
+    {"slug": "speedtest", "title": "Speed test", "art": None,
+     "what": "Measures the site's line from the router itself \u2014 over its "
+             "own internet connection, not through the tunnel, so it is what "
+             "that site actually gets. Nothing is written to the router's "
+             "storage; the test download is discarded as it arrives.",
+     "steps": ["Click <b>Run the test</b>. It takes ten to thirty seconds.",
+               "Read <b>packet loss</b> first. It is what is wrong most of "
+               "the time, and what somebody is describing when they say the "
+               "line keeps cutting out.",
+               "<b>Jitter</b> next, for anyone using voice or video. Above "
+               "30&nbsp;ms breaks calls even when latency and speed both "
+               "look fine.",
+               "<b>Download</b> last. A slow figure with no loss is usually "
+               "contention, which is an ISP conversation.",
+               "Run it again later. One slow run is weather; the previous "
+               "runs are kept underneath so you can see whether it is."],
+     "warn": "The download pulls about 5&nbsp;MB down that site's line each "
+             "time. On a capped or metered connection, use it when you have "
+             "a reason to rather than out of habit."},
+
     {"slug": "backups", "title": "Backups", "art": None,
      "what": "Configuration backups of the router. One is taken automatically "
              "before every change you apply, so there is always a way back "
