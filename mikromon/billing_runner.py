@@ -111,6 +111,15 @@ class _Zoho:
         except _z.ZohoError as exc:
             raise ProviderError(str(exc)) from exc
 
+    def record_payment(self, invoice_id, customer_name, amount,
+                       reference=""):
+        try:
+            contact_id = _z.ensure_client(self.cfg, customer_name)
+            return _z.record_payment(self.cfg, invoice_id, contact_id,
+                                     amount, reference=reference)
+        except _z.ZohoError as exc:
+            raise ProviderError(str(exc)) from exc
+
 
 def provider_from_cfg(cfg):
     """The adapter for a settings dict, whichever provider it belongs to.
@@ -369,6 +378,76 @@ def upcoming(billing, auth, limit: int = 20) -> list:
     return out[:limit]
 
 
+def outstanding(billing, auth, limit: int = 50) -> list:
+    """Invoices raised and not yet settled, newest first.
+
+    Read from our own orders rather than from the provider: this is the list
+    somebody works through with a bank statement open, and it has to render
+    even when the provider is unreachable.
+    """
+    if billing is None:
+        return []
+    prov = provider_for(auth)
+    out = []
+    for order in billing.open_orders(provider=prov.name if prov else "zoho"):
+        org_id = int(order.get("org_id") or 0)
+        org = (auth.org(org_id) if auth else None) or {}
+        from .billing import payment_reference
+        out.append({
+            "order_id": order.get("id"),
+            "org_id": org_id,
+            "name": org.get("name") or f"Company {org_id}",
+            "plan": order.get("plan") or "",
+            "kind": order.get("kind") or "renewal",
+            "amount": (order.get("amount_cents") or 0) / 100.0,
+            "currency": order.get("currency") or BILLING_CURRENCY,
+            "invoice_id": order.get("external_id") or "",
+            "raised": order.get("created") or 0,
+            "due": order.get("due") or 0,
+            "reference": payment_reference(org_id, org.get("name", "")),
+        })
+    out.sort(key=lambda r: r["raised"], reverse=True)
+    return out[:limit]
+
+
+def mark_paid(billing, auth, order_id: int) -> str:
+    """Record an EFT payment: at the provider AND here, in that order.
+
+    The provider first, because that is the one that can refuse -- a wrong
+    scope, a deleted invoice, a rate limit. Recording it here first and
+    failing there would leave a customer switched on with an invoice that
+    still says unpaid, which is the version somebody discovers a month
+    later while reconciling.
+    """
+    order = billing.order(int(order_id))
+    if not order:
+        raise ProviderError("No such invoice.")
+    if order.get("paid"):
+        return "That invoice was already marked paid."
+    prov = provider_for(auth)
+    inv_id = order.get("external_id") or ""
+    amount = (order.get("amount_cents") or 0) / 100.0
+
+    if prov is not None and inv_id and hasattr(prov, "record_payment"):
+        org = (auth.org(int(order["org_id"])) if auth else None) or {}
+        from .billing import payment_reference
+        try:
+            prov.record_payment(
+                inv_id, org.get("name") or f"Company {order['org_id']}",
+                amount,
+                reference=payment_reference(int(order["org_id"]),
+                                            org.get("name", "")))
+        except ProviderError as exc:
+            raise ProviderError(
+                f"The payment was NOT recorded, so nothing has changed: "
+                f"{exc}") from exc
+
+    if not billing.mark_order_paid(int(order_id), f"eft:{inv_id or order_id}"):
+        return "That invoice was already marked paid."
+    billing.apply_paid_order(order)
+    return ""
+
+
 def run_once(billing, auth, now: float | None = None,
              force_raise: bool = False) -> tuple:
     """One pass of both jobs. Returns (invoices_raised, payments_applied).
@@ -389,6 +468,23 @@ def run_once(billing, auth, now: float | None = None,
         log.exception("reconcile pass failed")
     # The invoice run is daily; reconciliation above is not.
     if force_raise or raise_is_due(auth, now):
+        # Lapse BEFORE invoicing, and only on the daily pass. An account
+        # whose period ended without payment moves to grace and then to
+        # suspension -- nothing did this before, so every customer had in
+        # effect a free account after their first month. It runs first
+        # because an account that has just been suspended should not also
+        # be invoiced for the next month in the same pass.
+        try:
+            moved = billing.lapse_due(now)
+            for org_id in moved["grace"]:
+                log.info("billing: org %s has lapsed into the grace period",
+                         org_id)
+            for org_id in moved["suspended"]:
+                log.warning("billing: org %s suspended, grace expired "
+                            "with no payment", org_id)
+        except Exception:  # noqa: BLE001 — never let this kill the pass
+            log.exception("the lapse pass failed")
+
         try:
             raised = raise_due_invoices(billing, auth, cfg, now=now,
                                         provider=prov)

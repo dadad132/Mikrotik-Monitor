@@ -386,8 +386,16 @@ check("...and within the next month, not some arbitrary distance",
 check("...and the renewal run can actually see it, which is the entire "
       "point and what was silently untrue before",
       4242 in [o["org_id"] for o in _bs.orgs_due_for_renewal(40)])
-check("it is not invoiced YET -- a month away is not seven days away",
-      4242 not in [o["org_id"] for o in _bs.orgs_due_for_renewal(7)])
+# Pinned to an explicit date rather than "whatever today plus a month is".
+# Everyone renews on the 28th, so run this near month-end and the next 28th
+# IS inside the seven-day window -- the assertion was true only for most of
+# the month, which is the worst kind of test.
+_bs.set_plan(4245, _plan, period_end=time.time() + 25 * 86400)
+check("a packet with 25 days to run is not invoiced yet -- the lead time is "
+      "seven days, and invoicing early is its own kind of wrong",
+      4245 not in [o["org_id"] for o in _bs.orgs_due_for_renewal(7)])
+check("...and the same packet IS invoiced once it comes inside the window",
+      4245 in [o["org_id"] for o in _bs.orgs_due_for_renewal(30)])
 
 _was = _bs.get(4242)["current_period_end"]
 _bs.set_plan(4242, _plan)

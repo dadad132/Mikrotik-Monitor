@@ -978,6 +978,54 @@ class BillingStore:
                             (1 if handled else 0, int(quote_id)))
             self.db.commit()
 
+    def orgs_to_lapse(self, now: float | None = None) -> list:
+        """Paid accounts whose period has ended and who have not paid.
+
+        Deliberately a query rather than a flag checked on read: an account
+        that has lapsed has to CHANGE, so that the dashboard, the device cap
+        and the suspended notice all agree about it. Deciding it freshly on
+        every read is how three parts of a system end up disagreeing.
+        """
+        now = now if now is not None else time.time()
+        rows = self.db.execute(
+            "SELECT org_id, plan, status, current_period_end, "
+            "grace_period_end FROM billing "
+            "WHERE current_period_end IS NOT NULL "
+            "AND current_period_end < ? "
+            "AND status IN ('active','trialing','grace')",
+            (now,)).fetchall()
+        return [{"org_id": r[0], "plan": r[1], "status": r[2],
+                 "current_period_end": r[3], "grace_period_end": r[4]}
+                for r in rows]
+
+    def lapse_due(self, now: float | None = None) -> dict:
+        """Move unpaid accounts through grace and into suspension.
+
+        Returns {"grace": [org ids], "suspended": [org ids]}.
+
+        Run daily. Nothing here is irreversible: a payment arriving at any
+        point sets the account active again and clears the grace deadline,
+        which is what apply_paid_order already does.
+        """
+        now = now if now is not None else time.time()
+        moved = {"grace": [], "suspended": []}
+        for row in self.orgs_to_lapse(now):
+            org_id = int(row["org_id"])
+            gpe = row.get("grace_period_end")
+            if row["status"] in ("active", "trialing") or not gpe:
+                # Just lapsed. A payment in transit and a customer who has
+                # stopped paying look the same for a few days, and only one
+                # of them deserves to be cut off -- so the service keeps
+                # working through the grace period.
+                self._upsert(org_id, status="grace",
+                             grace_period_end=float(row["current_period_end"])
+                             + _GRACE_SECS)
+                moved["grace"].append(org_id)
+            elif float(gpe) < now:
+                self.suspend(org_id)
+                moved["suspended"].append(org_id)
+        return moved
+
     def suspend(self, org_id: int) -> None:
         """Cut a company off until they pay, by hand.
 

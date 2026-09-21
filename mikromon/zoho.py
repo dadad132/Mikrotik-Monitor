@@ -57,7 +57,11 @@ DATA_CENTRES = (
 # Self Client's "Generate Code" box.
 SCOPES = ("ZohoInvoice.contacts.CREATE,ZohoInvoice.contacts.READ,"
           "ZohoInvoice.invoices.CREATE,ZohoInvoice.invoices.READ,"
-          "ZohoInvoice.invoices.UPDATE,ZohoInvoice.settings.READ")
+          "ZohoInvoice.invoices.UPDATE,ZohoInvoice.settings.READ,"
+          # Recording an EFT payment. Without this, marking an invoice paid
+          # has to be done by hand in Zoho, in a second system, before a
+          # paying customer is switched back on.
+          "ZohoInvoice.customerpayments.CREATE")
 
 # Access tokens last an hour. Refresh a little early so a call never goes out
 # holding one that expires mid-flight.
@@ -403,6 +407,41 @@ def email_invoice(cfg: dict, invoice_id: str) -> None:
     invoice is one nobody has been asked to pay."""
     _api(cfg, f"/invoices/{invoice_id}/status/sent", method="POST")
     _api(cfg, f"/invoices/{invoice_id}/email", method="POST")
+
+
+def record_payment(cfg: dict, invoice_id: str, contact_id: str,
+                   amount: float, mode: str = "banktransfer",
+                   reference: str = "") -> str:
+    """Tell Zoho an invoice has been paid. Returns the payment id.
+
+    Needed because an EFT lands in a bank account Zoho cannot see, so
+    without this somebody has to open Zoho and record it by hand -- and then
+    the service is waiting on a second manual step in a second system before
+    a paying customer is switched back on.
+
+    Requires the ZohoInvoice.customerpayments.CREATE scope. An older
+    connection made before that scope was asked for will be refused here,
+    and the fix is to reconnect rather than anything subtle.
+    """
+    if not (invoice_id and contact_id):
+        raise ZohoError("An invoice and a customer are both needed to "
+                        "record a payment.")
+    body = {
+        "customer_id": str(contact_id),
+        "payment_mode": mode,
+        "amount": round(float(amount), 2),
+        "date": time.strftime("%Y-%m-%d"),
+        "invoices": [{"invoice_id": str(invoice_id),
+                      "amount_applied": round(float(amount), 2)}],
+    }
+    if reference:
+        body["reference_number"] = reference
+    res = _api(cfg, "/customerpayments", method="POST", body=body)
+    pay = res.get("payment") or {}
+    pid = str(pay.get("payment_id") or "")
+    if not pid:
+        raise ZohoError("Zoho recorded no payment.")
+    return pid
 
 
 def invoice_status(cfg: dict, invoice_id: str) -> dict:

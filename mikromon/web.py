@@ -3180,6 +3180,16 @@ def _billing_status():
         return None
 
 
+def _billing_outstanding(billing, auth):
+    """Invoices raised and not settled. Never breaks the panel."""
+    try:
+        from .billing_runner import outstanding
+        return outstanding(billing, auth)
+    except Exception:  # noqa: BLE001
+        log.exception("could not read outstanding invoices")
+        return []
+
+
 def _billing_upcoming(billing, auth):
     """Who is due to be invoiced, and when. Never breaks the panel."""
     try:
@@ -7168,6 +7178,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 smtp=smtp_settings, billing_on=billing is not None,
                 billing_contact=auth.get_billing_contact() if auth else None,
                 upcoming=_billing_upcoming(billing, auth),
+                outstanding=_billing_outstanding(billing, auth),
                 runner_status=_billing_status() if billing else None,
                 hub_ip=hub_ip, hub_port=hub_port, router_count=router_count,
                 hub_pubkey=hub_pubkey_cur,
@@ -7585,6 +7596,44 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._redirect("/superadmin?error=" + quote(str(exc)))
             return self._redirect("/superadmin?ok=" + quote(
                 f"Zoho answered: {who}."))
+
+        def _post_mark_paid(self, user):
+            """Superadmin: record an EFT payment against an invoice.
+
+            Recorded at the provider first, because that is the call that
+            can refuse -- a missing scope, a deleted invoice, a rate limit.
+            Marking it here first and failing there would leave a customer
+            switched on against an invoice that still reads unpaid, which is
+            the version somebody discovers a month later.
+            """
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if billing is None:
+                return self._redirect("/superadmin?error=" +
+                                      quote("Billing is not enabled."))
+            try:
+                order_id = int(flat.get("order") or 0)
+            except (TypeError, ValueError):
+                return self._redirect("/superadmin?error=" +
+                                      quote("Which invoice?"))
+            from .billing_runner import mark_paid, ProviderError
+            try:
+                note = mark_paid(billing, auth, order_id)
+            except ProviderError as exc:
+                return self._redirect("/superadmin?error=" + quote(str(exc)))
+            except Exception as exc:  # noqa: BLE001
+                log.exception("mark paid failed for order %s", order_id)
+                return self._redirect("/superadmin?error=" + quote(str(exc)))
+            if note:
+                return self._redirect("/superadmin?ok=" + quote(note))
+            log.info("payment recorded for order %s by %s", order_id,
+                     user.get("email", "?"))
+            return self._redirect("/superadmin?ok=" + quote(
+                "Payment recorded on the invoice, and the packet carries on."))
 
         def _post_billing_run(self, user):
             """Superadmin-only: do the renewal/reconcile pass right now."""
@@ -10678,6 +10727,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_suspend(user, restore=True)
             if path == "/superadmin/yoco":
                 return self._post_superadmin_yoco(user)
+            if path == "/superadmin/mark-paid":
+                return self._post_mark_paid(user)
             if path == "/billing/change-plan":
                 return self._post_change_plan(user)
             if path == "/superadmin/zoho":

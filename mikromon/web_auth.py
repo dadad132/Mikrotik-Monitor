@@ -1304,6 +1304,65 @@ def _yoco_clear_form(csrf: str) -> str:
         f'</button></form>')
 
 
+def _outstanding_box(rows, csrf: str) -> str:
+    """Invoices raised and not paid, each with the one button that matters.
+
+    With EFT nothing tells the invoicing system the money arrived -- it
+    lands in a bank account it has no sight of. So a person has to say so,
+    and this is where: one click records it at the provider AND here, so the
+    books and the service cannot end up disagreeing, and the customer is
+    switched back on immediately rather than at the next reconcile.
+    """
+    if not rows:
+        return ""
+    trs = []
+    for r in rows:
+        raised = (time.strftime("%d %b", time.localtime(r["raised"]))
+                  if r["raised"] else "")
+        age = (time.time() - (r["raised"] or time.time())) / 86400
+        if age > 14:
+            chase = ('<span style="color:#b91c1c">'
+                     f'{age:.0f} days outstanding</span>')
+        elif age > 7:
+            chase = f'<span style="color:#b45309">{age:.0f} days</span>'
+        else:
+            chase = f'<span class="muted">{age:.0f} days</span>'
+        trs.append(
+            f'<tr><td><b>{esc(r["name"])}</b><br>'
+            f'<code style="font-size:11px">{esc(r["reference"])}</code></td>'
+            f'<td>{esc(r["plan"])}'
+            f'{" (upgrade)" if r["kind"] == "upgrade" else ""}</td>'
+            f'<td>{esc(raised)}<br>{chase}</td>'
+            f'<td style="text-align:right"><b>'
+            f'{esc(_money(r["amount"], r["currency"]))}</b></td>'
+            f'<td style="text-align:right">'
+            f'<form method="POST" action="/superadmin/mark-paid" '
+            f'onsubmit="return confirm(&#39;Record '
+            f'{esc(_money(r["amount"], r["currency"]))} received from '
+            f'{esc(r["name"])}? This marks the invoice paid and switches '
+            f'their account on.&#39;)">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="order" value="{r["order_id"]}">'
+            f'<button class="btn" type="submit">Paid</button>'
+            f'</form></td></tr>')
+    return (
+        f'<div class="box"><h2>Waiting for payment</h2>'
+        f'<p class="muted" style="margin:0 0 10px;font-size:12px">'
+        f'A bank transfer arrives where the invoicing system cannot see it, '
+        f'so nothing can mark these paid on its own. One click here records '
+        f'the payment on the invoice <b>and</b> carries the packet on &mdash; '
+        f'both at once, so the books and the service cannot disagree.</p>'
+        f'<table><thead><tr><th>Company</th><th>Packet</th>'
+        f'<th>Raised</th><th style="text-align:right">Amount</th>'
+        f'<th></th></tr></thead><tbody>{"".join(trs)}</tbody></table>'
+        f'</div>')
+
+
+def _money(amount, currency="USD") -> str:
+    from .billing import money
+    return money(amount, currency)
+
+
 def _upcoming_box(rows, status=None) -> str:
     """What the billing timer is going to do, before it does it.
 
@@ -1929,6 +1988,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        yoco=None, yoco_hook_url: str = "",
                        zoho=None,
                        upcoming=None, runner_status=None,
+                       outstanding=None,
                        zoho_scopes="",
                        tunnel_rows=None,
                        tunnel_err: str = "",
@@ -2107,6 +2167,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
              f'{_billing_contact_box(billing_contact, csrf)}'
              f'{_yoco_box(yoco, csrf, yoco_hook_url)}'
              f'{_zoho_box(zoho, csrf, zoho_scopes)}'
+             f'{_outstanding_box(outstanding, csrf)}'
              f'{_upcoming_box(upcoming, runner_status)}'
              f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf, hub_pubkey)}'
              f'{_regions_box(regions or [], csrf)}'
