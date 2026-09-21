@@ -1537,6 +1537,32 @@ def _upcoming_box(rows, status=None) -> str:
             f'paid switched off.</p></div>')
 
 
+def _zoho_reconnect_note(scopes: str) -> str:
+    """Why you would paste a code into a connection that already works.
+
+    Because a token carries the permissions it was issued with and they
+    cannot be widened later -- so when mikromon starts needing one more,
+    the only way to grant it is a fresh code. Worth saying plainly: pasting
+    into something that works is a reasonable thing to hesitate over.
+    """
+    return (
+        f'<details style="margin:0 0 12px"><summary class="muted" '
+        f'style="cursor:pointer;font-size:12px">Reconnecting &mdash; when '
+        f'and why</summary>'
+        f'<p class="muted" style="font-size:12px;margin:8px 0 0">'
+        f'A Zoho token carries the permissions it was issued with, and that '
+        f'list cannot be widened afterwards. So if mikromon starts needing '
+        f'one more &mdash; recording payments, say &mdash; the connection '
+        f'keeps working for everything it already did and is refused for '
+        f'the new thing. Generating a fresh grant code below fixes it '
+        f'without disconnecting: nothing stops, no settings are lost, and '
+        f'the client ID and secret above are already filled in.</p>'
+        f'<p class="muted" style="font-size:12px;margin:6px 0 0">'
+        f'Paste these scopes into the API console, commas and no spaces:<br>'
+        f'<code style="font-size:11px;word-break:break-all">{esc(scopes)}'
+        f'</code></p></details>')
+
+
 def _zoho_box(cfg, csrf: str, scopes: str = "") -> str:
     """Superadmin setting: connect Zoho Invoice, in three pastes.
 
@@ -1584,11 +1610,18 @@ def _zoho_box(cfg, csrf: str, scopes: str = "") -> str:
              f'two boxes are remembered and you only paste the code again.'
              f'</li></ol>')
 
-    code_field = ('' if live else
-                  f'<label style="grid-column:1/-1">Grant code '
-                  f'<span class="muted">(expires in minutes)</span><br>'
-                  f'<input name="code" placeholder="1000.xxxx.yyyy" '
-                  f'style="width:100%"></label>')
+    # Always offered, connected or not. It used to appear only when
+    # disconnected, so widening the permissions -- which needs a fresh grant
+    # code -- meant disconnecting first and stopping renewal invoicing to do
+    # it. There was no "just reconnect".
+    code_field = (
+        f'<label style="grid-column:1/-1">'
+        f'{"Reconnect: new grant code" if live else "Grant code"} '
+        f'<span class="muted">(expires in minutes'
+        f'{"; leave empty to just save the settings above" if live else ""})'
+        f'</span><br>'
+        f'<input name="code" placeholder="1000.xxxx.yyyy" '
+        f'style="width:100%"></label>')
 
     run = ('' if not live else
            f'<form method="POST" action="/superadmin/zoho/run" '
@@ -1616,6 +1649,7 @@ def _zoho_box(cfg, csrf: str, scopes: str = "") -> str:
     return (
         f'<div class="box"><h2>Renewal invoicing (Zoho Invoice)</h2>'
         f'{state}{steps}'
+        f'{_zoho_reconnect_note(scopes) if live else ""}'
         f'<form method="POST" action="/superadmin/zoho">'
         f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
         f'<div style="display:grid;grid-template-columns:'

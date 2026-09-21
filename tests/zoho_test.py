@@ -399,6 +399,43 @@ check("the scope is actually asked for, so a NEW connection can record "
       "payments without any of this",
       "ZohoInvoice.customerpayments.CREATE" in z.SCOPES)
 
+print("")
+print("Reconnecting has to be possible WITHOUT disconnecting first")
+
+# There is no clipboard on the server console: anything that has to get onto
+# that machine is typed by hand, and a grant code takes about two minutes.
+# Which is the whole reason credential setup lives in a browser panel.
+#
+# But the grant-code box only rendered when NOT connected, so granting a
+# wider permission meant Disconnect -- stopping renewal invoicing -- and
+# setting the whole thing up again. Calling that "one paste" was wrong.
+from mikromon.web_auth import _zoho_box as _zb
+
+_LIVE = {"refresh_token": "rt", "client_id": "1000.X", "client_secret": "s",
+         "organization_name": "EasyMikroTik",
+         "accounts_host": "accounts.zoho.eu", "days_before": 7,
+         "due_days": 7}
+_html = _zb(_LIVE, "tok", z.SCOPES)
+
+check("a connected account can still be handed a fresh grant code, without "
+      "disconnecting and losing renewal invoicing to do it",
+      'name="code"' in _html)
+check("...labelled as what it is for, rather than looking like setup all "
+      "over again", "Reconnect" in _html)
+check("...explaining why a working connection would need one: a token "
+      "carries the permissions it was issued with and they cannot be "
+      "widened later", "cannot be widened" in _html)
+check("...with the scopes right there to paste into the API console",
+      "customerpayments" in _html)
+check("...and the client id and secret already filled in, so it really is "
+      "one paste", "1000.X" in _html)
+check("the account is still shown as connected while all that is offered",
+      "Connected" in _html)
+
+check("an unconnected account still gets the plain first-time flow",
+      'name="code"' in _zb({}, "tok", z.SCOPES)
+      and "Reconnect" not in _zb({}, "tok", z.SCOPES))
+
 z._request = _real_request
 
 print()
