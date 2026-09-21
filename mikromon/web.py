@@ -7597,6 +7597,79 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._redirect("/superadmin?ok=" + quote(
                 f"Zoho answered: {who}."))
 
+        def _post_reconcile(self, user):
+            """Match a pasted bank statement against open invoices.
+
+            Shows what it found and applies nothing. The whole reason this
+            exists is to SEE what arrived; something that acted on a paste
+            would be a worse version of the button it replaces.
+            """
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if billing is None:
+                return self._redirect("/superadmin?error=" +
+                                      quote("Billing is not enabled."))
+            from .reconcile import parse_statement, match_rows
+            from .billing_runner import outstanding as _outstanding
+            rows = parse_statement(flat.get("statement", ""))
+            if not rows:
+                return self._redirect("/superadmin?error=" + quote(
+                    "Nothing in that paste looked like a deposit. It needs "
+                    "at least a description and an amount per line."))
+            result = match_rows(rows, _outstanding(billing, auth, limit=500))
+            log.info("reconcile: %s pasted a statement -- %d matched, "
+                     "%d unmatched", user.get("email", "?"),
+                     len(result["matched"]), len(result["unmatched"]))
+            from .web_auth import _page, _reconcile_preview
+            return self._send(200, _page(
+                "Statement", _header(user, "/superadmin")
+                + _reconcile_preview(result, sess["csrf"])),
+                "text/html; charset=utf-8")
+
+        def _post_reconcile_apply(self, user):
+            """Record the payments that were ticked on the preview."""
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, multi = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if billing is None:
+                return self._redirect("/superadmin?error=" +
+                                      quote("Billing is not enabled."))
+            ids = [i for i in (multi.get("apply") or []) if str(i).strip()]
+            if not ids:
+                return self._redirect("/superadmin?ok=" +
+                                      quote("Nothing was ticked."))
+            from .billing_runner import mark_paid, ProviderError
+            done, failed = 0, []
+            for raw in ids:
+                try:
+                    note = mark_paid(billing, auth, int(raw))
+                    if not note:
+                        done += 1
+                except (ProviderError, ValueError, TypeError) as exc:
+                    failed.append(str(exc))
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("reconcile apply failed for order %s", raw)
+                    failed.append(str(exc))
+            if failed:
+                # Said in full rather than summarised: a payment that did
+                # not record is money the books will disagree about, and
+                # "2 of 5 failed" is not something anybody can act on.
+                return self._redirect("/superadmin?error=" + quote(
+                    f"{done} recorded, {len(failed)} failed: "
+                    + "; ".join(failed[:3])))
+            log.info("reconcile: %d payment(s) recorded by %s", done,
+                     user.get("email", "?"))
+            return self._redirect("/superadmin?ok=" + quote(
+                f"{done} payment(s) recorded on their invoices, and those "
+                f"packets carry on."))
+
         def _post_mark_paid(self, user):
             """Superadmin: record an EFT payment against an invoice.
 
@@ -10727,6 +10800,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_suspend(user, restore=True)
             if path == "/superadmin/yoco":
                 return self._post_superadmin_yoco(user)
+            if path == "/superadmin/reconcile":
+                return self._post_reconcile(user)
+            if path == "/superadmin/reconcile-apply":
+                return self._post_reconcile_apply(user)
             if path == "/superadmin/mark-paid":
                 return self._post_mark_paid(user)
             if path == "/billing/change-plan":

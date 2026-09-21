@@ -1304,6 +1304,97 @@ def _yoco_clear_form(csrf: str) -> str:
         f'</button></form>')
 
 
+def _reconcile_box(csrf: str) -> str:
+    """Paste a bank statement here. Nothing happens until you say so."""
+    return (
+        f'<div class="box"><h2>Match a bank statement</h2>'
+        f'<p class="muted" style="margin:0 0 10px;font-size:12px">'
+        f'Paste your statement below &mdash; export it as CSV, or just copy '
+        f'the rows out of online banking. Each deposit is matched to an '
+        f'invoice by the reference on it. <b>Nothing is applied by '
+        f'pasting</b>: you get a list of what was found, and you choose.</p>'
+        f'<form method="POST" action="/superadmin/reconcile">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<textarea name="statement" rows="7" style="width:100%;'
+        f'font-family:ui-monospace,monospace;font-size:12px" '
+        f'placeholder="Date,Description,Amount&#10;'
+        f'2026-09-28,EFT MYITAFRICA-0001,25.00"></textarea>'
+        f'<div style="margin-top:10px">'
+        f'<button class="btn" type="submit">See who paid</button></div>'
+        f'</form></div>')
+
+
+def _reconcile_preview(result, csrf: str, currency: str = "USD") -> str:
+    """What the statement matched, and the one button that applies it."""
+    from .billing import money
+    from .reconcile import summarise
+
+    def rows_table(entries, with_tick=False, why=""):
+        trs = []
+        for e in entries:
+            inv = e.get("invoice") or {}
+            tick = ("" if not with_tick else
+                    f'<td><input type="checkbox" name="apply" '
+                    f'value="{inv.get("order_id")}" checked></td>')
+            expected = (money(inv["amount"], currency)
+                        if inv.get("amount") is not None else "&mdash;")
+            trs.append(
+                f'<tr>{tick}'
+                f'<td>{esc(e.get("date") or "")}</td>'
+                f'<td><code style="font-size:11px">'
+                f'{esc((e.get("description") or "")[:48])}</code></td>'
+                f'<td>{esc(inv.get("name") or "&mdash;")}</td>'
+                f'<td style="text-align:right">'
+                f'{esc(money(e["amount"], currency))}</td>'
+                f'<td style="text-align:right" class="muted">{expected}</td>'
+                f'</tr>')
+        head = ('<th></th>' if with_tick else '')
+        return (f'<table><thead><tr>{head}<th>Date</th><th>On the statement'
+                f'</th><th>Company</th><th style="text-align:right">Paid'
+                f'</th><th style="text-align:right">Invoiced</th></tr>'
+                f'</thead><tbody>{"".join(trs)}</tbody></table>'
+                + (f'<p class="muted" style="font-size:12px;margin:6px 0 0">'
+                   f'{why}</p>' if why else ""))
+
+    parts = [f'<div class="box"><h2>What the statement matched</h2>'
+             f'<p style="margin:0 0 14px">{esc(summarise(result))}</p>']
+
+    if result["matched"]:
+        parts.append('<h3 style="font-size:14px;margin:14px 0 6px">'
+                     'Ready to apply</h3>')
+        parts.append(
+            f'<form method="POST" action="/superadmin/reconcile-apply">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            + rows_table(result["matched"], with_tick=True)
+            + f'<div style="margin-top:12px">'
+              f'<button class="btn" type="submit">Record these payments'
+              f'</button></div></form>')
+
+    for key, title, why in (
+        ("wrong_amount", "Right company, different amount",
+         "Not applied. A part payment, or a bank fee taken off the top -- "
+         "worth a look before anything is recorded."),
+        ("already", "Nothing outstanding for them",
+         "Our reference, but no open invoice. Usually a duplicate payment "
+         "or one already recorded."),
+        ("unmatched", "No reference we recognise",
+         "A deposit with nothing of ours on it. Somebody forgot to quote "
+         "their reference, and this is how you find out who to ask."),
+    ):
+        if result[key]:
+            parts.append(f'<h3 style="font-size:14px;margin:18px 0 6px">'
+                         f'{title}</h3>')
+            parts.append(rows_table(result[key], why=why))
+
+    if not any(result[k] for k in result):
+        parts.append('<p class="muted">Nothing in that paste looked like a '
+                     'deposit. Check it includes an amount column.</p>')
+    parts.append('<p style="margin-top:16px">'
+                 '<a href="/superadmin">Back to Platform admin</a></p>')
+    parts.append('</div>')
+    return "".join(parts)
+
+
 def _outstanding_box(rows, csrf: str) -> str:
     """Invoices raised and not paid, each with the one button that matters.
 
@@ -2168,6 +2259,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
              f'{_yoco_box(yoco, csrf, yoco_hook_url)}'
              f'{_zoho_box(zoho, csrf, zoho_scopes)}'
              f'{_outstanding_box(outstanding, csrf)}'
+             f'{_reconcile_box(csrf) if outstanding else ""}'
              f'{_upcoming_box(upcoming, runner_status)}'
              f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf, hub_pubkey)}'
              f'{_regions_box(regions or [], csrf)}'
