@@ -64,12 +64,27 @@ QUOTE_ABOVE_DEVICES = MAX_TIER_DEVICES
 BILLING_CURRENCY = "USD"
 CURRENCY_SYMBOL = {"USD": "$", "ZAR": "R", "EUR": "\u20ac", "GBP": "\u00a3"}
 
-# ONLY for the card gateways. PayFast and Yoco settle in ZAR and cannot take
-# anything else, so a rand figure has to exist for them. It is not a price:
-# nothing is quoted or invoiced from it, and no invoice is raised in rands.
-# A constant rather than a live rate on purpose -- an amount that drifted
-# with the exchange rate would re-quote every existing customer every month.
-_ZAR_PER_USD = 18.4
+# A LAST-RESORT figure for display only, never charged. Anything a customer
+# actually pays in rands goes through mikromon.fxrate, which fetches a
+# published rate and records which one it used.
+#
+# This used to be what the card gateway charged. On the day that was noticed
+# the constant said 18.4 and the ECB reference rate was 16.26 -- so every
+# rand charge sat 13% above the dollar price advertised next to it. Nobody
+# chose that; it simply was never revisited, which is why a rate you set
+# yourself is the wrong shape of answer however carefully you set it.
+_ZAR_PER_USD_FALLBACK = 18.4
+
+
+def zar_amount(usd: float) -> dict:
+    """Convert a USD price to rands at the published rate.
+
+    Returns {amount, rate, date, source, stale}. Raises if no published rate
+    can be had and none is cached -- charging a figure with no source behind
+    it is worse than not charging it.
+    """
+    from .fxrate import convert
+    return convert(float(usd), "ZAR")
 
 
 def money(amount, currency: str = BILLING_CURRENCY) -> str:
@@ -227,7 +242,11 @@ def _make_tier(devices: int) -> dict:
         "price": float(usd),
         "currency": BILLING_CURRENCY,
         "price_usd": usd,
-        "price_zar": round(usd * _ZAR_PER_USD, 2),   # card gateways only
+        # Indicative only, at a fixed fallback rate, so a page can show a
+        # rough rand figure without a network call. NEVER charged: what a
+        # card is actually charged comes from zar_amount(), at a published
+        # rate recorded against the order.
+        "price_zar_approx": round(usd * _ZAR_PER_USD_FALLBACK, 2),
     }
 
 
@@ -261,7 +280,8 @@ def plan_by_name(plan_name: str):
         return tier
     return {"name": plan_name, "label": f"Custom ({devices} devices)",
             "devices": devices, "price": 0.0,
-            "currency": BILLING_CURRENCY, "price_usd": 0, "price_zar": 0.0}
+            "currency": BILLING_CURRENCY, "price_usd": 0,
+            "price_zar_approx": 0.0}
 
 
 def needs_quote(devices: int) -> bool:
@@ -420,7 +440,8 @@ def build_payment_data(*, merchant_id: str, merchant_key: str,
         raise ValueError(f"Unknown plan: {plan_name!r}")
 
     payment_id = f"{org_id}:{int(time.time())}"
-    amount = f"{plan['price_zar']:.2f}"
+    # PayFast settles in rands too. Same rule: a published rate, or nothing.
+    amount = f"{zar_amount(plan['price_usd'])['amount']:.2f}"
     item_name = f"EasyMikrotik {plan['label']} Plan"
 
     params: dict = {
@@ -533,6 +554,11 @@ class BillingStore:
         # changes the packet and leaves the renewal date exactly where it
         # is, so nobody pays twice for the same days.
         self._add_col_if_missing("orders", "kind", "TEXT")
+        # What a rand charge was converted at. The question that matters
+        # later is not what was charged but on what basis, and that has to
+        # outlive the day it was charged on.
+        self._add_col_if_missing("orders", "fx_rate", "REAL")
+        self._add_col_if_missing("orders", "fx_basis", "TEXT")
         self._add_col_if_missing("billing", "trial_end", "REAL")
         self._add_col_if_missing("billing", "pf_token", "TEXT")
         self._add_col_if_missing("billing", "payment_id", "TEXT")
@@ -763,12 +789,13 @@ class BillingStore:
     _ORDER_COLS = ("id", "org_id", "plan", "months", "amount_cents",
                    "provider", "external_id", "due",
                    "currency", "status", "checkout_id", "payment_id",
-                   "created", "paid", "kind")
+                   "created", "paid", "kind", "fx_rate", "fx_basis")
 
     def create_order(self, org_id: int, plan: str, amount_cents: int,
                      months: int = 1, currency: str = BILLING_CURRENCY,
                      provider: str = "yoco", due: float | None = None,
-                     kind: str = "renewal") -> int:
+                     kind: str = "renewal", fx_rate: float | None = None,
+                     fx_basis: str = "") -> int:
         """Record what is being bought, before sending anyone to pay.
 
         The amount is stored here rather than recomputed when the webhook
@@ -783,11 +810,11 @@ class BillingStore:
         with self._lock:
             cur = self.db.execute(
                 "INSERT INTO orders (org_id, plan, months, amount_cents, "
-                "currency, created, provider, due, kind) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
+                "currency, created, provider, due, kind, fx_rate, fx_basis) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (int(org_id), str(plan), max(1, int(months)),
                  int(amount_cents), str(currency), time.time(),
-                 str(provider), due, str(kind)))
+                 str(provider), due, str(kind), fx_rate, str(fx_basis or "")))
             self.db.commit()
             return int(cur.lastrowid)
 

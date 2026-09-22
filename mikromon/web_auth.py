@@ -752,6 +752,14 @@ def _pending_from_row(bill) -> dict | None:
             "from": float((bill or {}).get("pending_from") or 0.0)}
 
 
+def _fx_line(conv) -> str:
+    """Name the rate a rand figure came from, so it can be checked."""
+    if not conv:
+        return ""
+    from .fxrate import describe
+    return describe({**conv, "pair": "USDZAR"})
+
+
 def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                     msg: str = "", error: str = "", contact: dict | None = None,
                     device_count: int = 0, yoco_on: bool = False,
@@ -853,10 +861,16 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
             # would otherwise be a number a customer could edit before
             # paying it.
             # Yoco settles in rands, so a card is charged the converted
-            # figure. Saying both is the honest version of a page that
-            # advertises dollars: the surprise is the charge appearing in
-            # another currency, not the number itself.
-            _zar = p["price_zar"]
+            # figure. Shown at the published rate, with the rate named
+            # underneath -- the surprise is the charge appearing in another
+            # currency, not the number, and a figure a customer cannot check
+            # is the thing to avoid.
+            try:
+                from .billing import zar_amount
+                _conv = zar_amount(p["price_usd"])
+                _zar, _basis = _conv["amount"], _conv
+            except Exception:  # noqa: BLE001 - no rate: say so, charge nothing
+                _zar, _basis = None, None
             btn = (f'<form method="POST" action="/billing/checkout">'
                    f'<input type="hidden" name="csrf" value="{csrf}">'
                    f'<input type="hidden" name="plan" value="{esc(p["name"])}">'
@@ -869,7 +883,13 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                    f'Pay R{_zar:,.0f}</button></form>'
                    f'<div class="muted" style="font-size:11px;margin-top:4px">'
                    f'${p["price_usd"]:,.0f}/mo, charged in rands because the '
-                   f'card gateway settles in ZAR</div>')
+                   f'card gateway settles in ZAR. '
+                   f'{esc(_fx_line(_basis))}</div>'
+                   if _zar is not None else
+                   f'</button></form>'
+                   f'<div class="muted" style="font-size:11px;margin-top:4px">'
+                   f'Card payment is unavailable while today\'s exchange '
+                   f'rate cannot be fetched. Please pay by EFT.</div>')
         elif pf_enabled:
             btn = (f'<form method="POST" action="/billing/subscribe">'
                    f'<input type="hidden" name="csrf" value="{csrf}">'

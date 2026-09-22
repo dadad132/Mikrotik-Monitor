@@ -678,6 +678,13 @@ try:
     import base64 as _b64, hashlib as _hl, hmac as _hm
     import mikromon.yoco as _yoco
     from mikromon.billing import plan_by_name as _plan
+    from mikromon.billing import zar_amount as _zar
+    # Pinned: an expected figure must not move with the market, and checking
+    # arithmetic should not need a network call.
+    from mikromon import fxrate as _FX
+    _FX._cache["USDZAR"] = {"rate": 16.2593, "date": "2026-09-21",
+                            "source": "ECB reference rate",
+                            "pair": "USDZAR", "fetched": 1e12}
 
     _hook_secret = "whsec_" + _b64.b64encode(b"test-webhook-signing-key").decode()
     _ya = AuthStore(adb)
@@ -745,7 +752,8 @@ try:
                     {"csrf": _ytok, "plan": "d25", "months": "3",
                      "amount": "1", "amount_cents": "1", "price": "1"},
                     base=QBASE)
-        _want = int(round(_plan("d25")["price_zar"] * 100)) * 3
+        _want = int(round(_zar(_plan("d25")["price_usd"])["amount"]
+                          * 100)) * 3
         check("the amount charged is computed from our own plan table, not "
               "from anything the browser sent -- a price that arrives from a "
               "browser is a price a customer can edit",

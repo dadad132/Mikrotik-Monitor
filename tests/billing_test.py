@@ -20,6 +20,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mikromon import billing
 
+# The published rate, pinned. Expected figures must not move with the market,
+# and checking arithmetic should not need a network call.
+from mikromon import fxrate as _FX
+
+_FX._cache["USDZAR"] = {"rate": 16.2593, "date": "2026-09-21",
+                        "source": "ECB reference rate", "pair": "USDZAR",
+                        "fetched": __import__("time").time()}
+
 FAILS = []
 
 
@@ -115,7 +123,7 @@ data = billing.build_payment_data(
 # Derived, not hard-coded: a literal here would go stale the next time a
 # price moves and would then be asserting last year's number.
 check("amount matches the plan price",
-      data["amount"] == f'{_t15["price_zar"]:.2f}')
+      data["amount"] == f'{billing.zar_amount(_t15["price_usd"])["amount"]:.2f}')
 check("custom fields route the ITN back to the org + plan",
       data["custom_int1"] == "42" and data["custom_str1"] == "d15")
 check("buyer name is split into first/last",

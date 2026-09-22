@@ -24,8 +24,15 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from mikromon import fxrate as _FX
 from mikromon import yoco
-from mikromon.billing import BillingStore, plan_by_name
+from mikromon.billing import BillingStore, plan_by_name, zar_amount
+
+# Pinned: an expected figure must not move with the market, and
+# checking arithmetic should not need a network call.
+_FX._cache["USDZAR"] = {"rate": 16.2593, "date": "2026-09-21",
+                        "source": "ECB reference rate",
+                        "pair": "USDZAR", "fetched": 1e12}
 
 FAILS = []
 
@@ -239,7 +246,7 @@ os.close(_fd)
 store = BillingStore(_path)
 try:
     plan = plan_by_name("d25")
-    cents = int(round(plan["price_zar"] * 100)) * 3
+    cents = int(round(zar_amount(plan["price_usd"])["amount"] * 100)) * 3
     oid = store.create_order(3, "d25", cents, months=3)
     order = store.order(oid)
     check("an order is written before anyone is sent to pay, so a payment "

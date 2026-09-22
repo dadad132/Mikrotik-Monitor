@@ -6787,6 +6787,16 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
     except Exception:  # noqa: BLE001 - never block startup on this
         log.exception("could not check for Zoho credentials on disk")
 
+    # Where the last published rate is kept, so a restart does not lose it
+    # and a provider outage does not stop a customer paying.
+    try:
+        from . import fxrate as _fx_mod
+        _fx_mod.CACHE_PATH = os.path.join(
+            os.path.dirname(os.path.abspath(devices_db)) if devices_db
+            else os.getcwd(), "fxrate.json")
+    except Exception:  # noqa: BLE001
+        log.exception("could not set the exchange-rate cache path")
+
     if billing_cfg.get("db"):
         from .billing import BillingStore
         billing = BillingStore(billing_cfg["db"])
@@ -11507,14 +11517,29 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if months not in (1, 3, 6, 12):
                 months = 1
 
-            # Yoco settles in ZAR and cannot take anything else, so this
-            # one path converts -- explicitly, and recorded as ZAR on the
-            # order. Everything invoiced goes out in the currency the price
-            # was decided in; only a card charge is converted, and only here.
-            amount_cents = int(round(plan["price_zar"] * 100)) * months
+            # Yoco settles in ZAR and cannot take anything else, so this one
+            # path converts -- at a PUBLISHED rate, recorded against the
+            # order with its date and source. A rand figure derived from a
+            # rate of our own choosing would make the relationship between
+            # the advertised dollar price and the charge something we
+            # asserted rather than something a customer can check.
+            from .billing import zar_amount
+            from .fxrate import RateUnavailable, describe
+            try:
+                _fx = zar_amount(plan["price_usd"])
+            except RateUnavailable as exc:
+                log.error("no published USD/ZAR rate: %s", exc)
+                return self._redirect("/billing?error=" + quote(
+                    "Card payment is unavailable right now: today's exchange "
+                    "rate could not be fetched, and we will not convert at a "
+                    "rate we made up. Please pay by EFT, or try shortly."))
+            amount_cents = int(round(_fx["amount"] * 100)) * months
+            _fx_basis = describe({**_fx, "pair": "USDZAR"})
             org_id = user["org_id"]
             order_id = billing.create_order(org_id, plan["name"], amount_cents,
-                                            months=months, currency="ZAR")
+                                            months=months, currency="ZAR",
+                                            fx_rate=_fx["rate"],
+                                            fx_basis=_fx_basis)
             host = self.headers.get("Host", "localhost")
             base = ("https" if secure_cookies else "http") + "://" + host
             try:

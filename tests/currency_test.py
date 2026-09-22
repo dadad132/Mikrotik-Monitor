@@ -31,6 +31,14 @@ from mikromon import billing as B
 from mikromon import billing_runner as R
 from mikromon import web_auth
 
+# The published rate, pinned. Expected figures must not move with the market,
+# and checking arithmetic should not need a network call.
+from mikromon import fxrate as _FX
+
+_FX._cache["USDZAR"] = {"rate": 16.2593, "date": "2026-09-21",
+                        "source": "ECB reference rate", "pair": "USDZAR",
+                        "fetched": __import__("time").time()}
+
 FAILS = []
 
 
@@ -53,12 +61,16 @@ check("every tier's charged price equals its advertised price, exactly -- "
 check("...and each says which currency it is in, so no caller has to assume",
       all(p["currency"] == "USD" for p in B.PLANS))
 
-check("the rand figure still exists, because a card gateway settles in rands "
-      "and cannot take anything else",
-      all(p["price_zar"] > 0 for p in B.PLANS))
-check("...but it is NOT what anyone is invoiced: the two differ by the "
-      "conversion, which is the whole bug",
-      all(p["price"] != p["price_zar"] for p in B.PLANS))
+# The tiers no longer carry a rand figure anybody could charge. What a
+# card is charged comes from a published rate, recorded against the order --
+# see fxrate_test.py.
+check("no tier exposes a rand figure that could be mistaken for a price",
+      all("price_zar" not in p for p in B.PLANS))
+check("...only an indicative one, named as approximate",
+      all(p["price_zar_approx"] > 0 for p in B.PLANS))
+check("...and it is NOT what anyone is charged: it differs from the price, "
+      "which is the whole bug",
+      all(p["price"] != p["price_zar_approx"] for p in B.PLANS))
 
 check("money() prints the currency it is handed, rather than a house default",
       B.money(25, "USD") == "$25.00" and B.money(460, "ZAR") == "R460.00")
