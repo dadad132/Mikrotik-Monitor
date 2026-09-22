@@ -46,20 +46,42 @@ MAX_BYTES = 512 * 1024
 # blanked: a stray {{brace}} in somebody's CSS should not silently vanish.
 FIELDS = (
     ("logo", "The EasyMikroTik mark and name, drawn at document size"),
-    ("number", "Invoice number, e.g. 00042"),
-    ("date", "The date on the invoice"),
+    ("invoice_no", "Invoice number, e.g. EMT-2026-0142"),
+    ("number", "The bare order id, e.g. 00042"),
+    ("issue_date", "The date on the invoice"),
+    ("date", "The same date, for older templates"),
+    ("due_date", "When payment is due"),
+    ("due_days", "How many days there are to pay"),
+    ("status_pill", "The DUE / PAID badge, already styled"),
     ("company", "The company being billed"),
+    ("client_lines", "The billed-to address block, as markup"),
+    ("seller_name", "Your trading name"),
+    ("seller_tagline", "The line under it"),
+    ("seller_lines", "Your web, billing and support addresses, as markup"),
+    ("seller", "Your name and email on one line, for older templates"),
+    ("support_email", "Where questions go"),
     ("reference", "The payment reference to quote on a transfer"),
     ("description", "What is being charged for"),
     ("devices", "How many routers the packet covers"),
     ("unit", "The price per month"),
     ("months", "How many months this invoice covers"),
+    ("items", "The priced table rows, as markup"),
     ("total", "The amount, with its currency symbol"),
+    ("total_label", '"Total Due" or "Total Paid"'),
     ("currency", "The currency code, e.g. USD"),
     ("paid_on", "The date it was paid, blank if it has not been"),
-    ("seller", "Your own name and email, from the billing contact"),
+    ("payment_block", "Bank details and reference, as markup; blank if "
+                      "no bank details have been saved"),
+    ("pay_button", "The Pay by card button, as markup; blank once paid"),
     ("pay_link", "The URL that pays this invoice, blank if none"),
 )
+
+# Filled with markup rather than text, so a template can place them but
+# nothing escapes them on the way in. Everything not in here is escaped.
+MARKUP_FIELDS = frozenset((
+    "logo", "status_pill", "items", "payment_block", "pay_button",
+    "seller_lines", "client_lines",
+))
 FIELD_NAMES = tuple(name for name, _desc in FIELDS)
 
 _PLACEHOLDER = re.compile(r"\{\{\s*([a-z_]+)\s*\}\}")
@@ -79,8 +101,8 @@ def path(app_dir: str = "") -> str:
     return os.path.join(root, FILENAME)
 
 
-def load(app_dir: str = "") -> str:
-    """The uploaded template, or "" when the built-in invoice is in use.
+def uploaded(app_dir: str = "") -> str:
+    """The uploaded template, or "" when there is none.
 
     Read on every render rather than cached: replacing a template is a thing
     somebody does once and then expects to see, and restarting a service to
@@ -92,6 +114,18 @@ def load(app_dir: str = "") -> str:
             return f.read()
     except (OSError, ValueError):
         return ""
+
+
+def load(app_dir: str = "") -> str:
+    """The template every invoice is rendered from.
+
+    An uploaded design wins; otherwise the built-in one. There is only ever
+    one code path to an invoice, so the thing being previewed and the thing
+    being sent cannot drift apart.
+    """
+    from .invoice_design import DEFAULT
+
+    return uploaded(app_dir) or DEFAULT
 
 
 def placeholders(template: str) -> set:
@@ -193,13 +227,29 @@ def render(template: str, fields: dict) -> str:
         if key not in fields:
             return m.group(0)
         val = fields[key]
-        # The logo is markup by definition -- it is a drawing, not a value.
-        return val if key == "logo" else esc(str(val if val is not None else ""))
+        # A few fields ARE markup -- a drawing, a table of rows, a badge.
+        # Everything else is a value somebody else chose, and a company name
+        # with an ampersand in it must not break the page it is printed on.
+        if key in MARKUP_FIELDS:
+            return str(val if val is not None else "")
+        return esc(str(val if val is not None else ""))
 
     return _PLACEHOLDER.sub(sub, template or "")
 
 
 def example() -> str:
+    """The design this system ships, to change and upload back.
+
+    The real one rather than a simplified stand-in: somebody adjusting their
+    invoice wants the document they have been looking at, not a sketch of
+    it.
+    """
+    from .invoice_design import DEFAULT
+
+    return DEFAULT
+
+
+def _old_example() -> str:
     """A template somebody can download, change and upload back.
 
     Deliberately plain: it is a starting point for somebody's own design,

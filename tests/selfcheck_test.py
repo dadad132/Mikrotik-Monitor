@@ -472,6 +472,52 @@ check("an all-clear says so in one line", "Nothing is wrong"
 check("nothing to report renders nothing at all",
       wa._selfcheck_box([]) == "")
 
+print("\nWhich certificate the site actually serves")
+
+# "Not secure" on a site that IS serving HTTPS has two causes, and nothing
+# could tell them apart, because every existing check looked at certificates
+# on disk rather than at the one nginx is configured to present.
+#
+# install.sh falls back to a self-signed certificate whenever certbot does
+# not produce one -- DNS not pointing here yet, port 80 closed, a rate
+# limit. The install then succeeds, the site serves HTTPS, and every browser
+# calls it Not secure forever. The fallback prints one line and is never
+# mentioned again.
+import re as _re  # noqa: E402
+
+_CONF = ('server {\n'
+         '    listen 443 ssl http2;\n'
+         '    ssl_certificate     %s;\n'
+         '    ssl_certificate_key /etc/ssl/k.key;\n'
+         '}\n')
+
+
+def _source_of(path):
+    m = _re.search(r"^\s*ssl_certificate\s+([^;]+);", _CONF % path, _re.M)
+    got = m.group(1).strip()
+    return got, ("letsencrypt" if "/letsencrypt/" in got else "self-signed")
+
+
+check("the certificate is read out of the nginx config, not guessed from "
+      "what happens to exist on disk -- a server can hold a perfect Let's "
+      "Encrypt certificate while nginx serves the fallback beside it",
+      _source_of("/etc/letsencrypt/live/x.com/fullchain.pem")
+      == ("/etc/letsencrypt/live/x.com/fullchain.pem", "letsencrypt"))
+check("...and the installer's own fallback path is recognised as "
+      "self-signed, which is the case that produces a permanent 'Not "
+      "secure' on a site nobody has touched",
+      _source_of("/etc/ssl/easymikrotik-x.com.crt")[1] == "self-signed")
+check("with no nginx config present there is nothing to report, rather than "
+      "a false alarm on a machine that is not the server",
+      sc.check_served_cert() == []
+      or os.path.exists("/etc/nginx/sites-enabled/easymikrotik"))
+check("the check runs as part of the full sweep rather than only being "
+      "callable",
+      "check_served_cert" in open(
+          os.path.join(os.path.dirname(os.path.dirname(
+              os.path.abspath(__file__))), "mikromon", "selfcheck.py"),
+          encoding="utf-8").read().split("def run_all")[1])
+
 print("\nWhether HTTPS is actually enforced")
 
 # The symptom is a browser saying "Not secure" on a site with a perfectly

@@ -711,11 +711,16 @@ def _pay_page(order, error: str, *, paid: bool = False,
 
 
 def _invoice_fields(org: dict, order: dict, contact: dict | None,
-                    pay_link: str = "") -> dict:
-    """The numbers on an invoice, for a template to place where it likes.
+                    pay_link: str = "", due_days: int = 7) -> dict:
+    """Every value the invoice design places, for one order.
 
-    Built from the ORDER, like the built-in invoice: a document that changes
-    when the price list changes is not a record of anything.
+    Built from the ORDER, not from today's price list: an invoice that
+    changes when prices change is not a record of anything.
+
+    The blocks that would otherwise print blanks -- bank details nobody has
+    saved, a pay button on an invoice already settled -- come back empty
+    rather than half-filled. A wrong account number on an invoice is the
+    most expensive kind of placeholder there is.
     """
     from .brand import lockup_svg
 
@@ -726,24 +731,110 @@ def _invoice_fields(org: dict, order: dict, contact: dict | None,
     cur = str(order.get("currency") or BILLING_CURRENCY).upper()
     sym = CURRENCY_SYMBOL.get(cur, "")
     unit = total / months if months else total
-    when = time.strftime("%d %B %Y", time.localtime(
-        order.get("paid") or order.get("created") or 0))
+    settled = bool(order.get("paid"))
+
+    issued = order.get("created") or order.get("paid") or time.time()
+    due = order.get("due") or (issued + due_days * 86400)
+    issue_date = time.strftime("%d %B %Y", time.localtime(issued))
+    due_date = time.strftime("%d %B %Y", time.localtime(due))
+    paid_on = (time.strftime("%d %B %Y", time.localtime(order["paid"]))
+               if settled else "")
+    ref = payment_reference(order.get("org_id", 0), org.get("name", ""))
+    number = f'{int(order.get("id") or 0):05d}'
+    invoice_no = (f'EMT-{time.strftime("%Y", time.localtime(issued))}-'
+                  f'{int(order.get("id") or 0):04d}')
+
+    c = contact or {}
+    seller_name = c.get("name") or _BRAND
+    support = c.get("email") or ""
+    seller_bits = []
+    if c.get("web"):
+        seller_bits.append(("Web", c["web"]))
+    if c.get("email"):
+        seller_bits.append(("Email", c["email"]))
+    seller_lines = "".join(
+        f'<p><b>{esc(k)}:</b> {esc(str(v))}</p>' for k, v in seller_bits)
+
+    client_bits = []
+    if org.get("email"):
+        client_bits.append(("Email", org["email"]))
+    client_bits.append(("Reference", ref))
+    client_lines = "".join(
+        f'<p><b>{esc(k)}:</b> {esc(str(v))}</p>' for k, v in client_bits)
+
+    # One line, because a renewal charges for one thing. A legacy order
+    # bought for several months at once shows the months as the quantity.
+    items = (
+        f'<tr><td class="n">1</td>'
+        f'<td class="item">Router monitoring &mdash; up to {devices} '
+        f'devices<small>Continuous polling, alerting, remote access and '
+        f'configuration push across up to {devices} RouterBOARD devices.'
+        f'</small></td>'
+        f'<td class="n">{months}</td>'
+        f'<td class="n">{unit:,.2f}</td>'
+        f'<td class="n">{total:,.2f}</td></tr>')
+
+    pill = ('<span class="pill paid">Paid</span>' if settled
+            else f'<span class="pill">Due {esc(due_date)}</span>')
+
+    # Nothing hardcodes an account number. The design came with one in it,
+    # from a sample, and an account number that is not this business's is
+    # the single worst thing that can be printed on an invoice.
+    rows = [(k, v) for k, v in (
+        ("Bank", c.get("bank_name")),
+        ("Account Holder", c.get("bank_holder")),
+        ("Account Number", c.get("bank_account")),
+        ("Branch Code", c.get("bank_branch")),
+    ) if v]
+    pay_rows = "".join(
+        f'<tr><td>{esc(k)}:</td><td class="v">{esc(str(v))}</td></tr>'
+        for k, v in rows)
+    pay_rows += (f'<tr><td>Payment Ref:</td>'
+                 f'<td class="v">{esc(ref)}</td></tr>')
+    if pay_link:
+        pay_rows += (f'<tr><td>Online Gateway:</td>'
+                     f'<td class="v" style="font-weight:400;word-break:'
+                     f'break-all">{esc(pay_link)}</td></tr>')
+    payment_block = (
+        f'<div class="eyebrow">Payment information</div>'
+        f'<table>{pay_rows}</table>'
+        + ('' if rows else
+           '<p style="color:#64748b;font-size:12.5px;margin:8px 0 0">'
+           'Paying by card is the quickest route; a bank transfer needs '
+           'the reference above.</p>'))
+
+    pay_button = ("" if settled or not pay_link else
+                  f'<a class="cta" href="{esc(pay_link)}">Pay by card</a>')
+
     return {
-        "logo": lockup_svg(34),
-        "number": f'{int(order.get("id") or 0):05d}',
-        "date": when,
+        "logo": lockup_svg(30),
+        "status_pill": pill,
+        "invoice_no": invoice_no,
+        "number": number,
+        "issue_date": issue_date,
+        "date": issue_date,
+        "due_date": due_date,
+        "due_days": due_days,
         "company": org.get("name", ""),
-        "reference": payment_reference(order.get("org_id", 0),
-                                       org.get("name", "")),
-        "description": f"Router monitoring — up to {devices} devices",
+        "client_lines": client_lines,
+        "seller_name": seller_name,
+        "seller_tagline": "Automated Network Solutions & Cloud RouterOS",
+        "seller_lines": seller_lines,
+        "seller": " \u00b7 ".join(str(v) for v in (
+            c.get("name"), c.get("email")) if v),
+        "support_email": support,
+        "reference": ref,
+        "description": f"Router monitoring \u2014 up to {devices} devices",
         "devices": devices,
         "unit": f"{sym}{unit:,.2f}",
         "months": months,
+        "items": items,
         "total": f"{sym}{total:,.2f}",
+        "total_label": "Total Paid" if settled else "Total Due",
         "currency": cur,
-        "paid_on": when if order.get("paid") else "",
-        "seller": " · ".join(str(v) for v in (
-            (contact or {}).get("name"), (contact or {}).get("email")) if v),
+        "paid_on": paid_on,
+        "payment_block": payment_block,
+        "pay_button": pay_button,
         "pay_link": pay_link,
     }
 
@@ -779,93 +870,54 @@ def _invoice_pay_block(pay_link: str, ref: str) -> str:
 
 
 def _render_invoice(user, org: dict, order: dict, contact: dict | None,
-                    brand: str = "", pay_link: str = "") -> str:
-    """A printable invoice for one paid order.
+                    brand: str = "", pay_link: str = "",
+                    due_days: int = 7) -> str:
+    """The invoice, as a document.
 
-    Deliberately built from the ORDER, not from today's price list: an
-    invoice that changes when prices change is not a record of anything.
+    One code path: the built-in design and an uploaded one are both
+    templates, so the thing being previewed and the thing being sent cannot
+    drift apart.
 
     No VAT line and the word "Invoice" rather than "Tax Invoice", because a
-    business that is not VAT-registered may not issue one -- when the number
-    arrives this grows a VAT block, and until then claiming one would be a
-    real problem rather than a cosmetic one.
+    business that is not VAT registered may not issue one -- when the number
+    arrives the design grows a VAT block, and until then claiming one would
+    be a real problem rather than a cosmetic one.
+
+    Before payment it says what is due and carries a button that pays it;
+    after, it says what was paid and carries none, because an invoice
+    already settled with a working Pay button is how somebody pays twice.
     """
-    # An uploaded design wins outright. Somebody who has put their own
-    # invoice here has already decided what an invoice of theirs looks like.
     from . import invoice_template as _tpl
 
-    custom = _tpl.load()
-    if custom:
-        return _tpl.render(custom,
-                           _invoice_fields(org, order, contact, pay_link))
+    html = _tpl.render(_tpl.load(),
+                       _invoice_fields(org, order, contact, pay_link,
+                                       due_days))
+    return _invoice_actions(html)
 
-    plan = plan_by_name(order.get("plan", ""))
-    devices = plan["devices"] if plan else "?"
-    months = max(1, int(order.get("months") or 1))
-    total = (order.get("amount_cents") or 0) / 100
-    # The currency the order was RAISED in, not whatever the reader assumes.
-    # A figure printed in the wrong currency on a document somebody files is
-    # the one mistake here that is genuinely expensive.
-    cur = str(order.get("currency") or BILLING_CURRENCY).upper()
-    sym = CURRENCY_SYMBOL.get(cur, "")
-    unit = total / months if months else total
-    settled = bool(order.get("paid"))
-    paid_on = time.strftime("%d %B %Y", time.localtime(
-        order.get("paid") or order.get("created") or 0))
-    due_on = (time.strftime("%d %B %Y", time.localtime(order["due"]))
-              if order.get("due") else "")
-    ref = payment_reference(order.get("org_id", 0), org.get("name", ""))
-    seller = "".join(
-        f'<div>{esc(str(v))}</div>' for v in (
-            contact.get("name") if contact else "",
-            contact.get("email") if contact else "") if v)
-    inner = (
-        f'<div class="wrap" style="max-width:760px">'
-        f'<div class="box" id="inv">'
-        f'<div style="display:flex;justify-content:space-between;'
-        f'align-items:flex-start;gap:20px;flex-wrap:wrap">'
-        f'<div><h1 style="margin:0 0 4px">'
-        f'{"Receipt" if settled else "Invoice"}</h1>'
-        f'<div class="muted">#{int(order["id"]):05d} &middot; {esc(paid_on)}</div>'
-        f'</div>'
-        f'<div style="text-align:right">{_invoice_logo()}'
-        f'{seller}</div></div>'
-        f'<hr style="border:0;border-top:1px solid var(--border);margin:18px 0">'
-        f'<div style="display:flex;gap:30px;flex-wrap:wrap;margin-bottom:18px">'
-        f'<div><div class="muted" style="font-size:11px;text-transform:uppercase;'
-        f'letter-spacing:.08em">Billed to</div>'
-        f'<b>{esc(org.get("name", ""))}</b></div>'
-        f'<div><div class="muted" style="font-size:11px;text-transform:uppercase;'
-        f'letter-spacing:.08em">Reference</div>'
-        f'<code>{esc(ref)}</code></div></div>'
-        f'<table><thead><tr><th>Description</th><th>Months</th>'
-        f'<th style="text-align:right">Amount</th></tr></thead><tbody>'
-        f'<tr><td>Router monitoring &mdash; up to {devices} devices'
-        f'<br><span class="muted" style="font-size:12px">'
-        f'{esc(sym)}{unit:,.2f} per month</span></td>'
-        f'<td>{months}</td>'
-        f'<td style="text-align:right">{esc(sym)}{total:,.2f}</td></tr>'
-        f'</tbody></table>'
-        f'<div style="display:flex;justify-content:flex-end;margin-top:14px">'
-        f'<div style="min-width:220px">'
-        f'<div style="display:flex;justify-content:space-between;'
-        f'font-size:18px;font-weight:700">'
-        f'<span>{"Total paid" if settled else "Amount due"}</span>'
-        f'<span>{esc(sym)}{total:,.2f} {esc(cur)}</span></div>'
-        f'<div class="muted" style="font-size:12px;text-align:right;'
-        f'margin-top:4px">'
-        f'{f"Paid by card on {esc(paid_on)}" if settled else (f"Due {esc(due_on)}" if due_on else "Payable on receipt")}'
-        f'</div></div></div>'
-        + (_invoice_pay_block(pay_link, ref) if not settled else "")
-        + (f'<p class="muted" style="font-size:12px;margin-top:22px">'
-           f'{"This is a receipt for a payment already made." if settled else ""}'
-           f' No VAT has been charged.</p>')
-        + f'</div>'
-        f'<div class="actions" style="margin-top:14px">'
-        f'<button class="btn" type="button" onclick="window.print()">'
-        f'Print or save as PDF</button> '
-        f'<a class="btn ghost" href="/billing">Back to billing</a></div></div>')
-    return _page("Invoice", _header(user, "/billing") + inner)
+
+def _invoice_actions(html: str) -> str:
+    """A print/back bar on the document, which the document does not carry.
+
+    Injected into the page rather than written into the design, so it cannot
+    end up on a printed invoice and an uploaded design does not have to know
+    about it.
+    """
+    bar = ('<div class="mm-actions" style="max-width:860px;margin:18px auto '
+           '0;padding:0 18px;display:flex;gap:10px;flex-wrap:wrap">'
+           '<button type="button" onclick="window.print()" '
+           'style="background:#2563eb;color:#fff;border:0;border-radius:6px;'
+           'padding:10px 18px;font:600 14px system-ui,sans-serif;'
+           'cursor:pointer">Print or save as PDF</button>'
+           '<a href="/billing" style="background:#fff;color:#0f172a;'
+           'border:1px solid #cbd5e1;border-radius:6px;padding:10px 18px;'
+           'font:600 14px system-ui,sans-serif;text-decoration:none">'
+           'Back to billing</a></div>'
+           '<style>@media print{.mm-actions{display:none!important}}</style>')
+    i = html.find("<body>")
+    if i < 0:
+        return bar + html
+    i += len("<body>")
+    return html[:i] + bar + html[i:]
 
 
 def _pending_from_row(bill) -> dict | None:

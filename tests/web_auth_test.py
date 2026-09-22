@@ -851,7 +851,8 @@ try:
         check("no VAT is claimed on it, because the business is not yet "
               "VAT-registered and claiming one would be a real problem "
               "rather than a cosmetic one",
-              "Tax Invoice" not in inv and "VAT" not in inv.replace(
+              "Tax Invoice" not in inv
+              and "VAT" not in " ".join(inv.split()).replace(
                   "No VAT has been charged", ""))
         st, ubody = req(yo, f"/billing/invoice?id={_short_id}", base=QBASE)
         check("an order not yet paid HAS a document -- it is the thing "
@@ -860,11 +861,11 @@ try:
               st == 200 and "Invoice" in ubody)
         check("...and it says what is owed rather than what was taken, "
               "because a receipt for money nobody has sent is a lie",
-              "Amount due" in ubody and "Total paid" not in ubody)
-        check("...while the PAID one is a receipt, and carries no live pay "
-              "button, since an invoice already settled with a working "
-              "button is how somebody pays twice",
-              "Total paid" in inv and "Pay by card" not in inv)
+              "Total Due" in ubody and "Total Paid" not in ubody)
+        check("...while the PAID one carries no live pay button, since an "
+              "invoice already settled with a working button is how "
+              "somebody pays twice",
+              "Total Paid" in inv and "Pay by card" not in inv)
 
         # Invoice ids are guessable, and an invoice names a company and what
         # it pays.

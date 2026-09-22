@@ -11983,9 +11983,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     shown["due"] = time.time() + _DEFAULT_DUE_DAYS * 86400
                 base = _public_base(auth)
                 html = _render_invoice(
-                    user, {"name": _SAMPLE_ORG}, shown,
+                    user, {"name": _SAMPLE_ORG,
+                           "email": "accounts@sample.example"}, shown,
                     auth.get_billing_contact() if auth else None,
-                    brand=_BRAND,
+                    brand=_BRAND, due_days=_DEFAULT_DUE_DAYS,
                     pay_link=(f"{base}/pay?t=sample" if base and not paid
                               else ""))
                 return self._send(200, _sample_bar(
@@ -12046,10 +12047,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # names the company and what it pays.
             if not order or int(order["org_id"]) != int(user["org_id"]):
                 return self._send(404, "not found")
-            org = {"name": auth.org_name(user["org_id"]) or ""}
+            from .billing_runner import _DEFAULT_DUE_DAYS
+            org = {"name": auth.org_name(user["org_id"]) or "",
+                   "email": user.get("email", "")}
             return self._send(200, _render_invoice(
                 user, org, order, auth.get_billing_contact(), brand=_BRAND,
-                pay_link=self._pay_order_link(order)),
+                pay_link=self._pay_order_link(order),
+                due_days=_DEFAULT_DUE_DAYS),
                 "text/html; charset=utf-8")
 
         def _post_billing_subscribe(self, flat, user):

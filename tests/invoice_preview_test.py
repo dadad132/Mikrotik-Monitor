@@ -162,7 +162,7 @@ check("...stamped SAMPLE, because it is a page with an amount and a pay "
       "button on it", "SAMPLE" in pay)
 
 st, inv = get(boss, f"/superadmin/test-invoice?doc=receipt&plan={PLAN['name']}")
-check("the receipt previews", st == 200 and "Receipt" in inv)
+check("the receipt previews", st == 200 and "Total Paid" in inv)
 check("...stamped SAMPLE too -- this is the one that gets printed and filed",
       "SAMPLE" in inv)
 check("...and still carries no VAT line, which is the thing that would be a "
@@ -176,7 +176,7 @@ st, unpaid = get(boss,
 check("the UNPAID invoice previews -- the one that gets forwarded to "
       "whoever settles the bills", st == 200 and "Invoice" in unpaid)
 check("...saying what is owed rather than what was taken",
-      "Amount due" in unpaid and "Total paid" not in unpaid)
+      "Total Due" in unpaid and "Total Paid" not in unpaid)
 check("...with the reference for a bank transfer on it",
       "SAMPLECOMPAN" in unpaid)
 check("...and a Pay by card button, because the person it was forwarded to "

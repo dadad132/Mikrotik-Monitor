@@ -457,6 +457,76 @@ def _cert_paths(access_cfg):
             and not (p in seen or seen.add(p))]
 
 
+def _served_cert():
+    """(path, source) for the certificate nginx actually presents, or ("", "").
+
+    Read out of the config rather than guessed from what exists on disk: a
+    server can have a perfectly good Let's Encrypt certificate sitting in
+    /etc/letsencrypt while nginx serves the self-signed fallback beside it,
+    and that is exactly the case worth catching.
+    """
+    import re
+    for conf in ("/etc/nginx/sites-enabled/easymikrotik",
+                 "/etc/nginx/sites-available/easymikrotik"):
+        try:
+            with open(conf, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            continue
+        m = re.search(r"^\s*ssl_certificate\s+([^;]+);", text, re.M)
+        if not m:
+            continue
+        path = m.group(1).strip()
+        return path, ("letsencrypt" if "/letsencrypt/" in path
+                      else "self-signed")
+    return "", ""
+
+
+def check_served_cert():
+    """Is the certificate this site presents one a browser will trust?
+
+    The symptom of getting this wrong is "Not secure" in the address bar on
+    a site that is serving HTTPS perfectly well, which reads to everybody --
+    including the person running it -- as though something is broken in the
+    application.
+    """
+    path, source = _served_cert()
+    if not path:
+        return []
+    name = os.path.basename(os.path.dirname(path)) or os.path.basename(path)
+    if source == "self-signed":
+        return [_finding(
+            "tls:served", False,
+            "This site is serving a SELF-SIGNED certificate",
+            f"nginx presents {path}. HTTPS works, but no browser trusts it, "
+            f"so every visitor gets a warning and then a permanent 'Not "
+            f"secure'. install.sh falls back to this whenever certbot does "
+            f"not produce a certificate -- usually DNS not pointing here "
+            f"yet, or port 80 closed when it ran.",
+            "sudo certbot certonly --nginx -d your.domain && "
+            "sudo bash deploy/install.sh")]
+    days = _cert_days_left(path)
+    if days is None:
+        return [_finding("tls:served", False,
+                         f"Cannot read the certificate this site serves",
+                         path, f"sudo openssl x509 -noout -text -in {path}",
+                         warn=True)]
+    if days < 0:
+        return [_finding(
+            "tls:served", False,
+            f"The certificate this site serves EXPIRED "
+            f"{abs(days):.0f} days ago",
+            "Every visitor sees a full-page warning, and anyone who clicks "
+            "through sees 'Not secure' from then on. Renewal is meant to be "
+            "automatic, so this also means the renewal timer is not working.",
+            "sudo certbot renew --force-renewal && "
+            "sudo systemctl reload nginx")]
+    return [_finding(
+        "tls:served", True,
+        f"This site serves a trusted certificate for {name}, "
+        f"{days:.0f} days left")]
+
+
 def check_https_enforced(config_path="", access_cfg=None):
     """Is the dashboard reachable over plain HTTP?
 
@@ -754,6 +824,7 @@ def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
                lambda: check_peers_dir(peers_path),
                lambda: check_peers_file(peers_path, expected_peers),
                lambda: check_access_host(access_cfg),
+               lambda: check_served_cert(),
                lambda: check_tls_expiry(access_cfg),
                lambda: check_https_enforced(config_path, access_cfg),
                lambda: check_cert_renewal(),

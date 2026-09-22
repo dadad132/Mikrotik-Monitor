@@ -141,11 +141,39 @@ check("the logo is the real drawing at document size, not a picture pasted "
       "in two years ago", "<svg" in fields["logo"] and "MikroTik" in fields["logo"])
 
 _saved = T.save(TPL.encode("utf-8"), d)
-check("saving leaves a template that loads back",
-      T.load(d).startswith("<h1>{{company}}"))
-check("...and removing it goes back to the built-in invoice",
-      T.remove(d) and T.load(d) == "")
+check("saving leaves a template that every invoice then renders from",
+      T.load(d).startswith("<h1>{{company}}")
+      and T.uploaded(d).startswith("<h1>{{company}}"))
+check("...and removing it goes back to the built-in design rather than to "
+      "nothing at all: there is always an invoice",
+      T.remove(d) and T.uploaded(d) == ""
+      and "INVOICE" in T.load(d))
 check("removing when there is none is not an error", T.remove(d) is False)
+
+print("\nThe design this system ships")
+
+# The design arrived as a PDF describing a business other than this one.
+_built = T.load(d)
+check("it carries NO VAT or tax line: this business is not VAT registered, "
+      "and the original had 'Tax / VAT (15%)' on it",
+      "VAT (15" not in _built and "Tax /" not in _built)
+check("...and does not call itself a Tax Invoice",
+      "tax invoice" not in _built.lower())
+check("...nor carries a discount row that would always read -$0.00, since "
+      "there is no discount anywhere in this system",
+      "Discount" not in _built)
+check("no bank account number is baked into the design -- the one in the "
+      "original came from a sample, and an account number that is not this "
+      "business's is the worst thing that can be printed on an invoice",
+      "6284" not in _built and "250655" not in _built)
+check("it says plainly that no VAT has been charged",
+      "No VAT" in " ".join(_built.split()))
+check("the terms do not ask for proof of payment: a card payment activates "
+      "the packet by itself, and asking for proof invites back the manual "
+      "step the card rail exists to remove",
+      "proof of payment" not in _built.lower())
+check("what somebody downloads to edit IS the design being sent, not a "
+      "simplified stand-in", T.example() == T.load(d))
 
 print()
 if FAILS:
