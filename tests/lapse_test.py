@@ -208,6 +208,76 @@ check("...which asks first, because it takes money-received as fact",
 check("nothing outstanding renders nothing at all, rather than an empty "
       "table", web_auth._outstanding_box([], "tok") == "")
 
+print("\nA card payment has to reach the invoice it paid")
+
+# Zoho raises the invoice; Yoco takes the card. Nothing connected the two, so
+# a customer who paid by card had their packet extended while Zoho went on
+# believing the invoice was unpaid -- chasing them with reminders for money
+# they had already handed over. The books and the service disagreed, and the
+# customer was the one who found out.
+st = B.BillingStore(os.path.join(tempfile.mkdtemp(), "b.db"))
+st.set_plan(1, PLAN)
+_end = st.get(1)["current_period_end"]
+_zoho = st.create_order(1, PLAN, int(B.PLANS[0]["price"] * 100),
+                        currency="USD", provider="zoho", due=_end)
+st.set_order_external(_zoho, "INV-77")
+_card = st.create_order(1, PLAN, 40648, currency="ZAR", provider="yoco")
+
+_settled = []
+
+
+class _Prov:
+    name = "zoho"
+
+    def record_payment(self, invoice_id, customer_name, amount, reference=""):
+        _settled.append(invoice_id)
+        return "pay-1"
+
+
+_real_pf = R.provider_for
+try:
+    R.provider_for = lambda a: _Prov()
+    st.mark_order_paid(_card, "yoco-1")
+    st.apply_paid_order(st.order(_card))
+    _after = st.get(1)["current_period_end"]
+
+    check("paying by card settles the invoice that was raised for it, so "
+          "nobody is chased for money they have already paid",
+          R.settle_matching_invoice(st, FakeAuth(), st.order(_card)) == ""
+          and _settled == ["INV-77"])
+    check("...and that invoice is closed here too, so the reconcile pass "
+          "stops asking the provider about it",
+          bool(st.order(_zoho)["paid"]))
+    check("...but the packet is NOT extended a second time -- it moved when "
+          "the card was paid, and doing it twice hands over a free month",
+          st.get(1)["current_period_end"] == _after)
+
+    _settled.clear()
+    R.settle_matching_invoice(st, FakeAuth(), st.order(_card))
+    check("running it again settles nothing, because nothing is open",
+          _settled == [])
+
+    # A provider that refuses must not be silent: the customer is fine, the
+    # service is fine, and the books now disagree.
+    _z2 = st.create_order(1, PLAN, 2500, currency="USD", provider="zoho")
+    st.set_order_external(_z2, "INV-78")
+
+    class _Refuses:
+        name = "zoho"
+
+        def record_payment(self, *a, **k):
+            raise R.ProviderError("scope missing")
+
+    R.provider_for = lambda a: _Refuses()
+    _note = R.settle_matching_invoice(st, FakeAuth(), st.order(_card))
+    check("if the provider refuses, it says so plainly rather than leaving "
+          "the books quietly wrong",
+          "still reads unpaid" in _note and "scope missing" in _note)
+    check("...and the invoice is left open, so the next pass tries again "
+          "instead of it being lost", not st.order(_z2)["paid"])
+finally:
+    R.provider_for = _real_pf
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

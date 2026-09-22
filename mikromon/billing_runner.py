@@ -410,6 +410,64 @@ def outstanding(billing, auth, limit: int = 50) -> list:
     return out[:limit]
 
 
+def settle_matching_invoice(billing, auth, paid_order) -> str:
+    """Tell the invoicing provider about a payment taken somewhere else.
+
+    Returns a note for the log, or "" when there was nothing to settle.
+
+    A card payment and an invoice are two records of one transaction. When
+    the card is taken by a different provider from the one that raised the
+    invoice -- which is the whole point of using a local gateway with a
+    cheaper rate -- the invoice has to be told, or it keeps chasing money
+    that has arrived.
+
+    The packet is NOT extended again. It moved when the card was paid;
+    doing it twice would hand over a second month for nothing.
+    """
+    if billing is None or not paid_order:
+        return ""
+    prov = provider_for(auth)
+    if prov is None or not hasattr(prov, "record_payment"):
+        return ""
+    org_id = int(paid_order.get("org_id") or 0)
+    # Any other open order for this company at the invoicing provider. The
+    # period is not compared: a company with one open invoice and a card
+    # payment has just paid that invoice, and matching on an exact period
+    # would miss a part-month upgrade paying off its own invoice.
+    others = [o for o in billing.open_orders(provider=prov.name)
+              if int(o.get("org_id") or 0) == org_id
+              and int(o.get("id") or 0) != int(paid_order.get("id") or 0)]
+    if not others:
+        return ""
+    target = others[0]
+    inv_id = target.get("external_id") or ""
+    if not inv_id:
+        return ""
+
+    org = (auth.org(org_id) if auth else None) or {}
+    name = org.get("name") or f"Company {org_id}"
+    amount = (target.get("amount_cents") or 0) / 100.0
+    try:
+        from .billing import payment_reference
+        prov.record_payment(inv_id, name, amount,
+                            reference=payment_reference(org_id,
+                                                        org.get("name", "")))
+    except ProviderError as exc:
+        # Worth saying loudly: the customer is fine and the service is fine,
+        # but the books now disagree and somebody will be chased for money
+        # they have paid.
+        log.error("card payment for org %s could not be recorded against "
+                  "invoice %s: %s", org_id, inv_id, exc)
+        return f"invoice {inv_id} still reads unpaid: {exc}"
+
+    # Marked paid so the reconcile pass stops asking about it. NOT applied:
+    # apply_paid_order already ran for the payment that actually happened.
+    billing.mark_order_paid(int(target["id"]), f"card:{paid_order.get('id')}")
+    log.info("org %s paid by card; invoice %s recorded as settled",
+             org_id, inv_id)
+    return ""
+
+
 def mark_paid(billing, auth, order_id: int) -> str:
     """Record an EFT payment: at the provider AND here, in that order.
 

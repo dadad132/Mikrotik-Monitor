@@ -11623,6 +11623,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                          "applied", order_id)
                 return self._send(200, "ok")
             billing.apply_paid_order(order)
+            # The packet has moved. Now tell the invoicing provider, or Zoho
+            # goes on chasing a customer for money they have already paid.
+            try:
+                from .billing_runner import settle_matching_invoice
+                note = settle_matching_invoice(billing, auth, order)
+                if note:
+                    log.warning("after a card payment: %s", note)
+            except Exception:  # noqa: BLE001 - never undo a payment over this
+                log.exception("could not settle the matching invoice")
             log.info("Order %s paid (%s): org %s now on %s for %s month(s)",
                      order_id, payment_id, order["org_id"], order["plan"],
                      order["months"])
