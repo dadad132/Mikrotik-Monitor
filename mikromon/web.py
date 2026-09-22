@@ -43,6 +43,7 @@ from .web_shared import (
     _header, _page, parse_multipart_form,
     _THEME_VARS, _THEME_INIT_JS, _THEME_TOGGLE_JS,
 )
+from . import invoice_template as _invoice_tpl
 from .web_auth import (
     _first_visit_tip, _welcome_tip,
     _render_login, _render_signup, _render_account,
@@ -7259,6 +7260,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         billing.days_left_in_grace(org_id),
                         auth.get_billing_contact() if auth else None)
 
+            if path == "/superadmin/invoice-template":
+                return self._serve_invoice_template(url, user)
             if path == "/superadmin/test-invoice":
                 return self._serve_test_invoice(url, user)
             if path == "/billing/invoice":
@@ -7643,6 +7646,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 selfcheck=_selfcheck,
                 yoco=auth.get_yoco() if auth else {},
                 public_base=_pay_base,
+                invoice_template_on=bool(_invoice_tpl.load()),
+                invoice_template_warnings=_invoice_tpl.check(
+                    _invoice_tpl.load()) if _invoice_tpl.load() else (),
                 yoco_hook_url=(
                     ("https" if secure_cookies else "http") + "://"
                     + self.headers.get("Host", "")
@@ -7935,6 +7941,53 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 f"{money(amount, cur)} is on its way. You move to "
                 f"{plan['label']} as soon as it is paid — your renewal date "
                 f"does not change."))
+
+        def _post_invoice_template(self, user):
+            """Replace the invoice design, or go back to the built-in one.
+
+            Multipart, because the generic urlencoded form cannot carry a
+            file. Warnings are kept on the redirect rather than swallowed:
+            a template that mentions VAT is usable and still wrong for this
+            business, and saying so afterwards is too late to be useful.
+            """
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            from . import invoice_template as tpl
+
+            ctype = self.headers.get("Content-Type", "")
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length else b""
+            sess = self._session()
+            if "multipart/form-data" in ctype:
+                fields = parse_multipart_form(ctype, raw)
+                csrf = fields.get("csrf", b"").decode("utf-8", "replace")
+                data = fields.get("template") or b""
+                drop = bool(fields.get("remove"))
+            else:
+                flat = {k: v[-1] for k, v in
+                        parse_qs(raw.decode("utf-8", "replace"),
+                                 keep_blank_values=True).items()}
+                csrf = flat.get("csrf", "")
+                data, drop = b"", bool(flat.get("remove"))
+            if sess is None or csrf != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+
+            if drop:
+                tpl.remove()
+                log.info("invoice template removed by %s",
+                         user.get("email", "?"))
+                return self._redirect("/superadmin?ok=" + quote(
+                    "Back to the built-in invoice."))
+            try:
+                notes = tpl.save(data)
+            except tpl.TemplateError as exc:
+                return self._redirect("/superadmin?error=" + quote(str(exc)))
+            log.info("invoice template uploaded by %s (%d warning(s))",
+                     user.get("email", "?"), len(notes))
+            msg = "Your invoice design is in use. The preview shows it."
+            if notes:
+                msg += " " + " ".join(notes)
+            return self._redirect("/superadmin?ok=" + quote(msg))
 
         def _post_pay_base(self, user):
             """Set the address invoices link to, by hand.
@@ -11169,6 +11222,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_suspend(user, restore=True)
             if path == "/superadmin/yoco":
                 return self._post_superadmin_yoco(user)
+            if path == "/superadmin/invoice-template":
+                return self._post_invoice_template(user)
             if path == "/superadmin/pay-base":
                 return self._post_pay_base(user)
             if path == "/superadmin/mark-paid":
@@ -11847,6 +11902,30 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 f"Payments.\n")
             _smtp_send(smtp, msg)
 
+        def _serve_invoice_template(self, url, user):
+            """Hand back a template to start from, or the current one.
+
+            A blank page and a list of placeholder names is not a starting
+            point. This is a working invoice that can be opened, changed and
+            uploaded back.
+            """
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            from . import invoice_template as tpl
+
+            q = parse_qs(url.query)
+            body = (tpl.example() if q.get("example")
+                    else (tpl.load() or tpl.example()))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Disposition",
+                             'attachment; filename="invoice_template.html"')
+            data = body.encode("utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return None
+
         def _serve_test_invoice(self, url, user):
             """Everything a customer receives for a renewal, on demand.
 
@@ -11879,13 +11958,27 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     html, "The page the pay link opens", plan["name"]),
                     "text/html; charset=utf-8")
 
-            if doc == "invoice":
+            if doc in ("invoice", "receipt"):
+                paid = doc == "receipt"
+                shown = dict(order)
+                if not paid:
+                    # The document that actually goes out: unpaid, with the
+                    # Yoco button on it, which is the half nobody could see.
+                    shown["paid"] = None
+                    shown["status"] = "pending"
+                    shown["due"] = time.time() + _DEFAULT_DUE_DAYS * 86400
+                base = _public_base(auth)
                 html = _render_invoice(
-                    user, {"name": _SAMPLE_ORG}, order,
+                    user, {"name": _SAMPLE_ORG}, shown,
                     auth.get_billing_contact() if auth else None,
-                    brand=_BRAND)
+                    brand=_BRAND,
+                    pay_link=(f"{base}/pay?t=sample" if base and not paid
+                              else ""))
                 return self._send(200, _sample_bar(
-                    html, "The receipt sent after payment", plan["name"]),
+                    html,
+                    "The receipt sent after payment" if paid
+                    else "The invoice, with the Yoco pay button on it",
+                    plan["name"]),
                     "text/html; charset=utf-8")
 
             # The email, built by the same function that sends the real one.
@@ -11900,8 +11993,33 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 user, plan, plan["name"], subject, body, to, link),
                 "text/html; charset=utf-8")
 
+        def _pay_order_link(self, order):
+            """The signed pay link for an unpaid order, or "".
+
+            Built here rather than stored so it cannot outlive the order it
+            pays for, and empty for one already settled -- a paid invoice
+            carrying a live Pay button is how somebody pays twice.
+            """
+            if not order or order.get("paid") or order.get("status") == "paid":
+                return ""
+            base = _public_base(auth)
+            if not base:
+                return ""
+            try:
+                from .paylink import url as _link
+                return _link(auth, base, int(order["id"]))
+            except Exception:  # noqa: BLE001
+                log.exception("could not build a pay link for order %s",
+                              order.get("id"))
+                return ""
+
         def _serve_invoice(self, url, user):
-            """One paid invoice, printable, for the company that paid it."""
+            """One invoice, printable, for the company it belongs to.
+
+            Before payment it is an invoice with a way to pay it; after, a
+            receipt. Same document either way, because somebody filing these
+            should not have to keep two kinds.
+            """
             if not AuthStore.is_admin(user) or not billing or auth is None:
                 return self._send(403, "forbidden")
             q = parse_qs(url.query)
@@ -11914,13 +12032,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # names the company and what it pays.
             if not order or int(order["org_id"]) != int(user["org_id"]):
                 return self._send(404, "not found")
-            if order.get("status") != "paid":
-                return self._redirect("/billing?error=" + quote(
-                    "That payment has not been completed, so there is no "
-                    "invoice for it yet."))
             org = {"name": auth.org_name(user["org_id"]) or ""}
             return self._send(200, _render_invoice(
-                user, org, order, auth.get_billing_contact(), brand=_BRAND),
+                user, org, order, auth.get_billing_contact(), brand=_BRAND,
+                pay_link=self._pay_order_link(order)),
                 "text/html; charset=utf-8")
 
         def _post_billing_subscribe(self, flat, user):

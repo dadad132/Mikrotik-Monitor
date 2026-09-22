@@ -854,9 +854,17 @@ try:
               "Tax Invoice" not in inv and "VAT" not in inv.replace(
                   "No VAT has been charged", ""))
         st, ubody = req(yo, f"/billing/invoice?id={_short_id}", base=QBASE)
-        check("an order that was never paid has no invoice, and says so "
-              "rather than producing a document for money we never received",
-              "not been completed" in ubody)
+        check("an order not yet paid HAS a document -- it is the thing "
+              "somebody forwards to whoever settles the bills, and it used "
+              "to not exist until after it had been settled",
+              st == 200 and "Invoice" in ubody)
+        check("...and it says what is owed rather than what was taken, "
+              "because a receipt for money nobody has sent is a lie",
+              "Amount due" in ubody and "Total paid" not in ubody)
+        check("...while the PAID one is a receipt, and carries no live pay "
+              "button, since an invoice already settled with a working "
+              "button is how somebody pays twice",
+              "Total paid" in inv and "Pay by card" not in inv)
 
         # Invoice ids are guessable, and an invoice names a company and what
         # it pays.

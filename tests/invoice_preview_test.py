@@ -82,6 +82,10 @@ a = AuthStore(adb)
 org = a.signup("boss@easy.test", "a-password-for-the-test", "EasyMikroTik")
 a.set_superadmin("boss@easy.test", True)
 a.signup("owner@alpha.test", "a-password-for-the-test", "Alpha Freight")
+# Without this the pay link cannot be built at all -- 127.0.0.1 is refused
+# as a public address on purpose, since a link a customer cannot open is
+# worse than no link.
+a.set_setting("public_base_url", "https://easymikrotik.test")
 a.close()
 store = B.BillingStore(bdb)
 store.close()
@@ -157,13 +161,29 @@ check("...for the real advertised price, not a placeholder",
 check("...stamped SAMPLE, because it is a page with an amount and a pay "
       "button on it", "SAMPLE" in pay)
 
-st, inv = get(boss, f"/superadmin/test-invoice?doc=invoice&plan={PLAN['name']}")
-check("the receipt previews", st == 200 and "Invoice" in inv)
+st, inv = get(boss, f"/superadmin/test-invoice?doc=receipt&plan={PLAN['name']}")
+check("the receipt previews", st == 200 and "Receipt" in inv)
 check("...stamped SAMPLE too -- this is the one that gets printed and filed",
       "SAMPLE" in inv)
 check("...and still carries no VAT line, which is the thing that would be a "
       "real problem rather than a cosmetic one",
       "No VAT" in inv and "Tax Invoice" not in inv)
+
+# The document that actually goes out, which had no preview at all because
+# it had no renderer: before today an invoice only existed after it was paid.
+st, unpaid = get(boss,
+                 f"/superadmin/test-invoice?doc=invoice&plan={PLAN['name']}")
+check("the UNPAID invoice previews -- the one that gets forwarded to "
+      "whoever settles the bills", st == 200 and "Invoice" in unpaid)
+check("...saying what is owed rather than what was taken",
+      "Amount due" in unpaid and "Total paid" not in unpaid)
+check("...with the reference for a bank transfer on it",
+      "SAMPLECOMPAN" in unpaid)
+check("...and a Pay by card button, because the person it was forwarded to "
+      "has no login here", "Pay by card" in unpaid and "Yoco" in unpaid)
+check("the receipt carries NO live pay button: an invoice already settled "
+      "with a working Pay button is how somebody pays twice",
+      "Pay by card" not in inv)
 
 st, big = get(boss, "/superadmin/test-invoice?plan=" + B.PLANS[-1]["name"])
 check("any packet can be previewed, not just the cheapest",

@@ -710,8 +710,76 @@ def _pay_page(order, error: str, *, paid: bool = False,
             f'</div></body></html>')
 
 
+def _invoice_fields(org: dict, order: dict, contact: dict | None,
+                    pay_link: str = "") -> dict:
+    """The numbers on an invoice, for a template to place where it likes.
+
+    Built from the ORDER, like the built-in invoice: a document that changes
+    when the price list changes is not a record of anything.
+    """
+    from .brand import lockup_svg
+
+    plan = plan_by_name(order.get("plan", ""))
+    devices = plan["devices"] if plan else "?"
+    months = max(1, int(order.get("months") or 1))
+    total = (order.get("amount_cents") or 0) / 100
+    cur = str(order.get("currency") or BILLING_CURRENCY).upper()
+    sym = CURRENCY_SYMBOL.get(cur, "")
+    unit = total / months if months else total
+    when = time.strftime("%d %B %Y", time.localtime(
+        order.get("paid") or order.get("created") or 0))
+    return {
+        "logo": lockup_svg(34),
+        "number": f'{int(order.get("id") or 0):05d}',
+        "date": when,
+        "company": org.get("name", ""),
+        "reference": payment_reference(order.get("org_id", 0),
+                                       org.get("name", "")),
+        "description": f"Router monitoring — up to {devices} devices",
+        "devices": devices,
+        "unit": f"{sym}{unit:,.2f}",
+        "months": months,
+        "total": f"{sym}{total:,.2f}",
+        "currency": cur,
+        "paid_on": when if order.get("paid") else "",
+        "seller": " · ".join(str(v) for v in (
+            (contact or {}).get("name"), (contact or {}).get("email")) if v),
+        "pay_link": pay_link,
+    }
+
+
+def _invoice_pay_block(pay_link: str, ref: str) -> str:
+    """How to pay, on the invoice itself.
+
+    An invoice gets forwarded to whoever settles the bills, and that person
+    has no login here. A button that pays it is the difference between the
+    card rail and somebody at our end reading a bank statement -- so it is
+    on the document, not only in the email that carried it.
+    """
+    if pay_link:
+        card = (f'<a href="{esc(pay_link)}" '
+                f'style="display:inline-block;background:#2563eb;color:#fff;'
+                f'text-decoration:none;padding:11px 20px;border-radius:6px;'
+                f'font-weight:700">Pay by card</a>'
+                f'<div class="muted" style="font-size:12px;margin-top:8px">'
+                f'Secured by Yoco. Your service carries on the moment the '
+                f'payment clears &mdash; nobody here has to do anything. '
+                f'Or open <code>{esc(pay_link)}</code>.</div>')
+    else:
+        card = ('<div class="muted" style="font-size:12px">To pay by card, '
+                'sign in and open the Billing tab.</div>')
+    return (f'<div style="margin-top:24px;padding:16px;border:1px solid '
+            f'var(--border);border-radius:8px">'
+            f'<div style="font-size:11px;text-transform:uppercase;'
+            f'letter-spacing:.08em;color:#64748b;margin-bottom:8px">'
+            f'How to pay</div>{card}'
+            f'<div class="muted" style="font-size:12px;margin-top:10px">'
+            f'Paying by bank transfer instead? Quote <code>{esc(ref)}</code> '
+            f'so the payment can be matched to your account.</div></div>')
+
+
 def _render_invoice(user, org: dict, order: dict, contact: dict | None,
-                    brand: str = "") -> str:
+                    brand: str = "", pay_link: str = "") -> str:
     """A printable invoice for one paid order.
 
     Deliberately built from the ORDER, not from today's price list: an
@@ -722,6 +790,15 @@ def _render_invoice(user, org: dict, order: dict, contact: dict | None,
     arrives this grows a VAT block, and until then claiming one would be a
     real problem rather than a cosmetic one.
     """
+    # An uploaded design wins outright. Somebody who has put their own
+    # invoice here has already decided what an invoice of theirs looks like.
+    from . import invoice_template as _tpl
+
+    custom = _tpl.load()
+    if custom:
+        return _tpl.render(custom,
+                           _invoice_fields(org, order, contact, pay_link))
+
     plan = plan_by_name(order.get("plan", ""))
     devices = plan["devices"] if plan else "?"
     months = max(1, int(order.get("months") or 1))
@@ -732,8 +809,11 @@ def _render_invoice(user, org: dict, order: dict, contact: dict | None,
     cur = str(order.get("currency") or BILLING_CURRENCY).upper()
     sym = CURRENCY_SYMBOL.get(cur, "")
     unit = total / months if months else total
+    settled = bool(order.get("paid"))
     paid_on = time.strftime("%d %B %Y", time.localtime(
         order.get("paid") or order.get("created") or 0))
+    due_on = (time.strftime("%d %B %Y", time.localtime(order["due"]))
+              if order.get("due") else "")
     ref = payment_reference(order.get("org_id", 0), org.get("name", ""))
     seller = "".join(
         f'<div>{esc(str(v))}</div>' for v in (
@@ -744,7 +824,8 @@ def _render_invoice(user, org: dict, order: dict, contact: dict | None,
         f'<div class="box" id="inv">'
         f'<div style="display:flex;justify-content:space-between;'
         f'align-items:flex-start;gap:20px;flex-wrap:wrap">'
-        f'<div><h1 style="margin:0 0 4px">Invoice</h1>'
+        f'<div><h1 style="margin:0 0 4px">'
+        f'{"Receipt" if settled else "Invoice"}</h1>'
         f'<div class="muted">#{int(order["id"]):05d} &middot; {esc(paid_on)}</div>'
         f'</div>'
         f'<div style="text-align:right">{_invoice_logo()}'
@@ -768,14 +849,18 @@ def _render_invoice(user, org: dict, order: dict, contact: dict | None,
         f'<div style="display:flex;justify-content:flex-end;margin-top:14px">'
         f'<div style="min-width:220px">'
         f'<div style="display:flex;justify-content:space-between;'
-        f'font-size:18px;font-weight:700"><span>Total paid</span>'
+        f'font-size:18px;font-weight:700">'
+        f'<span>{"Total paid" if settled else "Amount due"}</span>'
         f'<span>{esc(sym)}{total:,.2f} {esc(cur)}</span></div>'
         f'<div class="muted" style="font-size:12px;text-align:right;'
-        f'margin-top:4px">Paid by card on {esc(paid_on)}</div></div></div>'
-        f'<p class="muted" style="font-size:12px;margin-top:22px">'
-        f'This is a receipt for a payment already made. No VAT has been '
-        f'charged.</p>'
-        f'</div>'
+        f'margin-top:4px">'
+        f'{f"Paid by card on {esc(paid_on)}" if settled else (f"Due {esc(due_on)}" if due_on else "Payable on receipt")}'
+        f'</div></div></div>'
+        + (_invoice_pay_block(pay_link, ref) if not settled else "")
+        + (f'<p class="muted" style="font-size:12px;margin-top:22px">'
+           f'{"This is a receipt for a payment already made." if settled else ""}'
+           f' No VAT has been charged.</p>')
+        + f'</div>'
         f'<div class="actions" style="margin-top:14px">'
         f'<button class="btn" type="button" onclick="window.print()">'
         f'Print or save as PDF</button> '
@@ -1109,6 +1194,46 @@ def _sample_bar(html: str, what: str, plan_name: str) -> str:
         else bar + html
 
 
+def _invoice_template_box(csrf: str, have: bool, warnings=()) -> str:
+    """Upload your own invoice design, or go back to the built-in one."""
+    warn = ""
+    if warnings:
+        warn = ("<ul style=\"margin:0 0 10px;padding-left:18px;color:#b45309\">"
+                + "".join(f"<li>{esc(str(w))}</li>" for w in warnings)
+                + "</ul>")
+    if have:
+        state = ('<p class="muted" style="margin:0 0 8px">'
+                 '<b>Your own template is in use.</b> Every invoice and '
+                 'receipt is rendered from it. The preview above shows it '
+                 'with real figures.</p>'
+                 f'<form method="POST" action="/superadmin/invoice-template" '
+                 f'style="display:inline" onsubmit="return confirm(\'Go back '
+                 f'to the built-in invoice?\')">'
+                 f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+                 f'<input type="hidden" name="remove" value="1">'
+                 f'<button class="btn ghost" type="submit">Use the built-in '
+                 f'invoice again</button></form> ')
+    else:
+        state = ('<p class="muted" style="margin:0 0 8px">The built-in '
+                 'invoice is in use. Upload an HTML file with '
+                 '<code>{{placeholders}}</code> where the figures go and it '
+                 'replaces it &mdash; <code>{{logo}}</code> becomes the '
+                 'EasyMikroTik mark, drawn at document size rather than '
+                 'pasted in as a picture.</p>')
+    return (f'<div class="card" style="margin-bottom:16px">'
+            f'<h3 style="margin:0 0 6px">Your own invoice design</h3>'
+            f'{warn}{state}'
+            f'<form method="POST" action="/superadmin/invoice-template" '
+            f'enctype="multipart/form-data" style="display:flex;gap:8px;'
+            f'flex-wrap:wrap;align-items:center;margin-top:6px">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="file" name="template" accept=".html,.htm,text/html">'
+            f'<button class="btn" type="submit">Upload</button>'
+            f'<a class="btn ghost" '
+            f'href="/superadmin/invoice-template?example=1">Download a '
+            f'starting point</a></form></div>')
+
+
 def _test_invoice_box() -> str:
     """The way into the preview, from the panel."""
     return ('<div class="card" style="margin-bottom:16px">'
@@ -1176,8 +1301,19 @@ def _test_invoice_page(user, plan, plan_name: str, subject: str, body: str,
         f'because a business that is not VAT-registered may not issue '
         f'one.</p>'
         f'<a class="btn" target="_blank" '
-        f'href="/superadmin/test-invoice?doc=invoice&plan={esc(plan_name)}">'
+        f'href="/superadmin/test-invoice?doc=receipt&plan={esc(plan_name)}">'
         f'Open the receipt</a></div>'
+        f'<div class="box">'
+        f'<h2 style="margin-top:0">4. The invoice itself, before it is '
+        f'paid</h2>'
+        f'<p class="muted">What gets forwarded to whoever settles the '
+        f'bills. That person has no login here, so the Pay by card button '
+        f'is on the document rather than only in the email that carried '
+        f'it &mdash; which is the difference between the card rail and '
+        f'somebody here reading a bank statement.</p>'
+        f'<a class="btn" target="_blank" '
+        f'href="/superadmin/test-invoice?doc=invoice&plan={esc(plan_name)}">'
+        f'Open the invoice</a></div>'
         f'<div class="actions" style="margin-top:14px">'
         f'<a class="btn ghost" href="/superadmin">Back to Platform '
         f'admin</a></div></div>')
@@ -2089,6 +2225,8 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        regions=None, nextdns=None, quotes=None,
                        yoco=None, yoco_hook_url: str = "",
                        public_base: str = "",
+                       invoice_template_on: bool = False,
+                       invoice_template_warnings=(),
                        upcoming=None, runner_status=None,
                        outstanding=None,
                        tunnel_rows=None,
@@ -2271,6 +2409,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
              f'{_yoco_box(yoco, csrf, yoco_hook_url)}'
              f'{_paylink_base_box(public_base, csrf)}'
              f'{_test_invoice_box()}'
+             f'{_invoice_template_box(csrf, invoice_template_on, invoice_template_warnings)}'
              f'{_outstanding_box(outstanding, csrf)}'
              f'{_upcoming_box(upcoming, runner_status)}'
              f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf, hub_pubkey)}'
