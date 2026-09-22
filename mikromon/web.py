@@ -3256,6 +3256,55 @@ def _learn_public_base(auth, host: str, https: bool) -> str:
     return base
 
 
+_SAMPLE_ORG = "Sample Company"
+
+
+def _sample_order(plan, now=None) -> dict:
+    """An order that does not exist, shaped exactly like one that does.
+
+    Built rather than read so the preview can never show, or alter, a real
+    company's invoice -- and so it works on a server that has not raised one
+    yet, which is the server whose invoices most need looking at.
+    """
+    from .billing import payment_reference
+
+    now = now or time.time()
+    return {"id": 0, "org_id": 0, "plan": plan["name"],
+            "amount_cents": int(round(plan["price_usd"] * 100)),
+            "currency": "USD", "months": 1, "status": "paid",
+            "created": now, "paid": now,
+            "reference": payment_reference(0, _SAMPLE_ORG)}
+
+
+def _renewal_email(org_name, plan, amount, currency, period_end, due_days,
+                   link, ref) -> tuple:
+    """(subject, body) for a renewal invoice. Builds it; does not send it.
+
+    Separated so the preview in Platform admin shows the message that will
+    actually arrive, rather than a second copy of it written to look the
+    same and then free to drift away from it.
+    """
+    from .billing import money
+
+    when = time.strftime("%d %B %Y", time.localtime(period_end))
+    total = money(amount, currency)
+    pay = (f"Pay now: {link}" if link else
+           "To pay, sign in to your account and open Billing.")
+    text = (
+        f"Hello,\n\n"
+        f"Your EasyMikroTik packet for {org_name} renews on {when}.\n\n"
+        f"  Router monitoring, up to {plan['devices']} devices\n"
+        f"  {total} for the month\n"
+        f"  Payable within {due_days} days\n\n"
+        f"{pay}\n\n"
+        f"Paying by card takes a moment and your service simply carries on "
+        f"-- nobody here has to do anything.\n\n"
+        f"Paying by bank transfer instead? Quote {ref} so the payment can "
+        f"be matched to your account.\n\n"
+        f"Thank you,\nEasyMikroTik\n")
+    return f"EasyMikroTik invoice \u2014 {total}, due {when}", text
+
+
 def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
                    period_end, due_days, link) -> None:
     """The renewal invoice, as an email somebody can act on.
@@ -3265,7 +3314,7 @@ def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
     that has to be hunted through for a way to pay gets paid by bank
     transfer, which is the path that needs a human here.
     """
-    from .billing import money, payment_reference
+    from .billing import payment_reference
     from .notify.org_email import _smtp_send
     from email.message import EmailMessage
 
@@ -3285,32 +3334,17 @@ def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
 
     org = (auth.org(org_id) if auth else None) or {}
     name = org.get("name") or f"Company {org_id}"
-    when = time.strftime("%d %B %Y", time.localtime(period_end))
     ref = payment_reference(org_id, org.get("name", ""))
-    total = money(amount, currency)
-
-    pay = (f"Pay now: {link}" if link else
-           "To pay, sign in to your account and open Billing.")
     if not link:
         log.warning("renewal: org %s was invoiced with NO pay link -- set "
                     "the public address in Platform admin, or every renewal "
                     "needs recording by hand", org_id)
 
-    text = (
-        f"Hello,\n\n"
-        f"Your EasyMikroTik packet for {name} renews on {when}.\n\n"
-        f"  Router monitoring, up to {plan['devices']} devices\n"
-        f"  {total} for the month\n"
-        f"  Payable within {due_days} days\n\n"
-        f"{pay}\n\n"
-        f"Paying by card takes a moment and your service simply carries on "
-        f"-- nobody here has to do anything.\n\n"
-        f"Paying by bank transfer instead? Quote {ref} so the payment can "
-        f"be matched to your account.\n\n"
-        f"Thank you,\nEasyMikroTik\n")
+    subject, text = _renewal_email(name, plan, amount, currency, period_end,
+                                   due_days, link, ref)
 
     msg = EmailMessage()
-    msg["Subject"] = f"EasyMikroTik invoice — {total}, due {when}"
+    msg["Subject"] = subject
     msg["From"] = smtp_cfg.from_addr
     msg["To"] = ", ".join(to)
     msg.set_content(text)
@@ -7116,6 +7150,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         billing.days_left_in_grace(org_id),
                         auth.get_billing_contact() if auth else None)
 
+            if path == "/superadmin/test-invoice":
+                return self._serve_test_invoice(url, user)
             if path == "/billing/invoice":
                 return self._serve_invoice(url, user)
             if path == "/billing":
@@ -11484,8 +11520,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
             The order row is written BEFORE anyone is sent to pay, and the
             amount comes from our own plan table. The browser says which
-            packet and how many months; it never says a price, because a
-            price that arrives from a browser is a price a customer can edit.
+            packet and nothing else; it never says a price or a length,
+            because either one arriving from a browser is one a customer
+            can edit.
             """
             from .billing import plan_by_name
             from .yoco import create_checkout, YocoError
@@ -11503,12 +11540,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._redirect("/billing?error=" + quote(
                     "That packet no longer exists. Please pick one from the "
                     "list."))
-            try:
-                months = int(flat.get("months") or 1)
-            except (TypeError, ValueError):
-                months = 1
-            if months not in (1, 3, 6, 12):
-                months = 1
+            # Monthly, always. Nothing is read off the form: a length that
+            # arrives from a browser is a length a customer can edit, and
+            # there is no longer anything for them to choose anyway.
+            months = 1
 
             # Yoco settles in ZAR and cannot take anything else, so this one
             # path converts -- at a PUBLISHED rate, recorded against the
@@ -11526,7 +11561,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     "Card payment is unavailable right now: today's exchange "
                     "rate could not be fetched, and we will not convert at a "
                     "rate we made up. Please pay by EFT, or try shortly."))
-            amount_cents = int(round(_fx["amount"] * 100)) * months
+            amount_cents = int(round(_fx["amount"] * 100))
             _fx_basis = describe({**_fx, "pair": "USDZAR"})
             org_id = user["org_id"]
             order_id = billing.create_order(org_id, plan["name"], amount_cents,
@@ -11559,9 +11594,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._redirect("/billing?error=" + quote(
                     "Yoco did not return a payment page. Nothing was "
                     "charged - please try again."))
-            log.info("Yoco checkout %s: org %s wants %s for %s month(s), "
+            log.info("Yoco checkout %s: org %s wants %s for the month, "
                      "R%.2f (order %s)", res.get("id"), org_id, plan["name"],
-                     months, amount_cents / 100, order_id)
+                     amount_cents / 100, order_id)
             return self._redirect(url)
 
         def _post_yoco_webhook(self):
@@ -11694,6 +11729,59 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 f"Your invoice is on the Billing page of the dashboard, under "
                 f"Payments.\n")
             _smtp_send(smtp, msg)
+
+        def _serve_test_invoice(self, url, user):
+            """Everything a customer receives for a renewal, on demand.
+
+            Superadmin only, and read-only in the strongest sense: it writes
+            no order, sends no mail and reads no company. The documents come
+            out of the same functions the real ones do, because a preview
+            rendered by a second code path is a picture of a document this
+            system does not send.
+            """
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            from .billing import (PLANS, first_billing_date, plan_by_name,
+                                  payment_reference)
+            from .billing_runner import _DEFAULT_DUE_DAYS
+            from .web_auth import _pay_page, _sample_bar, _test_invoice_page
+
+            q = parse_qs(url.query)
+            plan = plan_by_name((q.get("plan", [""])[0] or "").strip()) \
+                or PLANS[0]
+            order = _sample_order(plan)
+            doc = (q.get("doc", [""])[0] or "").strip()
+
+            if doc == "pay":
+                # A token that is deliberately not signed: pressing the
+                # button reaches the "this link is not valid" page, which is
+                # the right outcome for a payment nobody owes.
+                html = _pay_page(order, "", org_name=_SAMPLE_ORG,
+                                 token="sample")
+                return self._send(200, _sample_bar(
+                    html, "The page the pay link opens", plan["name"]),
+                    "text/html; charset=utf-8")
+
+            if doc == "invoice":
+                html = _render_invoice(
+                    user, {"name": _SAMPLE_ORG}, order,
+                    auth.get_billing_contact() if auth else None,
+                    brand=_BRAND)
+                return self._send(200, _sample_bar(
+                    html, "The receipt sent after payment", plan["name"]),
+                    "text/html; charset=utf-8")
+
+            # The email, built by the same function that sends the real one.
+            base = _public_base(auth)
+            link = f"{base}/pay?t=sample" if base else ""
+            renews = first_billing_date()
+            subject, body = _renewal_email(
+                _SAMPLE_ORG, plan, plan["price_usd"], "USD", renews,
+                _DEFAULT_DUE_DAYS, link, payment_reference(0, _SAMPLE_ORG))
+            to = user.get("email", "the company owner")
+            return self._send(200, _test_invoice_page(
+                user, plan, plan["name"], subject, body, to, link),
+                "text/html; charset=utf-8")
 
         def _serve_invoice(self, url, user):
             """One paid invoice, printable, for the company that paid it."""

@@ -749,11 +749,13 @@ try:
 
         # The price is the whole reason this route exists server-side.
         st, _ = req(yon, "/billing/checkout",
+                    # Every one of these is a field the browser must not
+                    # be able to decide: three of them are prices, and
+                    # months= no longer exists as a choice at all.
                     {"csrf": _ytok, "plan": "d25", "months": "3",
                      "amount": "1", "amount_cents": "1", "price": "1"},
                     base=QBASE)
-        _want = int(round(_zar(_plan("d25")["price_usd"])["amount"]
-                          * 100)) * 3
+        _want = int(round(_zar(_plan("d25")["price_usd"])["amount"] * 100))
         check("the amount charged is computed from our own plan table, not "
               "from anything the browser sent -- a price that arrives from a "
               "browser is a price a customer can edit",
@@ -766,6 +768,10 @@ try:
         check("the order is written before anyone is sent to pay",
               _yb.order(_order_id)["status"] == "pending"
               and _yb.order(_order_id)["amount_cents"] == _want)
+        check("...for one month, whatever months= the browser posted: "
+              "everything is monthly now, and the order row is what the "
+              "invoice is built from later",
+              int(_yb.order(_order_id)["months"]) == 1)
         check("...and the company is still on the packet it had, because "
               "opening a payment page is not paying",
               _yb.get(_yoid)["device_limit"] == 5)

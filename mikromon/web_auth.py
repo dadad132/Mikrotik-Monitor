@@ -176,12 +176,6 @@ def _plan_upgrade_box(csrf: str, bill, device_count: int = 0,
         f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
         f'<label style="flex:1;min-width:240px">Move up to'
         f'<br><select name="plan" style="width:100%">{opts}</select></label>'
-        f'<label>Pay for<br><select name="months">'
-        f'<option value="1">1 month</option>'
-        f'<option value="3">3 months</option>'
-        f'<option value="6">6 months</option>'
-        f'<option value="12">12 months</option>'
-        f'</select></label>'
         f'<button class="btn" type="submit">Upgrade</button>'
         f'</form>'
         f'<p class="muted" style="margin:10px 0 0;font-size:12px">'
@@ -927,19 +921,13 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
             btn = (f'<form method="POST" action="/billing/checkout">'
                    f'<input type="hidden" name="csrf" value="{csrf}">'
                    f'<input type="hidden" name="plan" value="{esc(p["name"])}">'
-                   f'<select name="months" style="padding:5px;margin-right:6px">'
-                   f'<option value="1">1 month</option>'
-                   f'<option value="3">3 months</option>'
-                   f'<option value="6">6 months</option>'
-                   f'<option value="12">12 months</option></select>'
                    f'<button class="btn" type="submit" style="padding:6px 14px">'
-                   f'Pay R{_zar:,.0f}</button></form>'
+                   f'Pay R{_zar:,.0f} for the month</button></form>'
                    f'<div class="muted" style="font-size:11px;margin-top:4px">'
                    f'${p["price_usd"]:,.0f}/mo, charged in rands because the '
                    f'card gateway settles in ZAR. '
                    f'{esc(_fx_line(_basis))}</div>'
                    if _zar is not None else
-                   f'</button></form>'
                    f'<div class="muted" style="font-size:11px;margin-top:4px">'
                    f'Card payment is unavailable while today\'s exchange '
                    f'rate cannot be fetched. Please pay by EFT.</div>')
@@ -1031,12 +1019,6 @@ def _locked_pay_block(user, csrf: str, yoco_on: bool, bill,
             f'<label style="display:block;margin-bottom:8px">Packet'
             f'<br><select name="plan" style="width:100%">{opts}</select>'
             f'</label>'
-            f'<label style="display:block;margin-bottom:10px">Pay for'
-            f'<br><select name="months" style="width:100%">'
-            f'<option value="1">1 month</option>'
-            f'<option value="3">3 months</option>'
-            f'<option value="6">6 months</option>'
-            f'<option value="12">12 months</option></select></label>'
             f'<button class="btn" type="submit" style="width:100%">'
             f'Pay now and switch everything back on</button>'
             f'<p class="muted" style="font-size:12px;margin:10px 0 0;'
@@ -1100,6 +1082,106 @@ def _render_locked(user, contact: dict | None = None,
              f'<a href="/logout">Log out</a></p>'
              f'</div></div>')
     return _page("Account Suspended", _header(user, "") + inner)
+
+
+def _sample_bar(html: str, what: str, plan_name: str) -> str:
+    """Stamp SAMPLE across a rendered customer document.
+
+    Injected into the wrapper rather than written into the document, so the
+    real thing never carries a banner and a printed preview can never be
+    mistaken for a real invoice -- which, on a document with an amount and a
+    bank reference on it, is the one confusion worth engineering against.
+    """
+    bar = (f'<div style="position:sticky;top:0;z-index:99;background:#b45309;'
+           f'color:#fff;padding:9px 16px;font:600 13px/1.4 system-ui,'
+           f'sans-serif;display:flex;gap:12px;align-items:center;'
+           f'flex-wrap:wrap">'
+           f'<span style="background:#fff;color:#b45309;padding:1px 7px;'
+           f'border-radius:3px;letter-spacing:.06em">SAMPLE</span>'
+           f'<span>{esc(what)} for the {esc(plan_name)} packet. Nothing was '
+           f'charged, nothing was sent, and no order exists.</span>'
+           f'<a href="/superadmin/test-invoice?plan={esc(plan_name)}" '
+           f'style="color:#fff;margin-left:auto">Back to the preview</a>'
+           f'</div>')
+    marker = "<body>"
+    i = html.find(marker)
+    return html[:i + len(marker)] + bar + html[i + len(marker):] if i >= 0 \
+        else bar + html
+
+
+def _test_invoice_box() -> str:
+    """The way into the preview, from the panel."""
+    return ('<div class="card" style="margin-bottom:16px">'
+            '<h3 style="margin:0 0 6px">See an invoice before one goes out</h3>'
+            '<p class="muted" style="margin:0 0 8px">The renewal email, the '
+            'pay page and the receipt, for any packet, built from a made-up '
+            'order. Nothing is written down and nothing is sent.</p>'
+            '<a class="btn" href="/superadmin/test-invoice">Preview an '
+            'invoice</a></div>')
+
+
+def _test_invoice_page(user, plan, plan_name: str, subject: str, body: str,
+                       to: str, link: str) -> str:
+    """Everything a customer receives for one renewal, before one is due.
+
+    Three documents go out in a renewal -- this email a week early, the page
+    its link opens, and the receipt after payment -- and until now the only
+    way to read any of them was to wait for a real one to fire at a real
+    customer. Which makes the first proper reader the person being billed.
+    """
+    opts = "".join(
+        f'<option value="{esc(p["name"])}"'
+        f'{" selected" if p["name"] == plan_name else ""}>'
+        f'{p["devices"]} devices &mdash; ${p["price_usd"]:,.0f} per month'
+        f'</option>' for p in PLANS)
+    warn = "" if link else (
+        '<p class="muted" style="color:#dc2626;margin:0 0 12px">'
+        '<b>There is no pay link in this email</b>, because no public '
+        'address is set. A real invoice would go out the same way, and '
+        'every renewal would then need recording by hand.</p>')
+    inner = (
+        f'<div class="wrap" style="max-width:820px">'
+        f'<h1 style="margin:0 0 4px">What the customer gets</h1>'
+        f'<p class="muted" style="margin:0 0 18px">Built from a made-up '
+        f'order by the same code that builds the real ones. Nothing is '
+        f'written down, nothing is emailed, and no company is touched.</p>'
+        f'<form method="GET" action="/superadmin/test-invoice" class="box" '
+        f'style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">'
+        f'<label style="flex:1;min-width:240px">Packet'
+        f'<br><select name="plan" style="width:100%">{opts}</select></label>'
+        f'<button class="btn" type="submit">Show me</button></form>'
+        f'<div class="box">'
+        f'<h2 style="margin-top:0">1. The email, seven days before it is '
+        f'due</h2>{warn}'
+        f'<table style="margin-bottom:12px"><tbody>'
+        f'<tr><td style="width:80px" class="muted">To</td>'
+        f'<td><code>{esc(to)}</code></td></tr>'
+        f'<tr><td class="muted">Subject</td><td><b>{esc(subject)}</b></td>'
+        f'</tr></tbody></table>'
+        f'<pre style="white-space:pre-wrap;margin:0;padding:14px;'
+        f'background:var(--bg);border:1px solid var(--border);'
+        f'border-radius:6px;font-size:13px">{esc(body)}</pre></div>'
+        f'<div class="box">'
+        f'<h2 style="margin-top:0">2. The page that link opens</h2>'
+        f'<p class="muted">No login. One amount and one button &mdash; a '
+        f'customer who has to sign in to pay takes the bank transfer '
+        f'instead, and that is the path that needs somebody here.</p>'
+        f'<a class="btn" target="_blank" '
+        f'href="/superadmin/test-invoice?doc=pay&plan={esc(plan_name)}">'
+        f'Open the pay page</a></div>'
+        f'<div class="box">'
+        f'<h2 style="margin-top:0">3. The receipt, after they have paid</h2>'
+        f'<p class="muted">What they can print or file. No VAT line and the '
+        f'word &ldquo;Invoice&rdquo; rather than &ldquo;Tax Invoice&rdquo;, '
+        f'because a business that is not VAT-registered may not issue '
+        f'one.</p>'
+        f'<a class="btn" target="_blank" '
+        f'href="/superadmin/test-invoice?doc=invoice&plan={esc(plan_name)}">'
+        f'Open the receipt</a></div>'
+        f'<div class="actions" style="margin-top:14px">'
+        f'<a class="btn ghost" href="/superadmin">Back to Platform '
+        f'admin</a></div></div>')
+    return _page("Invoice preview", _header(user, "/superadmin") + inner)
 
 
 def _paylink_base_box(base: str, csrf: str) -> str:
@@ -2188,6 +2270,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
              f'{_billing_contact_box(billing_contact, csrf)}'
              f'{_yoco_box(yoco, csrf, yoco_hook_url)}'
              f'{_paylink_base_box(public_base, csrf)}'
+             f'{_test_invoice_box()}'
              f'{_outstanding_box(outstanding, csrf)}'
              f'{_upcoming_box(upcoming, runner_status)}'
              f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf, hub_pubkey)}'
@@ -2519,7 +2602,7 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
         '<p>There are two ways to pay, and the Billing tab shows whichever '
         'one this server is set up for:</p>'
         '<ul>'
-        '<li><b>By card.</b> Pick the packet and how many months, and you '
+        '<li><b>By card.</b> Pick the packet and you '
         'are taken to Yoco to pay. The new packet switches on <b>by '
         'itself</b> the moment the payment clears — usually a few '
         'seconds. Nobody at our end has to notice and do anything.</li>'
