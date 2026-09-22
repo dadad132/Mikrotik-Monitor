@@ -111,6 +111,12 @@ class _Zoho:
         except _z.ZohoError as exc:
             raise ProviderError(str(exc)) from exc
 
+    def add_invoice_note(self, invoice_id, note):
+        try:
+            return _z.add_invoice_note(self.cfg, invoice_id, note)
+        except _z.ZohoError as exc:
+            raise ProviderError(str(exc)) from exc
+
     def record_payment(self, invoice_id, customer_name, amount,
                        reference=""):
         try:
@@ -247,6 +253,24 @@ def raise_due_invoices(billing, auth, cfg, now: float | None = None,
             org_id, plan["name"], int(round(amount * 100)), months=1,
             currency=currency, provider=prov.name, due=period_end)
         billing.set_order_external(order_id, inv["id"])
+
+        # The invoice now carries a link that pays it. Without one the
+        # easiest thing a customer can do is a bank transfer, and a bank
+        # transfer is the only path here that needs a person at our end
+        # reading a statement. Making the automatic route the easy route is
+        # the whole difference between "can be automatic" and "is".
+        try:
+            pay_url = _pay_link(auth, order_id)
+            if pay_url:
+                prov.add_invoice_note(
+                    inv["id"],
+                    f"Pay by card, instantly: {pay_url}\n"
+                    f"Your service continues the moment it goes through. "
+                    f"Or pay by bank transfer quoting {ref}.")
+        except Exception:  # noqa: BLE001 — an invoice without a link is
+            # still an invoice, and it must not fail to go out over this.
+            log.exception("could not add a pay link to invoice %s", inv["id"])
+
         raised += 1
         log.info("renewal: invoice %s (%s) raised for org %s (%s), %s, "
                  "packet lapses %s", inv["number"], inv["id"], org_id, name,
@@ -342,6 +366,19 @@ def mark_raised(auth, now: float | None = None) -> None:
                              time.strftime("%Y-%m-%d", time.localtime(now)))
     except Exception:  # noqa: BLE001
         log.exception("could not record the daily invoice run")
+
+
+def _pay_link(auth, order_id: int) -> str:
+    """The public pay URL for an order, or "" when it cannot be built."""
+    try:
+        from . import paylink
+        base = str((auth.get_setting("public_base_url") or "")).strip()
+        if not base:
+            return ""
+        return paylink.url(auth, base, int(order_id))
+    except Exception:  # noqa: BLE001
+        log.exception("could not build a pay link")
+        return ""
 
 
 def upcoming(billing, auth, limit: int = 20) -> list:

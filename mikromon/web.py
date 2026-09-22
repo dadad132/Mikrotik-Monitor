@@ -6927,6 +6927,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if path == "/health":
                 return self._send(200, "ok")
 
+            # Paying an invoice by card, from the link on the invoice. No
+            # session: a customer who has to remember a password to pay
+            # takes the bank transfer instead, and the bank transfer is the
+            # one that needs a person at our end reading a statement.
+            if path == "/pay":
+                return self._serve_pay(url)
+
             # The artwork is served before any auth check: the landing page
             # and the login page both need it, and neither has a session.
             if path in ("/favicon.svg", "/favicon.ico", "/logo", "/logo.svg"):
@@ -11236,6 +11243,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_billing_cancel(flat, user)
             if path == "/billing/quote":
                 return self._post_billing_quote(flat, user)
+            if path == "/pay":
+                return self._post_pay()
             if path == "/billing/checkout":
                 return self._post_billing_checkout(flat, user)
             # Org isolation: an owner may only touch devices their company owns.
@@ -11485,6 +11494,101 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             except Exception:
                 log.exception("could not mark quote handled")
             return self._redirect("/superadmin?ok=" + quote("Quote marked handled"))
+
+        def _pay_order(self, token):
+            """(order, error) for a pay token. Never reveals why it failed."""
+            if billing is None or auth is None:
+                return None, "Card payment is not available here."
+            from . import paylink
+            try:
+                order_id = paylink.read(auth, token)
+            except Exception:  # noqa: BLE001
+                log.exception("could not read a pay token")
+                return None, "That payment link is not valid."
+            if not order_id:
+                return None, ("That payment link has expired or is not "
+                              "valid. Ask us for a new one.")
+            order = billing.order(int(order_id))
+            if not order:
+                return None, "That payment link is not valid."
+            if order.get("paid"):
+                return order, "PAID"
+            return order, ""
+
+        def _serve_pay(self, url):
+            """The page a customer lands on from the invoice."""
+            from urllib.parse import parse_qs
+            q = parse_qs(url.query)
+            token = (q.get("t") or [""])[0]
+            order, err = self._pay_order(token)
+
+            from .web_auth import _pay_page
+            if err == "PAID":
+                return self._send(200, _pay_page(
+                    order, "", paid=True), "text/html; charset=utf-8")
+            if err:
+                return self._send(200, _pay_page(None, err),
+                                  "text/html; charset=utf-8")
+            org = (auth.org(int(order["org_id"])) if auth else None) or {}
+            return self._send(200, _pay_page(
+                order, "", org_name=org.get("name", ""), token=token),
+                "text/html; charset=utf-8")
+
+        def _post_pay(self):
+            """Start the card checkout for an invoice, from its own link."""
+            flat, _ = self._form()
+            order, err = self._pay_order(flat.get("t", ""))
+            from .web_auth import _pay_page
+            if err == "PAID":
+                return self._send(200, _pay_page(order, "", paid=True),
+                                  "text/html; charset=utf-8")
+            if err:
+                return self._send(200, _pay_page(None, err),
+                                  "text/html; charset=utf-8")
+            if not self._yoco_live():
+                return self._send(200, _pay_page(
+                    None, "Card payment is not switched on. Please pay by "
+                          "bank transfer using the details on your invoice."),
+                    "text/html; charset=utf-8")
+
+            # The amount comes from the ORDER, never from the page. A price
+            # that arrives from a browser is a price a customer can edit.
+            from .yoco import YocoError, create_checkout
+            cfg = auth.get_yoco() or {}
+            cents = int(order.get("amount_cents") or 0)
+            cur = str(order.get("currency") or "ZAR").upper()
+            if cur != "ZAR":
+                # Yoco settles in rands, so a USD invoice is charged its
+                # published-rate equivalent -- recorded on a second order so
+                # what was charged, and on what basis, is kept.
+                from .billing import zar_amount
+                from .fxrate import RateUnavailable, describe
+                try:
+                    fx = zar_amount(cents / 100.0)
+                except RateUnavailable:
+                    return self._send(200, _pay_page(
+                        None, "Today's exchange rate could not be fetched, "
+                              "and we will not convert at a rate we made up. "
+                              "Please pay by bank transfer, or try shortly."),
+                        "text/html; charset=utf-8")
+                cents = int(round(fx["amount"] * 100))
+            host = self.headers.get("Host", "")
+            base = ("https" if secure_cookies else "http") + "://" + host
+            try:
+                res = create_checkout(
+                    cfg["secret_key"], cents,
+                    success_url=f"{base}/pay?t={quote(flat.get('t', ''))}",
+                    cancel_url=f"{base}/pay?t={quote(flat.get('t', ''))}",
+                    failure_url=f"{base}/pay?t={quote(flat.get('t', ''))}",
+                    metadata={"order": str(order["id"])})
+            except YocoError as exc:
+                log.error("pay link checkout failed for order %s: %s",
+                          order["id"], exc)
+                return self._send(200, _pay_page(
+                    None, f"Card payment could not be started: {exc}"),
+                    "text/html; charset=utf-8")
+            billing.set_order_checkout(int(order["id"]), res.get("id", ""))
+            return self._redirect(res["redirectUrl"])
 
         def _post_billing_checkout(self, flat, user):
             """Send an owner to Yoco to pay for a packet.

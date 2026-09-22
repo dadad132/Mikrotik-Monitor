@@ -402,6 +402,17 @@ def create_invoice(cfg: dict, contact_id: str, *, description: str,
     return {"id": iid, "number": str(inv.get("invoice_number") or "")}
 
 
+def add_invoice_note(cfg: dict, invoice_id: str, note: str) -> None:
+    """Put a line on the invoice itself, above the terms.
+
+    Used for the pay-by-card link. It goes in the notes rather than a custom
+    field because notes print on every template without anybody having to
+    configure one -- and a link nobody can see is the same as no link.
+    """
+    _api(cfg, f"/invoices/{invoice_id}", method="PUT",
+         body={"notes": str(note or "")})
+
+
 def email_invoice(cfg: dict, invoice_id: str) -> None:
     """Send it. Zoho keeps a draft until it is marked sent, and a draft
     invoice is one nobody has been asked to pay."""

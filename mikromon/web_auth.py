@@ -663,6 +663,57 @@ def _invoice_logo() -> str:
             + lockup_svg(34) + '</div>')
 
 
+def _pay_page(order, error: str, *, paid: bool = False,
+              org_name: str = "", token: str = "") -> str:
+    """Pay one invoice by card. No login, and nothing else on the page.
+
+    Deliberately bare. Somebody arriving here has an invoice in front of
+    them and one thing to do; a menu, a login prompt or an account summary
+    would be an invitation to go and do something else, and the whole point
+    of this page is that the automatic path is the easy one.
+    """
+    from .billing import money, plan_by_name
+
+    if error:
+        inner = (f'<h1 style="font-size:20px;margin:0 0 10px">Payment link'
+                 f'</h1><p>{esc(error)}</p>')
+    elif paid:
+        inner = (f'<h1 style="font-size:20px;margin:0 0 10px;color:#15803d">'
+                 f'Already paid</h1>'
+                 f'<p>This invoice has been settled &mdash; nothing more is '
+                 f'owed, and your service carries on. Thank you.</p>')
+    else:
+        plan = plan_by_name(order.get("plan", "")) or {}
+        amount = (order.get("amount_cents") or 0) / 100
+        cur = str(order.get("currency") or "USD").upper()
+        devices = plan.get("devices")
+        inner = (
+            f'<h1 style="font-size:20px;margin:0 0 4px">Pay your invoice</h1>'
+            f'<p class="muted" style="margin:0 0 18px">'
+            f'{esc(org_name) if org_name else "Your account"}'
+            f'{f" &middot; up to {devices} devices" if devices else ""}</p>'
+            f'<div style="font-size:34px;font-weight:700;letter-spacing:-.02em;'
+            f'margin-bottom:4px">{esc(money(amount, cur))}</div>'
+            f'<p class="muted" style="margin:0 0 20px;font-size:13px">'
+            f'Router monitoring, billed monthly.</p>'
+            f'<form method="POST" action="/pay">'
+            f'<input type="hidden" name="t" value="{esc(token)}">'
+            f'<button class="btn" type="submit" style="width:100%;'
+            f'padding:12px;font-size:15px">Pay by card</button></form>'
+            f'<p class="muted" style="font-size:12px;margin:14px 0 0">'
+            f'Your service continues the moment the payment goes through '
+            f'&mdash; nobody here has to do anything. You can also pay by '
+            f'bank transfer using the details on your invoice.</p>')
+
+    return (f'<!doctype html><html><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f'{_THEME_INIT_JS}{_auth_favicon()}<title>Pay your invoice</title>'
+            f'<style>{_THEME_VARS}{_PAGE_CSS}</style></head><body>'
+            f'<div class="wrap" style="max-width:420px;margin-top:9vh">'
+            f'{_auth_brand()}<div class="box">{inner}</div>'
+            f'</div></body></html>')
+
+
 def _render_invoice(user, org: dict, order: dict, contact: dict | None,
                     brand: str = "") -> str:
     """A printable invoice for one paid order.
