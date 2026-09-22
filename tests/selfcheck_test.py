@@ -472,6 +472,54 @@ check("an all-clear says so in one line", "Nothing is wrong"
 check("nothing to report renders nothing at all",
       wa._selfcheck_box([]) == "")
 
+print("\nWhether HTTPS is actually enforced")
+
+# The symptom is a browser saying "Not secure" on a site with a perfectly
+# good certificate, and neither cause is visible from inside the app.
+#
+# secure_cookies decides whether the session cookie carries Secure at all.
+# install.sh sets it at install time and leaves it false whenever the
+# certificate was not yet in place on that first run -- which is every
+# server whose domain was pointed at it afterwards -- and nothing turns it
+# back on. And with no HSTS a browser has no reason to prefer https, so one
+# old bookmark puts the whole session in the clear.
+import tempfile as _tf  # noqa: E402
+
+_d = _tf.mkdtemp()
+_cfg = os.path.join(_d, "config.yaml")
+with open(_cfg, "w", encoding="utf-8") as _f:
+    _f.write("secure_cookies: false\n")
+
+check("with no certificate at all there is nothing to enforce, so this "
+      "stays quiet rather than nagging a server still being set up",
+      sc.check_https_enforced(_cfg) == []
+      or not os.path.isdir("/etc/letsencrypt/live"))
+
+# The parsing is the part worth pinning: the finding only ever fires off
+# what it reads out of the file.
+import yaml as _yaml  # noqa: E402
+
+with open(_cfg, encoding="utf-8") as _f:
+    check("a false flag in config.yaml is read as false, which is what the "
+          "finding turns on",
+          _yaml.safe_load(_f).get("secure_cookies") is False)
+
+check("the check is wired into the full run rather than only callable",
+      "check_https_enforced" in open(
+          os.path.join(os.path.dirname(os.path.dirname(
+              os.path.abspath(__file__))), "mikromon", "selfcheck.py"),
+          encoding="utf-8").read().split("def run_all")[1])
+
+_ngx = open(os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "deploy", "install.sh"),
+    encoding="utf-8").read()
+check("the installer sets HSTS, so a browser refuses http once it has seen "
+      "https even once", "Strict-Transport-Security" in _ngx)
+check("...but only with a real certificate: on a self-signed one HSTS also "
+      "removes the click-through on the certificate warning, which locks "
+      "the operator out of their own server",
+      "letsencrypt/live" in _ngx.split("HSTS_LINE=\"\"")[1][:200])
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

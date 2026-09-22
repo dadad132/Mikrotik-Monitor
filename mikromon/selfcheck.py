@@ -457,6 +457,84 @@ def _cert_paths(access_cfg):
             and not (p in seen or seen.add(p))]
 
 
+def check_https_enforced(config_path="", access_cfg=None):
+    """Is the dashboard reachable over plain HTTP?
+
+    The symptom is a browser saying "Not secure" on a site that has a
+    perfectly good certificate. Two separate things cause it, and both are
+    invisible from inside the app:
+
+    `secure_cookies` decides whether the session cookie carries the Secure
+    attribute at all. install.sh leaves it false whenever the certificate
+    was not yet in place on its first run -- which is every server where the
+    domain was pointed at it afterwards -- and nothing ever turns it back
+    on. So a site with a real Let's Encrypt cert can be sending its session
+    cookie over plain HTTP, which is the one that actually costs something.
+
+    And without HSTS the browser has no reason to prefer https: one http
+    link, one typed address, one old bookmark, and the whole session is in
+    the clear with nothing to say so.
+    """
+    import glob
+    out = []
+    live = sorted(glob.glob("/etc/letsencrypt/live/*/fullchain.pem"))
+    if not live:
+        return []                       # no cert, nothing to enforce yet
+
+    secure = None
+    if config_path and os.path.exists(config_path):
+        try:
+            import yaml
+            with open(config_path, encoding="utf-8") as f:
+                secure = bool((yaml.safe_load(f) or {}).get("secure_cookies"))
+        except Exception:  # noqa: BLE001
+            secure = None
+    if secure is False:
+        out.append(_finding(
+            "https:cookie", False,
+            "The session cookie is NOT marked Secure, on a server that has "
+            "a certificate",
+            "secure_cookies is false in config.yaml. It is set at install "
+            "time and left false when the certificate was not yet in place "
+            "on that first run, so a server that got its domain afterwards "
+            "stays like this. The cookie is then sent over plain HTTP "
+            "whenever anything reaches the site that way.",
+            "Set secure_cookies: true in config.yaml, then: "
+            "sudo systemctl restart mikromon-web"))
+    elif secure:
+        out.append(_finding("https:cookie", True,
+                            "The session cookie is marked Secure"))
+
+    hsts = False
+    for conf in ("/etc/nginx/sites-enabled/easymikrotik",
+                 "/etc/nginx/sites-available/easymikrotik"):
+        try:
+            with open(conf, encoding="utf-8") as f:
+                if "Strict-Transport-Security" in f.read():
+                    hsts = True
+                    break
+        except OSError:
+            continue
+    if not hsts:
+        out.append(_finding(
+            "https:hsts", False,
+            "Browsers are not told to insist on HTTPS",
+            "There is no Strict-Transport-Security header, so http:// still "
+            "works and a browser has no reason to prefer https. One old "
+            "bookmark or one plain link and the session runs in the clear "
+            "with only a small 'Not secure' in the address bar to say so.",
+            "Add to the 443 server block in "
+            "/etc/nginx/sites-available/easymikrotik:\n"
+            '  add_header Strict-Transport-Security '
+            '"max-age=31536000" always;\n'
+            "then: sudo nginx -t && sudo systemctl reload nginx",
+            warn=True))
+    else:
+        out.append(_finding("https:hsts", True,
+                            "Browsers are told to insist on HTTPS"))
+    return out
+
+
 def check_tls_expiry(access_cfg=None, warn_days=21, critical_days=7):
     """How long until the certificate stops working?
 
@@ -666,7 +744,7 @@ def check_deployed_version(app_dir=""):
 
 def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
             metrics_db="", retention_days=30, smtp_cfg=None,
-            app_dir="", billing_db="",
+            app_dir="", billing_db="", config_path="",
             card_ready=None, runner_status=None, pay_base=None):
     """Every check, in the order a person would want to read them."""
     out = []
@@ -677,6 +755,7 @@ def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
                lambda: check_peers_file(peers_path, expected_peers),
                lambda: check_access_host(access_cfg),
                lambda: check_tls_expiry(access_cfg),
+               lambda: check_https_enforced(config_path, access_cfg),
                lambda: check_cert_renewal(),
                lambda: check_billing_ready(billing_db, card_ready,
                                            runner_status, pay_base),

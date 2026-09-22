@@ -875,6 +875,19 @@ NGX
           -subj "/CN=${DOMAIN}" >/dev/null 2>&1
     fi
 
+    # HSTS only with a REAL certificate. On a self-signed one it would tell
+    # the browser to refuse http AND refuse to let anyone click through the
+    # certificate warning -- locking the operator out of their own server
+    # with no way back except clearing HSTS state in the browser.
+    #
+    # Without it the site is merely reachable over http, which is how a
+    # session ends up in the clear behind a small "Not secure" that nobody
+    # reads: one old bookmark or one plain link is enough.
+    HSTS_LINE=""
+    if [[ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]]; then
+      HSTS_LINE='    add_header Strict-Transport-Security "max-age=31536000" always;'
+    fi
+
     # Full HTTPS reverse-proxy config.
     cat > "${NGINX_CONF}" <<NGX
 # HTTP → HTTPS redirect
@@ -902,6 +915,7 @@ server {
     add_header X-Frame-Options        SAMEORIGIN;
     add_header X-Content-Type-Options nosniff;
     add_header Referrer-Policy        strict-origin-when-cross-origin;
+${HSTS_LINE}
 
     # Proxy to the Python dashboard
     location / {

@@ -3398,7 +3398,7 @@ def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
 
 
 def _server_selfcheck(devices_db, metrics_db, access_cfg, smtp_cfg,
-                      retention_days=30, billing_db="",
+                      retention_days=30, billing_db="", config_path="",
                       card_ready=None, runner_status=None, pay_base=None):
     """Run the server self-check for the Platform admin panel.
 
@@ -3419,6 +3419,7 @@ def _server_selfcheck(devices_db, metrics_db, access_cfg, smtp_cfg,
                        access_cfg=access_cfg, metrics_db=metrics_db or "",
                        retention_days=retention_days, smtp_cfg=smtp_cfg,
                        billing_db=billing_db,
+                       config_path=config_path,
                        card_ready=card_ready,
                        runner_status=runner_status,
                        pay_base=pay_base)
@@ -7064,6 +7065,18 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 self.send_header(k, v)
             self.end_headers()
 
+        def _is_https(self) -> bool:
+            """Should the links on this page say https?
+
+            Yes if the config says this server has TLS, and also yes if THIS
+            request arrived over it -- which nginx states outright. Trusting
+            the flag alone is how a correctly-certificated server hands out
+            http:// links: install.sh leaves the flag false whenever the
+            certificate was not yet in place on the first run, and nothing
+            ever turns it back on.
+            """
+            return bool(secure_cookies) or self._request_is_https()
+
         def _request_is_https(self) -> bool:
             """mikromon itself never terminates TLS — install.sh's domain
             setup puts nginx in front for that, which always adds
@@ -7620,10 +7633,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # itself the evidence of where customers reach this server.
             _pay_base = _learn_public_base(
                 auth, self.headers.get("Host", ""),
-                secure_cookies or self._request_is_https())
+                self._is_https())
             _selfcheck = _server_selfcheck(
                 devices_db, metrics_db, access_cfg, smtp_settings,
                 _RETENTION_DAYS_DEFAULT,
+                config_path=config_path or "",
                 runner_status=_billing_status() if billing else None,
                 billing_db=billing_cfg.get("db", "") if billing else "",
                 card_ready=_card_ready(auth) if billing else None,
@@ -7650,7 +7664,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 invoice_template_warnings=_invoice_tpl.check(
                     _invoice_tpl.load()) if _invoice_tpl.load() else (),
                 yoco_hook_url=(
-                    ("https" if secure_cookies else "http") + "://"
+                    ("https" if self._is_https() else "http") + "://"
                     + self.headers.get("Host", "")
                     + "/billing/yoco-webhook")),
                 "text/html; charset=utf-8")
@@ -8090,7 +8104,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # straight to settings instead of being copied by hand.
                 from .yoco import register_webhook, YocoError
                 host = self.headers.get("Host", "")
-                hook_url = (("https" if secure_cookies else "http")
+                hook_url = (("https" if self._is_https() else "http")
                             + "://" + host + "/billing/yoco-webhook")
                 try:
                     res = register_webhook(cur.get("secret_key", ""),
@@ -11670,7 +11684,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         "text/html; charset=utf-8")
                 cents = int(round(fx["amount"] * 100))
             host = self.headers.get("Host", "")
-            base = ("https" if secure_cookies else "http") + "://" + host
+            base = ("https" if self._is_https() else "http") + "://" + host
             try:
                 res = create_checkout(
                     cfg["secret_key"], cents,
@@ -11741,7 +11755,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                             fx_rate=_fx["rate"],
                                             fx_basis=_fx_basis)
             host = self.headers.get("Host", "localhost")
-            base = ("https" if secure_cookies else "http") + "://" + host
+            base = ("https" if self._is_https() else "http") + "://" + host
             try:
                 res = create_checkout(
                     cfg["secret_key"], amount_cents,
@@ -12046,7 +12060,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     "using the reference on this page."))
             plan_name = flat.get("plan", "").strip()
             host = self.headers.get("Host", "localhost")
-            scheme = "https" if secure_cookies else "http"
+            scheme = "https" if self._is_https() else "http"
             base = f"{scheme}://{host}"
             owner_email = user.get("email") or user.get("username") or ""
             org_name = auth.org_name(user["org_id"]) if auth else ""
