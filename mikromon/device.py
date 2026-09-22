@@ -257,15 +257,25 @@ class Device:
         read-only in spirit, so anything that fails -- an older install whose
         monitor user genuinely lacks the rights, a menu that does not exist on
         this board -- degrades to False rather than disturbing the poll."""
+        return self.run_command_err(path, cmd, **params)[0]
+
+    def run_command_err(self, path, cmd: str, **params) -> tuple:
+        """(accepted, reason) for the same command.
+
+        The reason is the part that was missing. A refused check-for-updates
+        is almost always the stored login lacking the rights, and returning
+        a bare False left that indistinguishable -- on the page and in the
+        logs -- from a router with nothing to update.
+        """
         if self.api is None:
-            return False
+            return False, "not connected to the router"
         try:
             list(self.api.path(*path)(cmd, **params))
-            return True
-        except Exception:  # noqa: BLE001 — never let a nicety break a poll
-            log.debug("%s: command %s/%s not accepted", self.name,
-                      "/".join(path), cmd)
-            return False
+            return True, ""
+        except Exception as exc:  # noqa: BLE001 — never let a nicety break a poll
+            log.debug("%s: command %s/%s not accepted: %s", self.name,
+                      "/".join(path), cmd, exc)
+            return False, str(exc) or exc.__class__.__name__
 
     def ping(self, address: str, count: int = 3):
         """Best-effort ICMP ping FROM the router. Returns packet-loss % or None.

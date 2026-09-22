@@ -626,8 +626,14 @@ class _CmdDev:
         self.calls = []
 
     def run_command(self, path, cmd, **kw):
+        return self.run_command_err(path, cmd, **kw)[0]
+
+    def run_command_err(self, path, cmd, **kw):
         self.calls.append((path, cmd))
-        return self.ok
+        # A real refusal carries a reason, and the reason is the whole point:
+        # "no permission (write)" is the difference between a router with
+        # nothing to update and one nobody is allowed to ask.
+        return (self.ok, "" if self.ok else "no permission (write)")
 
 
 class _FactStore:
@@ -704,6 +710,52 @@ _ue._maybe_check_updates(_accepts, _ucfg, _at(2026, 8, 25, 11, 0))
 check("a check the router ACCEPTED is still not repeated until tomorrow -- "
       "it is a real request out to MikroTik from every router",
       len(_accepts.calls) == 1)
+
+# The refusal reason used to go into a debug log and nowhere else, so the
+# only symptom of a monitoring login that cannot run the check was a blank
+# column -- which reads exactly like "no update available".
+_ue.state = _FactStore()
+_ue._maybe_check_updates(_CmdDev(ok=False), _ucfg, _at(2026, 8, 25, 9, 0))
+_rf = _ue.state.facts("R")
+check("a refused check keeps the router's own reason, so the page can say "
+      "why rather than showing a blank that looks like 'up to date'",
+      _rf.get("update_check_ok") is False
+      and "permission" in (_rf.get("update_check_error") or ""))
+
+_ue.state = _FactStore()
+_ue._maybe_check_updates(_CmdDev(ok=True), _ucfg, _at(2026, 8, 25, 9, 0))
+check("...and an accepted one clears it, so yesterday's failure does not "
+      "sit on the page after it stopped being true",
+      _ue.state.facts("R").get("update_check_error") == "")
+
+from mikromon.web import _update_cell  # noqa: E402
+
+_now = _at(2026, 8, 25, 0, 2)
+check("a router nobody has successfully asked says so, rather than looking "
+      "identical to one with nothing to update",
+      _update_cell({})[0] == "Not checked yet")
+check("a refused check says refused, and carries the reason where somebody "
+      "can read it",
+      _update_cell({"update_checked": _now, "update_check_ok": False,
+                    "update_check_error": "no permission (write)"})[0]
+      == "Check refused"
+      and "permission" in _update_cell(
+          {"update_checked": _now, "update_check_ok": False,
+           "update_check_error": "no permission (write)"})[2])
+check("an update waiting NAMES the version, because 'an update exists' is "
+      "not enough to plan a window around",
+      _update_cell({"update_checked": _now, "update_check_ok": True,
+                    "update_available": True,
+                    "update_latest": "7.22"})[0] == "7.22 available")
+check("a router with nothing to do says so positively, and says when it "
+      "was asked",
+      _update_cell({"update_checked": _now, "update_check_ok": True,
+                    "update_available": False})[0] == "Up to date")
+check("...and the gap between asking and the router answering is its own "
+      "state, not a blank -- RouterOS reports the result a minute or two "
+      "after the check, so the first poll after midnight often has neither",
+      _update_cell({"update_checked": _now,
+                    "update_check_ok": True})[0] == "Waiting for the router")
 
 check("the day is measured in LOCAL time -- in UTC the nightly rollover "
       "would land in the middle of the afternoon for much of the world",

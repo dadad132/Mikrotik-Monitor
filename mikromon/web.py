@@ -2226,13 +2226,54 @@ def _maintenance_menu(name, active, csrf) -> str:
             f'Maintenance</a><div class="tabmenu">{items}{reboot}</div></div>')
 
 
+def _update_cell(f) -> tuple:
+    """(text, colour, footnote) for the RouterOS update state.
+
+    Four states, and they must not look alike. Up to date, an update
+    waiting, never successfully asked, and asked-and-refused are different
+    facts about a router, and the old blank column collapsed the last three
+    into the first.
+    """
+    checked = f.get("update_checked") or 0
+    when = (time.strftime("%d %b %H:%M", time.localtime(checked))
+            if checked else "")
+    if f.get("update_check_ok") is False:
+        why = str(f.get("update_check_error") or "").strip()
+        tail = f": {why}" if why else ""
+        return ("Check refused", "#b45309",
+                f"The router would not run the update check{tail}. Usually "
+                f"the stored monitoring login lacks the rights. Retried "
+                f"within the hour.")
+    if f.get("update_available") is True:
+        latest = str(f.get("update_latest") or "").strip()
+        return (f"{latest} available" if latest else "Update available",
+                "#b45309", f"Checked {when}." if when else "")
+    if f.get("update_available") is False:
+        return ("Up to date", "#15803d", f"Checked {when}." if when else "")
+    if checked:
+        return ("Waiting for the router", "",
+                f"Asked {when}; the router had not answered yet when this "
+                f"was last polled. RouterOS reports the result a minute or "
+                f"two after the check.")
+    return ("Not checked yet", "",
+            "Each router is asked once a night, on the first poll after "
+            "midnight.")
+
+
 def _facts_strip(f) -> str:
     items = [("Model", f.get("model", "—")), ("RouterOS", f.get("version", "—")),
              ("Identity", f.get("identity", "—")), ("Serial", f.get("serial", "—")),
              ("Host / IP", f.get("host", "—")), ("Uptime", f.get("uptime", "—"))]
     cells = "".join(f'<div class="fact"><div class="k">{esc(k)}</div>'
                     f'<div class="val">{esc(str(v))}</div></div>' for k, v in items)
-    return f'<div class="box"><div class="factgrid">{cells}</div></div>'
+    text, colour, note = _update_cell(f)
+    style = f' style="color:{colour}"' if colour else ""
+    cells += (f'<div class="fact" title="{esc(note)}">'
+              f'<div class="k">Update</div>'
+              f'<div class="val"{style}>{esc(text)}</div></div>')
+    return (f'<div class="box"><div class="factgrid">{cells}</div>'
+            f'<p class="muted" style="font-size:11px;margin:8px 0 0">'
+            f'{esc(note)}</p></div>')
 
 
 def _render_inventory(store, state, user, allowed) -> str:

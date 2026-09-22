@@ -214,6 +214,10 @@ class Engine:
             installed = str(upd.get("installed-version", "")).strip()
             if latest and installed:
                 facts["update_available"] = latest != installed
+                # Kept so the page can NAME the version rather than just
+                # asserting that one exists.
+                facts["update_latest"] = latest
+                facts["update_installed"] = installed
         except Exception:
             pass
         # Cache disk usage percentage.
@@ -259,9 +263,13 @@ class Engine:
             elif _local_day(last) == _local_day(now):
                 return
         facts["update_checked"] = now
-        accepted = device.run_command(("system", "package", "update"),
-                                      "check-for-updates")
+        accepted, why = device.run_command_err(
+            ("system", "package", "update"), "check-for-updates")
         facts["update_check_ok"] = bool(accepted)
+        # In the router's own words, on the page. Without this the only
+        # symptom of a login that cannot run the check is a blank column,
+        # which reads exactly like "nothing to update".
+        facts["update_check_error"] = "" if accepted else why
         if accepted:
             log.debug("%s: asked for a RouterOS update check", cfg.name)
         else:
