@@ -175,6 +175,82 @@ check("...which asks first, because it takes money-received as fact",
 check("nothing outstanding renders nothing at all, rather than an empty "
       "table", web_auth._outstanding_box([], "tok") == "")
 
+print("\nHow long until the lights go out")
+
+# The panel showed "Grace" and a date. Turning that into "am I about to lose
+# this customer" meant knowing grace runs seven days past a paid period and
+# then doing arithmetic on a date, which nobody does while scanning a table.
+NOW = time.time()
+
+check("a paid company counts down from its renewal date plus the grace "
+      "period -- the cut-off is knowable long before anything lapses",
+      round(B.days_until_suspension(
+          {"status": "active", "current_period_end": NOW + 3 * DAY},
+          "active", now=NOW)) == 3 + B.GRACE_DAYS)
+
+check("once it has lapsed, the countdown follows the grace deadline itself",
+      round(B.days_until_suspension(
+          {"status": "grace", "current_period_end": NOW - DAY,
+           "grace_period_end": NOW + 5 * DAY}, "grace", now=NOW)) == 5)
+
+check("an account already past its deadline reads zero, not minus three -- "
+      "it is suspended on the next pass, and a negative number only invites "
+      "the question",
+      B.days_until_suspension(
+          {"status": "grace", "grace_period_end": NOW - 3 * DAY},
+          "grace", now=NOW) == 0.0)
+
+check("a company already suspended has nothing left to count down",
+      B.days_until_suspension(
+          {"status": "suspended", "current_period_end": NOW - 30 * DAY},
+          "suspended", now=NOW) is None)
+
+check("a free company is not counting down towards anything",
+      B.days_until_suspension({"status": "inactive"}, "none",
+                              now=NOW) is None)
+
+check("...and neither is a company with no billing row at all",
+      B.days_until_suspension(None, "none", now=NOW) is None)
+
+# The row's own status column lags: lapse_due runs daily, so an account can
+# be past every date it has and still say "active" until the pass catches up.
+check("the resolved status wins over the stale column, so a row the daily "
+      "pass has not reached yet still shows the right countdown",
+      round(B.days_until_suspension(
+          {"status": "active", "current_period_end": NOW - 2 * DAY,
+           "grace_period_end": NOW + 5 * DAY}, "grace", now=NOW)) == 5)
+
+print("\n...and that it reaches the panel")
+
+_rows = [{"id": 1, "name": "Alpha Freight", "owner_email": "a@example.com",
+          "user_count": 1, "created": NOW - 90 * DAY, "device_count": 3,
+          "active_count": 3,
+          "bill": {"status": "grace", "plan": PLAN,
+                   "current_period_end": NOW - 2 * DAY,
+                   "grace_period_end": NOW + 5 * DAY, "device_limit": 5}}]
+html = web_auth._render_superadmin(
+    {"email": "me@example.com", "role": "owner", "is_superadmin": True},
+    _rows, [], csrf="tok", billing_on=True)
+check("the superadmin row says how many days are left, in words, rather "
+      "than leaving a date to be subtracted by eye",
+      "suspends in 5 days" in html)
+
+_rows[0]["bill"] = {"status": "active", "plan": PLAN,
+                    "current_period_end": NOW + 20 * DAY, "device_limit": 5}
+html = web_auth._render_superadmin(
+    {"email": "me@example.com", "role": "owner", "is_superadmin": True},
+    _rows, [], csrf="tok", billing_on=True)
+check("a healthy account shows its cut-off too -- the point is to see it "
+      "coming, not to be told once it has happened",
+      f"suspends in {20 + B.GRACE_DAYS} days" in html)
+
+_rows[0]["bill"] = {"status": "none", "plan": "", "device_limit": 1}
+html = web_auth._render_superadmin(
+    {"email": "me@example.com", "role": "owner", "is_superadmin": True},
+    _rows, [], csrf="tok", billing_on=True)
+check("a free company's row stays quiet rather than saying 'n/a', because "
+      "a row that says nothing is read faster", "suspends" not in html)
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

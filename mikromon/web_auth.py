@@ -5,11 +5,13 @@ and helpers from web_shared; web.py imports the render functions from here.
 """
 from __future__ import annotations
 
+import math
 import time
 
 from . import guide_art, guide_tabs
 from .auth import AuthStore
 from .billing import (payment_reference, PLANS, GRACE_DAYS,
+                      days_until_suspension,
                       FREE_DEVICES, BILLING_CURRENCY,
                       CURRENCY_SYMBOL,
                       TRIAL_DEVICES, _TRIAL_DAYS, TIER_STEP,
@@ -1100,6 +1102,58 @@ def _render_locked(user, contact: dict | None = None,
     return _page("Account Suspended", _header(user, "") + inner)
 
 
+def _paylink_base_box(base: str, csrf: str) -> str:
+    """Where invoices tell customers to go.
+
+    Shown even when it is right, because the failure it prevents is silent:
+    an invoice with no pay link looks exactly like an invoice with one until
+    somebody tries to pay it.
+    """
+    if base:
+        body = (f'<p class="muted" style="margin:0 0 8px">Invoices link to '
+                f'<code>{esc(base)}/pay</code>. Learned from the address '
+                f'you are reading this on.</p>')
+        tone = ""
+    else:
+        body = ('<p class="muted" style="margin:0 0 8px;color:#dc2626">'
+                '<b>Invoices are going out with no way to pay them.</b> '
+                'Open this panel on your public address (not an IP, not '
+                'localhost) and it records itself, or set it here.</p>')
+        tone = "border-color:#dc2626;"
+    return (f'<div class="card" style="{tone}margin-bottom:16px">'
+            f'<h3 style="margin:0 0 6px">Pay link address</h3>'
+            f'{body}'
+            f'<form method="post" action="/superadmin/pay-base" '
+            f'style="display:flex;gap:8px;flex-wrap:wrap">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input name="base" value="{esc(base)}" '
+            f'placeholder="https://your.domain" style="flex:1;min-width:220px">'
+            f'<button type="submit">Save</button></form></div>')
+
+
+def _countdown(bill: dict, status: str) -> str:
+    """How long this account has before it is cut off.
+
+    Silent for an account with nothing counting down -- a free company, or
+    one already suspended -- because a row that says nothing is read faster
+    than a row that says "n/a". Red inside a week, because that is the point
+    at which somebody here still has time to do something about it.
+    """
+    days = days_until_suspension(bill, status)
+    if days is None:
+        return ""
+    # Rounded UP, because the deadline is a date at midnight, not a moment:
+    # a cut-off tonight is one day away, and truncating would call it none.
+    whole = int(math.ceil(days))
+    if whole >= 1:
+        when = f"in {whole} day" + ("" if whole == 1 else "s")
+    else:
+        when = "on the next pass"
+    colour = "#dc2626" if days < GRACE_DAYS else "#64748b"
+    return (f'<br><span class="muted" style="font-size:11px;'
+            f'color:{colour};font-weight:600">suspends {when}</span>')
+
+
 _STATUS_COLOR = {
     "active":   ("#16a34a", "Active"),
     "trialing": ("#16a34a", "Active"),
@@ -1952,6 +2006,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        router_count: int = 0, hub_pubkey: str = "",
                        regions=None, nextdns=None, quotes=None,
                        yoco=None, yoco_hook_url: str = "",
+                       public_base: str = "",
                        upcoming=None, runner_status=None,
                        outstanding=None,
                        tunnel_rows=None,
@@ -1979,6 +2034,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                      if trial_end and status == "trial" else "")
         grace_str = (time.strftime("%d %b %Y", time.localtime(grace_end))
                      if grace_end and status == "grace" else "")
+        cut_str = _countdown(bill, status)
         created_str = (time.strftime("%d %b %Y", time.localtime(r["created"]))
                        if r.get("created") else "")
 
@@ -1996,6 +2052,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
             f'<td><span style="color:{color};font-weight:700">{label}</span>'
             f'{f"<br><span class=\'muted\' style=\'font-size:11px\'>trial ends {trial_str}</span>" if trial_str else ""}'
             f'{f"<br><span class=\'muted\' style=\'font-size:11px;color:#d97706\'>grace ends {grace_str}</span>" if grace_str else ""}'
+            f'{cut_str}'
             f'</td>'
             f'<td>{esc(plan) if plan else "<span class=\'muted\'>—</span>"}</td>'
             f'<td>{active_count}'
@@ -2130,6 +2187,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
              f'{_smtp_settings_box(smtp, csrf)}'
              f'{_billing_contact_box(billing_contact, csrf)}'
              f'{_yoco_box(yoco, csrf, yoco_hook_url)}'
+             f'{_paylink_base_box(public_base, csrf)}'
              f'{_outstanding_box(outstanding, csrf)}'
              f'{_upcoming_box(upcoming, runner_status)}'
              f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf, hub_pubkey)}'

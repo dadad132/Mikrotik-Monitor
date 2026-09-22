@@ -532,7 +532,7 @@ def check_cert_renewal():
 
 
 def check_billing_ready(billing_db="", card_ready=None,
-                        runner_status=None):
+                        runner_status=None, pay_base=None):
     """Companies on a paid packet that will never be invoiced.
 
     Renewal invoicing selects on the paid-up date, so a company without one
@@ -596,6 +596,19 @@ def check_billing_ready(billing_db="", card_ready=None,
             out.append(_finding(
                 "billing:runner", True,
                 f"Billing pass ran {age:.0f} minute(s) ago"))
+    if pay_base is not None and not pay_base:
+        out.append(_finding(
+            "billing:paylink", False,
+            "Invoices are going out with no way to pay them",
+            "Every invoice links to this server's public address, and none "
+            "is set -- so the link is left off and every renewal falls back "
+            "to somebody here reading a bank statement. It sets itself the "
+            "first time Platform admin is opened on the public domain "
+            "rather than an IP.",
+            "Open https://your.domain/superadmin once"))
+    elif pay_base:
+        out.append(_finding("billing:paylink", True,
+                            f"Invoices link to {pay_base}/pay"))
     if card_ready is False:
         out.append(_finding(
             "billing:provider", False,
@@ -654,7 +667,7 @@ def check_deployed_version(app_dir=""):
 def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
             metrics_db="", retention_days=30, smtp_cfg=None,
             app_dir="", billing_db="",
-            card_ready=None, runner_status=None):
+            card_ready=None, runner_status=None, pay_base=None):
     """Every check, in the order a person would want to read them."""
     out = []
     for fn in (lambda: check_deployed_version(app_dir),
@@ -666,7 +679,7 @@ def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
                lambda: check_tls_expiry(access_cfg),
                lambda: check_cert_renewal(),
                lambda: check_billing_ready(billing_db, card_ready,
-                                           runner_status),
+                                           runner_status, pay_base),
                lambda: check_nginx(access_cfg),
                lambda: check_retention(metrics_db, retention_days),
                lambda: check_smtp(smtp_cfg)):

@@ -165,6 +165,76 @@ check("a forged link gets a page that explains, not a stack trace or a 500",
 st, body = get("/pay")
 check("no token at all is handled the same way", st == 200 and "link" in body)
 
+print("\nThe address the link is built from")
+
+# Every invoice this system sends carries a link to `public_base_url`/pay,
+# and nothing had ever set that -- no field, no default, no warning. The
+# first renewal run would have emailed real invoices with the link silently
+# left out, which is the exact manual step the card rail exists to remove.
+from mikromon.web import _learn_public_base, _usable_public_host  # noqa: E402
+
+check("a real domain is a usable address",
+      _usable_public_host("easymikrotik.com") == "easymikrotik.com")
+check("...and keeps working when the browser carries a port",
+      _usable_public_host("easymikrotik.com:8080") == "easymikrotik.com")
+check("a bare IP is refused: a customer's browser warns on it and the "
+      "certificate does not match it, so it is not a way to pay",
+      _usable_public_host("196.24.1.9") == "")
+check("localhost is refused -- it resolves for everyone and reaches this "
+      "server for nobody", _usable_public_host("localhost") == "")
+check("so is an address with no dot in it, which is a LAN name",
+      _usable_public_host("mikromon") == "")
+check("and IPv6, for the same reason a v4 address is refused",
+      _usable_public_host("[2001:db8::1]:8080") == "")
+
+
+class _Settings:
+    def __init__(self, **kw):
+        self.d = dict(kw)
+
+    def get_setting(self, k, default=None):
+        return self.d.get(k, default)
+
+    def set_setting(self, k, v):
+        self.d[k] = v
+
+
+_a = _Settings()
+check("loading the admin panel over the public name records it, so nobody "
+      "has to know the setting exists",
+      _learn_public_base(_a, "easymikrotik.com", True)
+      == "https://easymikrotik.com"
+      and _a.d["public_base_url"] == "https://easymikrotik.com")
+
+_a2 = _Settings()
+check("loading it over an IP records NOTHING rather than baking an "
+      "unreachable link into every future invoice",
+      _learn_public_base(_a2, "196.24.1.9:8080", False) == ""
+      and "public_base_url" not in _a2.d)
+
+_a3 = _Settings(public_base_url="https://chosen.example")
+check("an address set on purpose is never overwritten by whatever host the "
+      "panel happened to be opened on",
+      _learn_public_base(_a3, "other.example", True)
+      == "https://chosen.example")
+
+check("plain HTTP is recorded as HTTP rather than guessed upwards into a "
+      "link that would fail to connect",
+      _learn_public_base(_Settings(), "staging.example.com", False)
+      == "http://staging.example.com")
+
+# And the panel says which it is, because the failure is otherwise silent:
+# an invoice with no pay link looks exactly like one with a link until
+# somebody tries to pay it.
+from mikromon import web_auth as _wa  # noqa: E402
+
+_box = _wa._paylink_base_box("https://easymikrotik.com", "tok")
+check("the panel shows the address invoices actually use",
+      "easymikrotik.com/pay" in _box)
+_box = _wa._paylink_base_box("", "tok")
+check("...and says so plainly when there is none, rather than looking fine",
+      "no way to pay" in _box)
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

@@ -3192,6 +3192,32 @@ def _billing_lists(billing, auth):
         return [], []
 
 
+def _usable_public_host(host: str) -> str:
+    """The host part of a URL a customer could actually open, or "".
+
+    Rejects the addresses that work only from here: localhost, a bare IP
+    (which a browser will warn about and a certificate will not match), and
+    anything without a dot in it. An invoice goes to somebody who is not on
+    this network, so a link built from one of those is worse than no link --
+    it looks like a way to pay and is not.
+    """
+    host = (host or "").strip()
+    if host.count(":") == 1:
+        host = host.rsplit(":", 1)[0]          # a :port -- IPv6 has more
+    host = host.strip("[]").lower()
+    if not host or "." not in host:
+        return ""
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return ""
+    try:
+        import ipaddress
+        ipaddress.ip_address(host)
+        return ""                              # a bare IP is not a pay link
+    except ValueError:
+        pass
+    return host
+
+
 def _public_base(auth=None) -> str:
     """Where a customer reaches this server, for links on an invoice.
 
@@ -3204,6 +3230,30 @@ def _public_base(auth=None) -> str:
             if auth else ""
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _learn_public_base(auth, host: str, https: bool) -> str:
+    """Record where customers reach this server, from a request that did.
+
+    Only when nothing is set: an address entered on purpose always wins, and
+    this never moves one that already exists.
+    """
+    if auth is None:
+        return ""
+    have = _public_base(auth)
+    if have:
+        return have
+    name = _usable_public_host(host)
+    if not name:
+        return ""
+    base = ("https" if https else "http") + "://" + name
+    try:
+        auth.set_setting("public_base_url", base)
+    except Exception:  # noqa: BLE001
+        log.exception("could not record the public address")
+        return ""
+    log.info("pay links will use %s (learned from the admin panel)", base)
+    return base
 
 
 def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
@@ -3273,7 +3323,7 @@ def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
 
 def _server_selfcheck(devices_db, metrics_db, access_cfg, smtp_cfg,
                       retention_days=30, billing_db="",
-                      card_ready=None, runner_status=None):
+                      card_ready=None, runner_status=None, pay_base=None):
     """Run the server self-check for the Platform admin panel.
 
     Wrapped so a failing check can never take the page down: this is the
@@ -3294,7 +3344,8 @@ def _server_selfcheck(devices_db, metrics_db, access_cfg, smtp_cfg,
                        retention_days=retention_days, smtp_cfg=smtp_cfg,
                        billing_db=billing_db,
                        card_ready=card_ready,
-                       runner_status=runner_status)
+                       runner_status=runner_status,
+                       pay_base=pay_base)
     except Exception:  # noqa: BLE001
         log.exception("server self-check failed")
         return []
@@ -7417,12 +7468,18 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 hub_pubkey_cur = hub_for_sa.get("hub_pubkey", "")
                 router_count = len(hub_for_sa.get("leases_meta") or {})
             _tunnel_rows, _tunnel_err = _tunnel_panel(devices_db)
+            # Before the self-check, so the two agree: this request is
+            # itself the evidence of where customers reach this server.
+            _pay_base = _learn_public_base(
+                auth, self.headers.get("Host", ""),
+                secure_cookies or self._request_is_https())
             _selfcheck = _server_selfcheck(
                 devices_db, metrics_db, access_cfg, smtp_settings,
                 _RETENTION_DAYS_DEFAULT,
                 runner_status=_billing_status() if billing else None,
                 billing_db=billing_cfg.get("db", "") if billing else "",
-                card_ready=_card_ready(auth) if billing else None)
+                card_ready=_card_ready(auth) if billing else None,
+                pay_base=_pay_base if billing else None)
             _up, _owed = _billing_lists(billing, auth)
             return self._send(200, _render_superadmin(
                 user, rows, backups, self._session()["csrf"],
@@ -7440,6 +7497,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 tunnel_rows=_tunnel_rows, tunnel_err=_tunnel_err,
                 selfcheck=_selfcheck,
                 yoco=auth.get_yoco() if auth else {},
+                public_base=_pay_base,
                 yoco_hook_url=(
                     ("https" if secure_cookies else "http") + "://"
                     + self.headers.get("Host", "")
@@ -7732,6 +7790,39 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 f"{money(amount, cur)} is on its way. You move to "
                 f"{plan['label']} as soon as it is paid — your renewal date "
                 f"does not change."))
+
+        def _post_pay_base(self, user):
+            """Set the address invoices link to, by hand.
+
+            It normally records itself. This is for the case where it
+            learned the wrong one -- a server reached on two names, say --
+            because an invoice already sent cannot be corrected.
+            """
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            base = (flat.get("base") or "").strip().rstrip("/")
+            if base and not base.startswith(("http://", "https://")):
+                base = "https://" + base
+            host = base.split("://", 1)[-1].split("/")[0] if base else ""
+            if base and not _usable_public_host(host):
+                return self._redirect("/superadmin?error=" + quote(
+                    "That address would not work from outside this network. "
+                    "Use the public domain name customers browse to."))
+            try:
+                auth.set_setting("public_base_url", base)
+            except Exception:  # noqa: BLE001
+                log.exception("could not save the public address")
+                return self._redirect("/superadmin?error=" + quote(
+                    "Could not save that."))
+            log.info("pay links now use %s (set by %s)", base or "(nothing)",
+                     user.get("email", "?"))
+            return self._redirect("/superadmin?ok=" + quote(
+                f"Invoices will link to {base}/pay." if base
+                else "Cleared. Invoices will go out with no pay link."))
 
         def _post_mark_paid(self, user):
             """Superadmin: record a bank transfer against an invoice.
@@ -10925,6 +11016,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_suspend(user, restore=True)
             if path == "/superadmin/yoco":
                 return self._post_superadmin_yoco(user)
+            if path == "/superadmin/pay-base":
+                return self._post_pay_base(user)
             if path == "/superadmin/mark-paid":
                 return self._post_mark_paid(user)
             if path == "/billing/change-plan":

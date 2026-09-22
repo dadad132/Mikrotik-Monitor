@@ -389,15 +389,23 @@ check("...on the 28th, like every other account -- the 28th because it is "
       "the only late-month day that exists in February, so there is no "
       "clamping rule and therefore no clamping bug",
       time.localtime(_row["current_period_end"]).tm_mday == billing.BILLING_DAY)
-check("...and within the next month, not some arbitrary distance",
-      0 < ((_row["current_period_end"] - time.time()) / 86400) <= 32)
+check("...and a real month away, never the tail end of this one: activated "
+      "on the 26th, the plain next 28th would invoice a full month for a "
+      "day and a half of service",
+      billing.MIN_FIRST_DAYS
+      <= ((_row["current_period_end"] - time.time()) / 86400) <= 45)
+check("...which is exactly the date first_billing_date decides, rather than "
+      "something set_plan works out for itself",
+      _row["current_period_end"] == billing.first_billing_date(time.time()))
 check("...and the renewal run can actually see it, which is the entire "
       "point and what was silently untrue before",
       4242 in [o["org_id"] for o in _bs.orgs_due_for_renewal(40)])
-# Pinned to an explicit date rather than "whatever today plus a month is".
-# Everyone renews on the 28th, so run this near month-end and the next 28th
-# IS inside the seven-day window -- the assertion was true only for most of
-# the month, which is the worst kind of test.
+# Pinned to an explicit date rather than "whatever today plus three months
+# is". Everyone renews on the 28th, so run this near month-end and the next
+# 28th IS inside the seven-day window -- the assertion was true only for most
+# of the month, which is the worst kind of test. Three months bought up front
+# start from the same first period as one month does, so nobody pays for a
+# stub of a month at either end.
 _bs.set_plan(4245, _plan, period_end=time.time() + 25 * 86400)
 check("a packet with 25 days to run is not invoiced yet -- the lead time is "
       "seven days, and invoicing early is its own kind of wrong",
@@ -426,7 +434,7 @@ check("a longer period can be granted for somebody who paid up front, and "
 check("...three whole calendar months on, not ninety days -- which are not "
       "the same thing and drifted a renewal date backwards five days a year",
       _end3 == billing.add_billing_months(
-          billing.next_billing_date(time.time()), 2))
+          billing.first_billing_date(time.time()), 2))
 
 check("nothing is left in the never-invoiced state", _bs.orgs_never_invoiced() == [])
 
@@ -434,6 +442,76 @@ _bs.set_free(4242)
 check("putting a company back on free takes it out of the renewal run "
       "rather than invoicing somebody who is not paying",
       4242 not in [o["org_id"] for o in _bs.orgs_due_for_renewal(400)])
+
+print("\nA first period is a month, not the rest of this one")
+
+# Everyone renews on the 28th. So a company put on a packet on the 26th got
+# a paid-up date two days later, and was invoiced a full month for two days
+# of service -- the invoice arriving before they had finished reading the
+# welcome email. Nothing was wrong with the arithmetic; the 28th is the 28th
+# and the price is the price. The two simply should not have met on day one.
+
+
+def _at(y, m, d):
+    return time.mktime((y, m, d, 11, 0, 0, 0, 0, -1))
+
+
+def _day_of(ts):
+    lt = time.localtime(ts)
+    return (lt.tm_year, lt.tm_mon, lt.tm_mday)
+
+
+check("signed up on the 1st, the first renewal is this month's 28th -- a "
+      "27-day period is a month by any reading",
+      _day_of(billing.first_billing_date(_at(2026, 9, 1)))
+      == (2026, 9, 28))
+check("signed up on the 13th, still this month's 28th: a fortnight is the "
+      "line, and this is a day the right side of it",
+      _day_of(billing.first_billing_date(_at(2026, 9, 13)))
+      == (2026, 9, 28))
+check("signed up on the 15th, the first renewal moves to NEXT month's 28th "
+      "rather than invoicing a full month for thirteen days",
+      _day_of(billing.first_billing_date(_at(2026, 9, 15)))
+      == (2026, 10, 28))
+check("signed up on the 26th -- the case that started this -- the customer "
+      "gets a whole month, not an invoice 36 hours after signing up",
+      _day_of(billing.first_billing_date(_at(2026, 9, 26)))
+      == (2026, 10, 28))
+check("signed up ON the 28th, the renewal is a month out, never the same "
+      "day", _day_of(billing.first_billing_date(_at(2026, 9, 28)))
+      == (2026, 10, 28))
+check("it holds across a year end too, where the month arithmetic is the "
+      "easiest thing in this file to get wrong",
+      _day_of(billing.first_billing_date(_at(2026, 12, 20)))
+      == (2027, 1, 28))
+check("February, the month the 28th exists in precisely so that none of "
+      "this needs a clamping rule",
+      _day_of(billing.first_billing_date(_at(2027, 1, 20)))
+      == (2027, 2, 28))
+
+# The rule is a floor, not a fixed offset: it may never hand out LESS than a
+# fortnight, and it may never quietly hand out two months.
+for _m in range(1, 13):
+    for _d in (1, 5, 13, 14, 15, 20, 26, 27, 28):
+        _now = _at(2026, _m, _d)
+        _days = (billing.first_billing_date(_now) - _now) / 86400
+        if not billing.MIN_FIRST_DAYS <= _days <= 45:
+            check(f"first period from 2026-{_m:02d}-{_d:02d} is sane "
+                  f"({_days:.1f} days)", False)
+            break
+    else:
+        continue
+    break
+else:
+    check("every day of the year gives a first period between a fortnight "
+          "and a month and a half -- never a stub, never two months free",
+          True)
+
+# Renewals are untouched: the rule is about starting, not continuing.
+check("a RENEWAL is still an exact calendar month, so this does not quietly "
+      "give every existing customer a free fortnight every month",
+      _day_of(billing.add_billing_months(
+          billing.first_billing_date(_at(2026, 9, 26)), 1)) == (2026, 11, 28))
 
 print()
 if FAILS:

@@ -105,6 +105,12 @@ def money(amount, currency: str = BILLING_CURRENCY) -> str:
 # which drifted a packet's renewal date backwards about five days a year.
 BILLING_DAY = 28
 
+# A first period shorter than this is not a month, it is an accident of the
+# calendar -- and it would be invoiced as a full month, because the price of
+# a packet does not know how many days are left in the month it was bought
+# in. So a new account skips to the following 28th instead.
+MIN_FIRST_DAYS = 14
+
 
 def next_billing_date(after: float | None = None) -> float:
     """The next BILLING_DAY strictly after `after`, at the start of that day.
@@ -123,6 +129,20 @@ def next_billing_date(after: float | None = None) -> float:
     return time.mktime((year, month, BILLING_DAY, 0, 0, 0, 0, 0, -1))
 
 
+def first_billing_date(after: float | None = None) -> float:
+    """The first renewal date for a NEW paid account.
+
+    The next 28th, unless that is less than MIN_FIRST_DAYS away, in which
+    case the one after it. A customer signing up on the 26th should not be
+    invoiced a full month on the 27th for a day and a half of service.
+    """
+    now = after if after is not None else time.time()
+    end = next_billing_date(now)
+    if (end - now) / 86400 < MIN_FIRST_DAYS:
+        end = add_billing_months(end, 1)
+    return end
+
+
 def add_billing_months(period_end: float, months: int = 1) -> float:
     """Advance a paid-up date by whole calendar months, staying on the 28th.
 
@@ -135,6 +155,49 @@ def add_billing_months(period_end: float, months: int = 1) -> float:
     year = lt.tm_year + (month - 1) // 12
     month = (month - 1) % 12 + 1
     return time.mktime((year, month, BILLING_DAY, 0, 0, 0, 0, 0, -1))
+
+
+def suspends_at(row: dict | None, status: str = "") -> float | None:
+    """When this account gets cut off, or None if nothing is counting down.
+
+    A paid account that stops paying does not fall off a cliff: the packet
+    runs to `current_period_end`, then GRACE_DAYS of grace, and only then is
+    it suspended. That is two dates and an addition, which is why nobody
+    reads it off the panel correctly. This returns the one date that matters.
+
+    Takes the row rather than an org id so a panel rendering a hundred
+    companies does not put a hundred queries behind the countdown. `status`
+    is the resolved billing_status() when the caller has it, because the row's
+    own `status` column has not necessarily caught up -- lapse_due() runs
+    daily, so an account can be past its dates and still say "active".
+    """
+    if not row:
+        return None
+    status = status or row.get("status") or ""
+    if status == "suspended":
+        return None            # already off; there is nothing to count down
+    gpe = row.get("grace_period_end")
+    if gpe:
+        return float(gpe)      # in grace, or past it and awaiting the pass
+    if status in ("active", "trialing", "grace"):
+        cpe = row.get("current_period_end")
+        if cpe:
+            # Not yet lapsed, so no grace deadline exists on the row. It is
+            # still knowable: lapse_due() will set exactly this.
+            return float(cpe) + _GRACE_SECS
+    return None
+
+
+def days_until_suspension(row: dict | None, status: str = "",
+                          now: float | None = None) -> float | None:
+    """`suspends_at` as days from now. Never negative: an account that is
+    past its deadline is suspended on the next pass, not minus-three days
+    suspended, and showing a negative number would only invite the question."""
+    at = suspends_at(row, status)
+    if at is None:
+        return None
+    now = now if now is not None else time.time()
+    return max(0.0, (at - now) / 86400)
 
 
 def days_in_period(period_end: float) -> float:
@@ -698,8 +761,10 @@ class BillingStore:
             now = time.time()
             current = float((self.get(org_id) or {}).get(
                 "current_period_end") or 0.0)
-            end = current if current > now else next_billing_date(now)
-            if months > 1 and end == next_billing_date(now):
+            # An existing future date is kept; a new one gets a whole
+            # month rather than whatever is left of this one.
+            end = current if current > now else first_billing_date(now)
+            if months > 1 and end == first_billing_date(now):
                 end = add_billing_months(end, months - 1)
         self._upsert(org_id, status="active", plan=plan_name,
                      device_limit=plan["devices"], grace_period_end=None,
