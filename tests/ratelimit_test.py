@@ -152,19 +152,22 @@ check("ten threads taking fifty each account for exactly five hundred, with "
 
 print("\nEvery provider that calls out is actually limited")
 
-from mikromon import nextdns, yoco, zoho  # noqa: E402
+from mikromon import nextdns, yoco  # noqa: E402
 
-for mod, name in ((zoho, "zoho"), (yoco, "yoco"),
-                  (nextdns, "nextdns")):
+for mod, name in ((yoco, "yoco"), (nextdns, "nextdns")):
     src = open(mod.__file__, encoding="utf-8").read()
     check(f"{name} acquires budget before calling out",
           ".acquire()" in src)
     check(f"{name} honours a 429 rather than retrying straight into it",
           "note_429" in src)
 
-check("Zoho's ceiling sits UNDER the published figures, because being exactly "
-      "on a limit means one retry puts you over it",
-      zoho._LIMIT_PER_MINUTE < 100 and zoho._LIMIT_PER_DAY < 1000)
+check("the exchange-rate source is limited too -- it is fetched on every "
+      "card payment, and hammering a free published feed is how access to "
+      "it goes away",
+      "FX rates" in open(
+          os.path.join(os.path.dirname(os.path.dirname(
+              os.path.abspath(__file__))), "mikromon", "fxrate.py"),
+          encoding="utf-8").read())
 
 print()
 if FAILS:

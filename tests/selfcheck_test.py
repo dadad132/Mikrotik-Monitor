@@ -407,33 +407,6 @@ try:
 finally:
     sc._run, sc._unit_state = _rr, _rs
 
-print("\nAre the Zoho credentials actually on THIS server?")
-
-zd = tempfile.mkdtemp()
-check("no credentials anywhere is not a fault -- it is a feature nobody has "
-      "switched on", sc.check_zoho(zd) == [])
-
-f = one(sc.check_zoho("", {"refresh_token": "rt", "organization_name": "EasyMikrotik",
-                           "accounts_host": "accounts.zoho.eu"}), "zoho")
-check("settings holding a refresh token pass, naming the organisation",
-      f["ok"] and "EasyMikrotik" in f["title"])
-
-open(os.path.join(zd, "zoho-oauth.json"), "w").write(
-    '{"refresh_token": "rt", "organization_name": "EasyMikrotik"}')
-check("credentials written by the setup tool are found on disk, so work done "
-      "on the server shows up on the dashboard instead of looking like it "
-      "never happened", one(sc.check_zoho(zd), "zoho")["ok"])
-
-open(os.path.join(zd, "zoho-oauth.json"), "w").write('{"client_id": "1000.x"}')
-f = one(sc.check_zoho(zd), "zoho")
-check("a half-finished setup -- client id but no refresh token -- is called "
-      "out, because it looks identical to a finished one from the outside",
-      not f["ok"] and "half set up" in f["title"])
-
-open(os.path.join(zd, "zoho-oauth.json"), "w").write("{not json")
-check("an unreadable credentials file is reported rather than skipped",
-      not one(sc.check_zoho(zd), "zoho")["ok"])
-
 print("\nCompanies that would never be invoiced")
 
 bdb = os.path.join(d, "billing.db")
@@ -467,12 +440,12 @@ con.close()
 check("no billing database at all is silent",
       sc.check_billing_ready(os.path.join(d, "none.db")) == [])
 
-f = one(sc.check_billing_ready(bdb, provider_connected=False),
-        "billing:provider")
-check("no invoicing provider connected warns that packets will lapse with "
-      "nothing having been sent", not f["ok"] and f["warn"])
-check("...and that is a warning, not a failure -- the fleet still works",
-      one(sc.check_billing_ready(bdb, provider_connected=True),
+f = one(sc.check_billing_ready(bdb, card_ready=False), "billing:provider")
+check("card payment being off is worth saying: invoices still go out, but "
+      "the link on them cannot take a payment, so every renewal needs "
+      "recording by hand", not f["ok"] and f["warn"])
+check("...and it is a warning, not a failure -- the fleet still works",
+      one(sc.check_billing_ready(bdb, card_ready=True),
           "billing:provider") is None)
 
 print("\nWhat the panel shows")

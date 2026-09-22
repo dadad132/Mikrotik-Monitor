@@ -1375,95 +1375,9 @@ def _yoco_clear_form(csrf: str) -> str:
         f'</button></form>')
 
 
-def _reconcile_box(csrf: str) -> str:
-    """Paste a bank statement here. Nothing happens until you say so."""
-    return (
-        f'<div class="box"><h2>Match a bank statement</h2>'
-        f'<p class="muted" style="margin:0 0 10px;font-size:12px">'
-        f'Paste your statement below &mdash; export it as CSV, or just copy '
-        f'the rows out of online banking. Each deposit is matched to an '
-        f'invoice by the reference on it. <b>Nothing is applied by '
-        f'pasting</b>: you get a list of what was found, and you choose.</p>'
-        f'<form method="POST" action="/superadmin/reconcile">'
-        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
-        f'<textarea name="statement" rows="7" style="width:100%;'
-        f'font-family:ui-monospace,monospace;font-size:12px" '
-        f'placeholder="Date,Description,Amount&#10;'
-        f'2026-09-28,EFT MYITAFRICA-0001,25.00"></textarea>'
-        f'<div style="margin-top:10px">'
-        f'<button class="btn" type="submit">See who paid</button></div>'
-        f'</form></div>')
-
-
-def _reconcile_preview(result, csrf: str, currency: str = "USD") -> str:
-    """What the statement matched, and the one button that applies it."""
+def _money(amount, currency="USD") -> str:
     from .billing import money
-    from .reconcile import summarise
-
-    def rows_table(entries, with_tick=False, why=""):
-        trs = []
-        for e in entries:
-            inv = e.get("invoice") or {}
-            tick = ("" if not with_tick else
-                    f'<td><input type="checkbox" name="apply" '
-                    f'value="{inv.get("order_id")}" checked></td>')
-            expected = (money(inv["amount"], currency)
-                        if inv.get("amount") is not None else "&mdash;")
-            trs.append(
-                f'<tr>{tick}'
-                f'<td>{esc(e.get("date") or "")}</td>'
-                f'<td><code style="font-size:11px">'
-                f'{esc((e.get("description") or "")[:48])}</code></td>'
-                f'<td>{esc(inv.get("name") or "&mdash;")}</td>'
-                f'<td style="text-align:right">'
-                f'{esc(money(e["amount"], currency))}</td>'
-                f'<td style="text-align:right" class="muted">{expected}</td>'
-                f'</tr>')
-        head = ('<th></th>' if with_tick else '')
-        return (f'<table><thead><tr>{head}<th>Date</th><th>On the statement'
-                f'</th><th>Company</th><th style="text-align:right">Paid'
-                f'</th><th style="text-align:right">Invoiced</th></tr>'
-                f'</thead><tbody>{"".join(trs)}</tbody></table>'
-                + (f'<p class="muted" style="font-size:12px;margin:6px 0 0">'
-                   f'{why}</p>' if why else ""))
-
-    parts = [f'<div class="box"><h2>What the statement matched</h2>'
-             f'<p style="margin:0 0 14px">{esc(summarise(result))}</p>']
-
-    if result["matched"]:
-        parts.append('<h3 style="font-size:14px;margin:14px 0 6px">'
-                     'Ready to apply</h3>')
-        parts.append(
-            f'<form method="POST" action="/superadmin/reconcile-apply">'
-            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
-            + rows_table(result["matched"], with_tick=True)
-            + f'<div style="margin-top:12px">'
-              f'<button class="btn" type="submit">Record these payments'
-              f'</button></div></form>')
-
-    for key, title, why in (
-        ("wrong_amount", "Right company, different amount",
-         "Not applied. A part payment, or a bank fee taken off the top -- "
-         "worth a look before anything is recorded."),
-        ("already", "Nothing outstanding for them",
-         "Our reference, but no open invoice. Usually a duplicate payment "
-         "or one already recorded."),
-        ("unmatched", "No reference we recognise",
-         "A deposit with nothing of ours on it. Somebody forgot to quote "
-         "their reference, and this is how you find out who to ask."),
-    ):
-        if result[key]:
-            parts.append(f'<h3 style="font-size:14px;margin:18px 0 6px">'
-                         f'{title}</h3>')
-            parts.append(rows_table(result[key], why=why))
-
-    if not any(result[k] for k in result):
-        parts.append('<p class="muted">Nothing in that paste looked like a '
-                     'deposit. Check it includes an amount column.</p>')
-    parts.append('<p style="margin-top:16px">'
-                 '<a href="/superadmin">Back to Platform admin</a></p>')
-    parts.append('</div>')
-    return "".join(parts)
+    return money(amount, currency)
 
 
 def _outstanding_box(rows, csrf: str) -> str:
@@ -1518,11 +1432,6 @@ def _outstanding_box(rows, csrf: str) -> str:
         f'<th>Raised</th><th style="text-align:right">Amount</th>'
         f'<th></th></tr></thead><tbody>{"".join(trs)}</tbody></table>'
         f'</div>')
-
-
-def _money(amount, currency="USD") -> str:
-    from .billing import money
-    return money(amount, currency)
 
 
 def _upcoming_box(rows, status=None) -> str:
@@ -1606,145 +1515,6 @@ def _upcoming_box(rows, status=None) -> str:
             f'back from the provider, so a missed callback delays a '
             f'reactivation by minutes rather than leaving somebody who has '
             f'paid switched off.</p></div>')
-
-
-def _zoho_reconnect_note(scopes: str) -> str:
-    """Why you would paste a code into a connection that already works.
-
-    Because a token carries the permissions it was issued with and they
-    cannot be widened later -- so when mikromon starts needing one more,
-    the only way to grant it is a fresh code. Worth saying plainly: pasting
-    into something that works is a reasonable thing to hesitate over.
-    """
-    return (
-        f'<details style="margin:0 0 12px"><summary class="muted" '
-        f'style="cursor:pointer;font-size:12px">Reconnecting &mdash; when '
-        f'and why</summary>'
-        f'<p class="muted" style="font-size:12px;margin:8px 0 0">'
-        f'A Zoho token carries the permissions it was issued with, and that '
-        f'list cannot be widened afterwards. So if mikromon starts needing '
-        f'one more &mdash; recording payments, say &mdash; the connection '
-        f'keeps working for everything it already did and is refused for '
-        f'the new thing. Generating a fresh grant code below fixes it '
-        f'without disconnecting: nothing stops, no settings are lost, and '
-        f'the client ID and secret above are already filled in.</p>'
-        f'<p class="muted" style="font-size:12px;margin:6px 0 0">'
-        f'Paste these scopes into the API console, commas and no spaces:<br>'
-        f'<code style="font-size:11px;word-break:break-all">{esc(scopes)}'
-        f'</code></p></details>')
-
-
-def _zoho_box(cfg, csrf: str, scopes: str = "") -> str:
-    """Superadmin setting: connect Zoho Invoice, in three pastes.
-
-    Written for somebody doing this once, probably annoyed, quite possibly
-    on their second grant code because the first one expired while they read
-    the instructions. So the steps are on the page rather than in a document,
-    in the order they have to happen, and the field that expires is last.
-    """
-    c = cfg or {}
-    live = bool(str(c.get("refresh_token") or "").strip())
-    org_name = str(c.get("organization_name") or "")
-    org_id = str(c.get("organization_id") or "")
-    dc = str(c.get("accounts_host") or "")
-    days = int(c.get("days_before") or 7)
-    due = int(c.get("due_days") or 7)
-    has_secret = bool(str(c.get("client_secret") or "").strip())
-    cid = str(c.get("client_id") or "")
-
-    if live:
-        state = (f'<p style="margin:0 0 10px;font-size:12px;padding:8px 10px;'
-                 f'border-radius:6px;background:rgba(22,163,74,0.12);'
-                 f'color:#15803d">&#10003; <b>Connected</b> to '
-                 f'<b>{esc(org_name or org_id)}</b> on {esc(dc)}. Each '
-                 f'company is invoiced <b>{days} days</b> before its packet '
-                 f'lapses, payable within {due}. When Zoho records the '
-                 f'payment the packet simply carries on.</p>')
-    else:
-        state = ('<p class="muted" style="margin:0 0 10px;font-size:12px">'
-                 'Not connected. No renewal invoices are going out.</p>')
-
-    steps = ('' if live else
-             f'<ol style="font-size:12px;line-height:1.7;margin:0 0 12px;'
-             f'padding-left:20px">'
-             f'<li>At <b>api-console.zoho.com</b>, add a client of type '
-             f'<b>Self Client</b>. Copy the Client ID and Client Secret into '
-             f'the first two boxes below.</li>'
-             f'<li>On its <b>Generate Code</b> tab, paste these scopes '
-             f'exactly &mdash; <b>commas, no spaces</b>, or Zoho rejects the '
-             f'lot as an invalid scope:<br>'
-             f'<code style="font-size:11px;word-break:break-all">'
-             f'{esc(scopes)}</code></li>'
-             f'<li>Choose <b>10 minutes</b>, pick your organisation, and copy '
-             f'the code into the last box. It is single-use and short-lived, '
-             f'so generate it <b>last</b> &mdash; if it expires, the first '
-             f'two boxes are remembered and you only paste the code again.'
-             f'</li></ol>')
-
-    # Always offered, connected or not. It used to appear only when
-    # disconnected, so widening the permissions -- which needs a fresh grant
-    # code -- meant disconnecting first and stopping renewal invoicing to do
-    # it. There was no "just reconnect".
-    code_field = (
-        f'<label style="grid-column:1/-1">'
-        f'{"Reconnect: new grant code" if live else "Grant code"} '
-        f'<span class="muted">(expires in minutes'
-        f'{"; leave empty to just save the settings above" if live else ""})'
-        f'</span><br>'
-        f'<input name="code" placeholder="1000.xxxx.yyyy" '
-        f'style="width:100%"></label>')
-
-    run = ('' if not live else
-           f'<form method="POST" action="/superadmin/zoho/run" '
-           f'style="margin-top:8px;display:inline">'
-           f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
-           f'<button class="btn ghost" type="submit">Run the billing pass '
-           f'now</button></form> ')
-    test = ('' if not live else
-            f'<form method="POST" action="/superadmin/zoho/test" '
-            f'style="margin-top:8px;display:inline">'
-            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
-            f'<button class="btn ghost" type="submit">Test connection'
-            f'</button></form> ')
-    disconnect = ('' if not live else
-                  f'<form method="POST" action="/superadmin/zoho" '
-                  f'style="margin-top:8px;display:inline" onsubmit="return '
-                  f'confirm(&#39;Disconnect Zoho? Renewal invoices stop going '
-                  f'out, and packets will lapse with nothing having been '
-                  f'sent.&#39;)">'
-                  f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
-                  f'<input type="hidden" name="clear" value="1">'
-                  f'<button class="btn ghost" type="submit">Disconnect'
-                  f'</button></form>')
-
-    return (
-        f'<div class="box"><h2>Renewal invoicing (Zoho Invoice)</h2>'
-        f'{state}{steps}'
-        f'{_zoho_reconnect_note(scopes) if live else ""}'
-        f'<form method="POST" action="/superadmin/zoho">'
-        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
-        f'<div style="display:grid;grid-template-columns:'
-        f'repeat(auto-fit,minmax(240px,1fr));gap:10px">'
-        f'<label>Client ID<br><input name="client_id" '
-        f'value="{esc(cid)}" placeholder="1000.XXXXXXXX" '
-        f'style="width:100%"></label>'
-        f'<label>Client Secret<br><input name="client_secret" '
-        f'type="password" placeholder='
-        f'"{"saved - leave blank to keep" if has_secret else "from the API console"}" '
-        f'style="width:100%"></label>'
-        f'<label>Invoice this many days before it lapses<br>'
-        f'<input name="days_before" type="number" min="1" max="30" '
-        f'value="{days}" style="width:100%"></label>'
-        f'<label>Payable within (days)<br>'
-        f'<input name="due_days" type="number" min="1" max="60" '
-        f'value="{due}" style="width:100%"></label>'
-        f'{code_field}'
-        f'</div>'
-        f'<div style="margin-top:10px"><button class="btn" type="submit">'
-        f'{"Save" if live else "Connect"}</button></div>'
-        f'</form>'
-        f'<div>{test}{run}{disconnect}</div>'
-        f'</div>')
 
 
 def _tunnel_health_box(rows, wg_err: str = "") -> str:
@@ -2182,10 +1952,8 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        router_count: int = 0, hub_pubkey: str = "",
                        regions=None, nextdns=None, quotes=None,
                        yoco=None, yoco_hook_url: str = "",
-                       zoho=None,
                        upcoming=None, runner_status=None,
                        outstanding=None,
-                       zoho_scopes="",
                        tunnel_rows=None,
                        tunnel_err: str = "",
                        selfcheck=None) -> str:
@@ -2362,9 +2130,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
              f'{_smtp_settings_box(smtp, csrf)}'
              f'{_billing_contact_box(billing_contact, csrf)}'
              f'{_yoco_box(yoco, csrf, yoco_hook_url)}'
-             f'{_zoho_box(zoho, csrf, zoho_scopes)}'
              f'{_outstanding_box(outstanding, csrf)}'
-             f'{_reconcile_box(csrf) if outstanding else ""}'
              f'{_upcoming_box(upcoming, runner_status)}'
              f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf, hub_pubkey)}'
              f'{_regions_box(regions or [], csrf)}'

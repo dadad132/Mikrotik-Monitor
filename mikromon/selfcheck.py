@@ -531,7 +531,7 @@ def check_cert_renewal():
         "sudo systemctl enable --now certbot.timer")]
 
 
-def check_billing_ready(billing_db="", provider_connected=None,
+def check_billing_ready(billing_db="", card_ready=None,
                         runner_status=None):
     """Companies on a paid packet that will never be invoiced.
 
@@ -596,54 +596,18 @@ def check_billing_ready(billing_db="", provider_connected=None,
             out.append(_finding(
                 "billing:runner", True,
                 f"Billing pass ran {age:.0f} minute(s) ago"))
-    if provider_connected is False:
+    if card_ready is False:
         out.append(_finding(
             "billing:provider", False,
-            "Nothing is connected to send invoices",
-            "Packets will lapse into grace and then suspension with no "
-            "invoice ever having gone out.",
-            "Platform admin -> Renewal invoicing", warn=True))
+            "Card payment is not switched on",
+            "Invoices still go out, but the link on them cannot take a "
+            "payment -- so every renewal needs somebody here to record a "
+            "bank transfer by hand.",
+            "Platform admin -> Yoco", warn=True))
     if not out:
         out.append(_finding("billing:never", True,
                             "Every paid company has a renewal date"))
     return out
-
-
-def check_zoho(app_dir="", settings=None):
-    """Are the Zoho credentials actually on this server, and usable?
-
-    Credentials that were set up correctly somewhere else are worth nothing
-    here. This says whether the refresh token exists, without ever printing
-    it.
-    """
-    cfg = dict(settings or {})
-    src = "settings"
-    if not cfg.get("refresh_token"):
-        app_dir = app_dir or os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__)))
-        path = os.path.join(app_dir, "zoho-oauth.json")
-        if not os.path.exists(path):
-            return []                   # not set up; not a fault
-        src = path
-        try:
-            import json
-            cfg = json.load(open(path, encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            return [_finding("zoho", False,
-                             "The Zoho credentials file cannot be read",
-                             f"{path}: {exc}",
-                             "python3 tools/zoho_setup.py")]
-    if not cfg.get("refresh_token"):
-        return [_finding(
-            "zoho", False, "Zoho is half set up: no refresh token",
-            f"Found in {src}, but without the refresh token nothing can "
-            f"authenticate. The grant code was probably never exchanged.",
-            "python3 tools/zoho_setup.py")]
-    org = str(cfg.get("organization_name") or cfg.get("organization_id") or "")
-    dc = str(cfg.get("accounts_host") or "")
-    return [_finding("zoho", True,
-                     f"Zoho credentials are present{f' for {org}' if org else ''}",
-                     f"{dc}  (from {os.path.basename(str(src))})")]
 
 
 def check_deployed_version(app_dir=""):
@@ -689,8 +653,8 @@ def check_deployed_version(app_dir=""):
 
 def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
             metrics_db="", retention_days=30, smtp_cfg=None,
-            app_dir="", zoho_cfg=None, billing_db="",
-            provider_connected=None, runner_status=None):
+            app_dir="", billing_db="",
+            card_ready=None, runner_status=None):
     """Every check, in the order a person would want to read them."""
     out = []
     for fn in (lambda: check_deployed_version(app_dir),
@@ -701,9 +665,7 @@ def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
                lambda: check_access_host(access_cfg),
                lambda: check_tls_expiry(access_cfg),
                lambda: check_cert_renewal(),
-               lambda: check_zoho(app_dir, zoho_cfg),
-               lambda: check_billing_ready(billing_db,
-                                           provider_connected,
+               lambda: check_billing_ready(billing_db, card_ready,
                                            runner_status),
                lambda: check_nginx(access_cfg),
                lambda: check_retention(metrics_db, retention_days),

@@ -859,7 +859,8 @@ class BillingStore:
                               args).fetchone()
         return dict(zip(self._ORDER_COLS, row)) if row else None
 
-    def open_orders(self, provider: str = "", limit: int = 500) -> list:
+    def open_orders(self, provider: str = "", limit: int = 500,
+                    require_external: bool = True) -> list:
         """Orders raised but not yet paid.
 
         The reconcile pass walks these and asks the provider whether each one
@@ -867,9 +868,13 @@ class BillingStore:
         that never arrives costs a few minutes, not a suspended customer who
         has already paid.
         """
-        sql = (f"SELECT {', '.join(self._ORDER_COLS)} FROM orders "
-               f"WHERE status != 'paid' AND external_id IS NOT NULL "
-               f"AND external_id != ''")
+        # `require_external` is for reconciling against an outside system,
+        # where an order with no id there is nothing to ask about. An
+        # invoice raised here is outstanding from the moment it exists,
+        # whether or not a customer has opened the checkout yet.
+        sql = f"SELECT {', '.join(self._ORDER_COLS)} FROM orders WHERE status != 'paid'"
+        if require_external:
+            sql += " AND external_id IS NOT NULL AND external_id != ''"
         args: list = []
         if provider:
             sql += " AND provider = ?"

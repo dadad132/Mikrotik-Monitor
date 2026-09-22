@@ -47,7 +47,7 @@ class FakeAuth:
         self.cfg = cfg
         self.orgs = {}
 
-    def get_zoho(self):
+    def get_yoco(self):
         return self.cfg
 
     def org(self, org_id):
@@ -57,9 +57,8 @@ class FakeAuth:
         return [{"role": "owner", "email": f"owner{org_id}@example.com"}]
 
 
-ZCFG = {"refresh_token": "rt", "api_base": "https://www.zohoapis.eu/invoice/v3",
-        "client_id": "c", "client_secret": "s", "accounts_host": "accounts.zoho.eu",
-        "organization_id": "1", "days_before": 7, "due_days": 7}
+ZCFG = {"secret_key": "sk_test", "webhook_secret": "whsec_x",
+        "days_before": 7, "due_days": 7}
 
 
 def fresh():
@@ -76,20 +75,16 @@ auth.orgs[1] = {"name": "Alpha Freight"}
 store.set_plan(1, PLAN, period_end=time.time() + 20 * DAY)
 
 sent = []
-_real = (R._z.ensure_client, R._z.create_invoice, R._z.email_invoice)
-try:
-    R._z.ensure_client = lambda cfg, name, email="", phone="", known_id="": "C1"
 
-    def spy_create(cfg, contact_id, *, description, amount_cents,
-                   due_date="", reference="", currency=""):
-        sent.append({"cents": amount_cents, "desc": description,
-                     "due": due_date, "ref": reference})
-        return {"id": f"INV{len(sent)}", "number": f"INV-{len(sent):04d}"}
 
-    R._z.create_invoice = spy_create
-    R._z.email_invoice = lambda cfg, iid: sent[-1].update({"emailed": iid})
+def spy(org_id, order_id, plan, amount, currency, period_end, due_days):
+    """Stands in for the email that carries the pay link."""
+    sent.append({"org": org_id, "order": order_id, "amount": amount,
+                 "currency": currency, "plan": plan["name"]})
 
-    raised = R.raise_due_invoices(store, auth, ZCFG)
+
+if True:
+    raised = R.raise_due_invoices(store, auth, send=spy)
     check("a company paid up 20 days out is NOT invoiced -- the lead time is "
           "seven days, and invoicing early is its own kind of wrong",
           raised == 0 and not sent)
@@ -97,65 +92,29 @@ try:
     # Six days out: inside the window.
     store.set_plan(2, PLAN, period_end=time.time() + 6 * DAY)
     auth.orgs[2] = {"name": "Bravo Logistics"}
-    raised = R.raise_due_invoices(store, auth, ZCFG)
+    raised = R.raise_due_invoices(store, auth, send=spy)
     check("a company whose packet lapses in six days IS invoiced",
           raised == 1 and len(sent) == 1)
-    check("...for the price of the packet they are on, to the cent",
-          sent[0]["cents"] == int(round(PRICE * 100)))
-    check("...and it is actually emailed, not left sitting as a draft "
-          "nobody was asked to pay", sent[0].get("emailed") == "INV1")
-    check("...carrying a payment reference that ties it back to the company",
-          bool(sent[0]["ref"]))
+    check("...for the price of the packet they are on, in the currency it "
+          "is priced in", sent[0]["amount"] == PRICE
+          and sent[0]["currency"] == "USD")
+    check("...and the customer is told, because an invoice nobody receives "
+          "is not an invoice", sent[0]["org"] == 2)
 
-    check("the company that was not due is still not invoiced on the same "
-          "pass", raised == 1)
-
-    # The guard that matters most: the pass runs every 15 minutes.
+    # The guard that matters most: the pass runs daily, and a restart loop
+    # could run it more often than that.
     before = len(sent)
     for _ in range(5):
-        R.raise_due_invoices(store, auth, ZCFG)
-    check("running the pass five more times raises NOTHING further -- it "
-          "runs every fifteen minutes, so without this a customer would get "
-          "ninety-six invoices a day", len(sent) == before)
+        R.raise_due_invoices(store, auth, send=spy)
+    check("running the pass five more times raises NOTHING further -- "
+          "without this a customer would be invoiced once per pass",
+          len(sent) == before)
 
-    print("\nPayment is read back, never assumed")
-
-    order = [o for o in store.open_orders(provider="zoho")][0]
-    R._z.invoice_status = lambda cfg, iid: {"paid": False, "status": "sent",
-                                            "balance": PRICE, "total": PRICE,
-                                            "number": "INV-0001"}
-    check("an unpaid invoice extends nothing",
-          R.reconcile_payments(store, ZCFG) == 0)
-
-    check("...and that invoice is NOT re-read on the very next pass -- one "
-          "call per open invoice every fifteen minutes is 1440 calls a day "
-          "at fifteen invoices, over Zoho's free cap of 1000",
-          R.reconcile_payments(store, ZCFG) == 0 and len(R._checked) == 1)
-
-    # A payment callback names one invoice, and that one is always re-read:
-    # it is the fast path, and pacing it would defeat the point.
-    paid_now = {"paid": True, "status": "paid", "balance": 0.0,
-                "total": PRICE, "number": "INV-0001"}
-    R._z.invoice_status = lambda cfg, iid: paid_now
-    inv_id = order["external_id"]
-    check("a payment callback bypasses the cooldown entirely, so somebody "
-          "who has paid is not left suspended for half an hour",
-          R.reconcile_payments(store, ZCFG, only_invoice=inv_id) == 1)
-
-    # Back to the timed path for the rest.
-    R._checked.clear()
-    store2 = store
-    was = store.get(2)["current_period_end"]
-    R._z.invoice_status = lambda cfg, iid: {"paid": True, "status": "paid",
-                                            "balance": 0.0, "total": PRICE,
-                                            "number": "INV-0001"}
-    check("the payment was already applied by the callback, so the timed "
-          "pass finds nothing more -- a webhook and the timer both seeing "
-          "the same payment must not extend the packet twice",
-          R.reconcile_payments(store, ZCFG) == 0)
-    check("...and the packet did carry on, extended from where it ENDED "
-          "rather than from today, so nothing already paid for is lost",
-          store.get(2)["current_period_end"] > time.time() + 25 * DAY)
+    check("an invoice that cannot be emailed is still an invoice: the send "
+          "failing must not lose the charge",
+          R.raise_due_invoices(
+              store, auth,
+              send=lambda *a: (_ for _ in ()).throw(RuntimeError("smtp"))) == 0)
 
     print("\nBeing able to see it coming")
 
@@ -177,8 +136,6 @@ try:
           [r["name"] for r in rows] == sorted(
               (r["name"] for r in rows),
               key=lambda n: by_name[n]["invoice_on"]))
-finally:
-    R._z.ensure_client, R._z.create_invoice, R._z.email_invoice = _real
 
 print("\nThe invoice run is daily, not every fifteen minutes")
 

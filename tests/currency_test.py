@@ -91,29 +91,41 @@ oid2 = store.create_order(2, B.PLANS[0]["name"], 46000, currency="ZAR")
 check("a card charge records ZAR, because that is what the card is charged",
       store.order(oid2)["currency"] == "ZAR")
 
-print("\nWhat Zoho is told")
+print("\nWhat the invoice is raised in")
 
-sent = {}
-_real = R._z.create_invoice
-try:
-    def spy(cfg, contact_id, *, description, amount_cents, due_date="",
-            reference="", currency=""):
-        sent.update({"cents": amount_cents, "currency": currency})
-        return {"id": "INV1", "number": "INV-0001"}
+# There is one rail now: mikromon raises its own invoice and Yoco takes the
+# card. So the currency question is no longer "what did we tell an outside
+# system" but "what did we write down", which is the thing that has to be
+# right whatever happens afterwards.
+_raised = []
 
-    R._z.create_invoice = spy
-    prov = R.provider_from_cfg({"refresh_token": "rt", "api_base": "https://x",
-                                "client_id": "c", "client_secret": "s"})
-    prov.create_invoice("C1", description="Renewal", amount=25.00,
-                        due_days=7, reference="EM-1", currency="USD")
-    check("the invoice carries its currency to Zoho -- without it the "
-          "invoice takes the organisation's base currency, so a price "
-          "decided in dollars goes out as the same NUMBER in rands",
-          sent["currency"] == "USD")
-    check("...and the amount is the advertised one, in cents, converted "
-          "exactly once", sent["cents"] == 2500)
-finally:
-    R._z.create_invoice = _real
+
+def _spy(org_id, order_id, plan, amount, currency, period_end, due_days):
+    _raised.append({"amount": amount, "currency": currency,
+                    "order": order_id})
+
+
+_st = B.BillingStore(os.path.join(tempfile.mkdtemp(), "b.db"))
+_st.set_plan(9, B.PLANS[0]["name"], period_end=time.time() + 3 * 86400)
+
+
+class _A:
+    def get_yoco(self):
+        return {"secret_key": "k", "webhook_secret": "w"}
+
+    def org(self, i):
+        return {"name": "Alpha"}
+
+    def list_users(self, i):
+        return []
+
+
+R.raise_due_invoices(_st, _A(), send=_spy)
+check("a renewal is raised for the advertised price, in the currency the "
+      "price was decided in", _raised and _raised[0]["amount"] == B.PLANS[0]["price"]
+      and _raised[0]["currency"] == "USD")
+check("...and the order says so too, so nothing downstream has to assume",
+      _st.order(_raised[0]["order"])["currency"] == "USD")
 
 print("\nNothing prints a figure with a symbol somebody assumed")
 

@@ -3164,48 +3164,6 @@ def _tunnel_health_rows(hub, peers_path):
 _RETENTION_DAYS_DEFAULT = 30
 
 
-def _adopt_zoho_file(auth, devices_db=""):
-    """Take over credentials written by tools/zoho_setup.py.
-
-    The setup tool exists because a server console has no clipboard. Having
-    used it, nobody should then have to re-enter the same values in a web
-    form -- and a credential sitting in a file the application never reads
-    is indistinguishable, from the dashboard, from not having set it up at
-    all. So: if the file has a refresh token and the settings do not, adopt
-    it. Settings already present always win; this never overwrites.
-    """
-    if auth is None:
-        return False
-    try:
-        if (auth.get_zoho() or {}).get("refresh_token"):
-            return False
-    except Exception:  # noqa: BLE001
-        return False
-    import json
-    roots = [os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
-    if devices_db:
-        roots.insert(0, os.path.dirname(os.path.abspath(devices_db)))
-    for root in roots:
-        path = os.path.join(root, "zoho-oauth.json")
-        try:
-            cfg = json.load(open(path, encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not cfg.get("refresh_token"):
-            continue
-        cfg.setdefault("days_before", 7)
-        cfg.setdefault("due_days", 7)
-        try:
-            auth.set_zoho(cfg)
-        except Exception:  # noqa: BLE001
-            log.exception("could not adopt %s", path)
-            return False
-        log.info("adopted Zoho credentials from %s (%s)", path,
-                 cfg.get("organization_name") or cfg.get("organization_id"))
-        return True
-    return False
-
-
 def _billing_status():
     """What the renewal timer last did, or None when it is not running."""
     try:
@@ -3215,61 +3173,107 @@ def _billing_status():
         return None
 
 
-def _billing_outstanding(billing, auth):
-    """Invoices raised and not settled. Never breaks the panel."""
+def _card_ready(auth) -> bool:
+    """Can the link on an invoice actually take a payment?"""
     try:
-        from .billing_runner import outstanding
-        return outstanding(billing, auth)
-    except Exception:  # noqa: BLE001
-        log.exception("could not read outstanding invoices")
-        return []
-
-
-def _billing_upcoming(billing, auth):
-    """Who is due to be invoiced, and when. Never breaks the panel."""
-    try:
-        from .billing_runner import upcoming
-        return upcoming(billing, auth)
-    except Exception:  # noqa: BLE001
-        log.exception("could not read upcoming invoices")
-        return []
-
-
-def _invoicing_provider(auth):
-    """The connected invoicing provider, or None."""
-    try:
-        from .billing_runner import provider_for
-        return provider_for(auth)
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _invoicing_connected(auth) -> bool:
-    """Is anything able to send an invoice? None of the callers care which."""
-    try:
-        from .billing_runner import provider_for
-        return provider_for(auth) is not None
+        from .billing_runner import card_ready
+        return card_ready(auth)
     except Exception:  # noqa: BLE001
         return False
 
 
-def _zoho_scopes() -> str:
-    """The exact scope string to paste into Zoho's Generate Code box.
+def _billing_lists(billing, auth):
+    """(upcoming, outstanding) for the panel. Never breaks the page."""
+    try:
+        from .billing_runner import outstanding, upcoming
+        return upcoming(billing, auth), outstanding(billing, auth)
+    except Exception:  # noqa: BLE001
+        log.exception("could not read the billing lists")
+        return [], []
 
-    Read from the module that uses it, so the page cannot drift out of step
-    with what the code actually asks for -- a scope missing from the token
-    fails much later, as an invoice that quietly never went out.
+
+def _public_base(auth=None) -> str:
+    """Where a customer reaches this server, for links on an invoice.
+
+    Read from settings rather than guessed, because an invoice goes to
+    somebody who is not here and a link built from an internal address is a
+    link that quietly does nothing.
     """
     try:
-        from .zoho import SCOPES
-        return SCOPES
+        return str((auth.get_setting("public_base_url") or "")).strip() \
+            if auth else ""
     except Exception:  # noqa: BLE001
         return ""
 
 
+def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
+                   period_end, due_days, link) -> None:
+    """The renewal invoice, as an email somebody can act on.
+
+    Sent to the owner. The pay link is the point of the message, so it is
+    the first thing after the amount rather than a footnote -- an invoice
+    that has to be hunted through for a way to pay gets paid by bank
+    transfer, which is the path that needs a human here.
+    """
+    from .billing import money, payment_reference
+    from .notify.org_email import _smtp_send
+    from email.message import EmailMessage
+
+    if not (smtp_cfg and getattr(smtp_cfg, "host", "")):
+        log.warning("renewal: org %s invoiced but no mail server is "
+                    "configured, so nothing was sent", org_id)
+        return
+    to = []
+    for u in (auth.list_users(org_id) if auth else []) or []:
+        if u.get("role") == "owner" and u.get("email"):
+            to.append(u["email"])
+    to += [e for e in ((auth.org(org_id) or {}).get("alert_emails") or [])
+           if e not in to] if auth else []
+    if not to:
+        log.warning("renewal: org %s has nobody to email", org_id)
+        return
+
+    org = (auth.org(org_id) if auth else None) or {}
+    name = org.get("name") or f"Company {org_id}"
+    when = time.strftime("%d %B %Y", time.localtime(period_end))
+    ref = payment_reference(org_id, org.get("name", ""))
+    total = money(amount, currency)
+
+    pay = (f"Pay now: {link}" if link else
+           "To pay, sign in to your account and open Billing.")
+    if not link:
+        log.warning("renewal: org %s was invoiced with NO pay link -- set "
+                    "the public address in Platform admin, or every renewal "
+                    "needs recording by hand", org_id)
+
+    text = (
+        f"Hello,\n\n"
+        f"Your EasyMikroTik packet for {name} renews on {when}.\n\n"
+        f"  Router monitoring, up to {plan['devices']} devices\n"
+        f"  {total} for the month\n"
+        f"  Payable within {due_days} days\n\n"
+        f"{pay}\n\n"
+        f"Paying by card takes a moment and your service simply carries on "
+        f"-- nobody here has to do anything.\n\n"
+        f"Paying by bank transfer instead? Quote {ref} so the payment can "
+        f"be matched to your account.\n\n"
+        f"Thank you,\nEasyMikroTik\n")
+
+    msg = EmailMessage()
+    msg["Subject"] = f"EasyMikroTik invoice — {total}, due {when}"
+    msg["From"] = smtp_cfg.from_addr
+    msg["To"] = ", ".join(to)
+    msg.set_content(text)
+    try:
+        _smtp_send(smtp_cfg, msg)
+        log.info("renewal: invoice for org %s emailed to %s", org_id, to)
+    except Exception:  # noqa: BLE001 - the invoice exists either way
+        log.exception("renewal: could not email the invoice for org %s", org_id)
+
+
 def _server_selfcheck(devices_db, metrics_db, access_cfg, smtp_cfg,
-                      retention_days=30, zoho_cfg=None, billing_db="",
-                      provider_connected=None, runner_status=None):
+                      retention_days=30, billing_db="",
+                      card_ready=None, runner_status=None):
     """Run the server self-check for the Platform admin panel.
 
     Wrapped so a failing check can never take the page down: this is the
@@ -3288,8 +3292,8 @@ def _server_selfcheck(devices_db, metrics_db, access_cfg, smtp_cfg,
         return run_all(peers_path=peers_path, expected_peers=expected,
                        access_cfg=access_cfg, metrics_db=metrics_db or "",
                        retention_days=retention_days, smtp_cfg=smtp_cfg,
-                       zoho_cfg=zoho_cfg, billing_db=billing_db,
-                       provider_connected=provider_connected,
+                       billing_db=billing_db,
+                       card_ready=card_ready,
                        runner_status=runner_status)
     except Exception:  # noqa: BLE001
         log.exception("server self-check failed")
@@ -6779,14 +6783,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
     from .backup import backups_dir_for
     backups_dir = backups_dir_for(config_path=config_path, devices_db=devices_db)
     billing = None
-    # Credentials the setup tool wrote on the server are useless until the
-    # application reads them -- and from the dashboard, unread is identical
-    # to never set up.
-    try:
-        _adopt_zoho_file(auth, devices_db)
-    except Exception:  # noqa: BLE001 - never block startup on this
-        log.exception("could not check for Zoho credentials on disk")
-
     # Where the last published rate is kept, so a restart does not lose it
     # and a provider outage does not stop a customer paying.
     try:
@@ -6806,7 +6802,16 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
         if auth is not None:
             try:
                 from . import billing_runner
-                billing_runner.start(billing, auth)
+
+                def _send_invoice(org_id, order_id, plan, amount, currency,
+                                  period_end, due_days):
+                    """Email one renewal invoice, carrying its pay link."""
+                    link = billing_runner.pay_link(auth, order_id, _public_base(auth))
+                    _email_renewal(auth, smtp_settings, org_id, order_id,
+                                   plan, amount, currency, period_end,
+                                   due_days, link)
+
+                billing_runner.start(billing, auth, send=_send_invoice)
             except Exception:  # noqa: BLE001 - dashboard still starts
                 log.exception("could not start the billing runner")
     _pf_merchant_id = billing_cfg.get("payfast_merchant_id", "")
@@ -7415,18 +7420,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             _selfcheck = _server_selfcheck(
                 devices_db, metrics_db, access_cfg, smtp_settings,
                 _RETENTION_DAYS_DEFAULT,
-                zoho_cfg=auth.get_zoho() if auth else {},
                 runner_status=_billing_status() if billing else None,
                 billing_db=billing_cfg.get("db", "") if billing else "",
-                provider_connected=_invoicing_connected(auth))
+                card_ready=_card_ready(auth) if billing else None)
+            _up, _owed = _billing_lists(billing, auth)
             return self._send(200, _render_superadmin(
                 user, rows, backups, self._session()["csrf"],
+                upcoming=_up, outstanding=_owed,
                 msg=q.get("ok", [""])[0],
                 error=q.get("error", [""])[0],
                 smtp=smtp_settings, billing_on=billing is not None,
                 billing_contact=auth.get_billing_contact() if auth else None,
-                upcoming=_billing_upcoming(billing, auth),
-                outstanding=_billing_outstanding(billing, auth),
                 runner_status=_billing_status() if billing else None,
                 hub_ip=hub_ip, hub_port=hub_port, router_count=router_count,
                 hub_pubkey=hub_pubkey_cur,
@@ -7436,8 +7440,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 tunnel_rows=_tunnel_rows, tunnel_err=_tunnel_err,
                 selfcheck=_selfcheck,
                 yoco=auth.get_yoco() if auth else {},
-                zoho=auth.get_zoho() if auth else {},
-                zoho_scopes=_zoho_scopes(),
                 yoco_hook_url=(
                     ("https" if secure_cookies else "http") + "://"
                     + self.headers.get("Host", "")
@@ -7731,201 +7733,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 f"{plan['label']} as soon as it is paid — your renewal date "
                 f"does not change."))
 
-        def _post_zoho(self, user):
-            """Superadmin-only: connect Zoho Invoice, or disconnect it.
-
-            The whole OAuth exchange happens here rather than on a terminal,
-            because the values are long, the grant code expires in minutes
-            and is single-use, and a server console has no clipboard. Getting
-            one character wrong produces "invalid_client" -- the same error
-            as the wrong data centre -- so a typo costs another round trip
-            and another code.
-
-            The secret is write-only, like the Yoco keys: a blank box keeps
-            what is saved, so re-saving this panel to change the lead time
-            cannot silently wipe the credential and stop every renewal
-            invoice, a failure that would surface a month later as customers
-            who were never billed.
-            """
-            if not (user and user.get("is_superadmin")):
-                return self._send(403, "forbidden")
-            flat, _ = self._form()
-            sess = self._session()
-            if sess is None or flat.get("csrf") != sess["csrf"]:
-                return self._send(400, "bad csrf token")
-            if auth is None:
-                return self._redirect("/superadmin?error=" +
-                                      quote("Auth store is not enabled."))
-            from .zoho import exchange_code, ping, forget_tokens, ZohoError
-
-            cur = dict(auth.get_zoho() or {})
-            if flat.get("clear"):
-                forget_tokens(cur)
-                auth.set_zoho({})
-                log.warning("Zoho disconnected by %s", user.get("email", "?"))
-                return self._redirect("/superadmin?ok=" + quote(
-                    "Zoho disconnected. Renewal invoices will stop going "
-                    "out."))
-
-            cid = (flat.get("client_id") or "").strip()
-            if cid:
-                cur["client_id"] = cid
-            secret = (flat.get("client_secret") or "").strip()
-            if secret:
-                cur["client_secret"] = secret
-            for field, lo, hi, dflt in (("days_before", 1, 30, 7),
-                                        ("due_days", 1, 60, 7)):
-                try:
-                    cur[field] = min(hi, max(lo, int(flat.get(field) or dflt)))
-                except (TypeError, ValueError):
-                    cur[field] = dflt
-
-            code = (flat.get("code") or "").strip()
-            if not code:
-                # Saving settings on an already-connected account, or filling
-                # the first two boxes in before generating a code.
-                auth.set_zoho(cur)
-                if cur.get("refresh_token"):
-                    return self._redirect("/superadmin?ok=" + quote("Saved."))
-                return self._redirect("/superadmin?ok=" + quote(
-                    "Saved. Generate a grant code in the Zoho API console and "
-                    "paste it in to finish connecting."))
-
-            if not (cur.get("client_id") and cur.get("client_secret")):
-                return self._redirect("/superadmin?error=" + quote(
-                    "The client ID and secret are both needed as well as the "
-                    "code."))
-            try:
-                got = exchange_code(cur["client_id"], cur["client_secret"],
-                                    code)
-            except ZohoError as exc:
-                # Deliberately saved first: a failed exchange must not cost
-                # the two values that were typed correctly, or the next
-                # attempt starts from nothing again.
-                auth.set_zoho(cur)
-                return self._redirect("/superadmin?error=" + quote(str(exc)))
-
-            cur.update(got)
-            # A token that was issued is not yet a token the API accepts --
-            # a missing scope gives the first without the second, and the
-            # difference would otherwise surface as an invoice that never
-            # went out.
-            try:
-                from .zoho import organizations
-                orgs = organizations(cur)
-            except ZohoError as exc:
-                auth.set_zoho(cur)
-                return self._redirect("/superadmin?error=" + quote(
-                    f"Connected, but the API refused the token: {exc}"))
-            if orgs:
-                cur["organization_id"] = str(orgs[0].get("organization_id") or "")
-                cur["organization_name"] = str(orgs[0].get("name") or "")
-            auth.set_zoho(cur)
-            log.info("Zoho connected (%s) by %s",
-                     cur.get("organization_name", "?"), user.get("email", "?"))
-            return self._redirect("/superadmin?ok=" + quote(
-                f"Connected to Zoho Invoice "
-                f"({cur.get('organization_name') or 'organisation'}). "
-                f"Renewal invoices go out {cur['days_before']} days before a "
-                f"packet lapses."))
-
-        def _post_zoho_test(self, user):
-            """Superadmin-only: ask the API a real question, right now."""
-            if not (user and user.get("is_superadmin")):
-                return self._send(403, "forbidden")
-            flat, _ = self._form()
-            sess = self._session()
-            if sess is None or flat.get("csrf") != sess["csrf"]:
-                return self._send(400, "bad csrf token")
-            from .zoho import ping, ZohoError
-            try:
-                who = ping(auth.get_zoho() if auth else {})
-            except ZohoError as exc:
-                return self._redirect("/superadmin?error=" + quote(str(exc)))
-            return self._redirect("/superadmin?ok=" + quote(
-                f"Zoho answered: {who}."))
-
-        def _post_reconcile(self, user):
-            """Match a pasted bank statement against open invoices.
-
-            Shows what it found and applies nothing. The whole reason this
-            exists is to SEE what arrived; something that acted on a paste
-            would be a worse version of the button it replaces.
-            """
-            if not (user and user.get("is_superadmin")):
-                return self._send(403, "forbidden")
-            flat, _ = self._form()
-            sess = self._session()
-            if sess is None or flat.get("csrf") != sess["csrf"]:
-                return self._send(400, "bad csrf token")
-            if billing is None:
-                return self._redirect("/superadmin?error=" +
-                                      quote("Billing is not enabled."))
-            from .reconcile import parse_statement, match_rows
-            from .billing_runner import outstanding as _outstanding
-            rows = parse_statement(flat.get("statement", ""))
-            if not rows:
-                return self._redirect("/superadmin?error=" + quote(
-                    "Nothing in that paste looked like a deposit. It needs "
-                    "at least a description and an amount per line."))
-            result = match_rows(rows, _outstanding(billing, auth, limit=500))
-            log.info("reconcile: %s pasted a statement -- %d matched, "
-                     "%d unmatched", user.get("email", "?"),
-                     len(result["matched"]), len(result["unmatched"]))
-            from .web_auth import _page, _reconcile_preview
-            return self._send(200, _page(
-                "Statement", _header(user, "/superadmin")
-                + _reconcile_preview(result, sess["csrf"])),
-                "text/html; charset=utf-8")
-
-        def _post_reconcile_apply(self, user):
-            """Record the payments that were ticked on the preview."""
-            if not (user and user.get("is_superadmin")):
-                return self._send(403, "forbidden")
-            flat, multi = self._form()
-            sess = self._session()
-            if sess is None or flat.get("csrf") != sess["csrf"]:
-                return self._send(400, "bad csrf token")
-            if billing is None:
-                return self._redirect("/superadmin?error=" +
-                                      quote("Billing is not enabled."))
-            ids = [i for i in (multi.get("apply") or []) if str(i).strip()]
-            if not ids:
-                return self._redirect("/superadmin?ok=" +
-                                      quote("Nothing was ticked."))
-            from .billing_runner import mark_paid, ProviderError
-            done, failed = 0, []
-            for raw in ids:
-                try:
-                    note = mark_paid(billing, auth, int(raw))
-                    if not note:
-                        done += 1
-                except (ProviderError, ValueError, TypeError) as exc:
-                    failed.append(str(exc))
-                except Exception as exc:  # noqa: BLE001
-                    log.exception("reconcile apply failed for order %s", raw)
-                    failed.append(str(exc))
-            if failed:
-                # Said in full rather than summarised: a payment that did
-                # not record is money the books will disagree about, and
-                # "2 of 5 failed" is not something anybody can act on.
-                return self._redirect("/superadmin?error=" + quote(
-                    f"{done} recorded, {len(failed)} failed: "
-                    + "; ".join(failed[:3])))
-            log.info("reconcile: %d payment(s) recorded by %s", done,
-                     user.get("email", "?"))
-            return self._redirect("/superadmin?ok=" + quote(
-                f"{done} payment(s) recorded on their invoices, and those "
-                f"packets carry on."))
-
         def _post_mark_paid(self, user):
-            """Superadmin: record an EFT payment against an invoice.
+            """Superadmin: record a bank transfer against an invoice.
 
-            Recorded at the provider first, because that is the call that
-            can refuse -- a missing scope, a deleted invoice, a rate limit.
-            Marking it here first and failing there would leave a customer
-            switched on against an invoice that still reads unpaid, which is
-            the version somebody discovers a month later.
+            The card path never reaches here -- Yoco's webhook records
+            itself. This is for somebody who paid by EFT anyway, which
+            nothing can detect because the money lands where this server
+            cannot see it.
             """
             if not (user and user.get("is_superadmin")):
                 return self._send(403, "forbidden")
@@ -7936,28 +7750,20 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if billing is None:
                 return self._redirect("/superadmin?error=" +
                                       quote("Billing is not enabled."))
+            from .billing_runner import BillingError, mark_paid
             try:
-                order_id = int(flat.get("order") or 0)
-            except (TypeError, ValueError):
-                return self._redirect("/superadmin?error=" +
-                                      quote("Which invoice?"))
-            from .billing_runner import mark_paid, ProviderError
-            try:
-                note = mark_paid(billing, auth, order_id)
-            except ProviderError as exc:
-                return self._redirect("/superadmin?error=" + quote(str(exc)))
-            except Exception as exc:  # noqa: BLE001
-                log.exception("mark paid failed for order %s", order_id)
+                note = mark_paid(billing, auth, int(flat.get("order") or 0))
+            except (BillingError, ValueError, TypeError) as exc:
                 return self._redirect("/superadmin?error=" + quote(str(exc)))
             if note:
                 return self._redirect("/superadmin?ok=" + quote(note))
-            log.info("payment recorded for order %s by %s", order_id,
-                     user.get("email", "?"))
+            log.info("payment recorded for order %s by %s",
+                     flat.get("order"), user.get("email", "?"))
             return self._redirect("/superadmin?ok=" + quote(
-                "Payment recorded on the invoice, and the packet carries on."))
+                "Payment recorded, and that packet carries on."))
 
         def _post_billing_run(self, user):
-            """Superadmin-only: do the renewal/reconcile pass right now."""
+            """Superadmin-only: run the billing pass right now."""
             if not (user and user.get("is_superadmin")):
                 return self._send(403, "forbidden")
             flat, _ = self._form()
@@ -11119,20 +10925,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_suspend(user, restore=True)
             if path == "/superadmin/yoco":
                 return self._post_superadmin_yoco(user)
-            if path == "/superadmin/reconcile":
-                return self._post_reconcile(user)
-            if path == "/superadmin/reconcile-apply":
-                return self._post_reconcile_apply(user)
             if path == "/superadmin/mark-paid":
                 return self._post_mark_paid(user)
             if path == "/billing/change-plan":
                 return self._post_change_plan(user)
-            if path == "/superadmin/zoho":
-                return self._post_zoho(user)
-            if path == "/superadmin/zoho/test":
-                return self._post_zoho_test(user)
-            if path == "/superadmin/zoho/run":
-                return self._post_billing_run(user)
             if path == "/superadmin/billing-contact":
                 return self._post_superadmin_billing_contact(user)
             if path == "/superadmin/hub-endpoint":

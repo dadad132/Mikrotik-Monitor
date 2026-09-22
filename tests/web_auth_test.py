@@ -1375,10 +1375,19 @@ check("...and it offers the thing a customer actually came here to do, "
 # where no template setting can hide it.
 import mikromon.billing_runner as _br  # noqa: E402
 
-_src = open(_br.__file__, encoding="utf-8").read()
-check("the renewal invoice carries the reference in its description as well "
-      "as its reference field, so a template that hides one still shows the "
-      "other", "Please quote {ref} on your payment" in _src)
+# There is one rail now: mikromon raises its own invoice and emails it, and
+# Yoco takes the card. The reference has to be on the email, because that is
+# the document a customer paying by bank transfer is reading.
+import mikromon.web as _mw  # noqa: E402
+
+_wsrc = open(_mw.__file__, encoding="utf-8").read()
+check("the renewal email carries the reference, for anybody who pays by "
+      "bank transfer rather than clicking the link",
+      "Quote {ref} so the payment can" in _wsrc
+      or "Quote {ref}" in _wsrc)
+check("...and leads with the pay link, because an invoice that has to be "
+      "hunted through for a way to pay gets paid by bank transfer -- the "
+      "one path that needs somebody at our end", "Pay now: {link}" in _wsrc)
 
 # The superadmin has no other way to notice: their own panel looks fine while
 # every customer's billing page is quietly missing the account to pay into.
