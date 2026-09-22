@@ -4139,7 +4139,9 @@ def _nextdns_box(name, cfg, csrf, nextdns_configured: bool) -> str:
 _NEXTDNS_PROBE_DOMAIN = "example.org"
 
 
-_SPEEDTEST_KEEP = 10
+# Five. Ten was more table than anybody reads, and the point of the list is
+# to tell weather from the line -- which three runs already do.
+_SPEEDTEST_KEEP = 5
 
 
 def _speedtest_path(devices_db) -> str:
@@ -4181,6 +4183,8 @@ def _speedtest_record(name, run, devices_db="") -> None:
             "loss_pct": p.get("loss_pct"), "avg_ms": p.get("avg_ms"),
             "jitter_ms": p.get("jitter_ms"),
             "mbps": d.get("mbps"), "up_mbps": u.get("mbps"),
+            "target": (run.get("ping") or {}).get("target", ""),
+            "colo": (run.get("where") or {}).get("colo", ""),
         })
         all_runs[name] = all_runs[name][:_SPEEDTEST_KEEP]
         _atomic_write(path, json.dumps(all_runs, indent=1))
@@ -4202,8 +4206,8 @@ def _speedtest_box(name, csrf, run=None, history=()) -> str:
     secs = int(run.get("phase_seconds") or 30)
 
     if running:
-        order = [("ping", "Ping"), ("download", "Download"),
-                 ("upload", "Upload")]
+        order = [("where", "Locating"), ("ping", "Ping"),
+                 ("download", "Download"), ("upload", "Upload")]
         done_i = next((i for i, (k, _) in enumerate(order) if k == phase), -1)
         steps = []
         for i, (key, label) in enumerate(order):
@@ -4231,14 +4235,38 @@ def _speedtest_box(name, csrf, run=None, history=()) -> str:
                 f'<script>setTimeout(function(){{location.reload();}},'
                 f'5000);</script></div>')
 
-    run_btn = (f'<form method="POST" action="/device/speedtest">'
-               f'<input type="hidden" name="csrf" value="{csrf}">'
-               f'<input type="hidden" name="device" value="{q}">'
-               f'<button class="btn" type="submit">Run the test</button>'
-               f'<span class="muted" style="margin-left:10px;font-size:12px">'
-               f'Ping, download and upload, {secs} seconds each &mdash; about '
-               f'{secs * 3 // 60} minutes. Nothing is written to the '
-               f'router\'s storage.</span></form>')
+    from .speedtest import PING_CHOICES
+    chosen = str((run or {}).get("target") or "auto")
+    picked = any(chosen == k for k, _l, _a in PING_CHOICES)
+    opts = "".join(
+        f'<option value="{esc(k)}"{" selected" if chosen == k else ""}>'
+        f'{esc(label)} &mdash; {esc(addr)}</option>'
+        for k, label, addr in PING_CHOICES)
+    opts += (f'<option value="custom"{"" if picked else " selected"}>'
+             f'A host I type&hellip;</option>')
+    run_btn = (
+        f'<form method="POST" action="/device/speedtest" '
+        f'style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="device" value="{q}">'
+        f'<label style="font-size:12px">Ping<br>'
+        f'<select name="target" id="st-target" style="min-width:230px">'
+        f'{opts}</select></label>'
+        f'<label style="font-size:12px" id="st-custom-wrap"'
+        f'{"" if not picked else " hidden"}>Host or IP<br>'
+        f'<input name="custom" id="st-custom" placeholder="e.g. 196.25.1.1" '
+        f'value="{esc("" if picked else chosen)}"></label>'
+        f'<button class="btn" type="submit">Run the test</button></form>'
+        f'<p class="muted" style="margin:8px 0 0;font-size:12px">'
+        f'Ping, download and upload, {secs} seconds each &mdash; about '
+        f'{secs * 3 // 60} minutes. Nothing is written to the router\'s '
+        f'storage. Download and upload always go to the nearest Cloudflare '
+        f'point of presence, which the result names &mdash; only the ping '
+        f'target is a choice.</p>'
+        f'<script>(function(){{var s=document.getElementById("st-target"),'
+        f'w=document.getElementById("st-custom-wrap");if(!s||!w)return;'
+        f's.addEventListener("change",function(){{'
+        f'w.hidden=(s.value!=="custom");}});}})();</script>')
 
     body = ""
     if run and not running:
@@ -4282,6 +4310,29 @@ def _speedtest_box(name, csrf, run=None, history=()) -> str:
                    "warn" if jit is not None and jit >= 10 else "good")
             + "</div>")
 
+        w = run.get("where") or {}
+        if w.get("colo") or w.get("ip"):
+            bits = []
+            if w.get("colo"):
+                place = w["colo"]
+                if w.get("city"):
+                    place = f'{w["city"]} ({w["colo"]})'
+                bits.append(f'Served from Cloudflare <b>{esc(place)}</b>')
+            if w.get("country"):
+                bits.append(f'router seen in <b>{esc(w["country"])}</b>')
+            if w.get("ip"):
+                bits.append(f'public address <code>{esc(w["ip"])}</code>')
+            if w.get("org"):
+                bits.append(esc(w["org"]))
+            body += (f'<p class="muted" style="font-size:12px;margin:0 0 4px">'
+                     f'{" &middot; ".join(bits)}. Pinged '
+                     f'<code>{esc(str((run.get("ping") or {}).get("target", "")))}'
+                     f'</code>.</p>')
+        elif (run.get("ping") or {}).get("target"):
+            body += (f'<p class="muted" style="font-size:12px;margin:0 0 4px">'
+                     f'Pinged <code>'
+                     f'{esc(str(run["ping"]["target"]))}</code>.</p>')
+
         notes = []
         if run.get("error"):
             notes.append(f'The test stopped early: {esc(str(run["error"]))}')
@@ -4295,6 +4346,15 @@ def _speedtest_box(name, csrf, run=None, history=()) -> str:
         if jit is not None and jit >= 30:
             notes.append("Jitter this high breaks calls even when latency "
                          "and speed both look fine.")
+        if u.get("mbps") and u.get("streams"):
+            notes.append(
+                f'Upload used {u["streams"]} connections at once, '
+                f'{u.get("chunk_kib", 0)} KiB per POST &mdash; one at a time '
+                f'measures round trips rather than the line, because every '
+                f'POST is a fresh connection.')
+        if w.get("error") and not w.get("colo"):
+            notes.append(f'Could not tell where the test went: '
+                         f'{esc(str(w["error"]))}')
         if u.get("skipped"):
             notes.append(f'Upload was skipped: {esc(str(u.get("error", "")))}')
         elif u.get("error"):
@@ -4309,6 +4369,12 @@ def _speedtest_box(name, csrf, run=None, history=()) -> str:
 
     hist = ""
     if history:
+        def against(h):
+            """Where that run went, for the row. Built out here because a
+            second f-string nested inside the row is unreadable."""
+            bits = [str(h.get("target") or ""), str(h.get("colo") or "")]
+            return esc(" \u00b7 ".join(b for b in bits if b))
+
         def cell(value, unit=""):
             return "&mdash;" if value is None else f"{value}{unit}"
 
@@ -4317,11 +4383,13 @@ def _speedtest_box(name, csrf, run=None, history=()) -> str:
             f'<td>{cell(h.get("mbps"), " Mbit/s")}</td>'
             f'<td>{cell(h.get("up_mbps"), " Mbit/s")}</td>'
             f'<td>{cell(h.get("avg_ms"), " ms")}</td>'
-            f'<td>{cell(h.get("loss_pct"), "%")}</td></tr>'
+            f'<td>{cell(h.get("loss_pct"), "%")}</td>'
+            f'<td class="muted" style="font-size:11px">{against(h)}</td>'
+            f'</tr>'
             for h in history)
         hist = (f'<h3 style="font-size:14px;margin:20px 0 6px">Previous runs'
                 f'</h3><table><thead><tr><th>When</th><th>Down</th>'
-                f'<th>Up</th><th>Ping</th><th>Loss</th></tr></thead>'
+                f'<th>Up</th><th>Ping</th><th>Loss</th><th>Against</th></tr></thead>'
                 f'<tbody>{rows}</tbody></table>'
                 f'<p class="muted" style="font-size:12px;margin:6px 0 0">'
                 f'One slow run is weather. The same figure three times is '
@@ -10503,7 +10571,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             def _finished(dev_name, run):
                 _speedtest_record(dev_name, run, devices_db)
 
-            if not st.start(name, _Conn, on_done=_finished):
+            # "custom" means the typed box; anything else is a preset key
+            # and speedtest.ping_target turns it into an address. A blank
+            # custom box falls back to the default rather than pinging "".
+            _target = (flat.get("target") or "auto").strip()
+            if _target == "custom":
+                _target = (flat.get("custom") or "").strip() or "auto"
+
+            if not st.start(name, _Conn, on_done=_finished, target=_target):
                 return self._redirect(
                     f"/device?name={quote(name)}&tab=speedtest&msg="
                     + quote("A test is already running on this router."))
@@ -10511,7 +10586,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if audit:
                 audit.append(name, (user or {}).get("login", ""),
                              "speedtest", "run", "started",
-                             "ping, download and upload")
+                             f"ping {st.ping_target(_target)}, download "
+                             f"and upload")
                 audit.close()
             return self._redirect(f"/device?name={quote(name)}&tab=speedtest")
 

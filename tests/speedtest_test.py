@@ -219,6 +219,178 @@ hist = _speedtest_box("R1", "tok", {}, [
 check("past runs are listed, because one run is weather and three is the "
       "line", "48.2 Mbit/s" in hist and "21 Sep 09:00" in hist)
 
+print("\nThe upload that kept dying halfway through")
+
+# Every run ended "Upload did not complete: [Errno 104] Connection reset by
+# peer". The payload crosses the API to reach the router, and RouterOS
+# closes the connection outright on a sentence past whatever its limit is --
+# undocumented, different by version, and fatal to the rest of the run,
+# because the connection it kills is the one the test is using.
+#
+# So the size is no longer asserted. It is probed, largest first, and a
+# refusal means reconnecting before trying smaller.
+
+
+class PickyApi(FakeApi):
+    """A router that resets the connection on a body over `limit` bytes."""
+
+    def __init__(self, limit):
+        super().__init__()
+        self.limit = limit
+        self.dead = False
+        self.accepted = []
+
+    def path(self, *parts):
+        outer = self
+
+        class P(FakePath):
+            def __call__(self, _cmd, **kw):
+                if outer.dead:
+                    raise OSError(104, "Connection reset by peer")
+                data = kw.get("http-data")
+                if data is not None:
+                    if len(data) > outer.limit:
+                        outer.dead = True
+                        raise OSError(104, "Connection reset by peer")
+                    outer.accepted.append(len(data))
+                    time.sleep(0.02)
+                    return []
+                return FakePath.__call__(self, _cmd, **kw)
+
+        return P(self, parts)
+
+
+ST.PHASE_SECONDS = 1
+_apis = []
+
+
+def _picky_conn(limit):
+    def make():
+        api = PickyApi(limit)
+        _apis.append(api)
+        return Conn(api)
+    return make
+
+
+# 128 KiB refused, 64 accepted: the ladder has to come down one rung and
+# reconnect to do it, because the first refusal killed the connection.
+_mk = _picky_conn(64 * 1024)
+_first = _mk()
+_up = ST._phase_upload(_first.__enter__(), _mk, seconds=1)
+check("a router that refuses the largest body still produces an upload "
+      "figure, instead of losing the phase to a dead connection",
+      _up["mbps"] is not None and _up["bytes"] > 0)
+check("...measured with a body the router actually accepted",
+      _up["chunk_kib"] == 64)
+check("...and the result says which, because a figure whose payload size "
+      "is unknown cannot be compared with another one",
+      _up["chunk_kib"] in (s_ // 1024 for s_ in ST.UPLOAD_SIZES))
+check("...across more than one connection: a single stream spends most of "
+      "its time waiting for round trips, not sending",
+      _up["streams"] > 1)
+check("...and reports no error, because nothing went wrong -- the router "
+      "simply has a smaller limit than the first guess",
+      _up["error"] == "")
+
+# A router that refuses everything is a result, not a crash.
+_mk = _picky_conn(1)
+_first = _mk()
+_up = ST._phase_upload(_first.__enter__(), _mk, seconds=1)
+check("a router that refuses every size says so rather than reporting zero",
+      _up["mbps"] is None and "refused" in _up["error"])
+
+# The old bug, exactly: one oversized body, and the phase returned the bare
+# socket error with nothing measured.
+check("the probe never sends a body bigger than the largest rung, so the "
+      "thing that killed the connection cannot be sent by accident",
+      max(ST.UPLOAD_SIZES) == ST.UPLOAD_SIZES[0])
+
+print("\nWhere the test actually went")
+
+# speed.cloudflare.com is anycast: "the server" is whichever PoP is nearest.
+# A line in Johannesburg served out of Amsterdam is not a slow line, it is a
+# badly routed one, and megabits alone never tell those two apart.
+
+
+class MetaApi(FakeApi):
+    def __init__(self, body):
+        super().__init__()
+        self.body = body
+
+    def path(self, *parts):
+        outer = self
+
+        class P(FakePath):
+            def __call__(self, _cmd, **kw):
+                if kw.get("output") == "user":
+                    return [{"data": outer.body}]
+                return FakePath.__call__(self, _cmd, **kw)
+
+        return P(self, parts)
+
+
+_w = ST._detect_location(MetaApi(
+    '{"clientIp":"41.13.2.9","country":"ZA","city":"Johannesburg",'
+    '"colo":"JNB","asn":3741,"asOrganization":"Internet Solutions"}'))
+check("the run names the PoP that served it",
+      _w["colo"] == "JNB" and _w["city"] == "Johannesburg")
+check("...the country the router is seen in",
+      _w["country"] == "ZA")
+check("...and the public address it is seen as, which is the thing to quote "
+      "at an ISP", _w["ip"] == "41.13.2.9")
+
+_w = ST._detect_location(FakeApi())
+check("a router too old for output=user says so rather than inventing a "
+      "location", not _w["colo"] and "RouterOS 7" in _w["error"])
+
+_w = ST._detect_location(MetaApi("<html>not json</html>"))
+check("a reply that is not the JSON expected is handled, not raised",
+      not _w["colo"] and "JSON" in _w["error"])
+
+print("\nAiming the ping")
+
+check("a preset resolves to its address", ST.ping_target("google") == "8.8.8.8")
+check("the default is the nearest anycast, which is what 'auto' means",
+      ST.ping_target("auto") == "1.1.1.1")
+check("a typed host is taken as given -- somebody testing their line to a "
+      "particular place knows where it is better than a list does",
+      ST.ping_target("196.25.1.1") == "196.25.1.1")
+check("an empty choice falls back rather than pinging nothing",
+      ST.ping_target("") == ST.PING_TARGET)
+
+_api = FakeApi()
+ST._runs.clear()
+ST.start("R-target", lambda: Conn(_api), target="quad9")
+for _ in range(120):
+    if not ST.is_running("R-target"):
+        break
+    time.sleep(0.1)
+_st = ST.status("R-target")
+check("the chosen target is what actually gets pinged, not the default",
+      (_st.get("ping") or {}).get("target") == "9.9.9.9")
+
+_box = _speedtest_box("R1", "tok", run=_st)
+check("the page names what it pinged, so a figure can be compared with "
+      "another one", "9.9.9.9" in _box)
+check("...and offers the choice before the next run",
+      'name="target"' in _box and "Nearest" in _box)
+
+print("\nFive runs, not ten")
+
+from mikromon import web as _W  # noqa: E402
+
+check("the history keeps five, because ten is more table than anybody "
+      "reads and three already tells weather from the line",
+      _W._SPEEDTEST_KEEP == 5)
+
+_hist = [{"when": f"22 Sep 1{i}:00", "mbps": 18.0, "up_mbps": 2.0,
+          "avg_ms": 55.0, "loss_pct": 0.0, "target": "1.1.1.1",
+          "colo": "JNB"} for i in range(5)]
+_box = _speedtest_box("R1", "tok", history=_hist)
+check("...and the table says what each run was measured against, since a "
+      "row against a different host is not comparable with the one above it",
+      _box.count("JNB") == 5)
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")
