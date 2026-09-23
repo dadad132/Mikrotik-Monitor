@@ -80,13 +80,20 @@ _DEFAULT_API_TIMEOUT = 60.0
 
 # Same reason as upload: one stream measures round trips and ramps, several
 # measure the line.
-# Four streams returned 184 Mbit on a measured 306 Mbit line -- about 46 per
-# stream, so the streams were the ceiling rather than the line. Six gets
-# closer without asking a small router for a lot of simultaneous API
-# sessions. If the per-connection figure in the result does not fall when
-# this rises, the router's own CPU is the limit and no number of streams
-# will help.
-DOWNLOAD_STREAMS = 6
+# The counts to try. Measured on one unit: four streams gave 46 Mbit per
+# connection and 184 total; six gave 15.7 and 86. Adding streams made it
+# worse, because /tool/fetch terminates TCP on the router's CPU and that CPU
+# thrashes -- a shared LINE divides between streams, it does not shrink.
+#
+# Which count is best is therefore a property of the router, not something
+# to pick in advance. Each is measured and the best is reported.
+DOWNLOAD_RAMP = (1, 2, 3, 4, 6)
+DOWNLOAD_STREAMS = 4          # when a caller asks for a single fixed run
+
+# A fetch should last about this long inside one slice of the ramp: long
+# enough that the TCP ramp is a small part of it, short enough that several
+# complete within the slice.
+SLICE_TARGET_SECONDS = 1.5
 
 UPLOAD_URL = "http://speed.cloudflare.com/__up"
 META_URL = "http://speed.cloudflare.com/meta"
@@ -499,49 +506,14 @@ def _download_stream(connect, url, deadline, tally, own_api=None, key=0):
                 pass
 
 
-def _phase_download(api, connect=None, url: str = "", seconds: int = 0,
-                    streams: int = DOWNLOAD_STREAMS) -> dict:
-    """Fetch repeatedly for the duration, on several connections at once.
+def _run_slice(api, connect, url, seconds, streams) -> dict:
+    """One measured burst at a fixed number of connections.
 
-    Both of this phase's old faults came from one fixed 10 MB fetch on one
-    connection.
-
-    At 300 Mbit/s that transfer lasts a quarter of a second, and TCP spends
-    most of a quarter-second still opening its window -- slow start needs
-    about a dozen round trips, which at 20 ms is 240 ms of ramp inside a 270
-    ms transfer. What came out was the average of the ramp. Add a fresh
-    handshake per fetch, since /tool/fetch opens one every time, and the line
-    read back at roughly a third of itself.
-
-    At the other end, 10 MB needs 80 seconds on a 1 Mbit link, and the API
-    read blocks for the whole fetch -- so the slowest devices could not
-    finish one and the phase died with a socket error instead of a slow
-    answer.
-
-    Now the size is probed and chosen to last a few seconds whatever the line
-    does, and several fetches run at once so their ramps overlap rather than
-    being measured end to end.
+    Returns {mbps, per_stream_mbps, bytes, runs, live, seconds, error}.
     """
-    seconds = int(seconds or PHASE_SECONDS)
-    out = {"url": url or DOWNLOAD_URL, "seconds": 0.0, "bytes": 0,
-           "mbps": None, "per_stream_mbps": None, "runs": 0, "error": "",
-           "streams": 0, "chunk_mb": 0.0}
-
-    if url:
-        chunk, err = 0, ""          # an explicit url is used as given
-    else:
-        chunk, _rate, err = _probe_download(api, max(1, int(streams)))
-        if err:
-            out["error"] = err
-            return out
-        url = download_url(chunk)
-        out["url"] = url
-        out["chunk_mb"] = round(chunk / 1_000_000, 1)
-
     tally = _new_tally()
     deadline = time.monotonic() + seconds
     started = time.monotonic()
-
     threads = [threading.Thread(
         target=_download_stream, args=(connect, url, deadline, tally, api, 0),
         name="speedtest-down-0", daemon=True)]
@@ -555,20 +527,103 @@ def _phase_download(api, connect=None, url: str = "", seconds: int = 0,
         t.start()
     for t in threads:
         t.join(timeout=seconds + _api_timeout(api) + 10)
+    elapsed = round(time.monotonic() - started, 2)
+    got = summarise(tally, elapsed)
+    got["seconds"] = elapsed
+    got["error"] = tally["error"]
+    return got
+
+
+def _phase_download(api, connect=None, url: str = "", seconds: int = 0,
+                    streams: int = DOWNLOAD_STREAMS) -> dict:
+    """Fetch for the duration and report the most this router could pull.
+
+    How many connections to use is a property of the ROUTER, not something
+    to pick in advance. Measured on one unit: four connections gave 46 Mbit
+    each and 184 in total; six gave 15.7 each and 86. Adding streams made it
+    worse. A shared line divides between streams -- it does not shrink -- so
+    that is a CPU thrashing, not a line running out. /tool/fetch terminates
+    TCP on the router's own processor, a different path from the hardware
+    forwarding that carries the gigabit past it.
+
+    So the window is divided into slices at 1, 2, 4 and 6 connections, each
+    measured, and the best is reported. Each slice sizes its fetches from
+    the per-connection rate the PREVIOUS slice measured, so the size
+    self-corrects rather than being derived from a probe that ran alone --
+    which is what made every fetch six times too long, and 184 become 86.
+
+    A caller passing an explicit url gets a single fixed run instead, which
+    is what the tests use to measure against a line of known speed.
+    """
+    seconds = int(seconds or PHASE_SECONDS)
+    out = {"url": url or DOWNLOAD_URL, "seconds": 0.0, "bytes": 0,
+           "mbps": None, "per_stream_mbps": None, "runs": 0, "error": "",
+           "streams": 0, "chunk_mb": 0.0, "ramp": []}
+
+    # --- a single fixed run, for a caller that has already decided --------
+    if url:
+        got = _run_slice(api, connect, url, seconds, streams)
+        out["seconds"] = got["seconds"]
+        out["bytes"] = got["bytes"]
+        out["runs"] = got["runs"]
+        out["streams"] = got["live"] or streams
+        out["mbps"] = got["mbps"]
+        out["per_stream_mbps"] = got["per_stream_mbps"]
+        if got["error"] and not got["bytes"]:
+            out["error"] = got["error"]
+        elif got["error"]:
+            out["error"] = f"one stream stopped early ({got['error']})"
+        return out
+
+    # --- the ramp ---------------------------------------------------------
+    chunk, rate, err = _probe_download(api, 1)
+    if err:
+        out["error"] = err
+        return out
+
+    counts = [n for n in DOWNLOAD_RAMP if n == 1 or connect is not None]
+    slice_secs = max(0.5, seconds / max(1, len(counts)))
+    timeout = _api_timeout(api)
+    started = time.monotonic()
+    best = None
+    best_n = 0
+    per_stream_bps = rate
+
+    for n in counts:
+        chunk = choose_chunk(per_stream_bps, timeout, SLICE_TARGET_SECONDS)
+        got = _run_slice(api, connect, download_url(chunk), slice_secs, n)
+        out["ramp"].append({"streams": got["live"] or n,
+                            "mbps": got["mbps"],
+                            "per_stream_mbps": got["per_stream_mbps"],
+                            "chunk_mb": round(chunk / 1_000_000, 1)})
+        if got["error"] and not got["bytes"]:
+            out["error"] = out["error"] or got["error"]
+            break
+        if got["mbps"] and (best is None or got["mbps"] > best["mbps"]):
+            best, best_n = got, got["live"] or n
+            out["chunk_mb"] = round(chunk / 1_000_000, 1)
+        # Size the next slice from what ONE connection just managed, so the
+        # fetches shrink as contention grows instead of running long.
+        if got["per_stream_mbps"]:
+            per_stream_bps = got["per_stream_mbps"] * 1_000_000 / 8
+        # Clearly past the peak: adding connections is costing throughput,
+        # and the remaining slices would only cost the customer time.
+        if best and got["mbps"] and got["mbps"] < best["mbps"] * 0.75:
+            log.info("speed test: %d connections is past the peak "
+                     "(%.1f vs %.1f); stopping the ramp",
+                     n, got["mbps"], best["mbps"])
+            break
 
     out["seconds"] = round(time.monotonic() - started, 2)
-    got = summarise(tally, out["seconds"])
-    out["bytes"] = got["bytes"]
-    out["runs"] = got["runs"]
-    out["streams"] = got["live"] or len(threads)
-    out["mbps"] = got["mbps"]
-    out["per_stream_mbps"] = got["per_stream_mbps"]
-    # One stream falling over still leaves a measurement; say so without
-    # throwing the answer away.
-    if tally["error"] and not got["bytes"]:
-        out["error"] = tally["error"]
-    elif tally["error"]:
-        out["error"] = f"one stream stopped early ({tally['error']})"
+    if best is None:
+        out["error"] = out["error"] or "no slice of the ramp completed"
+        return out
+    out["bytes"] = best["bytes"]
+    out["runs"] = best["runs"]
+    out["streams"] = best_n
+    out["mbps"] = best["mbps"]
+    out["per_stream_mbps"] = best["per_stream_mbps"]
+    out["url"] = download_url(int(out["chunk_mb"] * 1_000_000))
     return out
 
 
@@ -685,15 +740,23 @@ def _file_stream(connect, url, size, deadline, tally, own_api=None, key=0):
                 pass
 
 
-def _upload_from_file(api, connect, url, seconds, streams) -> dict:
+def _upload_from_file(api, connect, url, seconds, streams, why=None) -> dict:
     """The real upload measurement: a file the router already holds.
 
     Returns a result with via_api False, or None when this router cannot do
-    it -- no room, or a RouterOS that will not take upload=yes -- in which
-    case the caller falls back to the API method and its floor.
+    it -- no room, or a RouterOS that will not take upload=yes. `why` is a
+    list the reason is appended to, because a fallback whose cause lives
+    only in a log leaves the page saying "at least this" with no way to find
+    out what stopped the real measurement.
     """
-    size = sample_size(_free_space(api))
+    why = why if why is not None else []
+    free = _free_space(api)
+    size = sample_size(free)
     if not size:
+        why.append(
+            f"the router reports {free // (1024 * 1024)} MB free, which is "
+            f"not enough to spare a sample" if free else
+            "the router did not report how much storage it has free")
         return None
     out = {"url": url, "seconds": 0.0, "bytes": 0, "mbps": None,
            "per_stream_mbps": None, "runs": 0, "error": "", "skipped": False,
@@ -702,10 +765,12 @@ def _upload_from_file(api, connect, url, seconds, streams) -> dict:
     try:
         landed = _seed_file(api, size)
     except Exception as exc:  # noqa: BLE001
+        why.append(f"the sample could not be written to the router: {exc}")
         log.info("speed test: could not place a sample on the router (%s); "
                  "falling back to the API method", exc)
         return None
     if not landed:
+        why.append("the router accepted the sample but reported no bytes")
         _remove_file(api)
         return None
     size = landed
@@ -717,6 +782,8 @@ def _upload_from_file(api, connect, url, seconds, streams) -> dict:
         try:
             _upload_file_once(api, url)
         except Exception as exc:  # noqa: BLE001
+            why.append(f"this RouterOS refused to upload a file "
+                       f"(/tool/fetch upload=yes): {exc}")
             log.info("speed test: this router will not upload=yes (%s); "
                      "falling back to the API method", exc)
             return None
@@ -855,7 +922,8 @@ def _phase_upload(api, connect, url: str = UPLOAD_URL, seconds: int = 0,
     seconds = int(seconds or PHASE_SECONDS)
     out = {"url": url, "seconds": 0.0, "bytes": 0, "mbps": None,
            "per_stream_mbps": None, "runs": 0, "error": "", "skipped": False,
-           "streams": 0, "chunk_kib": 0, "via_api": True}
+           "streams": 0, "chunk_kib": 0, "via_api": True,
+           "fallback_reason": ""}
     ros = _ros_version(api)
     if not upload_supported(ros):
         out["skipped"] = True
@@ -868,9 +936,13 @@ def _phase_upload(api, connect, url: str = UPLOAD_URL, seconds: int = 0,
     # The real measurement first: a sample the router already holds, so the
     # payload never crosses the API and the figure is the router's own
     # upload rather than our path to it.
-    real = _upload_from_file(api, connect, url, seconds, streams)
+    why = []
+    real = _upload_from_file(api, connect, url, seconds, streams, why)
     if real is not None:
         return real
+    out["fallback_reason"] = why[0] if why else ""
+    log.info("speed test: upload fell back to the API method (%s)",
+             out["fallback_reason"] or "no reason recorded")
 
     api, payload, note = _probe_payload(api, connect, url)
     if not payload:

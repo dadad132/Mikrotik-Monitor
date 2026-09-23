@@ -4401,6 +4401,12 @@ def _speedtest_box(name, csrf, run=None, history=()) -> str:
                          "and speed both look fine.")
         if u.get("mbps") and u.get("via_api"):
             notes.append(
+                f'<b>Why the real measurement did not run:</b> '
+                f'{esc(str(u["fallback_reason"]))}'
+                if u.get("fallback_reason") else
+                "<b>Why the real measurement did not run was not "
+                "recorded.</b>")
+            notes.append(
                 "<b>The upload figure is a floor, not a measurement.</b> "
                 "RouterOS can only POST a body it was handed, and the only "
                 "way to hand it one is through the API — so "
@@ -4409,14 +4415,22 @@ def _speedtest_box(name, csrf, run=None, history=()) -> str:
                 "covers that whole journey. Measuring upload properly needs "
                 "the payload generated on the router, which means writing a "
                 "temporary file to its storage.")
-        if d.get("mbps") and d.get("streams", 0) > 1:
+        if d.get("ramp") and len(d["ramp"]) > 1:
+            bits = " &middot; ".join(
+                f'{r["streams"]} conn {r["mbps"]}' for r in d["ramp"]
+                if r.get("mbps"))
             notes.append(
-                f'Download used {d["streams"]} connections at once, '
+                f'Connection counts were tried and the best kept &mdash; '
+                f'Mbit/s at each: {bits}. If the total FALLS as connections '
+                f'are added, the limit is the router, not the line: '
+                f'/tool/fetch terminates TCP on the router\'s own '
+                f'processor, which is a different path from the hardware '
+                f'forwarding that carries traffic past it.')
+        if d.get("mbps"):
+            notes.append(
+                f'Best was {d.get("streams", 1)} connection(s) at '
                 f'{d.get("chunk_mb", 0)} MB per fetch, {d.get("runs", 0)} '
-                f'fetches in all. Each connection managed about '
-                f'{d.get("per_stream_mbps")} Mbit/s — if that '
-                f'figure holds as connections are added, the line is '
-                f'the limit; if it falls, the router\'s own CPU is.')
+                f'fetches.')
         if u.get("mbps") and u.get("streams"):
             notes.append(
                 f'Upload used {u["streams"]} connections at once, '

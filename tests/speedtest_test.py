@@ -750,6 +750,138 @@ check("a stream that never fetched anything is not counted as a connection "
                                 1: {"bytes": 0, "busy": 0.0, "runs": 0,
                                     "best": 0.0}}}, 1.0)["live"] == 1)
 
+print("\nHow many connections a router wants is measured, not guessed")
+
+# From one real unit, two runs:
+#     4 connections -> 46.2 each -> 184.7 total
+#     6 connections -> 15.7 each ->  85.9 total
+# Adding connections made it WORSE. A shared line divides between streams;
+# it does not shrink. That is a CPU thrashing -- /tool/fetch terminates TCP
+# on the router's own processor, a different path from the hardware
+# forwarding that carries the gigabit past it.
+#
+# So the count cannot be a constant chosen in advance, and the fault that
+# produced 86 was picking one.
+
+_PEAK_AT, _PEAK_BPS = 3, 200e6 / 8
+_busy = {"n": 0}
+_blk = threading.Lock()
+
+
+def _thrashing_total(c):
+    """Total throughput: rises to a peak at 3 connections, falls after."""
+    if c <= _PEAK_AT:
+        return _PEAK_BPS * c / _PEAK_AT
+    return _PEAK_BPS * (_PEAK_AT / c) ** 1.5
+
+
+class ThrashApi(FakeApi):
+    def path(self, *parts):
+        class P(FakePath):
+            def __call__(self, _cmd, **kw):
+                if parts != ("tool", "fetch"):
+                    return []
+                url = kw.get("url", "")
+                n = (int(url.rsplit("bytes=", 1)[-1].split("&")[0])
+                     if "bytes=" in url else 0)
+                with _blk:
+                    _busy["n"] += 1
+                    c = _busy["n"]
+                try:
+                    time.sleep(n / (_thrashing_total(c) / max(1, c)))
+                finally:
+                    with _blk:
+                        _busy["n"] -= 1
+                return [{"downloaded": str(n // 1024)}]
+
+            def __iter__(self):
+                return iter([])
+
+        return P(self, parts)
+
+    def fetch(self, path):
+        return [{"version": "7.14.2 (stable)", "free-hdd-space": "0"}]
+
+
+class ThrashConn:
+    def __enter__(self):
+        return ThrashApi()
+
+    def __exit__(self, *a):
+        return False
+
+
+_d = ST._phase_download(ThrashApi(), (lambda: ThrashConn()), seconds=8)
+_tried = [r["streams"] for r in _d["ramp"]]
+check("several connection counts are tried rather than one being assumed",
+      len(_d["ramp"]) >= 3)
+check("...starting from a single connection, which is the only count that "
+      "cannot be made worse by contention", _tried[0] == 1)
+check("the best result is what gets reported, not the last one tried",
+      _d["mbps"] == max(r["mbps"] for r in _d["ramp"] if r["mbps"]))
+check("...on a router that thrashes above three connections, the answer is "
+      "NOT the highest count -- which is exactly the mistake that turned "
+      "184 Mbit into 86",
+      _d["streams"] <= 4)
+check("...and the count that won is reported, since it is a fact about the "
+      "router worth knowing", _d["streams"] in _tried)
+check("every rung is kept so the shape can be read off the page: a total "
+      "that falls as connections rise is a CPU, not a line",
+      all("mbps" in r for r in _d["ramp"]))
+
+# The ramp must not outlast the time it was given: a floor per slice that
+# outranked the budget turned a one-second phase into twelve.
+_t0 = time.monotonic()
+ST._phase_download(ThrashApi(), (lambda: ThrashConn()), seconds=2)
+check("the ramp fits inside the time the phase was given, rather than a "
+      "per-slice floor overriding it",
+      time.monotonic() - _t0 < 12)
+
+print("\nWhy the real upload measurement did not run")
+
+# Four different things send the upload phase back to the API method, and
+# every one of them used to go to a log. The page then said "at least this"
+# with nothing to say what had stopped it -- which is the state the last
+# screenshot came back in, and it left the fault undiagnosable.
+_api = FileApi(free=2 * MB)
+_u = ST._phase_upload(_api, None, seconds=1)
+check("a router without room to spare says so, in the result, in words",
+      _u["via_api"] and "not enough" in _u["fallback_reason"])
+
+_api = FileApi(refuse_upload=True)
+_u = ST._phase_upload(_api, None, seconds=1)
+check("a RouterOS that refuses to upload a file says THAT, and carries the "
+      "router's own words with it",
+      _u["via_api"] and "refused to upload" in _u["fallback_reason"])
+
+_api = FileApi(fail_seed=True)
+_u = ST._phase_upload(_api, None, seconds=1)
+check("a sample that could not be written says so",
+      _u["via_api"] and "could not be written" in _u["fallback_reason"])
+
+_api = FileApi()
+_u = ST._phase_upload(_api, None, seconds=1)
+check("and when the real measurement DOES run there is no reason to give, "
+      "because nothing fell back",
+      _u["via_api"] is False and not _u.get("fallback_reason"))
+
+_box = _speedtest_box("R1", "tok", run={
+    "running": False, "phase": "done",
+    "ping": {"target": "1.1.1.1", "avg_ms": 45.8, "loss_pct": 0.0,
+             "sent": 30, "received": 30},
+    "download": {"mbps": 231.4, "streams": 3, "runs": 52, "chunk_mb": 14.0,
+                 "error": "", "ramp": [{"streams": 1, "mbps": 92.1},
+                                       {"streams": 6, "mbps": 85.9}]},
+    "upload": {"mbps": 0.37, "streams": 3, "chunk_kib": 16, "runs": 70,
+               "error": "", "skipped": False, "via_api": True,
+               "fallback_reason": "this RouterOS refused to upload a file"},
+    "where": {}})
+check("the page prints the reason, so the next report can name the fault "
+      "instead of describing the symptom",
+      "refused to upload a file" in _box)
+check("...and prints the ramp, which is what tells a CPU-bound router from "
+      "a slow line", "1 conn 92.1" in _box and "6 conn 85.9" in _box)
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")
