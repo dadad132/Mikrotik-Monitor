@@ -391,6 +391,142 @@ check("...and the table says what each run was measured against, since a "
       "row against a different host is not comparable with the one above it",
       _box.count("JNB") == 5)
 
+print("\nA 300 Mbit line that read back as 100")
+
+# One fixed 10 MB fetch, one connection at a time, caused both of this
+# phase's faults.
+#
+# At 300 Mbit/s that transfer lasts a quarter of a second, and TCP spends
+# most of a quarter-second still opening its window: slow start needs about
+# a dozen round trips, which at 20 ms is 240 ms of ramp inside a 270 ms
+# transfer. What came out was the average of the ramp, not the line.
+#
+# At the other end 10 MB needs 80 seconds on a 1 Mbit link, and the API read
+# blocks for the whole fetch -- so the slowest devices could not finish one,
+# and the phase returned a socket error rather than a slow answer.
+
+MB = 1_000_000
+
+
+def secs(mbit):
+    """How long one chosen fetch lasts on a line of this speed."""
+    bps = mbit * MB / 8
+    return ST.choose_chunk(bps) / bps
+
+
+check("a fast line gets a fetch big enough to outlast TCP slow start -- at "
+      "300 Mbit a 10 MB fetch is over in a quarter of a second, most of it "
+      "ramp, which is how 300 read back as 100",
+      ST.choose_chunk(300 * MB / 8) > 100 * MB)
+check("...and every speed from a trickle upwards gets a fetch of a few "
+      "seconds rather than a fixed size that suits one of them",
+      all(2.0 <= secs(m) <= 25.0 for m in (1, 2, 10, 50, 100, 300, 1000)))
+
+# The other half: the API read blocks for the whole fetch, so a fetch longer
+# than the device timeout comes back as a socket error with nothing measured.
+check("no fetch is ever expected to outlast the API timeout, which is what "
+      "made slow devices fail outright instead of answering slowly",
+      all(ST.choose_chunk(b, 60.0) / b <= 60.0 * ST.TIMEOUT_SHARE + 0.01
+          for b in (3e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9)))
+check("...and a shorter configured timeout tightens it rather than being "
+      "ignored",
+      ST.choose_chunk(100 * MB / 8, 5.0) < ST.choose_chunk(100 * MB / 8, 60.0))
+check("a gigabit line does not ask for a gigabyte",
+      ST.choose_chunk(1e12) <= ST.DOWNLOAD_MAX_BYTES)
+check("and an unknown rate falls back rather than asking for nothing",
+      ST.choose_chunk(0) == ST.DOWNLOAD_MIN_BYTES)
+
+print("\nMeasured across several connections, not one")
+
+
+class CountingApi(FakeApi):
+    """Counts fetches and reports a fixed size, like a real /tool/fetch."""
+
+    def __init__(self, kib=2048):
+        super().__init__()
+        self.kib = kib
+        self.fetches = 0
+        self.lock = __import__("threading").Lock()
+
+    def path(self, *parts):
+        outer = self
+
+        class P(FakePath):
+            def __call__(self, _cmd, **kw):
+                if parts == ("tool", "fetch") and "http-data" not in kw:
+                    with outer.lock:
+                        outer.fetches += 1
+                    time.sleep(0.05)
+                    return [{"downloaded": str(outer.kib)}]
+                return FakePath.__call__(self, _cmd, **kw)
+
+        return P(self, parts)
+
+
+_api = CountingApi()
+_made = []
+
+
+def _conn():
+    a = CountingApi()
+    _made.append(a)
+    return Conn(a)
+
+
+_d = ST._phase_download(_api, _conn, seconds=1)
+check("the phase runs more than one connection at once, so their ramps "
+      "overlap instead of being measured end to end",
+      _d["streams"] > 1)
+check("...and reports how many, because a figure whose stream count is "
+      "unknown cannot be compared with another one", _d["streams"] >= 2)
+check("...and what size it settled on, for the same reason",
+      _d["chunk_mb"] > 0)
+check("every stream really fetched: the extra connections are not decoration",
+      sum(a.fetches for a in _made) > 0)
+check("a speed comes out of it", _d["mbps"] is not None and _d["bytes"] > 0)
+
+# With no way to open more connections -- which is every existing caller and
+# every test -- it still has to work on the one it was given.
+_d1 = ST._phase_download(CountingApi(), None, seconds=1)
+check("with no way to open a second connection it still measures on the one "
+      "it has, rather than refusing",
+      _d1["streams"] == 1 and _d1["mbps"] is not None)
+
+
+class DeadApi(FakeApi):
+    def path(self, *parts):
+        class P(FakePath):
+            def __call__(self, _cmd, **kw):
+                raise OSError(110, "Connection timed out")
+        return P(self, parts)
+
+
+_d2 = ST._phase_download(DeadApi(), None, seconds=1)
+check("a router that cannot fetch at all produces a result carrying the "
+      "reason, not a hang",
+      _d2["mbps"] is None and "timed out" in _d2["error"])
+
+print("\nA stuck run must not lock the router out of the feature")
+
+# The run is marked running until its thread returns. One blocked read and
+# that never happens -- and every later test is refused, which looks exactly
+# like the feature being broken.
+ST._runs.clear()
+ST._runs["R-stuck"] = {"running": True, "started": time.time() - 3600,
+                       "phase": "download", "name": "R-stuck"}
+check("a run that started an hour ago is not running, whatever it says",
+      ST.is_running("R-stuck") is False)
+check("...so another test can be started on that router",
+      ST.start("R-stuck", lambda: Conn(FakeApi())) is True)
+
+ST._runs.clear()
+ST._runs["R-live"] = {"running": True, "started": time.time(),
+                      "phase": "download", "name": "R-live"}
+check("a run that started a moment ago IS running, and a second is still "
+      "refused -- two tests would measure each other",
+      ST.is_running("R-live") is True
+      and ST.start("R-live", lambda: Conn(FakeApi())) is False)
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

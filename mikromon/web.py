@@ -4389,6 +4389,13 @@ def _speedtest_box(name, csrf, run=None, history=()) -> str:
         if jit is not None and jit >= 30:
             notes.append("Jitter this high breaks calls even when latency "
                          "and speed both look fine.")
+        if d.get("mbps") and d.get("streams", 0) > 1:
+            notes.append(
+                f'Download used {d["streams"]} connections at once, '
+                f'{d.get("chunk_mb", 0)} MB per fetch, sized from a probe. '
+                f'One fetch at a time measures TCP opening its window as '
+                f'much as the line — which is how a 300 Mbit line '
+                f'reads back as 100.')
         if u.get("mbps") and u.get("streams"):
             notes.append(
                 f'Upload used {u["streams"]} connections at once, '

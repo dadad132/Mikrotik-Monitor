@@ -44,6 +44,38 @@ PHASE_SECONDS = 30
 # Plain HTTP on purpose: HTTPS would make a small router measure its own
 # encryption speed rather than the line.
 DOWNLOAD_URL = "http://speed.cloudflare.com/__down?bytes=10000000"
+
+# How long ONE fetch should last. Long enough that TCP slow start is a small
+# fraction of it -- a quarter-second transfer is mostly ramp, and reports the
+# ramp -- and short enough that the phase is made of several fetches rather
+# than one long one.
+DOWNLOAD_TARGET_SECONDS = 4.0
+
+# The floor and ceiling on that size. The floor keeps a slow line from
+# fetching something so small it measures handshakes; the ceiling stops a
+# fast line asking for a gigabyte.
+DOWNLOAD_MIN_BYTES = 2_000_000
+DOWNLOAD_MAX_BYTES = 400_000_000
+
+# The first probe. Small, because it has to complete on the slowest line
+# there is before anything is known about the speed.
+DOWNLOAD_PROBE_BYTES = 2_000_000
+
+# Below this there is nothing left to measure; asking for fewer bytes than
+# this would time the handshake and call it a line speed.
+ABSOLUTE_MIN_BYTES = 64_000
+
+# No single fetch may be expected to take more than this share of the API
+# timeout. The API read blocks for the whole fetch, so a fetch longer than
+# the timeout does not come back slow -- it comes back as a socket error
+# with nothing measured.
+TIMEOUT_SHARE = 0.4
+_DEFAULT_API_TIMEOUT = 60.0
+
+# Same reason as upload: one stream measures round trips and ramps, several
+# measure the line.
+DOWNLOAD_STREAMS = 4
+
 UPLOAD_URL = "http://speed.cloudflare.com/__up"
 META_URL = "http://speed.cloudflare.com/meta"
 PING_TARGET = "1.1.1.1"
@@ -92,6 +124,11 @@ UPLOAD_SIZES = (128 * 1024, 64 * 1024, 16 * 1024)
 # reaches line rate.
 UPLOAD_STREAMS = 3
 
+# A run that has been "running" for longer than this is not running. Without
+# it a single stuck read leaves the router unable to start another test ever
+# again, which is indistinguishable from the feature being broken.
+MAX_RUN_SECONDS = 12 * 60
+
 _runs: dict = {}
 _lock = threading.Lock()
 
@@ -104,7 +141,25 @@ def status(name: str) -> dict:
 
 
 def is_running(name: str) -> bool:
-    return bool(status(name).get("running"))
+    """Is a test actually in progress on this router?
+
+    A run that says it started twelve minutes ago is not running: something
+    blocked and its thread never came back. Saying so lets a new test start,
+    rather than leaving the router locked out of the feature by one stuck
+    read.
+    """
+    run = status(name)
+    if not run.get("running"):
+        return False
+    started = float(run.get("started") or 0)
+    if started and (time.time() - started) > MAX_RUN_SECONDS:
+        log.warning("speed test for %r has been running %.0f minutes; "
+                    "treating it as dead so another can start",
+                    name, (time.time() - started) / 60)
+        _set(name, running=False, phase="done",
+             error=run.get("error") or "the test stopped responding")
+        return False
+    return True
 
 
 def _set(name: str, **fields) -> None:
@@ -120,9 +175,9 @@ def start(name: str, connect, on_done=None, target: str = "auto") -> bool:
     stays testable without a router, and called again by the upload phase,
     which needs more than one connection.
     """
+    if is_running(name):
+        return False
     with _lock:
-        if (_runs.get(name) or {}).get("running"):
-            return False
         _runs[name] = {"running": True, "phase": "connecting",
                        "started": time.time(), "name": name,
                        "ping": None, "download": None, "upload": None,
@@ -141,7 +196,7 @@ def _run(name, connect, on_done, target="auto") -> None:
             _set(name, phase="ping")
             _set(name, ping=_phase_ping(api, ping_target(target)))
             _set(name, phase="download")
-            _set(name, download=_phase_download(api))
+            _set(name, download=_phase_download(api, connect))
             _set(name, phase="upload")
             _set(name, upload=_phase_upload(api, connect))
     except Exception as exc:  # noqa: BLE001 — a failed test is a result
@@ -248,39 +303,191 @@ def _phase_ping(api, target: str = PING_TARGET,
     return out
 
 
-def _phase_download(api, url: str = DOWNLOAD_URL,
-                    seconds: int = 0) -> dict:
-    """Fetch repeatedly for the duration; bytes over elapsed time.
+def _api_timeout(api) -> float:
+    """How long the API will wait on one read, in seconds.
 
-    Repeated rather than one huge file so a fast line is measured over the
-    whole window rather than finishing in two seconds and reporting the
-    average of a ramp-up.
+    It matters because the read blocks for the WHOLE fetch: RouterOS sends
+    nothing back until the transfer finishes. A fetch expected to outlast
+    this does not return a slow answer, it returns a socket error with
+    nothing measured -- which is what the slowest devices were doing.
+    """
+    try:
+        return float(api.device.cfg.timeout) or _DEFAULT_API_TIMEOUT
+    except Exception:  # noqa: BLE001
+        return _DEFAULT_API_TIMEOUT
+
+
+def download_url(nbytes: int) -> str:
+    """Cloudflare's endpoint, asked for a specific size."""
+    return f"http://speed.cloudflare.com/__down?bytes={int(nbytes)}"
+
+
+def choose_chunk(rate_bps: float, api_timeout: float = _DEFAULT_API_TIMEOUT,
+                 target: float = DOWNLOAD_TARGET_SECONDS) -> int:
+    """How big one fetch should be, for a line running at `rate_bps`.
+
+    Big enough that TCP slow start is a small part of it -- a quarter-second
+    transfer is mostly ramp and reports the ramp, which is how a 300 Mbit
+    line read back as 100. Small enough that one fetch cannot approach the
+    API timeout, which is how the slowest lines failed outright.
+    """
+    if rate_bps <= 0:
+        return DOWNLOAD_MIN_BYTES
+    want = min(rate_bps * target, DOWNLOAD_MAX_BYTES)
+    # The floor keeps a merely slow line from measuring handshakes...
+    want = max(want, DOWNLOAD_MIN_BYTES)
+    # ...but the timeout beats it. On a genuinely awful line a 2 MB fetch
+    # outlasts the API read and returns a socket error with nothing
+    # measured, and a small answer is worth more than no answer.
+    want = min(want, rate_bps * api_timeout * TIMEOUT_SHARE)
+    return int(max(ABSOLUTE_MIN_BYTES, want))
+
+
+def _fetch_once(api, url: str) -> tuple:
+    """(bytes, seconds) for one fetch. Raises what the router raised."""
+    t0 = time.monotonic()
+    rows = list(api.device.api.path("tool", "fetch")(
+        "", url=url, mode="http", output="none",
+        **{"check-certificate": "no"}))
+    return _fetched_bytes(rows, url), time.monotonic() - t0
+
+
+def _probe_download(api) -> tuple:
+    """(chunk_bytes, rate_bps, error) -- how fast, and what to ask for next.
+
+    Two probes, because one cannot answer both ends of the range. A 2 MB
+    fetch completes on the slowest line there is, but on a fast one it is
+    over before TCP has opened its window, so it reports a fraction of the
+    truth. When the first probe comes back quickly the second asks for
+    something big enough to measure properly.
+    """
+    timeout = _api_timeout(api)
+    try:
+        got, took = _fetch_once(api, download_url(DOWNLOAD_PROBE_BYTES))
+    except Exception as exc:  # noqa: BLE001
+        return 0, 0.0, str(exc)
+    if not got:
+        return 0, 0.0, "the router reported no bytes"
+    rate = got / max(took, 0.001)
+
+    if took < 1.0:
+        # Fast enough that the first probe measured mostly the handshake.
+        bigger = choose_chunk(rate, timeout)
+        try:
+            got2, took2 = _fetch_once(api, download_url(bigger))
+            if got2 and took2 > 0.05:
+                rate = max(rate, got2 / took2)
+        except Exception:  # noqa: BLE001 - the first probe still stands
+            pass
+    return choose_chunk(rate, timeout), rate, ""
+
+
+def _download_stream(connect, url, deadline, tally, own_api=None):
+    """Fetch in a loop until the deadline, counting bytes into `tally`."""
+    api = own_api
+    ctx = None
+    try:
+        if api is None:
+            ctx = connect()
+            api = ctx.__enter__()
+        while time.monotonic() < deadline:
+            try:
+                got, took = _fetch_once(api, url)
+            except Exception as exc:  # noqa: BLE001
+                with tally["lock"]:
+                    tally["error"] = tally["error"] or str(exc)
+                return
+            if not got:
+                with tally["lock"]:
+                    tally["error"] = (tally["error"]
+                                      or "the router reported no bytes")
+                return
+            with tally["lock"]:
+                tally["bytes"] += got
+                tally["runs"] += 1
+                if took > 0.05:
+                    this = (got * 8) / took / 1_000_000
+                    tally["peak"] = max(tally["peak"], this)
+    except Exception as exc:  # noqa: BLE001
+        with tally["lock"]:
+            tally["error"] = tally["error"] or str(exc)
+    finally:
+        if ctx is not None:
+            try:
+                ctx.__exit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _phase_download(api, connect=None, url: str = "", seconds: int = 0,
+                    streams: int = DOWNLOAD_STREAMS) -> dict:
+    """Fetch repeatedly for the duration, on several connections at once.
+
+    Both of this phase's old faults came from one fixed 10 MB fetch on one
+    connection.
+
+    At 300 Mbit/s that transfer lasts a quarter of a second, and TCP spends
+    most of a quarter-second still opening its window -- slow start needs
+    about a dozen round trips, which at 20 ms is 240 ms of ramp inside a 270
+    ms transfer. What came out was the average of the ramp. Add a fresh
+    handshake per fetch, since /tool/fetch opens one every time, and the line
+    read back at roughly a third of itself.
+
+    At the other end, 10 MB needs 80 seconds on a 1 Mbit link, and the API
+    read blocks for the whole fetch -- so the slowest devices could not
+    finish one and the phase died with a socket error instead of a slow
+    answer.
+
+    Now the size is probed and chosen to last a few seconds whatever the line
+    does, and several fetches run at once so their ramps overlap rather than
+    being measured end to end.
     """
     seconds = int(seconds or PHASE_SECONDS)
-    out = {"url": url, "seconds": 0.0, "bytes": 0, "mbps": None,
-           "peak_mbps": None, "runs": 0, "error": ""}
+    out = {"url": url or DOWNLOAD_URL, "seconds": 0.0, "bytes": 0,
+           "mbps": None, "peak_mbps": None, "runs": 0, "error": "",
+           "streams": 0, "chunk_mb": 0.0}
+
+    if url:
+        chunk, err = 0, ""          # an explicit url is used as given
+    else:
+        chunk, _rate, err = _probe_download(api)
+        if err:
+            out["error"] = err
+            return out
+        url = download_url(chunk)
+        out["url"] = url
+        out["chunk_mb"] = round(chunk / 1_000_000, 1)
+
+    tally = {"lock": threading.Lock(), "bytes": 0, "runs": 0, "peak": 0.0,
+             "error": ""}
     deadline = time.monotonic() + seconds
     started = time.monotonic()
-    while time.monotonic() < deadline:
-        t0 = time.monotonic()
-        try:
-            rows = list(api.device.api.path("tool", "fetch")(
-                "", url=url, mode="http", output="none",
-                **{"check-certificate": "no"}))
-        except Exception as exc:  # noqa: BLE001
-            out["error"] = str(exc)
-            break
-        took = time.monotonic() - t0
-        got = _fetched_bytes(rows, url)
-        if not got:
-            out["error"] = out["error"] or "the router reported no bytes"
-            break
-        out["bytes"] += got
-        out["runs"] += 1
-        if took > 0.05:
-            this = (got * 8) / took / 1_000_000
-            out["peak_mbps"] = round(max(out["peak_mbps"] or 0.0, this), 2)
+
+    threads = [threading.Thread(
+        target=_download_stream, args=(connect, url, deadline, tally, api),
+        name="speedtest-down-0", daemon=True)]
+    if connect is not None:
+        for i in range(1, max(1, int(streams))):
+            threads.append(threading.Thread(
+                target=_download_stream,
+                args=(connect, url, deadline, tally, None),
+                name=f"speedtest-down-{i}", daemon=True))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=seconds + _api_timeout(api) + 10)
+
     out["seconds"] = round(time.monotonic() - started, 2)
+    out["bytes"] = tally["bytes"]
+    out["runs"] = tally["runs"]
+    out["streams"] = len(threads)
+    out["peak_mbps"] = round(tally["peak"], 2) or None
+    # One stream falling over still leaves a measurement; say so without
+    # throwing the answer away.
+    if tally["error"] and not tally["bytes"]:
+        out["error"] = tally["error"]
+    elif tally["error"]:
+        out["error"] = f"one stream stopped early ({tally['error']})"
     if out["bytes"] and out["seconds"] > 0.05:
         out["mbps"] = round((out["bytes"] * 8) / out["seconds"] / 1_000_000, 2)
     return out
