@@ -4335,10 +4335,15 @@ def _speedtest_box(name, csrf, run=None, history=()) -> str:
         body += (
             '<div style="display:flex;gap:24px;flex-wrap:wrap;margin:18px 0 8px">'
             + stat("Download", d.get("mbps"), " Mbit/s", "",
-                   f'peak {d.get("peak_mbps")}' if d.get("peak_mbps") else "")
-            + stat("Upload", u.get("mbps"), " Mbit/s", "",
+                   (f'{d["streams"]} \u00d7 {d.get("per_stream_mbps")} '
+                    f'per connection') if d.get("per_stream_mbps")
+                   and d.get("streams") else "")
+            # Marked as a floor rather than styled as a result: the payload
+            # reaches the router through the API, so this is bounded by our
+            # own path to it rather than by the customer's line.
+            + stat("Upload", u.get("mbps"), " Mbit/s", "warn",
                    "not supported" if u.get("skipped") else
-                   (f'peak {u.get("peak_mbps")}' if u.get("peak_mbps") else ""))
+                   ("at least this" if u.get("mbps") else ""))
             + stat("Ping", avg, " ms",
                    "bad" if avg is not None and avg >= 150 else
                    "warn" if avg is not None and avg >= 60 else "good",
@@ -4389,13 +4394,24 @@ def _speedtest_box(name, csrf, run=None, history=()) -> str:
         if jit is not None and jit >= 30:
             notes.append("Jitter this high breaks calls even when latency "
                          "and speed both look fine.")
+        if u.get("mbps") and u.get("via_api"):
+            notes.append(
+                "<b>The upload figure is a floor, not a measurement.</b> "
+                "RouterOS can only POST a body it was handed, and the only "
+                "way to hand it one is through the API — so "
+                "every payload crosses from this server into the router "
+                "before the router sends anything out, and the timing "
+                "covers that whole journey. Measuring upload properly needs "
+                "the payload generated on the router, which means writing a "
+                "temporary file to its storage.")
         if d.get("mbps") and d.get("streams", 0) > 1:
             notes.append(
                 f'Download used {d["streams"]} connections at once, '
-                f'{d.get("chunk_mb", 0)} MB per fetch, sized from a probe. '
-                f'One fetch at a time measures TCP opening its window as '
-                f'much as the line — which is how a 300 Mbit line '
-                f'reads back as 100.')
+                f'{d.get("chunk_mb", 0)} MB per fetch, {d.get("runs", 0)} '
+                f'fetches in all. Each connection managed about '
+                f'{d.get("per_stream_mbps")} Mbit/s — if that '
+                f'figure holds as connections are added, the line is '
+                f'the limit; if it falls, the router\'s own CPU is.')
         if u.get("mbps") and u.get("streams"):
             notes.append(
                 f'Upload used {u["streams"]} connections at once, '

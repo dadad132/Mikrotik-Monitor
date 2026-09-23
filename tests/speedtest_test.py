@@ -117,9 +117,11 @@ check("...and jitter, which breaks calls even when latency looks fine",
       p["jitter_ms"] is not None)
 check("download reports megabits per second, from bytes over elapsed time",
       d["mbps"] is not None and d["mbps"] > 0)
-check("...and the peak of any single fetch, since a line that bursts and "
-      "sags is a different complaint from one that is evenly slow",
-      d["peak_mbps"] is not None)
+check("...and what ONE connection managed, which is the figure that says "
+      "whether adding streams would help or the router's own CPU is the "
+      "ceiling -- and which printed as a nonsensical 'peak' below the "
+      "average while it was labelled as one",
+      d["per_stream_mbps"] is not None)
 check("...having fetched more than once, so a fast line is measured across "
       "the window rather than a two-second ramp-up", d["runs"] > 1)
 check("upload runs on RouterOS 7 and reports its own figure",

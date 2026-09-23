@@ -74,7 +74,13 @@ _DEFAULT_API_TIMEOUT = 60.0
 
 # Same reason as upload: one stream measures round trips and ramps, several
 # measure the line.
-DOWNLOAD_STREAMS = 4
+# Four streams returned 184 Mbit on a measured 306 Mbit line -- about 46 per
+# stream, so the streams were the ceiling rather than the line. Six gets
+# closer without asking a small router for a lot of simultaneous API
+# sessions. If the per-connection figure in the result does not fall when
+# this rises, the router's own CPU is the limit and no number of streams
+# will help.
+DOWNLOAD_STREAMS = 6
 
 UPLOAD_URL = "http://speed.cloudflare.com/__up"
 META_URL = "http://speed.cloudflare.com/meta"
@@ -407,7 +413,7 @@ def _download_stream(connect, url, deadline, tally, own_api=None):
                 tally["runs"] += 1
                 if took > 0.05:
                     this = (got * 8) / took / 1_000_000
-                    tally["peak"] = max(tally["peak"], this)
+                    tally["best_stream"] = max(tally["best_stream"], this)
     except Exception as exc:  # noqa: BLE001
         with tally["lock"]:
             tally["error"] = tally["error"] or str(exc)
@@ -444,7 +450,7 @@ def _phase_download(api, connect=None, url: str = "", seconds: int = 0,
     """
     seconds = int(seconds or PHASE_SECONDS)
     out = {"url": url or DOWNLOAD_URL, "seconds": 0.0, "bytes": 0,
-           "mbps": None, "peak_mbps": None, "runs": 0, "error": "",
+           "mbps": None, "per_stream_mbps": None, "runs": 0, "error": "",
            "streams": 0, "chunk_mb": 0.0}
 
     if url:
@@ -458,7 +464,7 @@ def _phase_download(api, connect=None, url: str = "", seconds: int = 0,
         out["url"] = url
         out["chunk_mb"] = round(chunk / 1_000_000, 1)
 
-    tally = {"lock": threading.Lock(), "bytes": 0, "runs": 0, "peak": 0.0,
+    tally = {"lock": threading.Lock(), "bytes": 0, "runs": 0, "best_stream": 0.0,
              "error": ""}
     deadline = time.monotonic() + seconds
     started = time.monotonic()
@@ -481,7 +487,7 @@ def _phase_download(api, connect=None, url: str = "", seconds: int = 0,
     out["bytes"] = tally["bytes"]
     out["runs"] = tally["runs"]
     out["streams"] = len(threads)
-    out["peak_mbps"] = round(tally["peak"], 2) or None
+    out["per_stream_mbps"] = round(tally["best_stream"], 2) or None
     # One stream falling over still leaves a measurement; say so without
     # throwing the answer away.
     if tally["error"] and not tally["bytes"]:
@@ -576,7 +582,7 @@ def _upload_stream(connect, url, payload, deadline, tally, own_api=None):
                 tally["runs"] += 1
                 if took > 0.05:
                     this = (len(payload) * 8) / took / 1_000_000
-                    tally["peak"] = max(tally["peak"], this)
+                    tally["best_stream"] = max(tally["best_stream"], this)
     except Exception as exc:  # noqa: BLE001
         with tally["lock"]:
             tally["error"] = tally["error"] or str(exc)
@@ -590,7 +596,22 @@ def _upload_stream(connect, url, payload, deadline, tally, own_api=None):
 
 def _phase_upload(api, connect, url: str = UPLOAD_URL, seconds: int = 0,
                   streams: int = UPLOAD_STREAMS) -> dict:
-    """POST a payload the router holds, on several connections at once.
+    """POST a payload, on several connections at once. A LOWER BOUND.
+
+    Read the limitation before the figure. /tool/fetch can only POST a body
+    that was handed to it, and the only way to hand a router a body is
+    through the API -- so every payload travels from this server, across the
+    internet, into the router, before the router sends one byte to
+    Cloudflare. The timing wraps that whole journey.
+
+    Which means the number is bounded by OUR path to the router, not by the
+    customer's upload, and on a real line it has come out at 0.3 Mbit/s
+    against a measured 158. It is reported as a floor, never as the line,
+    and `via_api` says so in the result.
+
+    Measuring upload properly needs the payload to originate on the router,
+    which means a file on its storage -- a deliberate trade nobody has
+    agreed to yet.
 
     One stream cannot measure an upload. Every POST is a fresh TCP
     connection from the router, so each payload costs a handshake out and a
@@ -607,8 +628,8 @@ def _phase_upload(api, connect, url: str = UPLOAD_URL, seconds: int = 0,
 
     seconds = int(seconds or PHASE_SECONDS)
     out = {"url": url, "seconds": 0.0, "bytes": 0, "mbps": None,
-           "peak_mbps": None, "runs": 0, "error": "", "skipped": False,
-           "streams": 0, "chunk_kib": 0}
+           "per_stream_mbps": None, "runs": 0, "error": "", "skipped": False,
+           "streams": 0, "chunk_kib": 0, "via_api": True}
     ros = _ros_version(api)
     if not upload_supported(ros):
         out["skipped"] = True
@@ -624,7 +645,7 @@ def _phase_upload(api, connect, url: str = UPLOAD_URL, seconds: int = 0,
         return out
     out["chunk_kib"] = len(payload) // 1024
 
-    tally = {"lock": threading.Lock(), "bytes": 0, "runs": 0, "peak": 0.0,
+    tally = {"lock": threading.Lock(), "bytes": 0, "runs": 0, "best_stream": 0.0,
              "error": ""}
     deadline = time.monotonic() + seconds
     started = time.monotonic()
@@ -646,7 +667,7 @@ def _phase_upload(api, connect, url: str = UPLOAD_URL, seconds: int = 0,
     out["bytes"] = tally["bytes"]
     out["runs"] = tally["runs"]
     out["streams"] = len(threads)
-    out["peak_mbps"] = round(tally["peak"], 2) or None
+    out["per_stream_mbps"] = round(tally["best_stream"], 2) or None
     # A stream that died is worth saying, but only if it cost the answer:
     # with three running, one falling over still leaves a measurement.
     if tally["error"] and not tally["bytes"]:
