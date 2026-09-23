@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -654,6 +655,100 @@ check("RouterOS 6 is still told it is RouterOS 6, rather than being given a "
       "made-up figure", _u["skipped"] is True and "RouterOS 7" in _u["error"])
 check("...and nothing was written to it on the way to finding that out",
       _api.files == [])
+
+print("\nThe arithmetic, against a line of known speed")
+
+# The only way to know a speed test is right is to measure something whose
+# speed is already known. This is a fake router attached to a simulated line
+# of exactly 50 Mbit/s, shared fairly between however many streams are
+# fetching at that moment -- so the answer the phase produces can be checked
+# against a number rather than against a hope.
+#
+# It caught a real mistake. Summing each stream's own rate over its own busy
+# time was tried here first, on the theory that a stream idling after the
+# deadline drags the average down. It overstated by 25%: when streams finish
+# at different moments the survivors speed up, and their individual rates
+# stop adding up to anything the line ever did. A speed test that reads high
+# is worse than one that reads low.
+
+_LINE_BPS = 50e6 / 8
+_active = {"n": 0}
+_alock = threading.Lock()
+
+
+class LineApi(FakeApi):
+    """A router on a simulated line shared by whoever is fetching."""
+
+    def path(self, *parts):
+        class P(FakePath):
+            def __call__(self, _cmd, **kw):
+                if parts != ("tool", "fetch"):
+                    return []
+                url = kw.get("url", "")
+                n = (int(url.rsplit("bytes=", 1)[-1].split("&")[0])
+                     if "bytes=" in url else 0)
+                with _alock:
+                    _active["n"] += 1
+                    sharing = _active["n"]
+                try:
+                    time.sleep(n / (_LINE_BPS / max(1, sharing)))
+                finally:
+                    with _alock:
+                        _active["n"] -= 1
+                return [{"downloaded": str(n // 1024)}]
+
+            def __iter__(self):
+                return iter([])
+
+        return P(self, parts)
+
+    def fetch(self, path):
+        return [{"version": "7.14.2 (stable)", "free-hdd-space": "0"}]
+
+
+class LineConn:
+    def __enter__(self):
+        return LineApi()
+
+    def __exit__(self, *a):
+        return False
+
+
+def _measure(secs_per_fetch, streams=6, window=3.0):
+    chunk = int((_LINE_BPS / streams) * secs_per_fetch)
+    return ST._phase_download(LineApi(), (lambda: LineConn()),
+                              url=ST.download_url(chunk),
+                              seconds=window, streams=streams)
+
+
+_r = _measure(0.4)
+check("a 50 Mbit line measures as 50 Mbit, within a few percent -- which is "
+      "the only claim a speed test really makes",
+      _r["mbps"] is not None and abs(_r["mbps"] - 50.0) / 50.0 < 0.08)
+check("...having fetched many times over the window rather than once",
+      _r["runs"] > 10)
+
+# The pathological shape: a fetch sized for the UNLOADED probe rate, so
+# under contention it eats most of the window.
+_r = _measure(2.4)
+check("...and still measures 50 Mbit when each fetch eats most of the "
+      "window, which is what an oversized chunk does under contention",
+      _r["mbps"] is not None and abs(_r["mbps"] - 50.0) / 50.0 < 0.08)
+
+_r = _measure(0.4, streams=1)
+check("one stream on the same line reads the same, because the line is the "
+      "line however many connections are pointed at it",
+      _r["mbps"] is not None and abs(_r["mbps"] - 50.0) / 50.0 < 0.10)
+
+check("a stream that never fetched anything is not counted as a connection "
+      "-- an extra connection that could not be opened used to be counted "
+      "anyway, which divided the per-connection figure by streams that were "
+      "never there",
+      ST.summarise({"lock": threading.Lock(), "error": "",
+                    "streams": {0: {"bytes": 100, "busy": 1.0, "runs": 1,
+                                    "best": 0.8},
+                                1: {"bytes": 0, "busy": 0.0, "runs": 0,
+                                    "best": 0.0}}}, 1.0)["live"] == 1)
 
 print()
 if FAILS:
