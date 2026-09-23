@@ -259,8 +259,11 @@ TABS = [
     {"slug": "speedtest", "title": "Speed test", "art": None,
      "what": "Measures the site's line from the router itself \u2014 over its "
              "own internet connection, not through the tunnel, so it is what "
-             "that site actually gets. Nothing is written to the router's "
-             "storage; the test download is discarded as it arrives.",
+             "that site actually gets. The download is discarded as it "
+             "arrives; the upload phase puts one temporary file on the "
+             "router and removes it afterwards, which is the only way to "
+             "measure the upload the router HAS rather than the speed of "
+             "the link between it and us.",
      "steps": ["Click <b>Run the test</b>. It takes ten to thirty seconds.",
                "Read <b>packet loss</b> first. It is what is wrong most of "
                "the time, and what somebody is describing when they say the "

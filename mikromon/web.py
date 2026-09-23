@@ -4302,8 +4302,9 @@ def _speedtest_box(name, csrf, run=None, history=()) -> str:
         f'<button class="btn" type="submit">Run the test</button></form>'
         f'<p class="muted" style="margin:8px 0 0;font-size:12px">'
         f'Ping, download and upload, {secs} seconds each &mdash; about '
-        f'{secs * 3 // 60} minutes. Nothing is written to the router\'s '
-        f'storage. Download and upload always go to the nearest Cloudflare '
+        f'{secs * 3 // 60} minutes. The upload phase puts one temporary '
+        f'file on the router and removes it afterwards; nothing else is '
+        f'written. Download and upload always go to the nearest Cloudflare '
         f'point of presence, which the result names &mdash; only the ping '
         f'target is a choice.</p>'
         f'<script>(function(){{var s=document.getElementById("st-target"),'
@@ -4341,9 +4342,13 @@ def _speedtest_box(name, csrf, run=None, history=()) -> str:
             # Marked as a floor rather than styled as a result: the payload
             # reaches the router through the API, so this is bounded by our
             # own path to it rather than by the customer's line.
-            + stat("Upload", u.get("mbps"), " Mbit/s", "warn",
+            + stat("Upload", u.get("mbps"), " Mbit/s",
+                   "warn" if u.get("via_api") else "",
                    "not supported" if u.get("skipped") else
-                   ("at least this" if u.get("mbps") else ""))
+                   ("at least this" if u.get("via_api") and u.get("mbps")
+                    else (f'{u["streams"]} × '
+                          f'{u.get("per_stream_mbps")} per connection')
+                    if u.get("per_stream_mbps") and u.get("streams") else ""))
             + stat("Ping", avg, " ms",
                    "bad" if avg is not None and avg >= 150 else
                    "warn" if avg is not None and avg >= 60 else "good",
@@ -4415,9 +4420,15 @@ def _speedtest_box(name, csrf, run=None, history=()) -> str:
         if u.get("mbps") and u.get("streams"):
             notes.append(
                 f'Upload used {u["streams"]} connections at once, '
-                f'{u.get("chunk_kib", 0)} KiB per POST &mdash; one at a time '
-                f'measures round trips rather than the line, because every '
-                f'POST is a fresh connection.')
+                + (f'{u.get("chunk_kib", 0)} KiB per POST &mdash; one at a '
+                   f'time measures round trips rather than the line, '
+                   f'because every POST is a fresh connection.'
+                   if u.get("via_api") else
+                   f'{u.get("chunk_mb", 0)} MB per POST from a sample the '
+                   f'router fetched to its own storage and then removed. '
+                   f'The sample has to live on the router: a payload handed '
+                   f'over the API measures the journey from here to the '
+                   f'router instead of the line.'))
         if w.get("error") and not w.get("colo"):
             notes.append(f'Could not tell where the test went: '
                          f'{esc(str(w["error"]))}')

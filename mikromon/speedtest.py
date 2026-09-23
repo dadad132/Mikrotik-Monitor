@@ -25,10 +25,16 @@ What each phase actually measures:
   DOWNLOAD  repeated fetches for the duration, bytes over seconds. Plain
             HTTP: a small MikroTik doing TLS measures its own CPU, not the
             line.
-  UPLOAD    POSTs a payload the router holds, across several connections at
-            once -- see _phase_upload for why one is not enough.
+  UPLOAD    POSTs a sample the router fetched to its own storage, across
+            several connections at once. The sample has to live on the
+            router: a payload handed over the API measures the journey from
+            here to the router, which on a 158 Mbit line reported 0.3.
 
-Nothing is written to the router's flash in any phase.
+Ping and download write nothing to the router. Upload writes one temporary
+sample to its storage and removes it on the way out -- which is the only way
+to measure the upload a router HAS, rather than the speed of our own path to
+it; see _phase_upload. A router with no room for a sample falls back to the
+old method and its figure is marked as the floor it is.
 """
 from __future__ import annotations
 
@@ -129,6 +135,18 @@ UPLOAD_SIZES = (128 * 1024, 64 * 1024, 16 * 1024)
 # once overlap the waiting, which is how every speed test on the internet
 # reaches line rate.
 UPLOAD_STREAMS = 3
+
+# The sample the router uploads. Fetched to its own storage once per run,
+# then POSTed repeatedly -- so the payload no longer crosses the API and the
+# figure is the router's own upload rather than our path to it.
+UPLOAD_FILE = "easymikrotik-speedtest.tmp"
+
+# Sized to what the device actually has free, because a hAP lite has 16 MB
+# of flash and an RB2011 has 128. A quarter of free space, bounded, so a
+# speed test can never be what fills a router's disk.
+UPLOAD_FILE_TARGET = 16 * 1024 * 1024
+UPLOAD_FILE_MIN = 1 * 1024 * 1024
+UPLOAD_FILE_SHARE = 0.25
 
 # A run that has been "running" for longer than this is not running. Without
 # it a single stuck read leaves the router unable to start another test ever
@@ -523,6 +541,177 @@ def upload_supported(ros_version: str) -> bool:
         return False
 
 
+def _free_space(api) -> int:
+    """Bytes free on the router's own storage, or 0 if it will not say."""
+    try:
+        rows = api.fetch(("system", "resource"))
+    except Exception:  # noqa: BLE001
+        return 0
+    for r in rows or []:
+        try:
+            return int(r.get("free-hdd-space") or 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def sample_size(free_bytes: int) -> int:
+    """How big a sample this router can spare, or 0 if it cannot spare one.
+
+    A quarter of what is free, capped: a speed test must never be the thing
+    that fills a router's disk, and on a 16 MB device there is no quarter
+    worth having.
+    """
+    if free_bytes <= 0:
+        return 0
+    want = min(int(free_bytes * UPLOAD_FILE_SHARE), UPLOAD_FILE_TARGET)
+    return want if want >= UPLOAD_FILE_MIN else 0
+
+
+def _seed_file(api, size: int, name: str = UPLOAD_FILE) -> int:
+    """Put a sample of `size` bytes on the router. Returns the bytes landed.
+
+    Fetched from Cloudflare rather than from this server: the download phase
+    already proves that path works, and it keeps the hub out of a
+    measurement the hub is not part of.
+    """
+    rows = list(api.device.api.path("tool", "fetch")(
+        "", url=download_url(size), mode="http", **{
+            "dst-path": name, "check-certificate": "no"}))
+    return _fetched_bytes(rows, download_url(size))
+
+
+def _remove_file(api, name: str = UPLOAD_FILE) -> None:
+    """Take the sample off the router. Never raises: a test that could not
+    tidy up must still report its result, and the next run overwrites the
+    file anyway."""
+    try:
+        path = api.device.api.path("file")
+        for row in list(path):
+            if str(row.get("name", "")).endswith(name):
+                path.remove(row[".id"])
+                log.debug("speed test: removed %s", row.get("name"))
+    except Exception:  # noqa: BLE001
+        log.warning("speed test: could not remove %s from the router; the "
+                    "next run overwrites it", name, exc_info=True)
+
+
+def _upload_file_once(api, url: str, name: str = UPLOAD_FILE) -> None:
+    """POST the sample the router already holds. Raises what the router did."""
+    list(api.device.api.path("tool", "fetch")(
+        "", url=url, mode="http", upload="yes", **{
+            "src-path": name, "http-method": "post",
+            "check-certificate": "no"}))
+
+
+def _file_stream(connect, url, size, deadline, tally, own_api=None):
+    """Upload the sample in a loop until the deadline."""
+    api = own_api
+    ctx = None
+    try:
+        if api is None:
+            ctx = connect()
+            api = ctx.__enter__()
+        while time.monotonic() < deadline:
+            t0 = time.monotonic()
+            try:
+                _upload_file_once(api, url)
+            except Exception as exc:  # noqa: BLE001
+                with tally["lock"]:
+                    tally["error"] = tally["error"] or str(exc)
+                return
+            took = time.monotonic() - t0
+            with tally["lock"]:
+                tally["bytes"] += size
+                tally["runs"] += 1
+                if took > 0.05:
+                    this = (size * 8) / took / 1_000_000
+                    tally["best_stream"] = max(tally["best_stream"], this)
+    except Exception as exc:  # noqa: BLE001
+        with tally["lock"]:
+            tally["error"] = tally["error"] or str(exc)
+    finally:
+        if ctx is not None:
+            try:
+                ctx.__exit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _upload_from_file(api, connect, url, seconds, streams) -> dict:
+    """The real upload measurement: a file the router already holds.
+
+    Returns a result with via_api False, or None when this router cannot do
+    it -- no room, or a RouterOS that will not take upload=yes -- in which
+    case the caller falls back to the API method and its floor.
+    """
+    size = sample_size(_free_space(api))
+    if not size:
+        return None
+    out = {"url": url, "seconds": 0.0, "bytes": 0, "mbps": None,
+           "per_stream_mbps": None, "runs": 0, "error": "", "skipped": False,
+           "streams": 0, "chunk_mb": round(size / 1_000_000, 1),
+           "via_api": False}
+    try:
+        landed = _seed_file(api, size)
+    except Exception as exc:  # noqa: BLE001
+        log.info("speed test: could not place a sample on the router (%s); "
+                 "falling back to the API method", exc)
+        return None
+    if not landed:
+        _remove_file(api)
+        return None
+    size = landed
+    out["chunk_mb"] = round(size / 1_000_000, 1)
+
+    try:
+        # One upload first: a router that refuses upload=yes must fall back
+        # rather than spend the whole window failing.
+        try:
+            _upload_file_once(api, url)
+        except Exception as exc:  # noqa: BLE001
+            log.info("speed test: this router will not upload=yes (%s); "
+                     "falling back to the API method", exc)
+            return None
+
+        tally = {"lock": threading.Lock(), "bytes": 0, "runs": 0,
+                 "best_stream": 0.0, "error": ""}
+        deadline = time.monotonic() + seconds
+        started = time.monotonic()
+        threads = [threading.Thread(
+            target=_file_stream, args=(connect, url, size, deadline, tally,
+                                       api),
+            name="speedtest-up-0", daemon=True)]
+        if connect is not None:
+            for i in range(1, max(1, int(streams))):
+                threads.append(threading.Thread(
+                    target=_file_stream,
+                    args=(connect, url, size, deadline, tally, None),
+                    name=f"speedtest-up-{i}", daemon=True))
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=seconds + _api_timeout(api) + 10)
+
+        out["seconds"] = round(time.monotonic() - started, 2)
+        out["bytes"] = tally["bytes"]
+        out["runs"] = tally["runs"]
+        out["streams"] = len(threads)
+        out["per_stream_mbps"] = round(tally["best_stream"], 2) or None
+        if tally["error"] and not tally["bytes"]:
+            out["error"] = tally["error"]
+        elif tally["error"]:
+            out["error"] = f"one stream stopped early ({tally['error']})"
+        if out["bytes"] and out["seconds"] > 0.05:
+            out["mbps"] = round(
+                (out["bytes"] * 8) / out["seconds"] / 1_000_000, 2)
+        return out
+    finally:
+        # On the way out whatever happened: a failed run must not leave a
+        # file on somebody's router.
+        _remove_file(api)
+
+
 def _post_once(api, url: str, payload: str) -> None:
     """One POST of `payload` from the router. Raises if the router refuses."""
     list(api.device.api.path("tool", "fetch")(
@@ -638,6 +827,13 @@ def _phase_upload(api, connect, url: str = UPLOAD_URL, seconds: int = 0,
         out["error"] = (f"RouterOS {shown} cannot POST a body with "
                         f"/tool/fetch; upload needs RouterOS 7.")
         return out
+
+    # The real measurement first: a sample the router already holds, so the
+    # payload never crosses the API and the figure is the router's own
+    # upload rather than our path to it.
+    real = _upload_from_file(api, connect, url, seconds, streams)
+    if real is not None:
+        return real
 
     api, payload, note = _probe_payload(api, connect, url)
     if not payload:

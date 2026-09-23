@@ -529,6 +529,132 @@ check("a run that started a moment ago IS running, and a second is still "
       ST.is_running("R-live") is True
       and ST.start("R-live", lambda: Conn(FakeApi())) is False)
 
+print("\nUpload, measured on the router rather than through us")
+
+# The old way reported 0.3 Mbit/s on a line measured at 158. Not a slow
+# measurement -- the wrong one. /tool/fetch will only POST a body it was
+# handed, and the only way to hand a router a body is through the API, so
+# every payload travelled from this server into the router before the router
+# sent a byte outward, and the timing wrapped that whole journey.
+#
+# So the sample now lives on the router. Which means the thing to test is
+# not the arithmetic but the housekeeping: is the file sized to what the
+# device has, does it always get removed, and does a router that cannot do
+# this still report something.
+
+MB = 1024 * 1024
+
+check("the sample is a quarter of free space, so a speed test can never be "
+      "what fills a router's disk",
+      ST.sample_size(40 * MB) == 10 * MB)
+check("...capped, because a router with 2 GB free does not need a 500 MB "
+      "sample to measure an upload",
+      ST.sample_size(4000 * MB) == ST.UPLOAD_FILE_TARGET)
+check("a device with too little free space gets no sample at all rather "
+      "than a useless one -- a hAP lite has 16 MB of flash in total",
+      ST.sample_size(2 * MB) == 0)
+check("...and a router that will not say how much it has is treated the "
+      "same way", ST.sample_size(0) == 0)
+
+
+class FileApi(FakeApi):
+    """A router with storage, which records what was done to it."""
+
+    def __init__(self, free=200 * MB, refuse_upload=False, fail_seed=False):
+        super().__init__()
+        self.free = free
+        self.refuse_upload = refuse_upload
+        self.fail_seed = fail_seed
+        self.files = []
+        self.uploads = 0
+        self.removed = []
+
+    def fetch(self, path):
+        if tuple(path) == ("system", "resource"):
+            return [{"free-hdd-space": str(self.free),
+                     "version": "7.14.2 (stable)"}]
+        return FakeApi.fetch(self, path)
+
+    def path(self, *parts):
+        outer = self
+
+        class P(FakePath):
+            def __call__(self, _cmd, **kw):
+                if parts == ("tool", "fetch"):
+                    if kw.get("dst-path"):
+                        if outer.fail_seed:
+                            raise RuntimeError("no space left on device")
+                        outer.files.append(kw["dst-path"])
+                        return [{"downloaded": "4096"}]
+                    if kw.get("upload") == "yes":
+                        if outer.refuse_upload:
+                            raise RuntimeError(
+                                "input does not match any value of upload")
+                        outer.uploads += 1
+                        time.sleep(0.02)
+                        return []
+                return FakePath.__call__(self, _cmd, **kw)
+
+            def __iter__(self):
+                if parts == ("file",):
+                    return iter([{".id": "*1", "name": n}
+                                 for n in outer.files])
+                return iter([])
+
+            def remove(self, rid):
+                outer.removed.append(rid)
+                outer.files.clear()
+
+        return P(self, parts)
+
+
+_api = FileApi()
+_u = ST._phase_upload(_api, None, seconds=1)
+check("the sample is fetched to the router's own storage, then POSTed from "
+      "there -- which is what makes the figure the router's upload rather "
+      "than the speed of our link to it",
+      _api.files == [] and _api.uploads > 0)
+check("...and the result says it was NOT measured through the API, so the "
+      "page knows not to hedge it", _u["via_api"] is False)
+check("...producing a real figure", _u["mbps"] is not None and _u["bytes"] > 0)
+check("the file is removed afterwards: a speed test must not leave "
+      "anything on somebody's router", _api.removed and not _api.files)
+
+# The housekeeping that matters most is the failing case.
+_api = FileApi(refuse_upload=True)
+_u = ST._phase_upload(_api, None, seconds=1)
+check("a router that refuses upload=yes falls back rather than spending the "
+      "whole window failing", _u["via_api"] is True)
+check("...and the sample is STILL removed, because a failed run must not "
+      "leave a file behind either", _api.removed and not _api.files)
+
+_api = FileApi(free=2 * MB)
+_u = ST._phase_upload(_api, None, seconds=1)
+check("a router with no room to spare is not asked for one -- it falls "
+      "back, and nothing is written to it at all",
+      _u["via_api"] is True and _api.files == [] and not _api.removed)
+
+_api = FileApi(fail_seed=True)
+_u = ST._phase_upload(_api, None, seconds=1)
+check("a sample that cannot be fetched falls back too, rather than losing "
+      "the phase", _u["via_api"] is True)
+
+# RouterOS 6 has neither http-data nor upload=yes worth using.
+class OldApi(FileApi):
+    def fetch(self, path):
+        if tuple(path) == ("system", "resource"):
+            return [{"version": "6.48.6 (long-term)",
+                     "free-hdd-space": str(self.free)}]
+        return FileApi.fetch(self, path)
+
+
+_api = OldApi()
+_u = ST._phase_upload(_api, None, seconds=1)
+check("RouterOS 6 is still told it is RouterOS 6, rather than being given a "
+      "made-up figure", _u["skipped"] is True and "RouterOS 7" in _u["error"])
+check("...and nothing was written to it on the way to finding that out",
+      _api.files == [])
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")
