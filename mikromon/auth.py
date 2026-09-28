@@ -63,6 +63,12 @@ CREATE TABLE IF NOT EXISTS users (
 
 REPORT_INTERVALS = {"weekly": 7 * 86400, "biweekly": 14 * 86400, "monthly": 30 * 86400}
 
+# How often to repeat what is still offline. Twelve hours means a fault that
+# starts overnight is on somebody's screen by morning, and one that starts in
+# the morning is repeated before the end of the day -- without being frequent
+# enough to become something people filter.
+OUTAGE_REMINDER_SECONDS = 12 * 3600
+
 
 def _next_report_due(schedule: str, from_ts: float | None = None) -> float | None:
     """Return the unix timestamp when the next scheduled report should fire."""
@@ -141,6 +147,10 @@ class AuthStore:
         self._add_col_if_missing("orgs", "report_schedule",
                                  "TEXT NOT NULL DEFAULT 'none'")
         self._add_col_if_missing("orgs", "report_next_due", "REAL")
+        # When this org was last told what is still down. Separate from the
+        # scheduled report because it answers a different question: the
+        # report summarises a period, this one repeats a fault.
+        self._add_col_if_missing("orgs", "outage_reminded", "REAL")
         # Platform-wide key/value settings (e.g. the SMTP relay the superadmin
         # configures from the dashboard instead of editing config.yaml).
         self.db.execute(
@@ -770,6 +780,38 @@ class AuthStore:
                 "alert_emails": emails, "due": r[4],
             })
         return result
+
+    def orgs_due_an_outage_reminder(self, now: float,
+                                    every: float = OUTAGE_REMINDER_SECONDS
+                                    ) -> list:
+        """Orgs that have not been told what is down for `every` seconds.
+
+        Includes orgs that have never been reminded, so the first fault on a
+        new install is covered rather than waiting half a day for a clock
+        that has not started.
+
+        Deliberately NOT filtered by report_schedule: somebody who wants no
+        weekly summary still wants to know their router is off.
+        """
+        rows = self.db.execute(
+            "SELECT id, name, alert_emails FROM orgs "
+            "WHERE outage_reminded IS NULL OR outage_reminded <= ?",
+            (now - every,)).fetchall()
+        out = []
+        for r in rows:
+            try:
+                emails = [e for e in json.loads(r[2] or "[]") if e]
+            except (json.JSONDecodeError, TypeError):
+                emails = []
+            out.append({"org_id": r[0], "name": r[1], "alert_emails": emails})
+        return out
+
+    def set_outage_reminded(self, org_id: int, ts: float | None) -> None:
+        with self._lock:
+            self.db.execute(
+                "UPDATE orgs SET outage_reminded=? WHERE id=?",
+                (ts, org_id))
+            self.db.commit()
 
     def set_report_next_due(self, org_id: int, ts: float | None) -> None:
         with self._lock:

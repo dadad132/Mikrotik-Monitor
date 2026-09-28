@@ -157,9 +157,13 @@ check("a rate a month old is marked stale -- a long weekend is three days, "
       row["stale"] and row["age_days"] > 25)
 
 reset()
-FX.urllib.request.urlopen = FakeOpen({"frankfurter": ECB})
+_yesterday = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
+FX.urllib.request.urlopen = FakeOpen(
+    {"frankfurter": {**ECB, "date": _yesterday}})
 check("yesterday's rate is not stale, because that is simply what a daily "
-      "published rate looks like", not FX.get()["stale"])
+      "published rate looks like -- and yesterday is computed rather than "
+      "typed, or this check quietly ages into a failure",
+      not FX.get()["stale"])
 
 print("\nThe price list no longer carries a rate anyone could charge")
 

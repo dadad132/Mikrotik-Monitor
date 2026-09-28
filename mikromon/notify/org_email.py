@@ -138,6 +138,111 @@ def _event_line(e: dict, until: float) -> str:
     return f"{e['title']} — since {start_str}, still ongoing ({dur} so far)"
 
 
+def _for_how_long(seconds: float) -> str:
+    """"3 days 4 hours", for a fault somebody has to judge the age of.
+
+    Rounded to whole hours above a day: nobody acts differently on 74 hours
+    versus 74 hours and twenty minutes, and the extra precision reads as
+    machine noise on a line a person is meant to react to.
+    """
+    if seconds is None or seconds < 0:
+        return "an unknown time"
+    mins = int(seconds // 60)
+    if mins < 60:
+        return f"{mins} minute" + ("" if mins == 1 else "s")
+    hours = mins // 60
+    if hours < 48:
+        return f"{hours} hour" + ("" if hours == 1 else "s")
+    days, rem = divmod(hours, 24)
+    tail = f" {rem} hour" + ("" if rem == 1 else "s") if rem else ""
+    return f"{days} days{tail}"
+
+
+def offline_devices(device_names: list, state_data: dict, now=None) -> list:
+    """Every device of this org that is down RIGHT NOW, oldest fault first.
+
+    Read from live state rather than from the alert log, on purpose: the
+    question is "what is broken", not "what did we manage to send an email
+    about". A fault whose original alert never arrived is exactly the one
+    this exists to catch.
+    """
+    now = now if now is not None else time.time()
+    devices = (state_data or {}).get("devices", {})
+    out = []
+    for name in device_names or []:
+        dev = devices.get(name) or {}
+        cond = (dev.get("conditions") or {}).get("reachability") or {}
+        if cond.get("status") != "problem":
+            continue
+        since = cond.get("since")
+        facts = dev.get("facts") or {}
+        out.append({
+            "name": name,
+            "identity": facts.get("identity") or name,
+            "model": facts.get("model") or "",
+            "host": facts.get("host") or "",
+            "since": since,
+            "seconds": (now - since) if since else None,
+        })
+    # Longest outage first: the one that has been down for three days is the
+    # one somebody has been getting away with not looking at.
+    out.sort(key=lambda d: -(d["seconds"] or 0))
+    return out
+
+
+def _build_outage_reminder(org_name: str, offline: list, subject_prefix: str,
+                           every_hours: int = 12) -> tuple:
+    """(subject, text, html) for "these are still down".
+
+    The count goes in the subject, because the subject is the part that gets
+    read on a phone at 6am and it is the part that decides whether the rest
+    gets opened.
+    """
+    n = len(offline)
+    subject = (f"{subject_prefix} {n} device{'' if n == 1 else 's'} still "
+               f"offline \u2014 {org_name}")
+
+    lines = []
+    html_rows = []
+    for d in offline:
+        how_long = _for_how_long(d["seconds"])
+        where = " \u00b7 ".join(x for x in (d["model"], d["host"]) if x)
+        lines.append(f"  \u2022 {d['identity']} \u2014 down {how_long}"
+                     + (f"  ({where})" if where else ""))
+        html_rows.append(
+            f'<tr><td style="padding:6px 14px 6px 0">'
+            f'<b>{render.esc(d["identity"])}</b>'
+            + (f'<br><span style="color:#64748b;font-size:12px">'
+               f'{render.esc(where)}</span>' if where else "")
+            + f'</td><td style="padding:6px 0;color:#dc2626;'
+              f'white-space:nowrap">down {render.esc(how_long)}</td></tr>')
+
+    body = "\n".join(lines)
+    text = (
+        f"{n} device{'' if n == 1 else 's'} at {org_name} "
+        f"{'is' if n == 1 else 'are'} still offline:\n\n"
+        f"{body}\n\n"
+        f"This is a reminder, not a new fault. It repeats every "
+        f"{every_hours} hours for as long as anything stays down, so an "
+        f"outage cannot go unnoticed because one email was missed.\n\n"
+        f"It stops by itself when the device comes back.\n")
+
+    html = (
+        f'<div style="font:14px/1.5 system-ui,sans-serif;color:#0f172a">'
+        f'<p style="margin:0 0 14px;font-size:16px">'
+        f'<b>{n} device{"" if n == 1 else "s"}</b> at '
+        f'{render.esc(org_name)} {"is" if n == 1 else "are"} still '
+        f'offline.</p>'
+        f'<table style="border-collapse:collapse;margin-bottom:16px">'
+        f'{"".join(html_rows)}</table>'
+        f'<p style="color:#64748b;font-size:12.5px;margin:0">'
+        f'This is a reminder, not a new fault. It repeats every '
+        f'{every_hours} hours for as long as anything stays down, so an '
+        f'outage cannot go unnoticed because one email was missed. It stops '
+        f'by itself when the device comes back.</p></div>')
+    return subject, text, html
+
+
 def _build_report(org_name: str, device_names: list[str], state_data: dict,
                   schedule: str, subject_prefix: str, since: float,
                   until: float, events_by_device: dict | None = None
@@ -421,6 +526,71 @@ class OrgEmailNotifier(Notifier):
                     auth.set_report_next_due(
                         org["org_id"],
                         _next_report_due(org["schedule"], now))
+        finally:
+            auth.close()
+
+    def check_outage_reminders(self, state, devices_store) -> None:
+        """Tell each org what is STILL down, every twelve hours.
+
+        Called after each poll, beside the scheduled report. Separate from it
+        because it answers a different question: the report summarises a
+        period, this repeats a fault until somebody deals with it.
+
+        A router went down, the alert fired once, nobody saw it, and the
+        device stayed down with nothing saying so. That is the failure mode
+        of every alert that fires on a transition -- the message goes out at
+        the one moment nobody is looking.
+        """
+        from ..auth import OUTAGE_REMINDER_SECONDS, AuthStore
+
+        now = time.time()
+        try:
+            auth = AuthStore(self._auth_db)
+        except Exception as exc:  # noqa: BLE001
+            log.error("outage reminder: cannot open auth DB: %s", exc)
+            return
+        try:
+            due = auth.orgs_due_an_outage_reminder(now)
+            if not due:
+                return
+            suspended = self._suspended_orgs()
+            smtp = effective_smtp(auth, self._smtp)
+            state_data = state.data if state is not None else {}
+            for org in due:
+                if org["org_id"] in suspended:
+                    continue
+                names = (devices_store.names_for_org(org["org_id"])
+                         if devices_store else [])
+                offline = offline_devices(names, state_data, now)
+                if not offline:
+                    # Nothing to say. The clock is NOT reset: the next fault
+                    # should be reported as soon as the pass sees it, not
+                    # half a day later.
+                    continue
+                if not org["alert_emails"]:
+                    continue
+                try:
+                    subj, txt, htm = _build_outage_reminder(
+                        org["name"], offline, smtp.subject_prefix,
+                        int(OUTAGE_REMINDER_SECONDS // 3600))
+                    msg = EmailMessage()
+                    msg["Subject"] = subj
+                    msg["From"] = smtp.from_addr
+                    msg["To"] = ", ".join(org["alert_emails"])
+                    msg.set_content(txt)
+                    msg.add_alternative(htm, subtype="html")
+                    _smtp_send(smtp, msg)
+                    auth.set_outage_reminded(org["org_id"], now)
+                    log.info("outage reminder: %d device(s) still down at "
+                             "'%s', told %d recipient(s)",
+                             len(offline), org["name"],
+                             len(org["alert_emails"]))
+                except Exception:  # noqa: BLE001
+                    # Deliberately NOT marking it sent: a reminder that could
+                    # not be delivered has to be tried again, which is the
+                    # whole point of the feature.
+                    log.exception("outage reminder failed for org %s",
+                                  org["org_id"])
         finally:
             auth.close()
 

@@ -446,6 +446,15 @@ class Engine:
                     n.check_scheduled(self.state, self.devices_store)
                 except Exception:  # noqa: BLE001
                     log.exception("check_scheduled failed for %s", n.name)
+            # Separate from the scheduled report, and run even when one is
+            # switched off: somebody who wants no weekly summary still wants
+            # to know their router is off. One failing must not stop the
+            # other, which is why it is its own try.
+            if hasattr(n, "check_outage_reminders"):
+                try:
+                    n.check_outage_reminders(self.state, self.devices_store)
+                except Exception:  # noqa: BLE001
+                    log.exception("outage reminder failed for %s", n.name)
 
     # ----- per-device -------------------------------------------------------
     def _poll_device(self, device) -> list:
