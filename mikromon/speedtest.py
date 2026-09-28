@@ -51,6 +51,47 @@ PHASE_SECONDS = 30
 # encryption speed rather than the line.
 DOWNLOAD_URL = "http://speed.cloudflare.com/__down?bytes=10000000"
 
+# Where a test file can come from. Cloudflare first because it is anycast --
+# whichever PoP is nearest answers, which for a South African line is
+# Johannesburg. The others are fixed locations and are here to be MEASURED
+# against it rather than assumed worse: a badly peered ISP can reach Germany
+# faster than it reaches the city it is in, and that is exactly the kind of
+# thing a speed test should be able to show rather than argue about.
+#
+# `sized` sources take the byte count in the URL; the rest serve one fixed
+# file, so the size is whatever that file is.
+DOWNLOAD_SOURCES = (
+    {"key": "cloudflare", "label": "Cloudflare (nearest)",
+     "url": "http://speed.cloudflare.com/__down?bytes={bytes}",
+     "sized": True, "bytes": 0},
+    {"key": "hetzner-fsn", "label": "Hetzner Falkenstein",
+     "url": "http://fsn1-speed.hetzner.com/100MB.bin",
+     "sized": False, "bytes": 100_000_000},
+    {"key": "hetzner-ash", "label": "Hetzner Ashburn",
+     "url": "http://ash-speed.hetzner.com/100MB.bin",
+     "sized": False, "bytes": 100_000_000},
+)
+
+# How the body is handled once it arrives.
+#
+#   discard   output=none. Nothing is written; the router throws the bytes
+#             away as they land.
+#   to-disk   dst-path. The body is written to the router's storage and the
+#             file removed afterwards. Suggested as possibly faster, since
+#             it is the path /tool/fetch is most used for -- and it puts
+#             flash write speed in the running as the ceiling, which on NAND
+#             is often only a few MB/s. Measured rather than assumed.
+DOWNLOAD_METHODS = ("discard", "to-disk")
+
+# The scratch file to-disk writes to, removed after every probe and after
+# the phase. Named so it is obvious where it came from if one is ever left.
+DOWNLOAD_FILE = "easymikrotik-speedtest-down.tmp"
+
+# One short burst per combination. Long enough to be past the TCP ramp,
+# short enough that trying six of them does not eat the window.
+SOURCE_PROBE_SECONDS = 2.5
+SOURCE_PROBE_BYTES = 8_000_000
+
 # How long ONE fetch should last. Long enough that TCP slow start is a small
 # fraction of it -- a quarter-second transfer is mostly ramp, and reports the
 # ramp -- and short enough that the phase is made of several fetches rather
@@ -434,13 +475,87 @@ def choose_chunk(rate_bps: float, api_timeout: float = _DEFAULT_API_TIMEOUT,
     return int(max(ABSOLUTE_MIN_BYTES, want))
 
 
-def _fetch_once(api, url: str) -> tuple:
-    """(bytes, seconds) for one fetch. Raises what the router raised."""
+def _fetch_once(api, url: str, method: str = "discard",
+                dst: str = "") -> tuple:
+    """(bytes, seconds) for one fetch. Raises what the router raised.
+
+    `discard` throws the body away as it lands. `to-disk` writes it to the
+    router's storage instead, which is the path /tool/fetch is most used
+    for -- and which puts flash write speed in the running as the ceiling.
+    Which is faster is a property of the router, so both are measured.
+    """
+    args = {"url": url, "mode": "http", "check-certificate": "no"}
+    if method == "to-disk":
+        # Its OWN file. Six streams writing one name is six fetches
+        # overwriting each other, and a byte count that means nothing.
+        args["dst-path"] = dst or DOWNLOAD_FILE
+    else:
+        args["output"] = "none"
     t0 = time.monotonic()
-    rows = list(api.device.api.path("tool", "fetch")(
-        "", url=url, mode="http", output="none",
-        **{"check-certificate": "no"}))
+    rows = list(api.device.api.path("tool", "fetch")("", **args))
     return _fetched_bytes(rows, url), time.monotonic() - t0
+
+
+def source_url(source: dict, nbytes: int) -> str:
+    """The URL for this source at (about) this size.
+
+    A fixed-file source ignores the size: it serves what it serves, and
+    pretending otherwise would put a byte count in the result that nothing
+    honoured.
+    """
+    if source.get("sized"):
+        return source["url"].format(bytes=int(nbytes))
+    return source["url"]
+
+
+def source_bytes(source: dict, nbytes: int) -> int:
+    """How many bytes that URL will actually deliver."""
+    return int(nbytes) if source.get("sized") else int(source["bytes"])
+
+
+def probe_sources(api, seconds: float = SOURCE_PROBE_SECONDS,
+                  budget: float = 0.0) -> list:
+    """Measure every source and method combination, briefly.
+
+    Returns a row per combination, fastest first, each carrying what it
+    managed or why it could not be reached. This table is the point: it is
+    what says whether a slow figure is the server, the method, the router or
+    the line, instead of another argument about which it might be.
+    """
+    combos = len(DOWNLOAD_SOURCES) * len(DOWNLOAD_METHODS)
+    if budget > 0:
+        # Six combinations at two and a half seconds is fifteen seconds, and
+        # a probe that eats half the window has stopped being a probe.
+        seconds = max(0.05, budget / combos)
+    rows = []
+    for src in DOWNLOAD_SOURCES:
+        for method in DOWNLOAD_METHODS:
+            url = source_url(src, SOURCE_PROBE_BYTES)
+            row = {"source": src["key"], "label": src["label"],
+                   "method": method, "mbps": None, "error": ""}
+            got = 0
+            took = 0.0
+            deadline = time.monotonic() + seconds
+            try:
+                while time.monotonic() < deadline:
+                    n, t = _fetch_once(api, url, method)
+                    if not n:
+                        row["error"] = "the router reported no bytes"
+                        break
+                    got += n
+                    took += t
+            except Exception as exc:  # noqa: BLE001
+                row["error"] = str(exc)
+            finally:
+                if method == "to-disk":
+                    _remove_file(api, DOWNLOAD_FILE)
+            if got and took > 0.05:
+                row["mbps"] = round((got * 8) / took / 1_000_000, 2)
+            rows.append(row)
+            log.info("speed test: %s via %s -> %s", src["key"], method,
+                     row["mbps"] if row["mbps"] else row["error"] or "nothing")
+    rows.sort(key=lambda r: -(r["mbps"] or 0))
+    return rows
 
 
 def _probe_download(api, streams: int = 1) -> tuple:
@@ -478,8 +593,10 @@ def _probe_download(api, streams: int = 1) -> tuple:
     return choose_chunk(rate / max(1, streams), timeout), rate, ""
 
 
-def _download_stream(connect, url, deadline, tally, own_api=None, key=0):
+def _download_stream(connect, url, deadline, tally, own_api=None, key=0,
+                     method="discard"):
     """Fetch in a loop until the deadline, counting bytes into `tally`."""
+    dst = f"{DOWNLOAD_FILE}.{key}" if method == "to-disk" else ""
     api = own_api
     ctx = None
     try:
@@ -488,7 +605,7 @@ def _download_stream(connect, url, deadline, tally, own_api=None, key=0):
             api = ctx.__enter__()
         while time.monotonic() < deadline:
             try:
-                got, took = _fetch_once(api, url)
+                got, took = _fetch_once(api, url, method, dst)
             except Exception as exc:  # noqa: BLE001
                 _tally_fail(tally, exc)
                 return
@@ -499,6 +616,10 @@ def _download_stream(connect, url, deadline, tally, own_api=None, key=0):
     except Exception as exc:  # noqa: BLE001
         _tally_fail(tally, exc)
     finally:
+        # A scratch file must not outlive the stream that made it, whatever
+        # went wrong.
+        if dst and api is not None:
+            _remove_file(api, dst)
         if ctx is not None:
             try:
                 ctx.__exit__(None, None, None)
@@ -506,7 +627,8 @@ def _download_stream(connect, url, deadline, tally, own_api=None, key=0):
                 pass
 
 
-def _run_slice(api, connect, url, seconds, streams) -> dict:
+def _run_slice(api, connect, url, seconds, streams,
+               method: str = "discard") -> dict:
     """One measured burst at a fixed number of connections.
 
     Returns {mbps, per_stream_mbps, bytes, runs, live, seconds, error}.
@@ -515,13 +637,14 @@ def _run_slice(api, connect, url, seconds, streams) -> dict:
     deadline = time.monotonic() + seconds
     started = time.monotonic()
     threads = [threading.Thread(
-        target=_download_stream, args=(connect, url, deadline, tally, api, 0),
+        target=_download_stream,
+        args=(connect, url, deadline, tally, api, 0, method),
         name="speedtest-down-0", daemon=True)]
     if connect is not None:
         for i in range(1, max(1, int(streams))):
             threads.append(threading.Thread(
                 target=_download_stream,
-                args=(connect, url, deadline, tally, None, i),
+                args=(connect, url, deadline, tally, None, i, method),
                 name=f"speedtest-down-{i}", daemon=True))
     for t in threads:
         t.start()
@@ -558,11 +681,13 @@ def _phase_download(api, connect=None, url: str = "", seconds: int = 0,
     seconds = int(seconds or PHASE_SECONDS)
     out = {"url": url or DOWNLOAD_URL, "seconds": 0.0, "bytes": 0,
            "mbps": None, "per_stream_mbps": None, "runs": 0, "error": "",
-           "streams": 0, "chunk_mb": 0.0, "ramp": []}
+           "streams": 0, "chunk_mb": 0.0, "ramp": [], "sources": [],
+           "source": "", "source_label": "", "method": ""}
 
     # --- a single fixed run, for a caller that has already decided --------
     if url:
         got = _run_slice(api, connect, url, seconds, streams)
+        out["source_label"] = "a url this caller chose"
         out["seconds"] = got["seconds"]
         out["bytes"] = got["bytes"]
         out["runs"] = got["runs"]
@@ -575,14 +700,30 @@ def _phase_download(api, connect=None, url: str = "", seconds: int = 0,
             out["error"] = f"one stream stopped early ({got['error']})"
         return out
 
-    # --- the ramp ---------------------------------------------------------
-    chunk, rate, err = _probe_download(api, 1)
-    if err:
-        out["error"] = err
+    # --- which server, and which way of fetching --------------------------
+    # Two guesses about why a fast line reads low have now been wrong, so
+    # this measures instead of choosing. The table it produces is the point:
+    # it says whether the limit is the server, the method, the router or the
+    # line, which is not a thing to argue about when the router can answer.
+    # Two fifths of the window to find the best way of fetching, three
+    # fifths to measure with it. Deciding takes time that could have been
+    # spent measuring, and the split is the price of not guessing.
+    tried = probe_sources(api, budget=seconds * 0.4)
+    out["sources"] = tried
+    winner = next((r for r in tried if r["mbps"]), None)
+    if winner is None:
+        out["error"] = next((r["error"] for r in tried if r["error"]),
+                            "no source could be reached")
         return out
+    source = next(x for x in DOWNLOAD_SOURCES if x["key"] == winner["source"])
+    method = winner["method"]
+    out["source"] = winner["source"]
+    out["source_label"] = winner["label"]
+    out["method"] = method
+    rate = winner["mbps"] * 1_000_000 / 8
 
     counts = [n for n in DOWNLOAD_RAMP if n == 1 or connect is not None]
-    slice_secs = max(0.5, seconds / max(1, len(counts)))
+    slice_secs = max(0.2, (seconds * 0.6) / max(1, len(counts)))
     timeout = _api_timeout(api)
     started = time.monotonic()
     best = None
@@ -591,7 +732,9 @@ def _phase_download(api, connect=None, url: str = "", seconds: int = 0,
 
     for n in counts:
         chunk = choose_chunk(per_stream_bps, timeout, SLICE_TARGET_SECONDS)
-        got = _run_slice(api, connect, download_url(chunk), slice_secs, n)
+        url_n = source_url(source, chunk)
+        chunk = source_bytes(source, chunk)
+        got = _run_slice(api, connect, url_n, slice_secs, n, method)
         out["ramp"].append({"streams": got["live"] or n,
                             "mbps": got["mbps"],
                             "per_stream_mbps": got["per_stream_mbps"],
@@ -623,7 +766,7 @@ def _phase_download(api, connect=None, url: str = "", seconds: int = 0,
     out["streams"] = best_n
     out["mbps"] = best["mbps"]
     out["per_stream_mbps"] = best["per_stream_mbps"]
-    out["url"] = download_url(int(out["chunk_mb"] * 1_000_000))
+    out["url"] = source_url(source, int(out["chunk_mb"] * 1_000_000))
     return out
 
 

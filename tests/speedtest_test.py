@@ -882,6 +882,128 @@ check("the page prints the reason, so the next report can name the fault "
 check("...and prints the ramp, which is what tells a CPU-bound router from "
       "a slow line", "1 conn 92.1" in _box and "6 conn 85.9" in _box)
 
+print("\nWhich server, and which way of fetching")
+
+# Two guesses about why a fast line reads low were wrong, so the phase stops
+# choosing and starts measuring: every source and method is tried briefly on
+# the router and the best one is used. The table it produces is the point --
+# it says whether the limit is the server, the method, the router or the
+# line, which is not a thing to argue about when the router can answer.
+
+
+class FieldApi(FakeApi):
+    """A router where each source and method has its own speed.
+
+    Modelled on the argument that prompted this: the nearest server is
+    fastest, a distant one is slower, and writing the body to flash is
+    slower still -- which is the case FOR measuring rather than assuming,
+    because on another router it could come out the other way round.
+    """
+
+    RATES = {("speed.cloudflare.com", "discard"): 100e6 / 8,
+             ("speed.cloudflare.com", "to-disk"): 30e6 / 8,
+             ("fsn1-speed.hetzner.com", "discard"): 40e6 / 8,
+             ("fsn1-speed.hetzner.com", "to-disk"): 20e6 / 8,
+             ("ash-speed.hetzner.com", "discard"): 15e6 / 8,
+             ("ash-speed.hetzner.com", "to-disk"): 8e6 / 8}
+
+    def __init__(self):
+        super().__init__()
+        self.written = []
+        self.removed = []
+
+    def path(self, *parts):
+        outer = self
+
+        class P(FakePath):
+            def __call__(self, _cmd, **kw):
+                if parts != ("tool", "fetch"):
+                    return []
+                url = kw.get("url", "")
+                host = url.split("//", 1)[-1].split("/")[0]
+                method = "to-disk" if kw.get("dst-path") else "discard"
+                if kw.get("dst-path"):
+                    outer.written.append(kw["dst-path"])
+                n = (int(url.rsplit("bytes=", 1)[-1].split("&")[0])
+                     if "bytes=" in url else 100_000_000)
+                rate = outer.RATES.get((host, method), 1e6)
+                time.sleep(min(0.4, n / rate / 400))     # time-compressed
+                return [{"downloaded": str(n // 1024)}]
+
+            def __iter__(self):
+                if parts == ("file",):
+                    return iter([{".id": f"*{i}", "name": n}
+                                 for i, n in enumerate(outer.written)])
+                return iter([])
+
+            def remove(self, rid):
+                outer.removed.append(rid)
+                outer.written.clear()
+
+        return P(self, parts)
+
+    def fetch(self, path):
+        return [{"version": "7.14.2 (stable)", "free-hdd-space": "0"}]
+
+
+_api = FieldApi()
+_rows = ST.probe_sources(_api, budget=1.2)
+check("every source is tried, not just the one somebody argued for",
+      len({r["source"] for r in _rows}) == len(ST.DOWNLOAD_SOURCES))
+check("...and both ways of handling the body, since writing to disk was the "
+      "suggestion and flash write speed is a real candidate for the ceiling",
+      {r["method"] for r in _rows} == set(ST.DOWNLOAD_METHODS))
+check("the table comes back fastest first, so the winner is the first row",
+      [r["mbps"] for r in _rows] == sorted(
+          [r["mbps"] for r in _rows], key=lambda m: -(m or 0)))
+check("...and on this router the nearest server discarding the body wins, "
+      "which is the answer the argument was about",
+      _rows[0]["source"] == "cloudflare" and _rows[0]["method"] == "discard")
+check("every scratch file written during the probe is removed again",
+      _api.written == [] and _api.removed)
+
+print("\n...and the phase uses what won")
+
+_api = FieldApi()
+_d = ST._phase_download(_api, None, seconds=4)
+check("the result names the server it measured from, so a figure can be "
+      "compared with one taken elsewhere", _d["source"] == "cloudflare")
+check("...and how the body was handled, which changes the number",
+      _d["method"] == "discard")
+check("...and carries the whole comparison, which is the thing that says "
+      "where the limit actually is",
+      len(_d["sources"]) == len(ST.DOWNLOAD_SOURCES) * len(ST.DOWNLOAD_METHODS))
+check("a speed still comes out of it", _d["mbps"] is not None)
+check("nothing is left on the router afterwards",
+      _api.written == [])
+
+
+class DeadField(FieldApi):
+    def path(self, *parts):
+        class P(FakePath):
+            def __call__(self, _cmd, **kw):
+                raise OSError(113, "No route to host")
+
+            def __iter__(self):
+                return iter([])
+
+            def remove(self, rid):
+                pass
+        return P(self, parts)
+
+
+_d = ST._phase_download(DeadField(), None, seconds=2)
+check("a router that can reach nothing at all says so, carrying the "
+      "router's own words rather than reporting zero",
+      _d["mbps"] is None and "No route to host" in _d["error"])
+
+# Writing the body to disk means one file PER connection: six streams
+# writing one name is six fetches overwriting each other.
+check("each connection writes its own scratch file, or the byte count "
+      "means nothing",
+      ST._fetch_once.__defaults__ is not None
+      and "dst" in ST._fetch_once.__code__.co_varnames)
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

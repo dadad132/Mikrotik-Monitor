@@ -4415,6 +4415,24 @@ def _speedtest_box(name, csrf, run=None, history=()) -> str:
                 "covers that whole journey. Measuring upload properly needs "
                 "the payload generated on the router, which means writing a "
                 "temporary file to its storage.")
+        if d.get("sources"):
+            rows = "".join(
+                f'<tr><td style="padding:2px 14px 2px 0">'
+                f'{esc(str(r.get("label", r.get("source", ""))))}</td>'
+                f'<td style="padding:2px 14px 2px 0">'
+                f'{"written to disk" if r.get("method") == "to-disk" else "discarded"}'
+                f'</td><td style="padding:2px 0;text-align:right">'
+                f'{(str(r["mbps"]) + " Mbit/s") if r.get("mbps") else esc(str(r.get("error", "") or "nothing"))}'
+                f'</td></tr>'
+                for r in d["sources"])
+            notes.append(
+                f'<b>Every way of fetching was tried on this router:</b>'
+                f'<table style="margin:6px 0 0;border-collapse:collapse;'
+                f'font-size:12px">{rows}</table>'
+                f'The best was used for the measurement above. If Cloudflare '
+                f'wins, the server was never the problem; if writing to disk '
+                f'is slower, the flash is; and if everything is about the '
+                f'same, the limit is the router or the line.')
         if d.get("ramp") and len(d["ramp"]) > 1:
             bits = " &middot; ".join(
                 f'{r["streams"]} conn {r["mbps"]}' for r in d["ramp"]
@@ -4428,9 +4446,13 @@ def _speedtest_box(name, csrf, run=None, history=()) -> str:
                 f'forwarding that carries traffic past it.')
         if d.get("mbps"):
             notes.append(
-                f'Best was {d.get("streams", 1)} connection(s) at '
-                f'{d.get("chunk_mb", 0)} MB per fetch, {d.get("runs", 0)} '
-                f'fetches.')
+                f'Measured from {esc(str(d.get("source_label") or "the "
+                "nearest server"))}, body '
+                + ("written to the router and removed"
+                   if d.get("method") == "to-disk" else "discarded on arrival")
+                + f', best at {d.get("streams", 1)} connection(s), '
+                + f'{d.get("chunk_mb", 0)} MB per fetch, '
+                  f'{d.get("runs", 0)} fetches.')
         if u.get("mbps") and u.get("streams"):
             notes.append(
                 f'Upload used {u["streams"]} connections at once, '
