@@ -92,6 +92,19 @@ DOWNLOAD_FILE = "easymikrotik-speedtest-down.tmp"
 SOURCE_PROBE_SECONDS = 2.5
 SOURCE_PROBE_BYTES = 8_000_000
 
+# A fetch is only started when it is expected to fit in the time left, with
+# this much room for being wrong about the rate. Without it the probe hung
+# for five minutes: a fixed-file source serves 100 MB whatever size you ask
+# for, and the API read blocks for the whole fetch.
+FIT_MARGIN = 1.5
+
+# At most this many fetches to rank one source, and stop early once there is
+# enough elapsed time to divide by. The unbounded loop this replaced is what
+# earned a 403 from a free endpoint, after which nothing else in the run
+# could reach it either.
+PROBE_MAX_FETCHES = 3
+PROBE_ENOUGH_SECONDS = 0.8
+
 # How long ONE fetch should last. Long enough that TCP slow start is a small
 # fraction of it -- a quarter-second transfer is mostly ramp, and reports the
 # ramp -- and short enough that the phase is made of several fetches rather
@@ -137,7 +150,11 @@ DOWNLOAD_STREAMS = 4          # when a caller asks for a single fixed run
 SLICE_TARGET_SECONDS = 1.5
 
 UPLOAD_URL = "http://speed.cloudflare.com/__up"
-META_URL = "http://speed.cloudflare.com/meta"
+# HTTPS here, unlike the transfers: this is a few hundred bytes, so the
+# router's own encryption speed is irrelevant to it -- and the endpoint
+# refuses plain HTTP, which showed up as "could not tell where the test
+# went: Status 403".
+META_URL = "https://speed.cloudflare.com/meta"
 PING_TARGET = "1.1.1.1"
 
 # Where a ping can be aimed. Download and upload always go to the nearest
@@ -303,7 +320,7 @@ def _detect_location(api, url: str = META_URL) -> dict:
            "org": "", "error": ""}
     try:
         rows = list(api.device.api.path("tool", "fetch")(
-            "", url=url, mode="http", output="user",
+            "", url=url, output="user",
             **{"check-certificate": "no"}))
     except Exception as exc:  # noqa: BLE001
         out["error"] = str(exc)
@@ -496,6 +513,34 @@ def _fetch_once(api, url: str, method: str = "discard",
     return _fetched_bytes(rows, url), time.monotonic() - t0
 
 
+def _is_refusal(exc) -> bool:
+    """Does this look like the far end pushing back rather than breaking?
+
+    403 and 429 from a free speed-test endpoint mean "you are asking too
+    often", which is a thing to wait out rather than a thing to report as a
+    broken line.
+    """
+    msg = str(exc)
+    return "403" in msg or "429" in msg or "Forbidden" in msg
+
+
+def _fetch_with_retry(api, url, method="discard", dst="", pause=2.0):
+    """One fetch, retried once after a pause if the far end refused.
+
+    Not a general retry: a refusal is specifically the case where waiting
+    helps, and everything else is reported as it happened.
+    """
+    try:
+        return _fetch_once(api, url, method, dst)
+    except Exception as exc:  # noqa: BLE001
+        if not _is_refusal(exc):
+            raise
+        log.info("speed test: %s refused the request; waiting %.0fs and "
+                 "trying once more", url.split("/")[2], pause)
+        time.sleep(pause)
+        return _fetch_once(api, url, method, dst)
+
+
 def source_url(source: dict, nbytes: int) -> str:
     """The URL for this source at (about) this size.
 
@@ -527,30 +572,87 @@ def probe_sources(api, seconds: float = SOURCE_PROBE_SECONDS,
         # Six combinations at two and a half seconds is fifteen seconds, and
         # a probe that eats half the window has stopped being a probe.
         seconds = max(0.05, budget / combos)
+    overall = time.monotonic() + (budget if budget > 0 else seconds * combos)
+    rate = 0.0                      # bytes/s, learned from the first source
     rows = []
     for src in DOWNLOAD_SOURCES:
         for method in DOWNLOAD_METHODS:
-            url = source_url(src, SOURCE_PROBE_BYTES)
             row = {"source": src["key"], "label": src["label"],
                    "method": method, "mbps": None, "error": ""}
+            left = overall - time.monotonic()
+            if left <= 0:
+                row["error"] = "no time left in the probe"
+                rows.append(row)
+                continue
+
+            # A sized source is asked for something that fits. A fixed-file
+            # one cannot be, so it is measured against the rate already
+            # proved and skipped when it plainly will not land -- with the
+            # sum in the result rather than a five-minute wait.
+            if method == "to-disk" and not src.get("sized"):
+                free = _free_space(api)
+                if free and src["bytes"] > free:
+                    row["error"] = (
+                        f"skipped: writing a fixed "
+                        f"{src['bytes'] // 1_000_000} MB file needs more "
+                        f"room than the {free // (1024 * 1024)} MB this "
+                        f"router has free")
+                    rows.append(row)
+                    continue
+            if src.get("sized"):
+                want = int(max(ABSOLUTE_MIN_BYTES,
+                               min(SOURCE_PROBE_BYTES,
+                                   (rate or SOURCE_PROBE_BYTES) * left)))
+                url = source_url(src, want)
+            else:
+                url = source_url(src, 0)
+                need = src["bytes"] / rate if rate else None
+                if need is None:
+                    row["error"] = ("nothing measured yet to judge whether "
+                                    "a fixed 100 MB file would finish")
+                    rows.append(row)
+                    continue
+                if need * FIT_MARGIN > left:
+                    row["error"] = (
+                        f"skipped: this server serves a fixed "
+                        f"{src['bytes'] // 1_000_000} MB file, which at the "
+                        f"rate measured so far needs about {need:.0f}s and "
+                        f"there are {left:.0f}s left")
+                    rows.append(row)
+                    log.info("speed test: %s via %s skipped (%s)",
+                             src["key"], method, row["error"])
+                    continue
+
+            # ONE fetch, not a loop of them. One timed fetch ranks a
+            # source perfectly well, and six combinations' worth of
+            # back-to-back requests is what got this router a 403 from a
+            # free endpoint -- after which the real measurement had nothing
+            # to work with.
             got = 0
             took = 0.0
-            deadline = time.monotonic() + seconds
+            deadline = time.monotonic() + min(seconds, left)
             try:
-                while time.monotonic() < deadline:
+                for _ in range(PROBE_MAX_FETCHES):
                     n, t = _fetch_once(api, url, method)
                     if not n:
                         row["error"] = "the router reported no bytes"
                         break
                     got += n
                     took += t
+                    # Enough to time, or out of budget. Either way, stop
+                    # asking: a free endpoint refuses a client that does not.
+                    if took >= PROBE_ENOUGH_SECONDS:
+                        break
+                    if time.monotonic() >= deadline:
+                        break
             except Exception as exc:  # noqa: BLE001
                 row["error"] = str(exc)
             finally:
                 if method == "to-disk":
                     _remove_file(api, DOWNLOAD_FILE)
-            if got and took > 0.05:
+            if got and took > 0.01:
                 row["mbps"] = round((got * 8) / took / 1_000_000, 2)
+                rate = max(rate, got / took)
             rows.append(row)
             log.info("speed test: %s via %s -> %s", src["key"], method,
                      row["mbps"] if row["mbps"] else row["error"] or "nothing")
@@ -605,7 +707,7 @@ def _download_stream(connect, url, deadline, tally, own_api=None, key=0,
             api = ctx.__enter__()
         while time.monotonic() < deadline:
             try:
-                got, took = _fetch_once(api, url, method, dst)
+                got, took = _fetch_with_retry(api, url, method, dst)
             except Exception as exc:  # noqa: BLE001
                 _tally_fail(tally, exc)
                 return
@@ -682,7 +784,8 @@ def _phase_download(api, connect=None, url: str = "", seconds: int = 0,
     out = {"url": url or DOWNLOAD_URL, "seconds": 0.0, "bytes": 0,
            "mbps": None, "per_stream_mbps": None, "runs": 0, "error": "",
            "streams": 0, "chunk_mb": 0.0, "ramp": [], "sources": [],
-           "source": "", "source_label": "", "method": ""}
+           "source": "", "source_label": "", "method": "",
+           "from_probe": False}
 
     # --- a single fixed run, for a caller that has already decided --------
     if url:
@@ -710,7 +813,30 @@ def _phase_download(api, connect=None, url: str = "", seconds: int = 0,
     # spent measuring, and the split is the price of not guessing.
     tried = probe_sources(api, budget=seconds * 0.4)
     out["sources"] = tried
-    winner = next((r for r in tried if r["mbps"]), None)
+
+    # A source only wins if it can produce a fetch that FITS a slice. A
+    # fixed-file server serves 100 MB whatever is asked of it, so however
+    # fast it looked in the probe, it cannot be measured in three seconds --
+    # and picking it is how the ramp came to take five minutes.
+    counts_n = len([n for n in DOWNLOAD_RAMP if n == 1 or connect is not None])
+    slice_budget = (seconds * 0.6) / max(1, counts_n)
+    winner = None
+    for r in tried:
+        if not r["mbps"]:
+            continue
+        src = next(x for x in DOWNLOAD_SOURCES if x["key"] == r["source"])
+        if src.get("sized"):
+            winner = r
+            break
+        need = src["bytes"] * 8 / (r["mbps"] * 1_000_000)
+        if need * FIT_MARGIN <= slice_budget:
+            winner = r
+            break
+        r["error"] = (f"fastest, but its fixed "
+                      f"{src['bytes'] // 1_000_000} MB file needs "
+                      f"{need:.0f}s and a slice is {slice_budget:.0f}s")
+        log.info("speed test: %s not used for the measurement (%s)",
+                 r["source"], r["error"])
     if winner is None:
         out["error"] = next((r["error"] for r in tried if r["error"]),
                             "no source could be reached")
@@ -759,7 +885,17 @@ def _phase_download(api, connect=None, url: str = "", seconds: int = 0,
 
     out["seconds"] = round(time.monotonic() - started, 2)
     if best is None:
+        # The ramp got nothing, but the probe already measured this source
+        # at a real rate. Reporting a dash instead would be throwing away an
+        # answer that was actually taken, which is how a rate-limited run
+        # came back completely blank.
         out["error"] = out["error"] or "no slice of the ramp completed"
+        if winner and winner["mbps"]:
+            out["mbps"] = winner["mbps"]
+            out["streams"] = 1
+            out["from_probe"] = True
+            out["error"] += (" \u2014 showing the figure the first probe "
+                             "measured instead")
         return out
     out["bytes"] = best["bytes"]
     out["runs"] = best["runs"]
@@ -828,10 +964,8 @@ def _seed_file(api, size: int, name: str = UPLOAD_FILE) -> int:
     already proves that path works, and it keeps the hub out of a
     measurement the hub is not part of.
     """
-    rows = list(api.device.api.path("tool", "fetch")(
-        "", url=download_url(size), mode="http", **{
-            "dst-path": name, "check-certificate": "no"}))
-    return _fetched_bytes(rows, download_url(size))
+    got, _took = _fetch_with_retry(api, download_url(size), "to-disk", name)
+    return got
 
 
 def _remove_file(api, name: str = UPLOAD_FILE) -> None:

@@ -927,7 +927,7 @@ class FieldApi(FakeApi):
                 n = (int(url.rsplit("bytes=", 1)[-1].split("&")[0])
                      if "bytes=" in url else 100_000_000)
                 rate = outer.RATES.get((host, method), 1e6)
-                time.sleep(min(0.4, n / rate / 400))     # time-compressed
+                time.sleep(min(0.4, n / rate / 40))      # time-compressed
                 return [{"downloaded": str(n // 1024)}]
 
             def __iter__(self):
@@ -1003,6 +1003,122 @@ check("each connection writes its own scratch file, or the byte count "
       "means nothing",
       ST._fetch_once.__defaults__ is not None
       and "dst" in ST._fetch_once.__code__.co_varnames)
+
+print("\nWhen the far end says no")
+
+# From a real run: the probe measured Cloudflare at 62 Mbit/s, and seconds
+# later the location lookup, the download measurement and the upload sample
+# all came back "Status 403, Forbidden" from that same host. Same server,
+# same router, same method -- working, then refused.
+#
+# That is rate limiting, and it was self-inflicted: the probe looped
+# back-to-back fetches for six combinations. Then, having provoked it, the
+# download reported NOTHING while holding a perfectly good measurement.
+
+check("a 403 is recognised as the far end pushing back rather than a broken "
+      "line", ST._is_refusal(RuntimeError("failure: Status 403, Forbidden")))
+check("...as is a 429, which is the same message said politely",
+      ST._is_refusal(RuntimeError("HTTP 429 Too Many Requests")))
+check("a genuine failure is NOT treated as one, or every real fault gets "
+      "quietly retried and the run takes twice as long to say so",
+      not ST._is_refusal(OSError("No route to host")))
+
+_tries = {"n": 0}
+
+
+class RefusesOnce(FakeApi):
+    def path(self, *parts):
+        class P(FakePath):
+            def __call__(self, _cmd, **kw):
+                _tries["n"] += 1
+                if _tries["n"] == 1:
+                    raise RuntimeError("failure: Status 403, Forbidden")
+                return [{"downloaded": "2048"}]
+
+            def __iter__(self):
+                return iter([])
+        return P(self, parts)
+
+
+_got, _took = ST._fetch_with_retry(RefusesOnce(), ST.DOWNLOAD_URL, pause=0.01)
+check("a refusal is waited out and tried once more, because a free endpoint "
+      "refusing a burst is a thing that passes",
+      _got > 0 and _tries["n"] == 2)
+
+# The probe must not be what provokes it in the first place.
+_count = {"n": 0}
+
+
+class Counting(FakeApi):
+    def path(self, *parts):
+        class P(FakePath):
+            def __call__(self, _cmd, **kw):
+                _count["n"] += 1
+                time.sleep(0.02)
+                return [{"downloaded": "2048"}]
+
+            def __iter__(self):
+                return iter([])
+
+            def remove(self, rid):
+                pass
+        return P(self, parts)
+
+    def fetch(self, path):
+        return [{"version": "7.14.2 (stable)", "free-hdd-space": "0"}]
+
+
+ST.probe_sources(Counting(), budget=2.0)
+_per_combo = len(ST.DOWNLOAD_SOURCES) * len(ST.DOWNLOAD_METHODS)
+check("ranking every source costs a handful of requests, not a burst -- an "
+      "unbounded loop is what earned the 403 that made the rest of the run "
+      "useless",
+      _count["n"] <= _per_combo * ST.PROBE_MAX_FETCHES)
+
+print("\nA measurement taken is not thrown away")
+
+
+class RefusesAfterProbe(FakeApi):
+    """Answers the probe, then refuses -- exactly what happened live."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def path(self, *parts):
+        outer = self
+
+        class P(FakePath):
+            def __call__(self, _cmd, **kw):
+                outer.calls += 1
+                if outer.calls > 6:
+                    raise RuntimeError("failure: Status 403, Forbidden")
+                time.sleep(0.03)
+                return [{"downloaded": "2048"}]
+
+            def __iter__(self):
+                return iter([])
+
+            def remove(self, rid):
+                pass
+        return P(self, parts)
+
+    def fetch(self, path):
+        return [{"version": "7.14.2 (stable)", "free-hdd-space": "0"}]
+
+
+_d = ST._phase_download(RefusesAfterProbe(), None, seconds=2)
+check("a run whose measurement is refused still reports the rate the PROBE "
+      "measured, rather than a dash -- an answer that was actually taken is "
+      "not improved by hiding it",
+      _d["mbps"] is not None and _d["from_probe"])
+check("...and says so, so nobody reads a probe figure as a full measurement",
+      "probe" in _d["error"])
+
+check("the location lookup goes over HTTPS: it is a few hundred bytes, so "
+      "the router's encryption speed is irrelevant, and the endpoint "
+      "refuses plain HTTP -- which is why it read 'could not tell where the "
+      "test went'", ST.META_URL.startswith("https://"))
 
 print()
 if FAILS:
