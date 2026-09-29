@@ -703,11 +703,40 @@ def check_billing_ready(billing_db="", card_ready=None,
                 "AND plan IS NOT NULL AND plan != '' "
                 "AND plan != 'unlimited' "
                 "AND status IN ('active','grace')").fetchall()
+            # Active, but on a plan the price list does not contain and with
+            # no agreed figure either. The renewal run skips these -- rightly,
+            # since inventing a price is worse -- so without asking here they
+            # run for free indefinitely and nothing ever says so. These are
+            # the largest accounts in the system, because a quote exists
+            # precisely where the money is worth a conversation.
+            try:
+                unpriced = con.execute(
+                    "SELECT org_id, plan, device_limit FROM billing "
+                    "WHERE status IN ('active','grace') "
+                    "AND (custom_cents IS NULL OR custom_cents <= 0) "
+                    "AND plan IS NOT NULL AND plan != ''").fetchall()
+            except Exception:  # noqa: BLE001 - older db without the column
+                unpriced = []
         finally:
             con.close()
     except Exception:  # noqa: BLE001 — no billing table yet is not a fault
         return []
     out = []
+    from .billing import plan_by_name
+    no_price = [r for r in unpriced if plan_by_name(r[1]) is None]
+    if no_price:
+        who = ", ".join(f"company {r[0]} ({r[1]}, "
+                        f"{r[2] or 'unlimited'} devices)"
+                        for r in no_price[:5])
+        out.append(_finding(
+            "billing:unpriced", False,
+            f"{len(no_price)} active company(ies) have no price, so nothing "
+            f"invoices them",
+            f"{who}. They are on a plan the price list does not contain and "
+            f"no agreed figure has been recorded, so the renewal run skips "
+            f"them every month. This is what a quoted customer looks like "
+            f"before somebody enters what was agreed.",
+            "Platform admin -> set the agreed monthly price for each"))
     if rows:
         who = ", ".join(f"company {r[0]} ({r[1]})" for r in rows[:5])
         out.append(_finding(

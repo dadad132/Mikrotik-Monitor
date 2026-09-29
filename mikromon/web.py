@@ -8073,6 +8073,46 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 msg += " " + " ".join(notes)
             return self._redirect("/superadmin?ok=" + quote(msg))
 
+        def _post_quoted_plan(self, user):
+            """Record what a quoted company agreed to pay each month.
+
+            Above the last packet there is no ladder price, and the only way
+            the panel used to switch such a company on left them with no
+            price at all -- active, uncapped, and skipped by the renewal run
+            every month for ever. This is where the agreed figure goes.
+            """
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if billing is None:
+                return self._redirect("/superadmin?error=" + quote(
+                    "Billing is not enabled."))
+            try:
+                org_id = int(flat.get("org") or 0)
+                devices = int(float(flat.get("devices") or 0))
+                price = float(flat.get("price") or 0)
+            except (TypeError, ValueError):
+                return self._redirect("/superadmin?error=" + quote(
+                    "The device count and price both have to be numbers."))
+            if not org_id:
+                return self._redirect("/superadmin?error=" + quote(
+                    "No company was named."))
+            try:
+                billing.set_quoted_plan(org_id, devices, price)
+            except ValueError as exc:
+                return self._redirect("/superadmin?error=" + quote(str(exc)))
+            log.info("quoted plan set for org %s: %s devices at %.2f/month "
+                     "by %s", org_id, devices or "unlimited", price,
+                     user.get("email", "?"))
+            from .billing import money
+            return self._redirect("/superadmin?ok=" + quote(
+                f"That company is on {devices or 'unlimited'} devices at "
+                f"{money(price)} a month, and will be invoiced for it like "
+                f"any other packet."))
+
         def _post_pay_base(self, user):
             """Set the address invoices link to, by hand.
 
@@ -11308,6 +11348,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_yoco(user)
             if path == "/superadmin/invoice-template":
                 return self._post_invoice_template(user)
+            if path == "/superadmin/quoted-plan":
+                return self._post_quoted_plan(user)
             if path == "/superadmin/pay-base":
                 return self._post_pay_base(user)
             if path == "/superadmin/mark-paid":

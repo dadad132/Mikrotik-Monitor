@@ -359,6 +359,45 @@ def plan_by_name(plan_name: str):
             "price_zar_approx": 0.0}
 
 
+QUOTED_PLAN = "quoted"
+
+
+def custom_plan(cents: int, devices: int = 0, label: str = "") -> dict:
+    """A plan-shaped dict for a price that was agreed rather than listed.
+
+    Shaped exactly like a tier so nothing downstream has to know the
+    difference: the renewal run, the invoice and the pro-rata arithmetic all
+    take a plan and ask it what it costs.
+    """
+    usd = round(int(cents) / 100, 2)
+    return {
+        "name": QUOTED_PLAN,
+        "label": label or (f"{devices} devices" if devices else "Agreed plan"),
+        "devices": int(devices or 0),
+        "price": float(usd),
+        "currency": BILLING_CURRENCY,
+        "price_usd": usd,
+        "price_zar_approx": round(usd * _ZAR_PER_USD_FALLBACK, 2),
+        "quoted": True,
+    }
+
+
+def plan_for(row: dict):
+    """The plan a billing row is actually on, or None if it has no price.
+
+    An agreed price beats the ladder: a quoted company is not on a tier, and
+    looking their plan name up in the price list is what returned nothing
+    and skipped them at every renewal.
+    """
+    if not row:
+        return None
+    cents = row.get("custom_cents")
+    if cents:
+        return custom_plan(int(cents), row.get("device_limit") or 0,
+                           row.get("custom_label") or "")
+    return plan_by_name(row.get("plan") or "")
+
+
 def needs_quote(devices: int) -> bool:
     """Whether a device count is past the last tier and has to be quoted."""
     return int(devices or 0) > QUOTE_ABOVE_DEVICES
@@ -623,6 +662,12 @@ class BillingStore:
         # currency they were actually raised in at the time.
         self._add_col_if_missing("orders", "currency", "TEXT")
         # A packet change that has been asked for but has not taken effect.
+        # What a quoted company agreed to pay each month, in cents of
+        # BILLING_CURRENCY, and what to call it on the invoice. Set only for
+        # a deal that was actually negotiated; NULL means no price has been
+        # agreed, which is a thing to report rather than to guess at.
+        self._add_col_if_missing("billing", "custom_cents", "INTEGER")
+        self._add_col_if_missing("billing", "custom_label", "TEXT")
         self._add_col_if_missing("billing", "pending_plan", "TEXT")
         self._add_col_if_missing("billing", "pending_from", "REAL")
         # Renewal or upgrade. A renewal extends the period; an upgrade
@@ -652,14 +697,15 @@ class BillingStore:
         row = self.db.execute(
             "SELECT org_id, pf_token, payment_id, status, plan, "
             "device_limit, current_period_end, grace_period_end, trial_end, "
-            "pending_plan, pending_from "
+            "pending_plan, pending_from, custom_cents, custom_label "
             "FROM billing WHERE org_id = ?",
             (int(org_id),)).fetchone()
         if not row:
             return None
         keys = ("org_id", "pf_token", "payment_id", "status", "plan",
                 "device_limit", "current_period_end", "grace_period_end",
-                "trial_end", "pending_plan", "pending_from")
+                "trial_end", "pending_plan", "pending_from",
+                "custom_cents", "custom_label")
         return dict(zip(keys, row))
 
     def device_limit(self, org_id: int) -> int:
@@ -988,13 +1034,15 @@ class BillingStore:
         now = now if now is not None else time.time()
         horizon = now + float(within_days) * 86400
         rows = self.db.execute(
-            "SELECT org_id, plan, device_limit, current_period_end, status "
+            "SELECT org_id, plan, device_limit, current_period_end, status, "
+            "custom_cents, custom_label "
             "FROM billing WHERE current_period_end IS NOT NULL "
             "AND current_period_end <= ? AND status IN "
             "('active','grace','suspended','canceled') "
             "ORDER BY current_period_end", (horizon,)).fetchall()
         return [{"org_id": r[0], "plan": r[1], "device_limit": r[2],
-                 "current_period_end": r[3], "status": r[4]} for r in rows]
+                 "current_period_end": r[3], "status": r[4],
+                 "custom_cents": r[5], "custom_label": r[6]} for r in rows]
 
     def mark_order_paid(self, order_id: int, payment_id: str = "") -> bool:
         """Mark an order paid. True only the FIRST time.
@@ -1174,6 +1222,59 @@ class BillingStore:
                 "SELECT org_id FROM billing WHERE status = 'suspended'"
             ).fetchall()
         return {int(r[0]) for r in rows}
+
+    def set_quoted_plan(self, org_id: int, devices: int, price_usd: float,
+                        label: str = "", months: int = 1,
+                        period_end: float | None = None) -> None:
+        """Switch a quoted company on, at the price that was agreed.
+
+        `devices` is the cap they bought; 0 means uncapped. The price is
+        what the renewal run will invoice every month, exactly as it does a
+        tier price -- which is the whole difference between a quote that
+        bills and one that quietly does not.
+        """
+        cents = int(round(float(price_usd) * 100))
+        if cents <= 0:
+            raise ValueError(
+                "A quoted plan needs the agreed monthly price. Switching a "
+                "company on without one is how the largest accounts end up "
+                "never invoiced.")
+        end = period_end
+        if end is None:
+            end = first_billing_date()
+            if months > 1:
+                end = add_billing_months(end, months - 1)
+        self._upsert(org_id, status="active", plan=QUOTED_PLAN,
+                     device_limit=int(devices or 0), custom_cents=cents,
+                     custom_label=(label or "").strip() or None,
+                     grace_period_end=None, current_period_end=end)
+        log.info("org %s switched on at an agreed %s/month for %s devices",
+                 org_id, money(cents / 100), devices or "unlimited")
+
+    def clear_quoted_price(self, org_id: int) -> None:
+        """Forget an agreed price, e.g. when moving a company onto a tier."""
+        self._upsert(org_id, custom_cents=None, custom_label=None)
+
+    def orgs_without_a_price(self) -> list:
+        """Companies that are active but that nothing knows how to invoice.
+
+        An 'unlimited' or hand-granted packet has no price in the ladder, so
+        the renewal run skips it -- correctly, since inventing a figure would
+        be worse. What was missing is anybody being told, which is how a
+        quoted customer runs for free indefinitely.
+        """
+        rows = self.db.execute(
+            "SELECT org_id, plan, device_limit FROM billing "
+            "WHERE status IN ('active','grace') "
+            "AND (custom_cents IS NULL OR custom_cents <= 0) "
+            "AND plan IS NOT NULL AND plan != ''").fetchall()
+        out = []
+        for org_id, plan, cap in rows:
+            if plan_by_name(plan) is not None:
+                continue                      # on a tier, priced by the list
+            out.append({"org_id": org_id, "plan": plan,
+                        "device_limit": cap})
+        return out
 
     def set_unlimited(self, org_id: int) -> None:
         """Grant a company an UNLIMITED device cap (device_limit 0), active."""

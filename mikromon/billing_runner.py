@@ -28,7 +28,7 @@ import logging
 import threading
 import time
 
-from .billing import BILLING_CURRENCY, money, plan_by_name
+from .billing import BILLING_CURRENCY, money, plan_by_name, plan_for
 
 log = logging.getLogger(__name__)
 
@@ -158,13 +158,19 @@ def raise_due_invoices(billing, auth, now: float | None = None,
             log.exception("could not apply the booked change for org %s", org_id)
 
         period_end = float(row.get("current_period_end") or 0.0)
-        plan = plan_by_name(row.get("plan") or "")
+        # plan_for, not plan_by_name: a quoted company is not on a tier, and
+        # looking their plan name up in the ladder is what returned nothing
+        # and skipped them at every single renewal.
+        plan = plan_for(row)
         if plan is None:
-            # An unlimited or hand-granted packet has no price. Inventing one
-            # would be worse than leaving it to a person.
-            log.info("renewal: org %s is on %r, which has no standard price "
-                     "-- leaving it to be invoiced by hand", org_id,
-                     row.get("plan"))
+            # Still no price: unlimited or hand-granted with nothing agreed.
+            # Inventing a figure would be worse than leaving it to a person,
+            # but it is reported now instead of only logged -- see
+            # orgs_without_a_price and the Platform admin check.
+            log.warning("renewal: org %s is on %r with no agreed price -- "
+                        "NOT invoiced. Set the quoted price in Platform "
+                        "admin or this repeats every month.", org_id,
+                        row.get("plan"))
             continue
         if billing.has_open_order_for_period(org_id, period_end):
             continue
@@ -230,7 +236,7 @@ def upcoming(billing, auth, limit: int = 20) -> list:
     out = []
     for row in billing.orgs_due_for_renewal(400, now=now):
         org_id = int(row["org_id"])
-        plan = plan_by_name(row.get("plan") or "")
+        plan = plan_for(row)
         end = float(row.get("current_period_end") or 0.0)
         org = (auth.org(org_id) if auth else None) or {}
         out.append({

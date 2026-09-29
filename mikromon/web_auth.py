@@ -1469,6 +1469,42 @@ def _suspend_button(org_id, status: str, csrf: str,
             f'{"Restore access" if suspended else "Suspend"}</button></form>')
 
 
+def _quoted_plan_form(org_id, bill, csrf) -> str:
+    """Set the agreed monthly price for a company past the last packet.
+
+    Shown on every row, because a quote can be agreed for anybody -- but it
+    says loudly when a company is active with NO price, since that is a
+    customer running for free that nothing else will mention.
+    """
+    bill = bill or {}
+    cents = bill.get("custom_cents") or 0
+    price = f"{cents / 100:.2f}" if cents else ""
+    cap = bill.get("device_limit") or ""
+    plan = bill.get("plan") or ""
+    unpriced = (not cents and plan
+                and plan_by_name(plan) is None and plan != "free")
+    warn = ""
+    if unpriced:
+        warn = ('<div style="color:#dc2626;font-size:11px;margin-bottom:4px">'
+                '<b>No price.</b> Nothing invoices this company.</div>')
+    elif cents:
+        warn = (f'<div class="muted" style="font-size:11px;margin-bottom:4px">'
+                f'Agreed: ${cents / 100:,.2f}/month</div>')
+    return (f'{warn}'
+            f'<form method="POST" action="/superadmin/quoted-plan" '
+            f'style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="org" value="{esc(str(org_id))}">'
+            f'<input name="devices" value="{esc(str(cap))}" size="4" '
+            f'placeholder="devices" title="Device cap; 0 for unlimited">'
+            f'<input name="price" value="{esc(price)}" size="7" '
+            f'placeholder="$/month" title="The agreed monthly price in '
+            f'{esc(BILLING_CURRENCY)}">'
+            f'<button class="btn ghost" type="submit" '
+            f'style="padding:3px 8px;font-size:12px">Set quote</button>'
+            f'</form>')
+
+
 def _plan_select(org_id, current_plan, csrf) -> str:
     """A per-company plan-assign control for the superadmin (manual billing)."""
     opts = ['<option value="">— assign —</option>']
@@ -2332,6 +2368,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
             f' / {device_limit if device_limit else "∞"}</td>'
             f'<td>{created_str}</td>'
             + (f'<td>{_plan_select(r.get("id"), plan, csrf)}'
+               f'{_quoted_plan_form(r.get("id"), bill, csrf)}'
                f'{_suspend_button(r.get("id"), status, csrf, r.get("has_superadmin", False))}</td>'
                if billing_on else "")
             + '</tr>'
