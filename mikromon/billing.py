@@ -60,7 +60,7 @@ QUOTE_ABOVE_DEVICES = MAX_TIER_DEVICES
 # The ladder, as the two numbers it was actually decided as: what the first
 # packet costs per device, and how much comes off at each step up.
 TIER_START_USD = 5.00
-TIER_STEP_DISCOUNT_USD = 0.05
+TIER_STEP_DISCOUNT_USD = 0.10
 
 # What customers are invoiced in. It is USD because that is the currency the
 # prices were decided in and the currency every page quotes -- and because
@@ -281,9 +281,14 @@ def tier_rate_usd(devices: int) -> float:
     """Per-device monthly price at a given packet size.
 
     Volume discount, flat all the way up: $5.00 a device at the smallest
-    packet, then five cents off for every five-device step. Five devices is
-    $5.00, ten is $4.95, fifteen is $4.90, and a hundred -- the largest
-    packet before a quote -- is $4.05.
+    packet, then ten cents off for every five-device step. Five devices is
+    $5.00, ten is $4.90, fifteen is $4.80, and a hundred -- the largest
+    packet before a quote -- is $3.10.
+
+    Ten cents against five-device steps happens to land every price on a
+    whole dollar, which five cents did not. That is worth having rather than
+    coincidence to rely on, so a test asserts it: these prices get read off
+    a page and typed into a banking app.
 
     Expressed as a rate rather than a price list because the rate is the
     thing that was decided; the prices are what fall out of it, and deriving
@@ -294,10 +299,12 @@ def tier_rate_usd(devices: int) -> float:
 
 
 def _make_tier(devices: int) -> dict:
-    # Cents kept, not rounded away. Five cents a step against five-device
-    # steps puts half the ladder on a half dollar, and rounding $49.50 up to
-    # $50 would make a ten-device packet cost $5.00 a device -- the rate of
-    # the packet below it, which is the opposite of a volume discount.
+    # Cents kept rather than rounded away. At the current ten-cent step
+    # every price lands on a whole dollar anyway, but rounding would be a
+    # trap the moment the step changes: $49.50 rounded to $50 makes a
+    # ten-device packet cost $5.00 a device -- the rate of the packet below
+    # it, which is the opposite of a volume discount. The rate is what was
+    # decided; the price follows it exactly.
     usd = round(devices * tier_rate_usd(devices), 2)
     return {
         "name": f"d{devices}",
