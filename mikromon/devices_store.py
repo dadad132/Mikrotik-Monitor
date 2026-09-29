@@ -46,6 +46,26 @@ class DevicesStore:
         if "org_id" not in cols:
             self.db.execute(
                 "ALTER TABLE devices ADD COLUMN org_id INTEGER NOT NULL DEFAULT 1")
+        # Departments: a VLAN, a subnet and a NextDNS profile, belonging to
+        # one router. Stored here rather than with the org because they are
+        # configuration OF a device -- the VLAN exists on a particular
+        # bridge, on particular ports, and moving the router moves them.
+        self.db.executescript("""
+CREATE TABLE IF NOT EXISTS departments (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    device     TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    vlan       INTEGER NOT NULL,
+    subnet     TEXT NOT NULL,
+    profile_id TEXT,
+    resolvers  TEXT,
+    ports      TEXT,
+    note       TEXT,
+    created    REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_dept_device ON departments(device);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_dept_name ON departments(device, name);
+""")
         self.db.commit()
         self._migrate_checks()
 
@@ -163,6 +183,56 @@ class DevicesStore:
                             "NOT being monitored: %s", r[0], exc)
                 continue
         return out
+
+    # ----- departments ----------------------------------------------------
+
+    def departments(self, device: str) -> list:
+        """Every department on this router, in VLAN order.
+
+        Returned already validated, so a row written by an older version --
+        or edited in the database by hand -- surfaces as a problem here
+        rather than as a push that half applies.
+        """
+        from .departments import DepartmentError, make
+
+        rows = self.db.execute(
+            "SELECT name, vlan, subnet, profile_id, resolvers, ports, note "
+            "FROM departments WHERE device = ? ORDER BY vlan",
+            (device,)).fetchall()
+        out = []
+        for name, vlan, subnet, pid, res, ports, note in rows:
+            try:
+                out.append(make(name, vlan, subnet, pid or "", res or "",
+                                note or "", ports or ""))
+            except DepartmentError as exc:
+                log.warning("department %r on %s is unusable: %s",
+                            name, device, exc)
+        return out
+
+    def save_department(self, device: str, dept: dict,
+                        original_name: str | None = None) -> None:
+        """Add or replace one department. `dept` comes from departments.make."""
+        with self._lock:
+            self.db.execute(
+                "DELETE FROM departments WHERE device = ? AND name = ?",
+                (device, original_name or dept["name"]))
+            self.db.execute(
+                "INSERT INTO departments (device, name, vlan, subnet, "
+                "profile_id, resolvers, ports, note, created) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (device, dept["name"], dept["vlan"], dept["subnet"],
+                 dept.get("profile_id") or "",
+                 ",".join(dept.get("resolvers") or []),
+                 ",".join(dept.get("ports") or []),
+                 dept.get("note") or "", time.time()))
+            self.db.commit()
+
+    def delete_department(self, device: str, name: str) -> None:
+        with self._lock:
+            self.db.execute(
+                "DELETE FROM departments WHERE device = ? AND name = ?",
+                (device, name))
+            self.db.commit()
 
     def close(self) -> None:
         with self._lock:

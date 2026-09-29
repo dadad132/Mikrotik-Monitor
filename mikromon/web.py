@@ -2134,6 +2134,7 @@ _DEVICE_TABS = ["Overview", "Provision", "Routes", "WAN", "Security",
                 "DNS", "Queues", "Port forwarding",
                 "VPN", "Scripts"]
 _MAINT_ITEMS = [("Update", "update"), ("Backups", "backups"),
+                ("Departments", "departments"),
                 ("Speed test", "speedtest"),
                 ("Restrict access", "harden"), ("Remote access", "remote"),
                 ("Temp Access", "tempaccess"), ("Share", "share")]
@@ -2146,6 +2147,7 @@ _LIVE_TABS = {"Overview": "", "Provision": "provision",
               "Interfaces": "interfaces", "Remote access": "remote",
               "VPN": "tunnel", "Scripts": "scripts",
               "Update": "update", "Backups": "backups",
+              "Departments": "departments",
               "Speed test": "speedtest",
               "Temp Access": "tempaccess", "Share": "share"}
 # tabs that WRITE to the router (admins only); Overview is read-only
@@ -4233,6 +4235,127 @@ def _speedtest_record(name, run, devices_db="") -> None:
         _atomic_write(path, json.dumps(all_runs, indent=1))
     except Exception:  # noqa: BLE001
         log.exception("could not record the speed test for %r", name)
+
+
+def _departments_box(name, csrf, departments, ports=(), problems=(),
+                     todo=(), plan_text="") -> str:
+    """One company, several networks, each filtered differently.
+
+    Ordered the way somebody actually works: what exists now, what is
+    unfinished about it, what the router would be told, and only then the
+    form. A form at the top of a page is a form somebody fills in before
+    reading that two of their departments are on the same VLAN.
+    """
+    q = esc(name)
+    rows = ""
+    for d in departments:
+        dns = (", ".join(d["resolvers"]) if d["resolvers"]
+               else '<span style="color:#b45309">none &mdash; not filtered '
+                    'separately</span>')
+        # Built out here: a second f-string nested inside the row, quoting
+        # its own attributes, is unreadable rather than clever.
+        port_cell = (esc(", ".join(d["ports"])) if d["ports"]
+                     else '<span class="muted">trunk only</span>')
+        prof = (f'<a href="https://my.nextdns.io/{esc(d["profile_id"])}/setup"'
+                f' target="_blank" rel="noopener">{esc(d["profile_id"])}</a>'
+                if d["profile_id"] else
+                '<span class="muted">not linked</span>')
+        rows += (
+            f'<tr><td><b>{esc(d["name"])}</b></td>'
+            f'<td>{d["vlan"]}</td>'
+            f'<td><code>{esc(d["subnet"])}</code><br>'
+            f'<span class="muted" style="font-size:11px">gateway '
+            f'{esc(d["gateway"])}</span></td>'
+            f'<td>{port_cell}</td>'
+            f'<td>{prof}</td><td style="font-size:12px">{dns}</td>'
+            f'<td><form method="POST" action="/device/departments" '
+            f'onsubmit="return confirm(\'Remove {esc(d["name"])}? The VLAN '
+            f'stays on the router until you push again.\')">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="device" value="{q}">'
+            f'<input type="hidden" name="action" value="delete">'
+            f'<input type="hidden" name="name" value="{esc(d["name"])}">'
+            f'<button class="btn ghost" type="submit" '
+            f'style="padding:2px 8px;font-size:12px">Remove</button>'
+            f'</form></td></tr>')
+
+    table = (f'<table><thead><tr><th>Department</th><th>VLAN</th>'
+             f'<th>Range</th><th>Ports</th><th>NextDNS</th>'
+             f'<th>Clients use</th><th></th></tr></thead>'
+             f'<tbody>{rows}</tbody></table>') if rows else (
+        '<p class="muted">No departments yet. Everything on this router '
+        'shares one network and one NextDNS profile.</p>')
+
+    warn = ""
+    if problems:
+        warn += ('<div class="box" style="border-color:#dc2626">'
+                 '<b style="color:#dc2626">These have to be fixed before '
+                 'anything can be pushed</b><ul style="margin:6px 0 0">'
+                 + "".join(f'<li>{esc(p)}</li>' for p in problems)
+                 + '</ul></div>')
+    if todo:
+        warn += ('<div class="box" style="border-color:#b45309">'
+                 '<b style="color:#b45309">Not filtered separately yet</b>'
+                 '<ul style="margin:6px 0 0">'
+                 + "".join(f'<li><b>{esc(t["name"])}</b> &mdash; '
+                           f'{esc(t["why"])}</li>' for t in todo)
+                 + '</ul></div>')
+
+    preview = ""
+    if plan_text:
+        preview = (f'<h3 style="font-size:14px;margin:18px 0 6px">What the '
+                   f'router would be told</h3>'
+                   f'<pre style="{_PRE}">{esc(plan_text)}</pre>'
+                   f'<p class="muted" style="font-size:12px;margin:6px 0 0">'
+                   f'Nothing has been sent. VLAN filtering is left switched '
+                   f'off deliberately &mdash; turning it on in the same push '
+                   f'that creates the VLANs is how somebody loses the link '
+                   f'they are managing the router over.</p>')
+
+    port_opts = "".join(f'<option value="{esc(p)}">' for p in ports)
+    form = (
+        f'<h3 style="font-size:14px;margin:18px 0 6px">Add a department</h3>'
+        f'<form method="POST" action="/device/departments" '
+        f'style="display:grid;grid-template-columns:repeat(auto-fit,'
+        f'minmax(150px,1fr));gap:10px;align-items:end">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<input type="hidden" name="device" value="{q}">'
+        f'<input type="hidden" name="action" value="save">'
+        f'<label style="font-size:12px">Name<br>'
+        f'<input name="name" placeholder="Sales" style="width:100%"></label>'
+        f'<label style="font-size:12px">VLAN<br>'
+        f'<input name="vlan" placeholder="20" style="width:100%"></label>'
+        f'<label style="font-size:12px">IP range<br>'
+        f'<input name="subnet" placeholder="10.20.20.0/24" '
+        f'style="width:100%"></label>'
+        f'<label style="font-size:12px">Ports on this VLAN<br>'
+        f'<input name="ports" list="dev-ports-{q}" '
+        f'placeholder="ether3, ether4" style="width:100%">'
+        f'<datalist id="dev-ports-{q}">{port_opts}</datalist></label>'
+        f'<label style="font-size:12px">NextDNS profile<br>'
+        f'<input name="profile_id" placeholder="abc123" '
+        f'style="width:100%"></label>'
+        f'<label style="font-size:12px">Clients use these DNS servers<br>'
+        f'<input name="resolvers" placeholder="from the profile\'s setup '
+        f'page" style="width:100%"></label>'
+        f'<button class="btn" type="submit">Add</button>'
+        f'</form>')
+
+    return (
+        f'<div class="box"><h2>Departments</h2>'
+        f'<p class="muted" style="margin:0 0 12px">A department is its own '
+        f'VLAN, its own IP range and its own NextDNS profile, so Sales can '
+        f'reach Instagram and Support cannot. Departments cannot reach each '
+        f'other; all of them reach the internet.</p>'
+        f'{warn}{table}'
+        f'<p class="muted" style="font-size:12px;margin:10px 0 0">'
+        f'<b>Why each department needs its own DNS servers:</b> RouterOS '
+        f'can only hold ONE DNS-over-HTTPS profile, so pointing every '
+        f'department at the router gives them all the same filtering. '
+        f'Instead each VLAN hands its clients their own profile\'s '
+        f'resolver addresses &mdash; copy those from that profile\'s '
+        f'NextDNS setup page.</p>'
+        f'{preview}{form}</div>')
 
 
 def _speedtest_box(name, csrf, run=None, history=()) -> str:
@@ -9066,7 +9189,31 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             cfg = build_device(raw, defaults)  # device metadata (no router needed)
             summary_lines = fields = unmanaged = None
             extra_html = extra_actions = ""
-            if slug == "speedtest":
+            if slug == "departments":
+                # Built from stored config, not from the router. The tab has
+                # to be usable while the site is down -- that is often
+                # exactly when somebody is planning the VLANs for it.
+                from . import departments as _dept
+                from .devices_store import DevicesStore as _DeptStore
+                _ds = _DeptStore(devices_db) if devices_db else None
+                _depts = _ds.departments(name) if _ds else []
+                # Port names the monitoring engine already cached, so the
+                # picker works without dialling the router -- which is the
+                # point of building this tab from stored config.
+                _ports = [str(n) for n in (facts.get("interfaces") or []) if n]
+                _problems = _dept.check_set(_depts)
+                _plan_text = ""
+                if _depts and not _problems:
+                    try:
+                        _plan_text = _dept.build_plan(name, _depts).diff_text()
+                    except _dept.DepartmentError as exc:
+                        _problems = [str(exc)]
+                extra_html = _departments_box(
+                    name, csrf, _depts, _ports, _problems,
+                    _dept.unfinished(_depts), _plan_text)
+                if _ds:
+                    _ds.close()
+            elif slug == "speedtest":
                 # Built here, before the live-read block, because it needs
                 # nothing from the router: the live state of any run, and
                 # the runs already on file. Connecting just to draw it would
@@ -10778,6 +10925,74 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._redirect(
                 f"/device?name={quote(name)}&tab=nextdns&msg=" + quote(msg))
 
+        def _device_departments_post(self, flat, user):
+            """Add, edit or remove one department.
+
+            Saved, not pushed. Creating VLANs and moving ports is the kind of
+            change that takes a site off the air when it is wrong, so it is
+            written down first, shown back as a plan, and applied
+            deliberately.
+            """
+            from . import departments as _dept
+            from .devices_store import DevicesStore as _DeptStore
+
+            name = (flat.get("device") or "").strip()
+            if not name:
+                return self._send(400, "no device")
+            if not self._can_manage_device(user, name):
+                return self._deny_manage(user, name, "departments")
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if not devices_db:
+                return self._redirect(
+                    f"/device?name={quote(name)}&tab=departments&error="
+                    + quote("This server has no device database."))
+
+            back = f"/device?name={quote(name)}&tab=departments"
+            store = _DeptStore(devices_db)
+            try:
+                if (flat.get("action") or "") == "delete":
+                    gone = (flat.get("name") or "").strip()
+                    store.delete_department(name, gone)
+                    log.info("department %r removed from %s by %s", gone,
+                             name, (user or {}).get("login", "?"))
+                    return self._redirect(back + "&msg=" + quote(
+                        f"{gone} removed here. The VLAN stays on the router "
+                        f"until you push again."))
+                try:
+                    dept = _dept.make(
+                        flat.get("name", ""), flat.get("vlan", ""),
+                        flat.get("subnet", ""), flat.get("profile_id", ""),
+                        flat.get("resolvers", ""), flat.get("note", ""),
+                        flat.get("ports", ""))
+                except _dept.DepartmentError as exc:
+                    return self._redirect(back + "&error=" + quote(str(exc)))
+
+                # Checked against the ones already there, because every
+                # fault that matters here is a relationship: a VLAN is only
+                # wrong because a sibling has it.
+                others = [d for d in store.departments(name)
+                          if d["name"].lower() != dept["name"].lower()]
+                problems = _dept.check_set(others + [dept])
+                if problems:
+                    return self._redirect(back + "&error="
+                                          + quote(" ".join(problems)))
+                store.save_department(name, dept,
+                                      original_name=flat.get("original"))
+                log.info("department %r saved on %s (vlan %s, %s) by %s",
+                         dept["name"], name, dept["vlan"], dept["subnet"],
+                         (user or {}).get("login", "?"))
+                note = ""
+                if not dept["resolvers"]:
+                    note = (" It has no DNS servers of its own yet, so it "
+                            "will be filtered like everyone else.")
+                return self._redirect(back + "&msg=" + quote(
+                    f"{dept['name']} saved on VLAN {dept['vlan']}."
+                    f"{note} Nothing has been sent to the router."))
+            finally:
+                store.close()
+
         def _device_speedtest_post(self, flat, user):
             """Start a line test and return at once.
 
@@ -11482,6 +11697,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._device_nextdns_reapply_post(flat, user)
                 if path == "/dashboard/suggestion":
                     return self._dashboard_suggestion_post(flat, user)
+                if path == "/device/departments":
+                    return self._device_departments_post(flat, user)
                 if path == "/device/speedtest":
                     return self._device_speedtest_post(flat, user)
                 if path == "/device/nextdns-test":

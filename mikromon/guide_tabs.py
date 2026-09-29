@@ -256,6 +256,42 @@ TABS = [
      "warn": "Installing an upgrade reboots the router. Everything at that "
              "site is offline for 1–2 minutes, so do it out of hours."},
 
+    {"slug": "departments", "title": "Departments", "art": None,
+     "what": "One company, several networks. Each department gets its own "
+             "VLAN, its own IP range and its own NextDNS profile — so "
+             "Sales can reach Instagram because that is where the customers "
+             "are, and Support cannot, but keeps YouTube for the guides. "
+             "Departments cannot reach each other; all of them reach the "
+             "internet.",
+     "steps": ["Add a department: a name, a VLAN number, an IP range like "
+               "<code>10.20.20.0/24</code>, and the ports its desks are "
+               "plugged into.",
+               "Make that department a profile in NextDNS and set its "
+               "blocking there — that is where Instagram gets allowed "
+               "for one and not the other.",
+               "Open that profile's NextDNS setup page and copy the "
+               "resolver addresses it lists into <b>Clients use these DNS "
+               "servers</b>. <b>This is the step that makes the filtering "
+               "actually different</b>, and skipping it leaves the "
+               "department sharing everyone else's.",
+               "Read the plan shown above the form before pushing. It is "
+               "the whole change, in order.",
+               "Afterwards, switch on <code>vlan-filtering</code> on the "
+               "bridge by hand, once the ports read correctly."],
+     "why": "RouterOS can only hold ONE DNS-over-HTTPS profile, so pointing "
+            "every department at the router gives them all identical "
+            "filtering — which defeats the point. Instead each VLAN's "
+            "DHCP hands its own clients their own profile's addresses, and "
+            "they talk to NextDNS directly. A department with no addresses "
+            "of its own still gets its network and its isolation; it just "
+            "gets the same filtering as everyone else, and the tab says so "
+            "rather than letting somebody discover it.\n\n"
+            "Nothing is pushed when you save. VLANs and port moves take a "
+            "site off the air when they are wrong, so the change is written "
+            "down, shown back as a plan, and applied deliberately. "
+            "vlan-filtering is deliberately left for you: turning it on in "
+            "the same unattended push that creates the VLANs is how "
+            "somebody loses the link they are managing the router over."},
     {"slug": "speedtest", "title": "Speed test", "art": None,
      "what": "Measures the site's line from the router itself \u2014 over its "
              "own internet connection, not through the tunnel, so it is what "
