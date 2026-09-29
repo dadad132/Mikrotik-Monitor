@@ -243,6 +243,81 @@ def _build_outage_reminder(org_name: str, offline: list, subject_prefix: str,
     return subject, text, html
 
 
+def _build_dormant_notice(org_name: str, days: float, subject_prefix: str,
+                          contact_email: str = "", devices: int = 0,
+                          hold_days: int = 60) -> tuple:
+    """(subject, text, html) for an account suspended long enough to be at risk.
+
+    Written to be answered. The three things it has to carry are what will
+    happen, what stops it, and who to tell -- and the easiest of those to
+    leave out is the second, which is the one that matters to somebody who
+    has every intention of paying and no money this month.
+
+    It does not threaten a date. Nothing here deletes anything on a timer:
+    the removal is a person's decision, and a letter that names a deadline
+    the system will not actually honour teaches people to ignore the next
+    one.
+    """
+    months = int(days // 30)
+    subject = (f"{subject_prefix} {org_name}: your account has been "
+               f"suspended for {months} months")
+    reach = (f"reply to this message or email {contact_email}"
+             if contact_email else "reply to this message")
+    kit = (f"Your {devices} monitored device(s), their settings and their "
+           f"history are all still here, exactly as you left them"
+           if devices else
+           "Your settings and history are all still here, exactly as you "
+           "left them")
+
+    text = (
+        f"Hello,\n\n"
+        f"The EasyMikroTik account for {org_name} has been suspended for "
+        f"{months} months, which usually means an invoice went unpaid and "
+        f"nothing has been heard since.\n\n"
+        f"{kit}, and reactivating takes a moment. But an account left "
+        f"suspended indefinitely will eventually be removed along with "
+        f"everything in it, so we would rather ask than assume.\n\n"
+        f"Three ways to deal with this:\n\n"
+        f"  1. Pay the outstanding invoice, and everything comes straight "
+        f"back on.\n"
+        f"  2. Waiting on funds? Tell us and we will hold the account for "
+        f"another {hold_days} days. Say so and nothing happens in the "
+        f"meantime.\n"
+        f"  3. Finished with it? Tell us that too, and we will close it "
+        f"properly.\n\n"
+        f"To do any of those, {reach}.\n\n"
+        f"If we hear nothing at all, somebody here will get in touch before "
+        f"anything is removed. Nothing is deleted automatically.\n\n"
+        f"Thank you,\nEasyMikroTik\n")
+
+    html = (
+        f'<div style="font:14px/1.6 system-ui,sans-serif;color:#0f172a">'
+        f'<p>Hello,</p>'
+        f'<p>The EasyMikroTik account for <b>{render.esc(org_name)}</b> has '
+        f'been suspended for <b>{months} months</b>, which usually means an '
+        f'invoice went unpaid and nothing has been heard since.</p>'
+        f'<p>{render.esc(kit)}, and reactivating takes a moment. But an '
+        f'account left suspended indefinitely will eventually be removed '
+        f'along with everything in it, so we would rather ask than '
+        f'assume.</p>'
+        f'<p><b>Three ways to deal with this:</b></p>'
+        f'<ol>'
+        f'<li>Pay the outstanding invoice, and everything comes straight '
+        f'back on.</li>'
+        f'<li><b>Waiting on funds?</b> Tell us and we will hold the account '
+        f'for another {hold_days} days. Say so and nothing happens in the '
+        f'meantime.</li>'
+        f'<li>Finished with it? Tell us that too, and we will close it '
+        f'properly.</li>'
+        f'</ol>'
+        f'<p>To do any of those, {render.esc(reach)}.</p>'
+        f'<p style="color:#64748b;font-size:12.5px">If we hear nothing at '
+        f'all, somebody here will get in touch before anything is removed. '
+        f'Nothing is deleted automatically.</p>'
+        f'<p>Thank you,<br>EasyMikroTik</p></div>')
+    return subject, text, html
+
+
 def _build_report(org_name: str, device_names: list[str], state_data: dict,
                   schedule: str, subject_prefix: str, since: float,
                   until: float, events_by_device: dict | None = None
@@ -528,6 +603,88 @@ class OrgEmailNotifier(Notifier):
                         _next_report_due(org["schedule"], now))
         finally:
             auth.close()
+
+    def check_dormant_accounts(self, billing_db=None) -> None:
+        """Tell the owner of a long-suspended account, and tell us.
+
+        A suspended account keeps its plan, its device cap and every push
+        ever made to its routers, so that somebody who pays is working again
+        in seconds. That is the right trade at a week. At three months it is
+        a filing cabinet nobody is paying for, and a customer who may have
+        left without anyone noticing.
+
+        Nothing here deletes anything. The list goes to the superadmin and
+        the decision stays with a person.
+        """
+        db = billing_db or self._billing_db
+        if not db:
+            return
+        from ..auth import AuthStore
+        from ..billing import BillingStore, FUNDS_HOLD_DAYS
+
+        try:
+            store = BillingStore(db)
+        except Exception:  # noqa: BLE001
+            log.exception("dormant accounts: cannot open the billing db")
+            return
+        try:
+            due = store.orgs_dormant()
+            if not due:
+                return
+            try:
+                auth = AuthStore(self._auth_db)
+            except Exception as exc:  # noqa: BLE001
+                log.error("dormant accounts: cannot open auth DB: %s", exc)
+                return
+            try:
+                smtp = effective_smtp(auth, self._smtp)
+                contact = (auth.get_billing_contact() or {}).get("email", "")
+                for row in due:
+                    org_id = row["org_id"]
+                    org = auth.org(org_id) or {}
+                    name = org.get("name") or f"Company {org_id}"
+                    to = [u["email"] for u in (auth.list_users(org_id) or [])
+                          if u.get("role") == "owner" and u.get("email")]
+                    if not to:
+                        log.warning("dormant accounts: org %s (%s) has been "
+                                    "suspended %.0f days and has NO owner "
+                                    "address to write to", org_id, name,
+                                    row["days"])
+                        continue
+                    try:
+                        subj, txt, htm = _build_dormant_notice(
+                            name, row["days"], smtp.subject_prefix, contact,
+                            int(row.get("device_limit") or 0),
+                            int(FUNDS_HOLD_DAYS))
+                        msg = EmailMessage()
+                        msg["Subject"] = subj
+                        msg["From"] = smtp.from_addr
+                        msg["To"] = ", ".join(to)
+                        if contact:
+                            # The superadmin is copied rather than sent a
+                            # separate digest: the account is one thing, and
+                            # the reply needs to reach whoever can act.
+                            msg["Cc"] = contact
+                        msg.set_content(txt)
+                        msg.add_alternative(htm, subtype="html")
+                        _smtp_send(smtp, msg)
+                        store.mark_dormant_warned(org_id)
+                        log.info("dormant accounts: told %s (suspended "
+                                 "%.0f days) at %s", name, row["days"],
+                                 ", ".join(to))
+                    except Exception:  # noqa: BLE001
+                        # NOT marked warned: a letter that could not be sent
+                        # has to be tried again, or the account quietly ages
+                        # out with nobody having been asked.
+                        log.exception("dormant notice failed for org %s",
+                                      org_id)
+            finally:
+                auth.close()
+        finally:
+            try:
+                store.db.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def check_outage_reminders(self, state, devices_store) -> None:
         """Tell each org what is STILL down, every twelve hours.

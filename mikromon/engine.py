@@ -455,6 +455,15 @@ class Engine:
                     n.check_outage_reminders(self.state, self.devices_store)
                 except Exception:  # noqa: BLE001
                     log.exception("outage reminder failed for %s", n.name)
+            # An account three months suspended with nobody having asked
+            # about it. Its own try, so one failing pass does not take the
+            # others down with it.
+            if hasattr(n, "check_dormant_accounts"):
+                try:
+                    n.check_dormant_accounts()
+                except Exception:  # noqa: BLE001
+                    log.exception("dormant account check failed for %s",
+                                  n.name)
 
     # ----- per-device -------------------------------------------------------
     def _poll_device(self, device) -> list:

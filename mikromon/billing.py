@@ -30,6 +30,21 @@ import urllib.request
 log = logging.getLogger(__name__)
 
 GRACE_DAYS = 7
+
+# How long an account sits suspended before its owner is told it is at risk
+# of removal. Three months: long enough that a seasonal business or a slow
+# finance department is not chased, short enough that a customer who has
+# left is noticed while anyone still remembers them.
+DORMANT_DAYS = 90
+
+# Having warned once, ask again this often. A single email can be missed --
+# which is the whole reason the offline reminder exists too.
+DORMANT_REMIND_DAYS = 30
+
+# How long "we are waiting on funds" holds the clock before it has to be
+# said again. Long enough to be worth saying, short enough that it is not a
+# way to keep an account for ever by replying once.
+FUNDS_HOLD_DAYS = 60
 _GRACE_SECS = GRACE_DAYS * 86400
 _TRIAL_DAYS = 30
 # Cap once a company has no active billing (lapsed, or never paid). Matches
@@ -666,6 +681,14 @@ class BillingStore:
         # BILLING_CURRENCY, and what to call it on the invoice. Set only for
         # a deal that was actually negotiated; NULL means no price has been
         # agreed, which is a thing to report rather than to guess at.
+        # When a suspension started, so "how long has this been off" can be
+        # answered without reading the alert log; when the customer last said
+        # they are waiting on funds, which stops the dormancy clock; and when
+        # they were last warned, so the warning repeats rather than being a
+        # single email that can be missed.
+        self._add_col_if_missing("billing", "suspended_since", "REAL")
+        self._add_col_if_missing("billing", "funds_hold_until", "REAL")
+        self._add_col_if_missing("billing", "dormant_warned", "REAL")
         self._add_col_if_missing("billing", "custom_cents", "INTEGER")
         self._add_col_if_missing("billing", "custom_label", "TEXT")
         self._add_col_if_missing("billing", "pending_plan", "TEXT")
@@ -697,7 +720,8 @@ class BillingStore:
         row = self.db.execute(
             "SELECT org_id, pf_token, payment_id, status, plan, "
             "device_limit, current_period_end, grace_period_end, trial_end, "
-            "pending_plan, pending_from, custom_cents, custom_label "
+            "pending_plan, pending_from, custom_cents, custom_label, "
+            "suspended_since, funds_hold_until, dormant_warned "
             "FROM billing WHERE org_id = ?",
             (int(org_id),)).fetchone()
         if not row:
@@ -705,7 +729,8 @@ class BillingStore:
         keys = ("org_id", "pf_token", "payment_id", "status", "plan",
                 "device_limit", "current_period_end", "grace_period_end",
                 "trial_end", "pending_plan", "pending_from",
-                "custom_cents", "custom_label")
+                "custom_cents", "custom_label",
+                "suspended_since", "funds_hold_until", "dormant_warned")
         return dict(zip(keys, row))
 
     def device_limit(self, org_id: int) -> int:
@@ -1191,7 +1216,17 @@ class BillingStore:
         was on -- and a customer who pays should be working again in seconds,
         not waiting for someone to reconstruct their account.
         """
-        self._upsert(org_id, status="suspended", grace_period_end=None)
+        # Recorded on the way in, so "three months suspended" is a fact on
+        # the row rather than something to reconstruct from the alert log.
+        # Only set when it is not already: re-suspending an account that was
+        # never reactivated must not restart the clock.
+        now = time.time()
+        already = (self.get(org_id) or {})
+        since = already.get("suspended_since")
+        if already.get("status") != "suspended" or not since:
+            since = now
+        self._upsert(org_id, status="suspended", grace_period_end=None,
+                     suspended_since=since)
 
     def unsuspend(self, org_id: int) -> None:
         """Undo a suspension, putting the company back on the plan it kept
@@ -1202,10 +1237,13 @@ class BillingStore:
             return
         plan = row.get("plan")
         if plan:
-            self._upsert(org_id, status="active", grace_period_end=None)
+            self._upsert(org_id, status="active", grace_period_end=None,
+                         suspended_since=None, funds_hold_until=None,
+                         dormant_warned=None)
         else:
             self._upsert(org_id, status="inactive", grace_period_end=None,
-                         device_limit=FREE_DEVICES)
+                         device_limit=FREE_DEVICES, suspended_since=None,
+                         funds_hold_until=None, dormant_warned=None)
 
     def is_suspended(self, org_id: int) -> bool:
         return (self.get(org_id) or {}).get("status") == "suspended"
@@ -1254,6 +1292,71 @@ class BillingStore:
     def clear_quoted_price(self, org_id: int) -> None:
         """Forget an agreed price, e.g. when moving a company onto a tier."""
         self._upsert(org_id, custom_cents=None, custom_label=None)
+
+    def set_funds_hold(self, org_id: int, days: float = FUNDS_HOLD_DAYS,
+                       now: float | None = None) -> float:
+        """Record that this company says it is waiting on funds.
+
+        Stops the dormancy clock for a while. It is the one answer that
+        makes removing an account the wrong move, so it has to be an answer
+        somebody can actually give -- and it expires, so replying once is
+        not a way to keep an account for ever.
+        """
+        until = (now or time.time()) + float(days) * 86400
+        self._upsert(org_id, funds_hold_until=until, dormant_warned=None)
+        log.info("org %s says it is waiting on funds; dormancy paused until "
+                 "%s", org_id, time.strftime("%d %b %Y", time.localtime(until)))
+        return until
+
+    def clear_funds_hold(self, org_id: int) -> None:
+        self._upsert(org_id, funds_hold_until=None)
+
+    def orgs_dormant(self, now: float | None = None,
+                     after_days: float = DORMANT_DAYS,
+                     remind_days: float = DORMANT_REMIND_DAYS) -> list:
+        """Suspended long enough to be at risk, and due to be told.
+
+        Excludes anyone with a live "waiting on funds" hold, because that is
+        precisely the case where the account should be left alone.
+        """
+        now = now if now is not None else time.time()
+        cutoff = now - float(after_days) * 86400
+        rows = self.db.execute(
+            "SELECT org_id, plan, device_limit, suspended_since, "
+            "funds_hold_until, dormant_warned FROM billing "
+            "WHERE status = 'suspended' AND suspended_since IS NOT NULL "
+            "AND suspended_since <= ? "
+            "AND (funds_hold_until IS NULL OR funds_hold_until <= ?) "
+            "AND (dormant_warned IS NULL OR dormant_warned <= ?)",
+            (cutoff, now, now - float(remind_days) * 86400)).fetchall()
+        return [{"org_id": r[0], "plan": r[1], "device_limit": r[2],
+                 "suspended_since": r[3], "funds_hold_until": r[4],
+                 "dormant_warned": r[5],
+                 "days": (now - float(r[3])) / 86400} for r in rows]
+
+    def all_dormant(self, now: float | None = None,
+                    after_days: float = DORMANT_DAYS) -> list:
+        """Every account past the dormancy line, warned or not, held or not.
+
+        For the panel: somebody deciding what to remove needs to see the
+        ones on hold too, or the list looks shorter than the truth.
+        """
+        now = now if now is not None else time.time()
+        cutoff = now - float(after_days) * 86400
+        rows = self.db.execute(
+            "SELECT org_id, plan, device_limit, suspended_since, "
+            "funds_hold_until, dormant_warned FROM billing "
+            "WHERE status = 'suspended' AND suspended_since IS NOT NULL "
+            "AND suspended_since <= ? ORDER BY suspended_since",
+            (cutoff,)).fetchall()
+        return [{"org_id": r[0], "plan": r[1], "device_limit": r[2],
+                 "suspended_since": r[3], "funds_hold_until": r[4],
+                 "dormant_warned": r[5],
+                 "on_hold": bool(r[4] and float(r[4]) > now),
+                 "days": (now - float(r[3])) / 86400} for r in rows]
+
+    def mark_dormant_warned(self, org_id: int, now: float | None = None) -> None:
+        self._upsert(org_id, dormant_warned=now or time.time())
 
     def orgs_without_a_price(self) -> list:
         """Companies that are active but that nothing knows how to invoice.

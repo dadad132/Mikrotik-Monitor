@@ -7730,6 +7730,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 selfcheck=_selfcheck,
                 yoco=auth.get_yoco() if auth else {},
                 public_base=_pay_base,
+                dormant=(billing.all_dormant() if billing else []),
                 invoice_template_on=bool(_invoice_tpl.load()),
                 invoice_template_warnings=_invoice_tpl.check(
                     _invoice_tpl.load()) if _invoice_tpl.load() else (),
@@ -8072,6 +8073,38 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if notes:
                 msg += " " + " ".join(notes)
             return self._redirect("/superadmin?ok=" + quote(msg))
+
+        def _post_funds_hold(self, user):
+            """Record that a suspended company says it is waiting on funds.
+
+            The one answer that makes removing an account the wrong move, so
+            it has to be an answer somebody can give on their behalf when
+            they reply to the letter.
+            """
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if billing is None:
+                return self._redirect("/superadmin?error=" + quote(
+                    "Billing is not enabled."))
+            try:
+                org_id = int(flat.get("org") or 0)
+            except (TypeError, ValueError):
+                org_id = 0
+            if not org_id:
+                return self._redirect("/superadmin?error=" + quote(
+                    "No company was named."))
+            until = billing.set_funds_hold(org_id)
+            log.info("funds hold set for org %s by %s", org_id,
+                     user.get("email", "?"))
+            from .billing import FUNDS_HOLD_DAYS
+            return self._redirect("/superadmin?ok=" + quote(
+                f"Left alone for {int(FUNDS_HOLD_DAYS)} days, until "
+                f"{time.strftime('%d %b %Y', time.localtime(until))}. They "
+                f"will not be asked again before then."))
 
         def _post_quoted_plan(self, user):
             """Record what a quoted company agreed to pay each month.
@@ -11348,6 +11381,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_yoco(user)
             if path == "/superadmin/invoice-template":
                 return self._post_invoice_template(user)
+            if path == "/superadmin/funds-hold":
+                return self._post_funds_hold(user)
             if path == "/superadmin/quoted-plan":
                 return self._post_quoted_plan(user)
             if path == "/superadmin/pay-base":

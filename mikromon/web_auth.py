@@ -11,6 +11,7 @@ import time
 from . import guide_art, guide_tabs
 from .auth import AuthStore
 from .billing import (payment_reference, PLANS, GRACE_DAYS,
+                      FUNDS_HOLD_DAYS,
                       days_until_suspension,
                       FREE_DEVICES, BILLING_CURRENCY,
                       CURRENCY_SYMBOL,
@@ -1469,6 +1470,61 @@ def _suspend_button(org_id, status: str, csrf: str,
             f'{"Restore access" if suspended else "Suspend"}</button></form>')
 
 
+def _dormant_box(rows, names, csrf: str) -> str:
+    """Accounts suspended long enough to be at risk, and what to do with them.
+
+    Shown so that removing a customer's history is a decision somebody makes
+    with the list in front of them, rather than something a clock does. The
+    hold button is the useful one: it is what gets pressed when a customer
+    replies "we are waiting on funds", which is the one answer that makes
+    deletion wrong.
+    """
+    if not rows:
+        return ""
+    out = []
+    for r in rows:
+        org_id = r["org_id"]
+        name = names.get(org_id, f"Company {org_id}")
+        months = int(r["days"] // 30)
+        if r.get("on_hold"):
+            state = (f'<span class="badge" style="background:#dcfce7;'
+                     f'color:#15803d">waiting on funds until '
+                     f'{time.strftime("%d %b", time.localtime(r["funds_hold_until"]))}'
+                     f'</span>')
+        elif r.get("dormant_warned"):
+            state = (f'<span class="muted" style="font-size:11px">asked '
+                     f'{time.strftime("%d %b", time.localtime(r["dormant_warned"]))}'
+                     f'</span>')
+        else:
+            state = ('<span class="muted" style="font-size:11px">not asked '
+                     'yet</span>')
+        out.append(
+            f'<tr><td><b>{esc(name)}</b></td>'
+            f'<td>{months} months</td>'
+            f'<td>{esc(str(r.get("plan") or ""))} &middot; '
+            f'{r.get("device_limit") or 0} dev</td>'
+            f'<td>{state}</td>'
+            f'<td><form method="POST" action="/superadmin/funds-hold" '
+            f'style="display:inline">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="org" value="{org_id}">'
+            f'<button class="btn ghost" type="submit" '
+            f'style="padding:3px 8px;font-size:12px">They are waiting on '
+            f'funds</button></form></td></tr>')
+    return (f'<div class="card" style="margin-bottom:16px">'
+            f'<h3 style="margin:0 0 6px">Suspended three months or more</h3>'
+            f'<p class="muted" style="margin:0 0 8px">Their owners are asked '
+            f'by email, and asked again every month until something changes. '
+            f'<b>Nothing is deleted automatically</b> &mdash; removing a '
+            f'company and its history is a decision to make here, with this '
+            f'list in front of you. If one replies that they are waiting on '
+            f'funds, press the button and they are left alone for '
+            f'{int(FUNDS_HOLD_DAYS)} days.</p>'
+            f'<table><thead><tr><th>Company</th><th>Suspended</th>'
+            f'<th>Was on</th><th>Asked</th><th></th></tr></thead>'
+            f'<tbody>{"".join(out)}</tbody></table></div>')
+
+
 def _quoted_plan_form(org_id, bill, csrf) -> str:
     """Set the agreed monthly price for a company past the last packet.
 
@@ -2315,6 +2371,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        public_base: str = "",
                        invoice_template_on: bool = False,
                        invoice_template_warnings=(),
+                       dormant=None,
                        upcoming=None, runner_status=None,
                        outstanding=None,
                        tunnel_rows=None,
@@ -2499,6 +2556,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
              f'{_paylink_base_box(public_base, csrf)}'
              f'{_test_invoice_box()}'
              f'{_invoice_template_box(csrf, invoice_template_on, invoice_template_warnings)}'
+             f'{_dormant_box(dormant or [], {r["id"]: r.get("name", "") for r in rows}, csrf)}'
              f'{_outstanding_box(outstanding, csrf)}'
              f'{_upcoming_box(upcoming, runner_status)}'
              f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf, hub_pubkey)}'
