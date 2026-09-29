@@ -57,6 +57,11 @@ TIER_STEP = 5
 MAX_TIER_DEVICES = 100
 QUOTE_ABOVE_DEVICES = MAX_TIER_DEVICES
 
+# The ladder, as the two numbers it was actually decided as: what the first
+# packet costs per device, and how much comes off at each step up.
+TIER_START_USD = 5.00
+TIER_STEP_DISCOUNT_USD = 0.05
+
 # What customers are invoiced in. It is USD because that is the currency the
 # prices were decided in and the currency every page quotes -- and because
 # the alternative was a rand figure derived from a constant that was right on
@@ -275,25 +280,25 @@ def upgrade_quote(old_plan: dict | None, new_plan: dict,
 def tier_rate_usd(devices: int) -> float:
     """Per-device monthly price at a given packet size.
 
-    Volume discount, flat and predictable: $5.00 at the smallest packet, then
-    ten cents off per five-device step from 15 devices up, bottoming out at
-    $2.90 for 100. The two steps below 15 fall twice as fast (5.00 -> 4.80 ->
-    4.60) because the smallest packets carry the same fixed per-account cost
-    over far fewer devices, so the curve has further to come down there.
+    Volume discount, flat all the way up: $5.00 a device at the smallest
+    packet, then five cents off for every five-device step. Five devices is
+    $5.00, ten is $4.95, fifteen is $4.90, and a hundred -- the largest
+    packet before a quote -- is $4.05.
 
-    Expressed as a rate rather than a price list because the rate is the thing
-    that was decided; the prices are what fall out of it, and deriving them
-    means a tier cannot silently disagree with its neighbours.
+    Expressed as a rate rather than a price list because the rate is the
+    thing that was decided; the prices are what fall out of it, and deriving
+    them means a tier cannot silently disagree with its neighbours.
     """
-    if devices <= 5:
-        return 5.00
-    if devices <= 10:
-        return 4.80
-    return round(4.60 - 0.10 * ((devices - 15) // TIER_STEP), 2)
+    steps = max(0, (max(devices, TIER_STEP) // TIER_STEP) - 1)
+    return round(TIER_START_USD - TIER_STEP_DISCOUNT_USD * steps, 2)
 
 
 def _make_tier(devices: int) -> dict:
-    usd = int(round(devices * tier_rate_usd(devices)))
+    # Cents kept, not rounded away. Five cents a step against five-device
+    # steps puts half the ladder on a half dollar, and rounding $49.50 up to
+    # $50 would make a ten-device packet cost $5.00 a device -- the rate of
+    # the packet below it, which is the opposite of a volume discount.
+    usd = round(devices * tier_rate_usd(devices), 2)
     return {
         "name": f"d{devices}",
         "label": f"{devices} devices",

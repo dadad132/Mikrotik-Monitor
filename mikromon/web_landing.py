@@ -113,7 +113,7 @@ _PLANS = [
     {
         "name":    "Starter",
         "devices": f'{_tier(5)["devices"]} devices',
-        "amount":  f'${_tier(5)["price_usd"]}',
+        "amount":  f'${_tier(5)["price_usd"]:,.2f}',
         "period":  "per month",
         "items":   [
             "Everything in Free Trial",
@@ -130,7 +130,7 @@ _PLANS = [
     {
         "name":    "Growing",
         "devices": f'{_tier(50)["devices"]} devices',
-        "amount":  f'${_tier(50)["price_usd"]}',
+        "amount":  f'${_tier(50)["price_usd"]:,.2f}',
         "period":  "per month",
         "items":   [
             "Everything in Starter",
@@ -145,7 +145,7 @@ _PLANS = [
     {
         "name":    "Full house",
         "devices": f'{MAX_TIER_DEVICES} devices',
-        "amount":  f'${_tier(MAX_TIER_DEVICES)["price_usd"]}',
+        "amount":  f'${_tier(MAX_TIER_DEVICES)["price_usd"]:,.2f}',
         "period":  "per month",
         "items":   [
             "Everything in Growing",
@@ -440,7 +440,7 @@ def _tier_rows() -> str:
         rows += (f'<tr>'
                  f'<td><b>{p["devices"]} devices</b></td>'
                  f'<td>{p["devices"]}</td>'
-                 f'<td class="usd">${p["price_usd"]:,}</td>'
+                 f'<td class="usd">${p["price_usd"]:,.2f}</td>'
                  f'<td class="per">${per:.2f} / device</td>'
                  f'<td><a class="btn-nav-primary" href="/signup" '
                  f'style="display:inline-block;padding:5px 14px;font-size:13px">'

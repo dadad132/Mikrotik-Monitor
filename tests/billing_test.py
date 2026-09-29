@@ -82,15 +82,39 @@ check("...while the per-device rate falls with every step, which is the "
       "whole reason to buy a bigger packet",
       all(billing.tier_rate_usd(a) > billing.tier_rate_usd(b)
           for a, b in zip(_devs, _devs[1:])))
-check("the ladder runs $25 for 5 devices to $290 for 100",
-      billing.plan_by_name("d5")["price_usd"] == 25
-      and billing.plan_by_name("d100")["price_usd"] == 290)
-check("a ten-cent-per-step rate from 15 devices up, as priced",
-      [billing.tier_rate_usd(n) for n in (15, 20, 45, 70, 100)]
-      == [4.60, 4.50, 4.00, 3.50, 2.90])
-check("every packet price is a whole dollar -- these get read off a page and "
-      "typed into a banking app",
-      all(float(p["price_usd"]).is_integer() for p in billing.PLANS))
+check("the ladder runs $25.00 for 5 devices to $405.00 for 100",
+      billing.plan_by_name("d5")["price_usd"] == 25.00
+      and billing.plan_by_name("d100")["price_usd"] == 405.00)
+check("five dollars a device at the smallest packet, which is the number "
+      "the whole ladder is built from",
+      billing.tier_rate_usd(5) == billing.TIER_START_USD == 5.00)
+check("...and exactly five cents off at every five-device step, with no "
+      "step anywhere that is bigger or smaller than the rest",
+      all(round(billing.tier_rate_usd(a) - billing.tier_rate_usd(b), 2)
+          == billing.TIER_STEP_DISCOUNT_USD
+          for a, b in zip(_devs, _devs[1:])))
+check("so the named rungs come out where the rule says they should",
+      [billing.tier_rate_usd(n) for n in (5, 10, 15, 50, 100)]
+      == [5.00, 4.95, 4.90, 4.55, 4.05])
+
+# Prices used to be whole dollars, by design -- they get read off a page and
+# typed into a banking app. Five cents a step against five-device steps puts
+# half the ladder on a half dollar, and rounding those away would make a
+# ten-device packet cost $5.00 a device: the rate of the packet BELOW it,
+# which is the opposite of a volume discount. The rate is what was decided,
+# so the rate is what survives.
+check("the price of a packet is exactly its devices times its rate, to the "
+      "cent -- not rounded to something tidier that would contradict the "
+      "rate printed beside it",
+      all(p["price_usd"] == round(p["devices"]
+                                  * billing.tier_rate_usd(p["devices"]), 2)
+          for p in billing.PLANS))
+check("...so a ten-device packet is $49.50 and not $50, because $50 would "
+      "be five dollars a device and that is the smallest packet's price",
+      billing.plan_by_name("d10")["price_usd"] == 49.50)
+check("no price carries fractions of a cent, which no one can pay",
+      all(round(p["price_usd"], 2) == p["price_usd"]
+          for p in billing.PLANS))
 
 print("Above the last packet it is a quote, not a tier:")
 check("100 devices is still a packet",

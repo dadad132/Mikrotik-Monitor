@@ -156,7 +156,7 @@ def _plan_upgrade_box(csrf: str, bill, device_count: int = 0,
 
     opts = "".join(
         f'<option value="{esc(p["name"])}">{p["devices"]} devices '
-        f'&mdash; ${p["price_usd"]:,.0f} per month</option>' for p in bigger)
+        f'&mdash; ${p["price_usd"]:,.2f} per month</option>' for p in bigger)
     if not yoco_on:
         # Card payment off: say where to go rather than showing a button that
         # cannot charge anything.
@@ -1061,7 +1061,7 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                    f'<button class="btn" type="submit" style="padding:6px 14px">'
                    f'Pay R{_zar:,.0f} for the month</button></form>'
                    f'<div class="muted" style="font-size:11px;margin-top:4px">'
-                   f'${p["price_usd"]:,.0f}/mo, charged in rands because the '
+                   f'${p["price_usd"]:,.2f}/mo, charged in rands because the '
                    f'card gateway settles in ZAR. '
                    f'{esc(_fx_line(_basis))}</div>'
                    if _zar is not None else
@@ -1147,7 +1147,7 @@ def _locked_pay_block(user, csrf: str, yoco_on: bool, bill,
         opts = "".join(
             f'<option value="{esc(p["name"])}"'
             f'{" selected" if p["devices"] == want else ""}>'
-            f'{p["devices"]} devices &mdash; ${p["price_usd"]:,.0f} per month'
+            f'{p["devices"]} devices &mdash; ${p["price_usd"]:,.2f} per month'
             f'</option>' for p in PLANS)
         return (
             f'<form method="POST" action="/billing/checkout" '
@@ -1309,7 +1309,7 @@ def _test_invoice_page(user, plan, plan_name: str, subject: str, body: str,
     opts = "".join(
         f'<option value="{esc(p["name"])}"'
         f'{" selected" if p["name"] == plan_name else ""}>'
-        f'{p["devices"]} devices &mdash; ${p["price_usd"]:,.0f} per month'
+        f'{p["devices"]} devices &mdash; ${p["price_usd"]:,.2f} per month'
         f'</option>' for p in PLANS)
     warn = "" if link else (
         '<p class="muted" style="color:#dc2626;margin:0 0 12px">'
@@ -1484,7 +1484,7 @@ def _plan_select(org_id, current_plan, csrf) -> str:
     for p in PLANS:
         sel = " selected" if current_plan == p["name"] else ""
         opts.append(f'<option value="{esc(p["name"])}"{sel}>'
-                    f'{p["devices"]} dev · ${p["price_usd"]:.0f}/mo</option>')
+                    f'{p["devices"]} dev · ${p["price_usd"]:.2f}/mo</option>')
     opts.append('<option value="unlimited"'
                 + (" selected" if current_plan == "unlimited" else "")
                 + '>Unlimited</option>')
