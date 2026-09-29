@@ -3545,6 +3545,11 @@ FEATURES = {
     # for a measurement, and quietly running one on every page load would
     # pull five megabytes down a customer's line for nobody.
     "speedtest": {"title": "Speed test", "write": False},
+    # Read-only here in the same sense speedtest is: the tab is built from
+    # stored configuration, not from the router. It has its own push, run
+    # deliberately, because creating VLANs and moving ports is not a thing
+    # to do on a page load.
+    "departments": {"title": "Departments", "write": False},
 }
 
 # tab label -> url slug (Overview/Backups handled elsewhere)
@@ -3553,7 +3558,8 @@ TAB_SLUGS = {"Routes": "routes", "WAN": "wan", "Security": "security",
              "QoS": "qos", "Port forwarding": "portfwd", "Interfaces": "interfaces",
              "Remote access": "remote", "VPN": "tunnel",
              "Scripts": "scripts", "Update": "update",
-             "Speed test": "speedtest"}
+             "Speed test": "speedtest",
+             "Departments": "departments"}
 
 
 # ===========================================================================

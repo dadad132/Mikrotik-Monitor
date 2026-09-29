@@ -11645,7 +11645,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                              "/device/nextdns-privacy-settings",
                              "/device/nextdns-blocklist", "/device/nextdns-list",
                              "/device/nextdns-reapply", "/device/nextdns-test",
-                             "/device/speedtest",
+                             "/device/speedtest", "/device/departments",
                              "/dashboard/suggestion",
                              "/device/remote-regenerate", "/device/remote-test")
             if path in _DEVICE_WRITE:

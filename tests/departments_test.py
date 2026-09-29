@@ -282,6 +282,119 @@ check("a clash is shown loudly, and no plan is offered beside it",
       "both on VLAN 20" in box
       and "What the router would be told" not in box)
 
+print("\nThrough a real server, because rendering is not serving")
+
+# The tab drew correctly in isolation and did nothing whatsoever in the
+# browser. Two separate reasons, neither visible from calling the function
+# that builds the page: a tab has to be registered in FEATURES to be
+# dispatched, and a device POST has to be on the _DEVICE_WRITE whitelist or
+# it is simply a 404. So this asks the server.
+import html as _html  # noqa: E402
+import http.cookiejar  # noqa: E402
+import json  # noqa: E402
+import tempfile  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.parse  # noqa: E402
+import urllib.request  # noqa: E402
+
+from mikromon import web as _web  # noqa: E402
+from mikromon.auth import AuthStore  # noqa: E402
+from mikromon.devices_store import DevicesStore  # noqa: E402
+from mikromon.push import FEATURES as _FEATURES  # noqa: E402
+
+check("the tab is registered, or the device page never dispatches it and "
+      "clicking Departments does nothing at all",
+      "departments" in _FEATURES)
+
+_d = tempfile.mkdtemp()
+_adb = os.path.join(_d, "auth.db")
+_wdb = os.path.join(_d, "dev.db")
+_sfile = os.path.join(_d, "state.json")
+_a = AuthStore(_adb)
+_org = _a.signup("o@x.test", "a-password-for-the-test", "Acme")
+_a.close()
+_ds = DevicesStore(_wdb)
+_ds.upsert({"name": "R1", "host": "10.10.0.2", "org_id": _org}, {})
+_ds.close()
+with open(_sfile, "w", encoding="utf-8") as _f:
+    json.dump({"devices": {"R1": {"facts": {
+        "interfaces": ["ether1", "ether2", "ether3", "ether4"]}}}}, _f)
+
+_PORT = 8813
+threading.Thread(target=_web.serve, kwargs=dict(
+    metrics_db=os.path.join(_d, "m.db"), state_file=_sfile, auth_db=_adb,
+    devices_db=_wdb, host="127.0.0.1", port=_PORT), daemon=True).start()
+time.sleep(2.0)
+_B = f"http://127.0.0.1:{_PORT}"
+_cj = http.cookiejar.CookieJar()
+_op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_cj))
+_op.open(urllib.request.Request(_B + "/login", data=urllib.parse.urlencode(
+    {"email": "o@x.test", "password": "a-password-for-the-test"}).encode()),
+    timeout=8)
+
+
+def _tab():
+    return _op.open(_B + "/device?name=R1&tab=departments",
+                    timeout=10).read().decode("utf-8", "replace")
+
+
+def _post(**kw):
+    fields = {"csrf": _CSRF, "device": "R1", "action": "save"}
+    fields.update(kw)
+    try:
+        r = _op.open(urllib.request.Request(
+            _B + "/device/departments",
+            data=urllib.parse.urlencode(fields).encode()), timeout=10)
+        return getattr(r, "status", r.code)
+    except urllib.error.HTTPError as exc:
+        return exc.code
+
+
+_page = _tab()
+check("the tab actually SERVES, rather than drawing correctly in a test and "
+      "doing nothing in the browser",
+      "Add a department" in _page and "shares one network" in _page)
+check("...offering the router's real port names from cached facts, with no "
+      "connection to the router", "ether3" in _page)
+
+_CSRF = _page.split('name="csrf" value="')[1].split('"')[0]
+
+check("saving a department is accepted -- a device POST that is not on the "
+      "write whitelist is a 404 however right the handler is",
+      _post(name="Sales", vlan="20", subnet="10.20.20.0/24", ports="ether3",
+            profile_id="p1", resolvers="2a07:a8c0::1") == 200)
+check("...and a second one", _post(name="Support", vlan="30",
+                                   subnet="10.20.30.0/24",
+                                   ports="ether4") == 200)
+
+_page = _html.unescape(_tab())
+check("both appear on the tab afterwards",
+      "Sales" in _page and "Support" in _page)
+check("...with the plan showing each port stamped with its VLAN",
+      "ether3 -> VLAN 20 (Sales)" in _page)
+check("...the wall between departments",
+      "drop department-to-department" in _page)
+check("...and the one with no DNS of its own called out",
+      "not filtered separately" in _page)
+
+_post(name="Clashing", vlan="20", subnet="10.20.90.0/24")
+_page = _tab()
+check("a department clashing with one already saved is REFUSED rather than "
+      "stored and left to break the push", "Clashing" not in _page)
+
+_op.open(urllib.request.Request(_B + "/device/departments",
+         data=urllib.parse.urlencode({"csrf": _CSRF, "device": "R1",
+                                      "action": "delete",
+                                      "name": "Support"}).encode()),
+         timeout=10)
+_page = _tab()
+check("removing one takes its ROW off the tab and leaves the other -- "
+      "checked by its delete form rather than by its name, which also "
+      "appears in the tab's own explanation",
+      'value="Support"' not in _page and 'value="Sales"' in _page)
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")
