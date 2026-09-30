@@ -383,7 +383,8 @@ def _cmd_access_apply(config) -> int:
         return 2
     ports = access.apply_hub_config(
         acc["grants_file"], acc.get("tls_cert", ""), acc.get("tls_key", ""),
-        acc["nginx_http_conf"], acc["nginx_stream_conf"])
+        acc["nginx_http_conf"], acc["nginx_stream_conf"],
+        host=acc.get("hub_host", ""))
     # Reload nginx so the new listen ports take effect (and closed ones drop).
     for cmd in (["systemctl", "reload", "nginx"], ["nginx", "-s", "reload"]):
         try:

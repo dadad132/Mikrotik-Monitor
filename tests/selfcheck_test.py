@@ -472,6 +472,85 @@ check("an all-clear says so in one line", "Nothing is wrong"
 check("nothing to report renders nothing at all",
       wa._selfcheck_box([]) == "")
 
+print("\nWhether a WebFig link can be opened at all")
+
+# Reported from a browser: ERR_CERT_AUTHORITY_INVALID on the WebFig port,
+# and "you cannot visit ... because the website uses HSTS" -- meaning no
+# click-through. Two faults, each harmless alone.
+#
+# The WebFig ports serve whatever certificate the installer found for the
+# access host AT INSTALL TIME, written into config.yaml. A server installed
+# before its DNS pointed here gets the self-signed fallback frozen in, and a
+# real certificate obtained an hour later is never picked up.
+#
+# And HSTS covers a whole host across EVERY port, and removes the
+# click-through. So a warning somebody used to dismiss became a wall.
+
+from mikromon.access import resolve_cert  # noqa: E402
+
+_c, _k, _src = resolve_cert("nowhere.example", "/etc/ssl/self.crt",
+                            "/etc/ssl/self.key")
+check("with no Let's Encrypt certificate for the host, the configured one "
+      "is used and named as self-signed",
+      (_c, _src) == ("/etc/ssl/self.crt", "self-signed"))
+
+# Pointed at a real directory, so this asserts the behaviour rather than
+# accepting whatever the machine running the tests happens to have.
+import mikromon.access as _acc  # noqa: E402
+
+_d2 = tempfile.mkdtemp()
+os.makedirs(os.path.join(_d2, "example.test"))
+for _f in ("fullchain.pem", "privkey.pem"):
+    open(os.path.join(_d2, "example.test", _f), "w").close()
+_was = _acc.LETSENCRYPT_LIVE
+_acc.LETSENCRYPT_LIVE = _d2
+try:
+    _c2, _k2, _src2 = resolve_cert("example.test", "/etc/ssl/self.crt",
+                                   "/etc/ssl/self.key")
+    check("a real certificate for the host WINS over whatever config.yaml "
+          "still says -- the whole fault is that the path was frozen at "
+          "install time, so a certificate obtained an hour later was never "
+          "picked up and WebFig kept serving the self-signed one",
+          _src2 == "letsencrypt"
+          and _c2 == os.path.join(_d2, "example.test", "fullchain.pem")
+          and _k2.endswith("privkey.pem"))
+    check("...and a host with a directory but no files in it does NOT win, "
+          "or a half-finished certbot run would point nginx at nothing",
+          resolve_cert("missing.test", "/etc/ssl/self.crt",
+                       "/etc/ssl/self.key")[2] == "self-signed")
+finally:
+    _acc.LETSENCRYPT_LIVE = _was
+
+f = one(sc.check_webfig_cert(
+    {"nginx_http_conf": "/x", "tls_cert": "/etc/ssl/easymikrotik-x.crt",
+     "hub_host": "easymikrotik.com"}), "webfig:cert")
+check("a self-signed WebFig certificate is reported", f is not None
+      and not f["ok"])
+check("...explaining that HSTS is what turns it from a warning into a "
+      "block, because the error a person sees blames only the certificate",
+      "click-through" in f["detail"] or "click-through" in f["title"])
+check("...and carrying the command that fixes it",
+      "certbot" in f["fix"])
+
+f = one(sc.check_webfig_cert(
+    {"nginx_http_conf": "/x", "hub_host": "x",
+     "tls_cert": "/etc/letsencrypt/live/x/fullchain.pem"}), "webfig:cert")
+check("a Let's Encrypt path is trusted WITHOUT having to stat it -- this "
+      "check runs off the server too, and inventing a lockout sends "
+      "somebody to re-issue a certificate that was fine",
+      f is not None and f["ok"])
+
+check("no remote access configured means nothing to say",
+      sc.check_webfig_cert({}) == [])
+check("...and neither does access configured with no certificate at all",
+      sc.check_webfig_cert({"nginx_http_conf": "/x"}) == [])
+
+check("the check runs as part of the full sweep",
+      "check_webfig_cert" in open(
+          os.path.join(os.path.dirname(os.path.dirname(
+              os.path.abspath(__file__))), "mikromon", "selfcheck.py"),
+          encoding="utf-8").read().split("def run_all")[1])
+
 print("\nWhich certificate the site actually serves")
 
 # "Not secure" on a site that IS serving HTTPS has two causes, and nothing

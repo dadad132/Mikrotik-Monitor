@@ -22,14 +22,22 @@ the hub turns it into nginx config (see deploy/install.sh).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 import secrets
 import threading
 import time
 
+log = logging.getLogger(__name__)
+
 # Public port pools on the hub. WebFig (HTTPS) and Winbox (raw TCP) are kept in
 # separate ranges so the renderer can tell them apart at a glance.
+# Where certbot puts what it issues. A constant so the resolver can be
+# tested against a real directory rather than against whatever happens to
+# exist on the machine running the tests.
+LETSENCRYPT_LIVE = "/etc/letsencrypt/live"
+
 WEBFIG_PORTS = (20000, 24999)
 WINBOX_PORTS = (25000, 29999)
 DEFAULT_TTL = 15 * 60          # seconds an access grant stays open
@@ -202,6 +210,37 @@ _UPGRADE_MAP = (
 _MAX_BODY = "256m"
 
 
+def resolve_cert(host: str, cert: str = "", key: str = "") -> tuple:
+    """(cert, key, source) for the WebFig leg, decided NOW rather than at
+    install time.
+
+    The installer looks for a Let's Encrypt certificate for the access host
+    and falls back to a self-signed one so nginx still starts. It then
+    writes whichever it found into config.yaml -- and that is where the
+    trouble is: a server installed before DNS pointed at it gets the
+    self-signed path frozen in, and a real certificate obtained an hour
+    later is never picked up, because nothing looks again.
+
+    Which is survivable on its own (a browser warning, click through) and
+    is NOT survivable with HSTS, because HSTS applies to the whole host
+    across every port and removes the click-through. WebFig then cannot be
+    opened at all.
+
+    So: a real certificate for this host wins whenever one exists, whatever
+    config.yaml still says.
+    """
+    live = os.path.join(LETSENCRYPT_LIVE, host, "fullchain.pem") if host else ""
+    live_key = os.path.join(LETSENCRYPT_LIVE, host, "privkey.pem") if host else ""
+    if live and os.path.exists(live) and os.path.exists(live_key):
+        if os.path.abspath(live) != os.path.abspath(cert or ""):
+            log.info("access: using the Let's Encrypt certificate for %s "
+                     "instead of the configured %s", host, cert or "(none)")
+        return live, live_key, "letsencrypt"
+    source = ("self-signed" if cert and "/letsencrypt/" not in cert
+              else "configured")
+    return cert, key, source
+
+
 def render_nginx_http(grants, cert: str, key: str) -> str:
     """`http {}`-context server blocks for the WebFig (HTTPS) grants."""
     blocks = []
@@ -274,13 +313,19 @@ def _write(path: str, content: str) -> None:
 
 def apply_hub_config(grants_file: str, cert: str, key: str,
                      http_conf: str, stream_conf: str,
-                     now: float | None = None) -> list:
+                     now: float | None = None, host: str = "") -> list:
     """Hub-side: prune expired grants, then render the active ones into the two
     nginx include files (WebFig http + Winbox stream). Returns the active ports.
     The caller reloads nginx afterwards. Run by the access-reload unit as root."""
     store = AccessStore(grants_file)
     store.sweep(now)                       # drop expired grants + persist
     grants = store.active(now)
+    cert, key, source = resolve_cert(host, cert, key)
+    if grants and source != "letsencrypt":
+        log.warning("access: WebFig is being served with a %s certificate "
+                    "(%s). Browsers will refuse it outright wherever HSTS "
+                    "is set on this host, because HSTS covers every port "
+                    "and removes the click-through.", source, cert)
     _write(http_conf, "# easymikrotik WebFig access — generated, do not edit\n"
            + render_nginx_http(grants, cert, key))
     _write(stream_conf, "# easymikrotik Winbox access — generated, do not edit\n"

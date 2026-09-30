@@ -527,6 +527,80 @@ def check_served_cert():
         f"{days:.0f} days left")]
 
 
+def check_webfig_cert(access_cfg=None):
+    """Can a browser actually OPEN a WebFig link?
+
+    Two things have to be true together, and each is harmless alone.
+
+    The WebFig ports are served with whatever certificate the installer
+    found for the access host AT INSTALL TIME, written into config.yaml. A
+    server installed before its DNS pointed here gets the self-signed
+    fallback frozen in, and a real certificate obtained an hour later is
+    never picked up.
+
+    And HSTS covers a whole host across EVERY port, and removes the
+    click-through on a certificate warning.
+
+    Separately: a warning you dismiss, and a working site. Together: WebFig
+    cannot be opened at all, with no way past it, and the error a person
+    sees blames the certificate rather than the combination.
+    """
+    cfg = access_cfg or {}
+    cert = str(cfg.get("tls_cert", "") or "")
+    host = str(cfg.get("hub_host", "") or "")
+    if not cfg.get("nginx_http_conf") or not cert:
+        return []
+
+    from .access import resolve_cert
+    live, _key, source = resolve_cert(host, cert, cfg.get("tls_key", ""))
+    # A configured Let's Encrypt path counts as trusted even when it cannot
+    # be stat'd here: this runs off the server too, and reporting a lockout
+    # that does not exist is its own kind of harm -- it sends somebody to
+    # re-issue a certificate that was fine.
+    if source == "letsencrypt" or "/letsencrypt/" in cert:
+        if os.path.abspath(live) != os.path.abspath(cert):
+            return [_finding(
+                "webfig:cert", True,
+                f"WebFig now uses the Let's Encrypt certificate for {host}",
+                f"config.yaml still names {cert}, which was what existed at "
+                f"install time. The live certificate is preferred at apply "
+                f"time, so this corrects itself.")]
+        return [_finding("webfig:cert", True,
+                         "WebFig uses a trusted certificate")]
+
+    hsts = False
+    for conf in ("/etc/nginx/sites-enabled/easymikrotik",
+                 "/etc/nginx/sites-available/easymikrotik"):
+        try:
+            with open(conf, encoding="utf-8") as f:
+                if "Strict-Transport-Security" in f.read():
+                    hsts = True
+                    break
+        except OSError:
+            continue
+
+    if hsts:
+        return [_finding(
+            "webfig:cert", False,
+            "WebFig links cannot be opened at all",
+            f"The WebFig ports serve {cert}, which no browser trusts, and "
+            f"HSTS is set on {host or 'this host'}. HSTS covers every port "
+            f"on a host and removes the click-through, so the certificate "
+            f"warning has no 'continue anyway' and remote access is "
+            f"unreachable. The error blames the certificate, which is only "
+            f"half of it.",
+            f"sudo certbot certonly --nginx -d {host} && "
+            f"sudo systemctl restart easymikrotik-access-reload.service")]
+    return [_finding(
+        "webfig:cert", False,
+        "WebFig is served with an untrusted certificate",
+        f"{cert} is self-signed, so every WebFig link warns before it "
+        f"opens. Tolerable today; the moment HSTS is set on this host it "
+        f"becomes a hard block, because HSTS removes the click-through "
+        f"across every port.",
+        f"sudo certbot certonly --nginx -d {host}", warn=True)]
+
+
 def check_https_enforced(config_path="", access_cfg=None):
     """Is the dashboard reachable over plain HTTP?
 
@@ -854,6 +928,7 @@ def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
                lambda: check_peers_file(peers_path, expected_peers),
                lambda: check_access_host(access_cfg),
                lambda: check_served_cert(),
+               lambda: check_webfig_cert(access_cfg),
                lambda: check_tls_expiry(access_cfg),
                lambda: check_https_enforced(config_path, access_cfg),
                lambda: check_cert_renewal(),
