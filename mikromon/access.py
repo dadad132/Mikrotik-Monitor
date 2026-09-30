@@ -210,6 +210,51 @@ _UPGRADE_MAP = (
 _MAX_BODY = "256m"
 
 
+def hsts_is_set(paths=("/etc/nginx/sites-enabled/easymikrotik",
+                       "/etc/nginx/sites-available/easymikrotik")) -> bool:
+    """Is this host telling browsers to insist on HTTPS?
+
+    It matters here for one reason only: HSTS covers a host across EVERY
+    port and removes the click-through on a certificate warning. Which is
+    correct for the dashboard and catastrophic for a WebFig link served
+    with a self-signed certificate -- the link simply cannot be opened.
+    """
+    for p in paths:
+        try:
+            with open(p, encoding="utf-8") as f:
+                if "Strict-Transport-Security" in f.read():
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def link_host(hub_host: str, cert_source: str, hsts: bool,
+              server_ip: str = "") -> tuple:
+    """(host_for_the_link, why) -- what a WebFig link should actually point at.
+
+    The right answer is always the hostname with a real certificate. This
+    exists for when there is not one.
+
+    HSTS is keyed to a HOSTNAME; browsers do not apply it to a bare IP
+    literal. So when the certificate is untrusted AND HSTS is set, pointing
+    the link at the server's address restores the click-through -- the
+    warning comes back, which is bad, but a warning can be got past and a
+    lockout cannot.
+
+    A degraded link that opens beats a correct-looking one that does not.
+    """
+    if cert_source == "letsencrypt" or not hsts:
+        return hub_host, ""
+    if not server_ip or server_ip == hub_host:
+        return hub_host, ""
+    return server_ip, (
+        f"pointed at {server_ip} rather than {hub_host}: the certificate "
+        f"served on the WebFig port is not one browsers trust, and HSTS on "
+        f"{hub_host} removes the option to continue past that warning. An "
+        f"address is not covered by HSTS, so this link can still be opened.")
+
+
 def resolve_cert(host: str, cert: str = "", key: str = "") -> tuple:
     """(cert, key, source) for the WebFig leg, decided NOW rather than at
     install time.

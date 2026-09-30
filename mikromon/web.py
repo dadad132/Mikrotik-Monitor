@@ -2748,7 +2748,38 @@ def _access_link_host(access_cfg, request_host: str) -> str:
     return cfg
 
 
-def _access_box(name, csrf, hub_host, tunnel_ip, creds, grants) -> str:
+def _webfig_link_state(access_cfg) -> tuple:
+    """(host_for_links, note) for WebFig, decided from what is really served.
+
+    Asked here, when the link is drawn, rather than left for the browser to
+    discover. A certificate the browser refuses plus HSTS is a link that
+    cannot be opened at all, and finding that out from Chrome tells somebody
+    about the certificate and nothing about the port or the way past it.
+    """
+    cfg = access_cfg or {}
+    host = str(cfg.get("hub_host", "") or "").strip()
+    if not host:
+        return "", ""
+    try:
+        from .access import hsts_is_set, link_host, resolve_cert
+        _c, _k, source = resolve_cert(host, cfg.get("tls_cert", ""),
+                                      cfg.get("tls_key", ""))
+        use, why = link_host(host, source, hsts_is_set(), host)
+        if source == "letsencrypt":
+            return use, ""
+        if why:
+            return use, why
+        return use, (
+            "the certificate on the WebFig port is self-signed, so the "
+            "browser warns before it opens. Click through once and it is "
+            "remembered. A real certificate for this host removes it.")
+    except Exception:  # noqa: BLE001 - a link is worth more than this note
+        log.exception("could not work out the WebFig link state")
+        return host, ""
+
+
+def _access_box(name, csrf, hub_host, tunnel_ip, creds, grants,
+                link_host_override="", cert_note="") -> str:
     """On-demand remote access through the hub. `grants` maps kind -> active
     grant dict (or None). Each kind shows either an Open button or the live
     connection details + a countdown + Close while a grant is active."""
@@ -2799,9 +2830,14 @@ def _access_box(name, csrf, hub_host, tunnel_ip, creds, grants) -> str:
                     f'easymikrotik-access-reload.service</code></span>'
                     f' &nbsp;{close_btn(kind)}</div>')
             if kind == "webfig":
-                target = (f'<a href="https://{esc(hub_host)}:{port}" '
+                _lh = link_host_override or hub_host
+                target = (f'<a href="https://{esc(_lh)}:{port}" '
                           f'target="_blank" rel="noopener">'
-                          f'https://{esc(hub_host)}:{port}</a>')
+                          f'https://{esc(_lh)}:{port}</a>')
+                if cert_note:
+                    target += (f'<br><span class="muted" '
+                               f'style="font-size:11px;color:#b45309">'
+                               f'{esc(cert_note)}</span>')
             else:
                 target = (f'<code>{esc(hub_host)}:{port}</code> '
                           f'<span class="muted">(enter in the Winbox client)</span>')
@@ -8776,8 +8812,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             creds = {"user": raw.get("username", ""),
                      "pwd": raw.get("password", "")}
             grants = {k: store.grant_for(name, k) for k in ("webfig", "winbox")}
+            _lh, _note = _webfig_link_state(access_cfg)
             return _access_box(name, csrf, self._link_host(),
-                               _device_tunnel_ip(name, devices_db), creds, grants)
+                               _device_tunnel_ip(name, devices_db), creds,
+                               grants, link_host_override=_lh,
+                               cert_note=_note)
 
         @staticmethod
         def _purge_device_data(name):

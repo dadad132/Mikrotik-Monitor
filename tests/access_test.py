@@ -310,6 +310,41 @@ check("nothing configured and nothing to fall back on stays empty, which "
       "switches the feature off rather than inventing a link",
       _access_link_host({}, "") == "")
 
+print("\nA link that can actually be opened")
+
+# Reported from a browser: ERR_CERT_AUTHORITY_INVALID on a WebFig link and
+# "you cannot visit ... because the website uses HSTS" -- no click-through,
+# so remote access was simply unreachable. HSTS covers a host across EVERY
+# port and removes the way past a certificate warning, which is right for
+# the dashboard and fatal for a WebFig port on a self-signed certificate.
+
+check("a trusted certificate means the hostname is used, which is the only "
+      "outcome anybody actually wants",
+      access.link_host("easymikrotik.com", "letsencrypt", True,
+                       "38.54.63.107")[0] == "easymikrotik.com")
+check("...and so does a self-signed one with no HSTS: a warning can be "
+      "clicked through, so nothing needs working around",
+      access.link_host("easymikrotik.com", "self-signed", False,
+                       "38.54.63.107")[0] == "easymikrotik.com")
+
+_host, _why = access.link_host("easymikrotik.com", "self-signed", True,
+                               "38.54.63.107")
+check("a self-signed certificate WITH HSTS points the link at the address "
+      "instead -- HSTS is keyed to a hostname and browsers do not apply it "
+      "to a bare address, so the click-through comes back",
+      _host == "38.54.63.107")
+check("...and says why, because a link that silently changed host is its "
+      "own kind of confusing",
+      "HSTS" in _why and "easymikrotik.com" in _why)
+
+check("with no address to fall back to, the hostname is kept rather than "
+      "handing out something broken",
+      access.link_host("easymikrotik.com", "self-signed", True, "")[0]
+      == "easymikrotik.com")
+check("a host that is already an address needs no workaround",
+      access.link_host("38.54.63.107", "self-signed", True,
+                       "38.54.63.107")[1] == "")
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")
