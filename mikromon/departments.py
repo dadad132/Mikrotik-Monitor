@@ -221,6 +221,129 @@ def check_set(departments: list) -> list:
     return problems
 
 
+def read_router(api) -> dict:
+    """What the router already has: addresses, VLANs, bridge ports, DHCP.
+
+    Best-effort and read-only. A router that cannot be reached returns an
+    empty picture rather than raising, because the tab has to stay usable
+    while a site is down -- which is often exactly when somebody is planning
+    its VLANs.
+    """
+    out = {"addresses": [], "vlans": [], "ports": [], "dhcp": [],
+           "read": False, "error": ""}
+    try:
+        out["addresses"] = [
+            {"address": str(r.get("address", "")),
+             "interface": str(r.get("interface", "")),
+             "network": str(r.get("network", "")),
+             "disabled": str(r.get("disabled", "false")) == "true",
+             "comment": str(r.get("comment", ""))}
+            for r in api.fetch(("ip", "address")) or []]
+        out["vlans"] = [
+            {"name": str(r.get("name", "")),
+             "vlan_id": str(r.get("vlan-id", "")),
+             "interface": str(r.get("interface", "")),
+             "comment": str(r.get("comment", ""))}
+            for r in api.fetch(("interface", "vlan")) or []]
+        out["ports"] = [
+            {"interface": str(r.get("interface", "")),
+             "bridge": str(r.get("bridge", "")),
+             "pvid": str(r.get("pvid", "")),
+             "comment": str(r.get("comment", ""))}
+            for r in api.fetch(("interface", "bridge", "port")) or []]
+        out["dhcp"] = [
+            {"name": str(r.get("name", "")),
+             "interface": str(r.get("interface", "")),
+             "comment": str(r.get("comment", ""))}
+            for r in api.fetch(("ip", "dhcp-server")) or []]
+        out["read"] = True
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = str(exc)
+    return out
+
+
+def _ours(comment: str) -> bool:
+    """Did mikromon put this here? Then re-pushing it is not a clash."""
+    return "mikromon:" in (comment or "")
+
+
+def check_against_router(departments: list, existing: dict) -> list:
+    """Clashes between the departments and what the router ALREADY has.
+
+    check_set only compares departments with each other, which is half the
+    question. The other half is everything that was on the router before
+    anybody thought of departments: the office LAN on 192.168.88.0/24, a
+    VLAN somebody made by hand two years ago, a port already carrying the
+    CCTV network.
+
+    Pushing over any of those does not fail cleanly -- it half works, and a
+    subnet that exists twice routes to whichever entry RouterOS happens to
+    match first. So they are found before anything is sent, and anything
+    mikromon put there itself is not counted, or re-pushing an unchanged
+    department would report a clash with its own last push.
+    """
+    if not existing or not existing.get("read"):
+        return []
+    problems = []
+
+    taken_nets = []
+    for a in existing.get("addresses") or []:
+        if a.get("disabled") or _ours(a.get("comment", "")):
+            continue
+        try:
+            taken_nets.append(
+                (ipaddress.ip_network(a["address"], strict=False),
+                 a.get("interface", "?")))
+        except ValueError:
+            continue
+
+    taken_vlans = {v["vlan_id"]: v for v in existing.get("vlans") or []
+                   if not _ours(v.get("comment", ""))}
+    port_pvid = {p["interface"]: p for p in existing.get("ports") or []}
+    addressed_ports = {a.get("interface", "") for a in
+                       (existing.get("addresses") or [])
+                       if not a.get("disabled") and not _ours(a.get("comment", ""))}
+
+    for d in departments:
+        net = ipaddress.ip_network(d["subnet"])
+        for other, iface in taken_nets:
+            if net.overlaps(other):
+                problems.append(
+                    f"{d['name']} ({net}) overlaps {other}, which is already "
+                    f"on {iface}. Two entries for one range route to "
+                    f"whichever RouterOS matches first, which is not a thing "
+                    f"you can predict or debug.")
+
+        hit = taken_vlans.get(str(d["vlan"]))
+        if hit:
+            problems.append(
+                f"VLAN {d['vlan']} already exists on this router as "
+                f"{hit['name'] or 'an unnamed interface'}"
+                + (f" on {hit['interface']}" if hit.get("interface") else "")
+                + f", and was not created here. Pick another id for "
+                  f"{d['name']}, or adopt that VLAN deliberately.")
+
+        for port in d.get("ports") or []:
+            if port in addressed_ports:
+                problems.append(
+                    f"{port} has an IP address directly on it, so it is a "
+                    f"routed port rather than a bridge member. Putting "
+                    f"{d['name']} on it would take that address out of use.")
+                continue
+            p = port_pvid.get(port)
+            if p is None:
+                problems.append(
+                    f"{port} is not a member of any bridge on this router. "
+                    f"Add it to the bridge first, or {d['name']} gets a VLAN "
+                    f"with nothing plugged into it.")
+            elif p.get("pvid") and p["pvid"] not in ("1", str(d["vlan"]))                     and not _ours(p.get("comment", "")):
+                problems.append(
+                    f"{port} is already on VLAN {p['pvid']}, which nothing "
+                    f"here created. Moving it to {d['name']} would take "
+                    f"whatever is plugged into it off that network.")
+    return problems
+
+
 def unfinished(departments: list) -> list:
     """Departments that will not actually be filtered, and why.
 

@@ -4237,8 +4237,92 @@ def _speedtest_record(name, run, devices_db="") -> None:
         log.exception("could not record the speed test for %r", name)
 
 
+def _existing_network_box(existing) -> str:
+    """What the router already has: addresses, VLANs and where the ports are.
+
+    Shown because a department is planned ON something, not in a vacuum. The
+    question "which port is free" has an answer on the router and nowhere
+    else, and making somebody open Winbox to find it is how a port gets
+    claimed twice.
+
+    Anything mikromon put there is marked, so a second look at this tab does
+    not read as a pile of conflicts with its own last push.
+    """
+    existing = existing or {}
+    if not existing.get("read"):
+        why = existing.get("error") or "the router could not be reached"
+        return (f'<div class="box" style="border-color:#b45309">'
+                f'<h3 style="margin:0 0 4px;font-size:14px">The router\'s '
+                f'own addresses could not be read</h3>'
+                f'<p class="muted" style="margin:0">{esc(str(why))}. '
+                f'Departments can still be planned and saved &mdash; but '
+                f'until this reads, nothing here can tell you whether a '
+                f'range or a port is already in use, so check before you '
+                f'push.</p></div>')
+
+    addr_rows = ""
+    for a in sorted(existing.get("addresses") or [],
+                    key=lambda x: x.get("interface", "")):
+        tag = ('<span class="badge ok" style="font-size:10px">mikromon</span>'
+               if "mikromon:" in (a.get("comment") or "") else "")
+        dis = (' <span class="muted" style="font-size:11px">(disabled)</span>'
+               if a.get("disabled") else "")
+        addr_rows += (f'<tr><td><code>{esc(a["address"])}</code>{dis}</td>'
+                      f'<td>{esc(a["interface"])}</td><td>{tag}</td></tr>')
+
+    port_rows = ""
+    for p in sorted(existing.get("ports") or [],
+                    key=lambda x: x.get("interface", "")):
+        pvid = p.get("pvid") or ""
+        where = (f'VLAN {esc(pvid)}' if pvid and pvid != "1"
+                 else '<span class="muted">untagged / VLAN 1</span>')
+        tag = ('<span class="badge ok" style="font-size:10px">mikromon</span>'
+               if "mikromon:" in (p.get("comment") or "") else "")
+        port_rows += (f'<tr><td><code>{esc(p["interface"])}</code></td>'
+                      f'<td>{esc(p.get("bridge") or "")}</td>'
+                      f'<td>{where}</td><td>{tag}</td></tr>')
+
+    vlan_rows = "".join(
+        f'<tr><td><code>{esc(v["name"])}</code></td>'
+        f'<td>{esc(v["vlan_id"])}</td><td>{esc(v.get("interface") or "")}</td>'
+        f'<td>{"<span class=\'badge ok\' style=\'font-size:10px\'>mikromon</span>" if "mikromon:" in (v.get("comment") or "") else ""}</td></tr>'
+        for v in sorted(existing.get("vlans") or [],
+                        key=lambda x: x.get("vlan_id", "")))
+
+    def block(title, head, rows, empty):
+        if not rows:
+            return (f'<div style="flex:1;min-width:230px">'
+                    f'<div class="muted" style="font-size:11px;'
+                    f'text-transform:uppercase;letter-spacing:.07em;'
+                    f'margin-bottom:4px">{title}</div>'
+                    f'<p class="muted" style="margin:0;font-size:12px">'
+                    f'{empty}</p></div>')
+        return (f'<div style="flex:1;min-width:230px">'
+                f'<div class="muted" style="font-size:11px;'
+                f'text-transform:uppercase;letter-spacing:.07em;'
+                f'margin-bottom:4px">{title}</div>'
+                f'<table style="font-size:12px"><thead><tr>{head}</tr>'
+                f'</thead><tbody>{rows}</tbody></table></div>')
+
+    return (f'<div class="box"><h3 style="margin:0 0 4px;font-size:14px">'
+            f'Already on this router</h3>'
+            f'<p class="muted" style="margin:0 0 10px;font-size:12px">'
+            f'Read from the router just now. A department planned on top of '
+            f'one of these does not fail cleanly &mdash; it half works.</p>'
+            f'<div style="display:flex;gap:22px;flex-wrap:wrap">'
+            + block("Addresses", "<th>Range</th><th>On</th><th></th>",
+                    addr_rows, "No IP addresses configured.")
+            + block("Ports", "<th>Port</th><th>Bridge</th><th>VLAN</th>"
+                             "<th></th>", port_rows,
+                    "No bridge ports. Nothing is plugged into a bridge, so a "
+                    "department VLAN would have nowhere to land.")
+            + block("VLANs", "<th>Name</th><th>Id</th><th>On</th><th></th>",
+                    vlan_rows, "No VLANs yet.")
+            + '</div></div>')
+
+
 def _departments_box(name, csrf, departments, ports=(), problems=(),
-                     todo=(), plan_text="") -> str:
+                     todo=(), plan_text="", existing=None) -> str:
     """One company, several networks, each filtered differently.
 
     Ordered the way somebody actually works: what exists now, what is
@@ -4348,6 +4432,7 @@ def _departments_box(name, csrf, departments, ports=(), problems=(),
         f'reach Instagram and Support cannot. Departments cannot reach each '
         f'other; all of them reach the internet.</p>'
         f'{warn}{table}'
+        f'{_existing_network_box(existing)}'
         f'<p class="muted" style="font-size:12px;margin:10px 0 0">'
         f'<b>Why each department needs its own DNS servers:</b> RouterOS '
         f'can only hold ONE DNS-over-HTTPS profile, so pointing every '
@@ -9202,6 +9287,35 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # point of building this tab from stored config.
                 _ports = [str(n) for n in (facts.get("interfaces") or []) if n]
                 _problems = _dept.check_set(_depts)
+                # What the router ALREADY has, so a department cannot be
+                # planned on top of the office LAN or a port that is
+                # carrying the CCTV network. Its own try: a site that cannot
+                # be reached must still show the tab, because planning VLANs
+                # for a site that is down is a normal thing to be doing.
+                _existing = {"read": False, "error": "not attempted"}
+                try:
+                    import dataclasses as _dc
+
+                    from .push import rw_device
+                    from .push.api import PushApi
+                    # A SHORT timeout, not the device's usual one. This read
+                    # is a convenience -- it says which ports are free -- and
+                    # the tab has to stay usable for a site that is down.
+                    # At the default sixty seconds an unreachable router
+                    # makes the page hang for a minute, which is worse than
+                    # not knowing.
+                    _dev = rw_device(_dc.replace(cfg, timeout=5))
+                    _api = PushApi(_dev)
+                    try:
+                        _api.connect()
+                        _existing = _dept.read_router(_api)
+                    finally:
+                        _dev.close()
+                except Exception as exc:  # noqa: BLE001
+                    _existing = {"read": False, "error": str(exc)}
+                    log.info("departments: could not read %s (%s); showing "
+                             "stored config only", name, exc)
+                _problems += _dept.check_against_router(_depts, _existing)
                 _plan_text = ""
                 if _depts and not _problems:
                     try:
@@ -9210,7 +9324,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         _problems = [str(exc)]
                 extra_html = _departments_box(
                     name, csrf, _depts, _ports, _problems,
-                    _dept.unfinished(_depts), _plan_text)
+                    _dept.unfinished(_depts), _plan_text, _existing)
                 if _ds:
                     _ds.close()
             elif slug == "speedtest":

@@ -395,6 +395,129 @@ check("removing one takes its ROW off the tab and leaves the other -- "
       "appears in the tab's own explanation",
       'value="Support"' not in _page and 'value="Sales"' in _page)
 
+print("\nAgainst what the router already has")
+
+# check_set only compares departments with each other, which is half the
+# question. The other half is everything that was on the router before
+# anybody thought of departments: the office LAN on 192.168.88.0/24, a CCTV
+# VLAN somebody made by hand two years ago, a routed port to another
+# building. Pushing over any of those does not fail cleanly -- it half
+# works, and a subnet that exists twice routes to whichever entry RouterOS
+# matches first.
+
+ROUTER = {
+    "read": True, "error": "", "dhcp": [],
+    "addresses": [
+        {"address": "192.168.88.1/24", "interface": "bridge",
+         "network": "192.168.88.0", "disabled": False, "comment": ""},
+        {"address": "10.20.20.1/24", "interface": "vlan20-sales",
+         "network": "10.20.20.0", "disabled": False,
+         "comment": "mikromon: Sales gateway"},
+        {"address": "172.16.5.1/30", "interface": "ether9",
+         "network": "172.16.5.0", "disabled": False,
+         "comment": "link to building B"}],
+    "vlans": [
+        {"name": "cctv", "vlan_id": "50", "interface": "bridge",
+         "comment": "cameras - do not touch"},
+        {"name": "vlan20-sales", "vlan_id": "20", "interface": "bridge",
+         "comment": "mikromon: Sales"}],
+    "ports": [
+        {"interface": "ether2", "bridge": "bridge", "pvid": "1",
+         "comment": ""},
+        {"interface": "ether3", "bridge": "bridge", "pvid": "50",
+         "comment": "camera nvr"},
+        {"interface": "ether4", "bridge": "bridge", "pvid": "1",
+         "comment": ""}],
+}
+
+
+def _against(dept):
+    return D.check_against_router([dept], ROUTER)
+
+
+check("a department on top of the existing office LAN is caught -- a range "
+      "that exists twice routes to whichever entry RouterOS matches first, "
+      "which is not a thing anybody can predict or debug",
+      any("overlaps 192.168.88.0/24" in p for p in
+          _against(D.make("Admin", 60, "192.168.88.0/24", ports="ether4"))))
+
+check("a VLAN id somebody else already used is caught, and NAMED, so it is "
+      "obvious what would have been trodden on",
+      any("cctv" in p for p in
+          _against(D.make("Admin", 50, "10.20.60.0/24", ports="ether4"))))
+
+check("a port already carrying another VLAN is caught: moving it would take "
+      "whatever is plugged into it off that network",
+      any("already on VLAN 50" in p for p in
+          _against(D.make("Admin", 60, "10.20.60.0/24", ports="ether3"))))
+
+check("a port with an address directly on it is caught as routed rather "
+      "than a bridge member -- claiming it would take that link down",
+      any("routed port" in p for p in
+          _against(D.make("Admin", 60, "10.20.60.0/24", ports="ether9"))))
+
+check("a port on no bridge at all is caught, or the department gets a VLAN "
+      "with nothing plugged into it",
+      any("not a member of any bridge" in p for p in
+          _against(D.make("Admin", 60, "10.20.60.0/24", ports="ether7"))))
+
+check("a department that clashes with nothing passes",
+      _against(D.make("Admin", 60, "10.20.60.0/24", ports="ether4")) == [])
+
+# The one that would make the feature unusable if it were wrong.
+check("re-pushing a department mikromon itself created is NOT a clash with "
+      "its own last push -- otherwise the tab fills with conflicts the "
+      "second time anybody opens it",
+      _against(D.make("Sales", 20, "10.20.20.0/24", ports="ether2")) == [])
+
+check("a disabled address is not treated as occupying its range",
+      D.check_against_router(
+          [D.make("Admin", 60, "10.9.9.0/24")],
+          {"read": True, "addresses": [
+              {"address": "10.9.9.1/24", "interface": "x", "disabled": True,
+               "comment": ""}], "vlans": [], "ports": []}) == [])
+
+check("a router that could not be read blocks nothing -- planning VLANs for "
+      "a site that is down is a normal thing to be doing",
+      D.check_against_router([D.make("Admin", 50, "192.168.88.0/24")],
+                             {"read": False, "error": "unreachable"}) == [])
+
+print("\nAnd the tab says which of those it is")
+
+from mikromon.web import _existing_network_box  # noqa: E402
+
+box = _existing_network_box(ROUTER)
+check("every address the router has is shown, with the interface it is on",
+      "192.168.88.1/24" in box and "ether9" in box)
+check("...and every bridge port with the VLAN it currently carries, which "
+      "is the answer to 'which port is free' and lives nowhere else",
+      "ether3" in box and "VLAN 50" in box)
+check("...and the VLANs that already exist", "cctv" in box)
+check("anything mikromon put there is marked, so a second look does not "
+      "read as a pile of conflicts with its own last push",
+      box.count("mikromon") >= 2)
+
+box = _existing_network_box({"read": False, "error": "connection refused"})
+check("a router that could not be read says so plainly, and says the tab "
+      "still works but cannot warn about clashes",
+      "could not be read" in box and "connection refused" in box
+      and "check before you push" in box)
+
+# The live read is a convenience, and it must never be what makes the tab
+# unusable. At the device's default sixty-second timeout an unreachable
+# router hung the page for a minute -- which this test caught by timing out
+# against a fake device on 10.10.0.2 that does not answer.
+_t0 = time.monotonic()
+_page = _tab()
+_took = time.monotonic() - _t0
+check("the tab still answers promptly when the router cannot be reached, "
+      "because the address read is bounded -- at the default timeout an "
+      "unreachable site hung this page for a minute",
+      _took < 20 and "Add a department" in _page)
+check("...and says the router could not be read, rather than silently "
+      "showing no conflicts as though there were none",
+      "could not be read" in _page)
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")
