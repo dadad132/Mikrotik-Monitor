@@ -210,6 +210,24 @@ _UPGRADE_MAP = (
 _MAX_BODY = "256m"
 
 
+def _unroutable(host: str) -> bool:
+    """Private, loopback or link-local -- reachable only from where it lives.
+
+    A hostname is assumed routable: it is the addresses that get detected
+    wrongly, because install-time detection falls back to `hostname -I` and
+    a NATed server answers 172.16.x.x.
+    """
+    import ipaddress
+
+    h = (host or "").strip().strip("[]").split("%")[0]
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    return bool(ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_unspecified)
+
+
 def hsts_is_set(paths=("/etc/nginx/sites-enabled/easymikrotik",
                        "/etc/nginx/sites-available/easymikrotik")) -> bool:
     """Is this host telling browsers to insist on HTTPS?
@@ -246,7 +264,12 @@ def link_host(hub_host: str, cert_source: str, hsts: bool,
     """
     if cert_source == "letsencrypt" or not hsts:
         return hub_host, ""
-    if not server_ip or server_ip == hub_host:
+    # An alternative is only worth swapping to if it can actually be reached
+    # from outside. A private address handed to a browser somewhere else is
+    # a connection timeout, which is worse than the warning it was meant to
+    # avoid -- and is exactly what happened: 172.16.1.246 exists only on the
+    # server's own LAN.
+    if not server_ip or server_ip == hub_host or _unroutable(server_ip):
         return hub_host, ""
     return server_ip, (
         f"pointed at {server_ip} rather than {hub_host}: the certificate "

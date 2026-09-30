@@ -345,6 +345,42 @@ check("a host that is already an address needs no workaround",
       access.link_host("38.54.63.107", "self-signed", True,
                        "38.54.63.107")[1] == "")
 
+print("\nAnd never at an address nobody outside can reach")
+
+# The regression this pins. hub_host is detected at install time and falls
+# back to `hostname -I`, which on a NATed server is 172.16.1.246 -- an
+# address that exists only on the server's own LAN. _access_link_host
+# already handles that by falling back to whatever address the browser
+# reached the dashboard on. The certificate work then read hub_host out of
+# the config AGAIN, threw that resolution away, and handed out a link to
+# 172.16.1.246 that timed out from everywhere.
+
+for bad in ("172.16.1.246", "10.0.0.5", "192.168.1.10", "127.0.0.1"):
+    check(f"{bad} is never swapped in as a link host -- a private address "
+          f"given to a browser somewhere else is a connection timeout, "
+          f"which is worse than the warning it was avoiding",
+          access.link_host("easymikrotik.com", "self-signed", True, bad)[0]
+          == "easymikrotik.com")
+
+check("a genuinely public address still is, because that is the case where "
+      "the swap buys something",
+      access.link_host("easymikrotik.com", "self-signed", True,
+                       "38.54.63.107")[0] == "38.54.63.107")
+
+import mikromon.web as _w  # noqa: E402
+
+_cfg = {"hub_host": "172.16.1.246", "tls_cert": "/etc/ssl/self.crt",
+        "tls_key": "/k", "nginx_http_conf": "/x"}
+_resolved = _w._access_link_host(_cfg, "easymikrotik.com")
+check("the dashboard resolves a private hub_host to the address the browser "
+      "actually reached it on", _resolved == "easymikrotik.com")
+check("...and the certificate note works from THAT, not from the raw "
+      "config -- reading hub_host again is what produced the dead link",
+      _w._webfig_link_state(_cfg, _resolved)[0] == "easymikrotik.com")
+check("with nothing resolved it falls back to the config rather than to "
+      "nothing at all",
+      _w._webfig_link_state(_cfg)[0] == "172.16.1.246")
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

@@ -2748,7 +2748,7 @@ def _access_link_host(access_cfg, request_host: str) -> str:
     return cfg
 
 
-def _webfig_link_state(access_cfg) -> tuple:
+def _webfig_link_state(access_cfg, resolved_host: str = "") -> tuple:
     """(host_for_links, note) for WebFig, decided from what is really served.
 
     Asked here, when the link is drawn, rather than left for the browser to
@@ -2757,7 +2757,8 @@ def _webfig_link_state(access_cfg) -> tuple:
     about the certificate and nothing about the port or the way past it.
     """
     cfg = access_cfg or {}
-    host = str(cfg.get("hub_host", "") or "").strip()
+    host = (resolved_host or "").strip() or str(
+        cfg.get("hub_host", "") or "").strip()
     if not host:
         return "", ""
     try:
@@ -8812,8 +8813,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             creds = {"user": raw.get("username", ""),
                      "pwd": raw.get("password", "")}
             grants = {k: store.grant_for(name, k) for k in ("webfig", "winbox")}
-            _lh, _note = _webfig_link_state(access_cfg)
-            return _access_box(name, csrf, self._link_host(),
+            _resolved = self._link_host()
+            _lh, _note = _webfig_link_state(access_cfg, _resolved)
+            return _access_box(name, csrf, _resolved,
                                _device_tunnel_ip(name, devices_db), creds,
                                grants, link_host_override=_lh,
                                cert_note=_note)
