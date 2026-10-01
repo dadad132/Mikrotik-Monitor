@@ -2135,7 +2135,6 @@ _DEVICE_TABS = ["Overview", "Provision", "Routes", "WAN", "Security",
                 "VPN", "Scripts"]
 _MAINT_ITEMS = [("Update", "update"), ("Backups", "backups"),
                 ("Departments", "departments"),
-                ("Speed test", "speedtest"),
                 ("Restrict access", "harden"), ("Remote access", "remote"),
                 ("Temp Access", "tempaccess"), ("Share", "share")]
 # label -> url slug (all tabs are wired to the engine now)
@@ -2148,7 +2147,6 @@ _LIVE_TABS = {"Overview": "", "Provision": "provision",
               "VPN": "tunnel", "Scripts": "scripts",
               "Update": "update", "Backups": "backups",
               "Departments": "departments",
-              "Speed test": "speedtest",
               "Temp Access": "tempaccess", "Share": "share"}
 # tabs that WRITE to the router (admins only); Overview is read-only
 # Instant toggles are wrong where the act is not a small reversible change:
@@ -2157,12 +2155,11 @@ _LIVE_TABS = {"Overview": "", "Provision": "provision",
 #   scripts -- the payload is free text nobody has checked, so the preview
 #              IS the review.
 #   remote  -- creating a login is a one-way act with a password shown once.
-_INSTANT_TOGGLE_OFF = {"update", "scripts", "remote", "speedtest"}
+_INSTANT_TOGGLE_OFF = {"update", "scripts", "remote"}
 
 _ADMIN_TABS = {"provision", "routes", "wan", "security", "harden", "nextdns",
                "qos", "portfwd", "remote", "tunnel", "scripts",
-               "update", "backups", "tempaccess", "interfaces", "share",
-               "speedtest"}
+               "update", "backups", "tempaccess", "interfaces", "share"}
 
 
 def _help_dot(anchor: str, what: str = "") -> str:
@@ -4221,59 +4218,6 @@ def _nextdns_box(name, cfg, csrf, nextdns_configured: bool) -> str:
 _NEXTDNS_PROBE_DOMAIN = "example.org"
 
 
-# Five. Ten was more table than anybody reads, and the point of the list is
-# to tell weather from the line -- which three runs already do.
-_SPEEDTEST_KEEP = 5
-
-
-def _speedtest_path(devices_db) -> str:
-    root = (os.path.dirname(os.path.abspath(devices_db)) if devices_db
-            else os.getcwd())
-    return os.path.join(root, "speedtests.json")
-
-
-def _speedtest_history(name, devices_db="") -> list:
-    """Past runs for one router, newest first."""
-    try:
-        import json
-        with open(_speedtest_path(devices_db), encoding="utf-8") as f:
-            return (json.load(f) or {}).get(name, [])[:_SPEEDTEST_KEEP]
-    except (OSError, ValueError):
-        return []
-
-
-def _speedtest_record(name, run, devices_db="") -> None:
-    """File a finished run. One run is weather; three is the line.
-
-    Best-effort: a test that could not be filed is still a test that was
-    run, and losing the history must never lose the answer on the screen.
-    """
-    import json
-    path = _speedtest_path(devices_db)
-    try:
-        try:
-            with open(path, encoding="utf-8") as f:
-                all_runs = json.load(f) or {}
-        except (OSError, ValueError):
-            all_runs = {}
-        p = run.get("ping") or {}
-        d = run.get("download") or {}
-        u = run.get("upload") or {}
-        all_runs.setdefault(name, []).insert(0, {
-            "when": time.strftime("%d %b %H:%M"),
-            "ts": run.get("finished") or time.time(),
-            "loss_pct": p.get("loss_pct"), "avg_ms": p.get("avg_ms"),
-            "jitter_ms": p.get("jitter_ms"),
-            "mbps": d.get("mbps"), "up_mbps": u.get("mbps"),
-            "target": (run.get("ping") or {}).get("target", ""),
-            "colo": (run.get("where") or {}).get("colo", ""),
-        })
-        all_runs[name] = all_runs[name][:_SPEEDTEST_KEEP]
-        _atomic_write(path, json.dumps(all_runs, indent=1))
-    except Exception:  # noqa: BLE001
-        log.exception("could not record the speed test for %r", name)
-
-
 def _existing_network_box(existing) -> str:
     """What the router already has: addresses, VLANs and where the ports are.
 
@@ -4478,287 +4422,6 @@ def _departments_box(name, csrf, departments, ports=(), problems=(),
         f'resolver addresses &mdash; copy those from that profile\'s '
         f'NextDNS setup page.</p>'
         f'{preview}{form}</div>')
-
-
-def _speedtest_box(name, csrf, run=None, history=()) -> str:
-    """The test: start it, watch it, read it.
-
-    `run` is the live state from mikromon.speedtest.status(). While a test
-    is running the page refreshes itself, because ninety seconds is far too
-    long to leave somebody looking at a button wondering whether it worked.
-    """
-    q = esc(name)
-    run = run or {}
-    running = bool(run.get("running"))
-    phase = str(run.get("phase") or "")
-    secs = int(run.get("phase_seconds") or 30)
-
-    if running:
-        order = [("where", "Locating"), ("ping", "Ping"),
-                 ("download", "Download"), ("upload", "Upload")]
-        done_i = next((i for i, (k, _) in enumerate(order) if k == phase), -1)
-        steps = []
-        for i, (key, label) in enumerate(order):
-            if i < done_i:
-                mark, colour = "&#10003;", "#15803d"
-            elif i == done_i:
-                mark, colour = "&#9679;", "#2563eb"
-            else:
-                mark, colour = "&#9675;", "#94a3b8"
-            steps.append(f'<span style="color:{colour};margin-right:14px">'
-                         f'{mark} {label}</span>')
-        head = (f'<p style="margin:14px 0 6px">{"".join(steps)}</p>'
-                f'<p class="muted" style="font-size:12px;margin:0">'
-                f'Each phase runs for {secs} seconds, one at a time &mdash; '
-                f'downloading while pinging would measure the download\'s '
-                f'effect on the latency rather than the line\'s own. This '
-                f'page refreshes itself; you can leave it.</p>')
-        return (f'<div class="box"><h2>Speed test'
-                f'{_help_dot("speedtest", "the speed test")}</h2>'
-                f'<p class="muted" style="margin:0">Running on the router '
-                f'now.</p>{head}'
-                # Reloads itself until the run finishes. Ninety seconds is
-                # far too long to leave somebody looking at a button
-                # wondering whether anything happened.
-                f'<script>setTimeout(function(){{location.reload();}},'
-                f'5000);</script></div>')
-
-    from .speedtest import PING_CHOICES
-    chosen = str((run or {}).get("target") or "auto")
-    picked = any(chosen == k for k, _l, _a in PING_CHOICES)
-    opts = "".join(
-        f'<option value="{esc(k)}"{" selected" if chosen == k else ""}>'
-        f'{esc(label)} &mdash; {esc(addr)}</option>'
-        for k, label, addr in PING_CHOICES)
-    opts += (f'<option value="custom"{"" if picked else " selected"}>'
-             f'A host I type&hellip;</option>')
-    run_btn = (
-        f'<form method="POST" action="/device/speedtest" '
-        f'style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">'
-        f'<input type="hidden" name="csrf" value="{csrf}">'
-        f'<input type="hidden" name="device" value="{q}">'
-        f'<label style="font-size:12px">Ping<br>'
-        f'<select name="target" id="st-target" style="min-width:230px">'
-        f'{opts}</select></label>'
-        f'<label style="font-size:12px" id="st-custom-wrap"'
-        f'{"" if not picked else " hidden"}>Host or IP<br>'
-        f'<input name="custom" id="st-custom" placeholder="e.g. 196.25.1.1" '
-        f'value="{esc("" if picked else chosen)}"></label>'
-        f'<button class="btn" type="submit">Run the test</button></form>'
-        f'<p class="muted" style="margin:8px 0 0;font-size:12px">'
-        f'Ping, download and upload, {secs} seconds each &mdash; about '
-        f'{secs * 3 // 60} minutes. The upload phase puts one temporary '
-        f'file on the router and removes it afterwards; nothing else is '
-        f'written. Download and upload always go to the nearest Cloudflare '
-        f'point of presence, which the result names &mdash; only the ping '
-        f'target is a choice.</p>'
-        f'<script>(function(){{var s=document.getElementById("st-target"),'
-        f'w=document.getElementById("st-custom-wrap");if(!s||!w)return;'
-        f's.addEventListener("change",function(){{'
-        f'w.hidden=(s.value!=="custom");}});}})();</script>')
-
-    body = ""
-    if run and not running:
-        p = run.get("ping") or {}
-        d = run.get("download") or {}
-        u = run.get("upload") or {}
-
-        def stat(label, value, unit="", tone="", sub=""):
-            colour = {"bad": "#b91c1c", "warn": "#b45309",
-                      "good": "#15803d"}.get(tone, "var(--text)")
-            shown = "&mdash;" if value is None else f"{value}{unit}"
-            return (f'<div style="min-width:118px">'
-                    f'<div class="muted" style="font-size:11px;'
-                    f'text-transform:uppercase;letter-spacing:.07em">{label}'
-                    f'</div><div style="font-size:24px;font-weight:700;'
-                    f'color:{colour};line-height:1.2">{shown}</div>'
-                    f'<div class="muted" style="font-size:11px">{sub}</div>'
-                    f'</div>')
-
-        loss = p.get("loss_pct")
-        avg = p.get("avg_ms")
-        jit = p.get("jitter_ms")
-        body += (
-            '<div style="display:flex;gap:24px;flex-wrap:wrap;margin:18px 0 8px">'
-            + stat("Download", d.get("mbps"), " Mbit/s", "",
-                   (f'{d["streams"]} \u00d7 {d.get("per_stream_mbps")} '
-                    f'per connection') if d.get("per_stream_mbps")
-                   and d.get("streams") else "")
-            # Marked as a floor rather than styled as a result: the payload
-            # reaches the router through the API, so this is bounded by our
-            # own path to it rather than by the customer's line.
-            + stat("Upload", u.get("mbps"), " Mbit/s",
-                   "warn" if u.get("via_api") else "",
-                   "not supported" if u.get("skipped") else
-                   ("at least this" if u.get("via_api") and u.get("mbps")
-                    else (f'{u["streams"]} × '
-                          f'{u.get("per_stream_mbps")} per connection')
-                    if u.get("per_stream_mbps") and u.get("streams") else ""))
-            + stat("Ping", avg, " ms",
-                   "bad" if avg is not None and avg >= 150 else
-                   "warn" if avg is not None and avg >= 60 else "good",
-                   f'{p.get("min_ms")}\u2013{p.get("max_ms")} ms'
-                   if p.get("min_ms") is not None else "")
-            + stat("Packet loss", loss, "%",
-                   "bad" if loss is not None and loss >= 5 else
-                   "warn" if loss else "good",
-                   f'{p.get("received", 0)}/{p.get("sent", 0)} replies')
-            + stat("Jitter", jit, " ms",
-                   "bad" if jit is not None and jit >= 30 else
-                   "warn" if jit is not None and jit >= 10 else "good")
-            + "</div>")
-
-        w = run.get("where") or {}
-        if w.get("colo") or w.get("ip"):
-            bits = []
-            if w.get("colo"):
-                place = w["colo"]
-                if w.get("city"):
-                    place = f'{w["city"]} ({w["colo"]})'
-                bits.append(f'Served from Cloudflare <b>{esc(place)}</b>')
-            if w.get("country"):
-                bits.append(f'router seen in <b>{esc(w["country"])}</b>')
-            if w.get("ip"):
-                bits.append(f'public address <code>{esc(w["ip"])}</code>')
-            if w.get("org"):
-                bits.append(esc(w["org"]))
-            body += (f'<p class="muted" style="font-size:12px;margin:0 0 4px">'
-                     f'{" &middot; ".join(bits)}. Pinged '
-                     f'<code>{esc(str((run.get("ping") or {}).get("target", "")))}'
-                     f'</code>.</p>')
-        elif (run.get("ping") or {}).get("target"):
-            body += (f'<p class="muted" style="font-size:12px;margin:0 0 4px">'
-                     f'Pinged <code>'
-                     f'{esc(str(run["ping"]["target"]))}</code>.</p>')
-
-        notes = []
-        if run.get("error"):
-            notes.append(f'The test stopped early: {esc(str(run["error"]))}')
-        if loss is not None and loss >= 5:
-            notes.append("Packet loss this high makes voice and video "
-                         "unusable whatever the speed says. That is the "
-                         "fault to chase, not the megabits.")
-        elif loss:
-            notes.append("Some packet loss. Worth watching; not yet the "
-                         "thing breaking calls.")
-        if jit is not None and jit >= 30:
-            notes.append("Jitter this high breaks calls even when latency "
-                         "and speed both look fine.")
-        if u.get("mbps") and u.get("via_api"):
-            notes.append(
-                f'<b>Why the real measurement did not run:</b> '
-                f'{esc(str(u["fallback_reason"]))}'
-                if u.get("fallback_reason") else
-                "<b>Why the real measurement did not run was not "
-                "recorded.</b>")
-            notes.append(
-                "<b>The upload figure is a floor, not a measurement.</b> "
-                "RouterOS can only POST a body it was handed, and the only "
-                "way to hand it one is through the API — so "
-                "every payload crosses from this server into the router "
-                "before the router sends anything out, and the timing "
-                "covers that whole journey. Measuring upload properly needs "
-                "the payload generated on the router, which means writing a "
-                "temporary file to its storage.")
-        if d.get("sources"):
-            rows = "".join(
-                f'<tr><td style="padding:2px 14px 2px 0">'
-                f'{esc(str(r.get("label", r.get("source", ""))))}</td>'
-                f'<td style="padding:2px 14px 2px 0">'
-                f'{"written to disk" if r.get("method") == "to-disk" else "discarded"}'
-                f'</td><td style="padding:2px 0;text-align:right">'
-                f'{(str(r["mbps"]) + " Mbit/s") if r.get("mbps") else esc(str(r.get("error", "") or "nothing"))}'
-                f'</td></tr>'
-                for r in d["sources"])
-            notes.append(
-                f'<b>Every way of fetching was tried on this router:</b>'
-                f'<table style="margin:6px 0 0;border-collapse:collapse;'
-                f'font-size:12px">{rows}</table>'
-                f'The best was used for the measurement above. If Cloudflare '
-                f'wins, the server was never the problem; if writing to disk '
-                f'is slower, the flash is; and if everything is about the '
-                f'same, the limit is the router or the line.')
-        if d.get("ramp") and len(d["ramp"]) > 1:
-            bits = " &middot; ".join(
-                f'{r["streams"]} conn {r["mbps"]}' for r in d["ramp"]
-                if r.get("mbps"))
-            notes.append(
-                f'Connection counts were tried and the best kept &mdash; '
-                f'Mbit/s at each: {bits}. If the total FALLS as connections '
-                f'are added, the limit is the router, not the line: '
-                f'/tool/fetch terminates TCP on the router\'s own '
-                f'processor, which is a different path from the hardware '
-                f'forwarding that carries traffic past it.')
-        if d.get("mbps"):
-            notes.append(
-                f'Measured from {esc(str(d.get("source_label") or "the "
-                "nearest server"))}, body '
-                + ("written to the router and removed"
-                   if d.get("method") == "to-disk" else "discarded on arrival")
-                + f', best at {d.get("streams", 1)} connection(s), '
-                + f'{d.get("chunk_mb", 0)} MB per fetch, '
-                  f'{d.get("runs", 0)} fetches.')
-        if u.get("mbps") and u.get("streams"):
-            notes.append(
-                f'Upload used {u["streams"]} connections at once, '
-                + (f'{u.get("chunk_kib", 0)} KiB per POST &mdash; one at a '
-                   f'time measures round trips rather than the line, '
-                   f'because every POST is a fresh connection.'
-                   if u.get("via_api") else
-                   f'{u.get("chunk_mb", 0)} MB per POST from a sample the '
-                   f'router fetched to its own storage and then removed. '
-                   f'The sample has to live on the router: a payload handed '
-                   f'over the API measures the journey from here to the '
-                   f'router instead of the line.'))
-        if w.get("error") and not w.get("colo"):
-            notes.append(f'Could not tell where the test went: '
-                         f'{esc(str(w["error"]))}')
-        if u.get("skipped"):
-            notes.append(f'Upload was skipped: {esc(str(u.get("error", "")))}')
-        elif u.get("error"):
-            notes.append(f'Upload did not complete: {esc(str(u["error"]))}')
-        if d.get("error"):
-            notes.append(f'Download did not complete: {esc(str(d["error"]))}')
-        if not notes:
-            notes.append("Nothing wrong with the line at the moment this "
-                         "ran.")
-        body += (f'<p class="muted" style="font-size:12px;margin:2px 0 0">'
-                 f'{" ".join(notes)}</p>')
-
-    hist = ""
-    if history:
-        def against(h):
-            """Where that run went, for the row. Built out here because a
-            second f-string nested inside the row is unreadable."""
-            bits = [str(h.get("target") or ""), str(h.get("colo") or "")]
-            return esc(" \u00b7 ".join(b for b in bits if b))
-
-        def cell(value, unit=""):
-            return "&mdash;" if value is None else f"{value}{unit}"
-
-        rows = "".join(
-            f'<tr><td>{esc(str(h.get("when", "")))}</td>'
-            f'<td>{cell(h.get("mbps"), " Mbit/s")}</td>'
-            f'<td>{cell(h.get("up_mbps"), " Mbit/s")}</td>'
-            f'<td>{cell(h.get("avg_ms"), " ms")}</td>'
-            f'<td>{cell(h.get("loss_pct"), "%")}</td>'
-            f'<td class="muted" style="font-size:11px">{against(h)}</td>'
-            f'</tr>'
-            for h in history)
-        hist = (f'<h3 style="font-size:14px;margin:20px 0 6px">Previous runs'
-                f'</h3><table><thead><tr><th>When</th><th>Down</th>'
-                f'<th>Up</th><th>Ping</th><th>Loss</th><th>Against</th></tr></thead>'
-                f'<tbody>{rows}</tbody></table>'
-                f'<p class="muted" style="font-size:12px;margin:6px 0 0">'
-                f'One slow run is weather. The same figure three times is '
-                f'the line, and that is what an ISP will act on.</p>')
-
-    return (f'<div class="box"><h2>Speed test'
-            f'{_help_dot("speedtest", "the speed test")}</h2>'
-            f'<p class="muted" style="margin:0 0 10px">Measured by the router '
-            f'itself, over its own internet connection &mdash; not through '
-            f'the tunnel, so this is what the site actually gets.</p>'
-            f'{run_btn}{body}{hist}</div>')
 
 
 def _nextdns_test_box(name, csrf) -> str:
@@ -9368,16 +9031,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     _dept.unfinished(_depts), _plan_text, _existing)
                 if _ds:
                     _ds.close()
-            elif slug == "speedtest":
-                # Built here, before the live-read block, because it needs
-                # nothing from the router: the live state of any run, and
-                # the runs already on file. Connecting just to draw it would
-                # make the tab fail on exactly the site somebody opens it
-                # for -- the one that is down.
-                from . import speedtest as _st
-                extra_html = _speedtest_box(
-                    name, csrf, _st.status(name),
-                    _speedtest_history(name, devices_db))
             elif slug == "nextdns":
                 # The real NextDNS.io cloud enable/disable box only needs
                 # local device state (cfg, the platform API key) — computed
@@ -9434,7 +9087,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             wan_failover_on = False
             _report_html = report_html  # local copy; may be overridden below
             # A feature that declares no read is a legitimate thing to be --
-            # Speed test measures on demand and shows nothing until asked.
+            # Departments builds its tab from stored configuration.
             # This used to subscript feature["read"] regardless, which threw
             # KeyError, which is not one of the exceptions below: the
             # connection died with no response and nginx returned 502.
@@ -11148,70 +10801,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             finally:
                 store.close()
 
-        def _device_speedtest_post(self, flat, user):
-            """Start a line test and return at once.
-
-            The test takes ninety seconds -- thirty each of ping, download
-            and upload. That cannot happen inside a request: nginx gives up
-            and the browser gets a 502 with nothing to explain it, which is
-            exactly what it did. So this starts a thread and redirects, and
-            the tab shows the progress.
-            """
-            name = (flat.get("device") or "").strip()
-            if not name:
-                return self._send(400, "no device")
-            if not self._can_manage_device(user, name):
-                return self._deny_manage(user, name, "speedtest")
-            raw = self._device_raw(name)
-            if raw is None:
-                return self._send(404, "not found")
-
-            from .config import build_device
-            from . import speedtest as st
-            from .push import rw_device
-            from .push.api import PushApi
-
-            cfg = build_device(raw, defaults)
-
-            class _Conn:
-                """Connect when the thread runs, not when the page renders."""
-
-                def __enter__(self):
-                    self._dev = rw_device(cfg)
-                    api = PushApi(self._dev)
-                    api.connect()
-                    return api
-
-                def __exit__(self, *exc):
-                    try:
-                        self._dev.close()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    return False
-
-            def _finished(dev_name, run):
-                _speedtest_record(dev_name, run, devices_db)
-
-            # "custom" means the typed box; anything else is a preset key
-            # and speedtest.ping_target turns it into an address. A blank
-            # custom box falls back to the default rather than pinging "".
-            _target = (flat.get("target") or "auto").strip()
-            if _target == "custom":
-                _target = (flat.get("custom") or "").strip() or "auto"
-
-            if not st.start(name, _Conn, on_done=_finished, target=_target):
-                return self._redirect(
-                    f"/device?name={quote(name)}&tab=speedtest&msg="
-                    + quote("A test is already running on this router."))
-            audit = self._auditlog()
-            if audit:
-                audit.append(name, (user or {}).get("login", ""),
-                             "speedtest", "run", "started",
-                             f"ping {st.ping_target(_target)}, download "
-                             f"and upload")
-                audit.close()
-            return self._redirect(f"/device?name={quote(name)}&tab=speedtest")
-
         def _device_nextdns_test_post(self, flat, user):
             """Run the router-side proof and show it on the DNS tab.
 
@@ -11800,7 +11389,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                              "/device/nextdns-privacy-settings",
                              "/device/nextdns-blocklist", "/device/nextdns-list",
                              "/device/nextdns-reapply", "/device/nextdns-test",
-                             "/device/speedtest", "/device/departments",
+                             "/device/departments",
                              "/dashboard/suggestion",
                              "/device/remote-regenerate", "/device/remote-test")
             if path in _DEVICE_WRITE:
@@ -11854,8 +11443,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._dashboard_suggestion_post(flat, user)
                 if path == "/device/departments":
                     return self._device_departments_post(flat, user)
-                if path == "/device/speedtest":
-                    return self._device_speedtest_post(flat, user)
                 if path == "/device/nextdns-test":
                     return self._device_nextdns_test_post(flat, user)
                 if path == "/device/remote-regenerate":
