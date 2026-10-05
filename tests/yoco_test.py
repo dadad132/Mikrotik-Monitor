@@ -320,6 +320,31 @@ try:
           "past it", time.strftime("%Y-%m-%d", time.localtime(
               store.get(6)["current_period_end"])) == "2026-10-28")
 
+    # And the account that was already given the extra month: suspending
+    # and restoring it changed nothing, because neither touches the date.
+    store._upsert(7, status="active", plan="d25", device_limit=25,
+                  current_period_end=time.mktime(
+                      (2026, 11, 28, 0, 0, 0, 0, 0, -1)))
+    store.suspend(7)
+    store.unsuspend(7)
+    check("suspending and restoring leaves the paid-up date alone -- which "
+          "is why it still said 61 days",
+          time.strftime("%Y-%m-%d", time.localtime(
+              store.get(7)["current_period_end"])) == "2026-11-28")
+    store.set_paid_until(7, time.mktime((2026, 10, 28, 12, 0, 0, 0, 0, -1)))
+    _row7 = store.get(7)
+    check("set_paid_until corrects it, to the start of that 28th",
+          _row7["current_period_end"]
+          == time.mktime((2026, 10, 28, 0, 0, 0, 0, 0, -1)))
+    check("...and on 5 October the countdown then reads 30 days",
+          round(days_until_suspension(_row7, "active", now=_oct5)) == 30)
+    try:
+        store.set_paid_until(7, time.mktime((2026, 10, 30, 0, 0, 0, 0, 0, -1)))
+        _refused = False
+    except ValueError:
+        _refused = True
+    check("...and refuses any day but the 28th", _refused)
+
     # A suspended company that pays should come back on its own.
     store.suspend(3)
     oid3 = store.create_order(3, "d50", 100, months=1)

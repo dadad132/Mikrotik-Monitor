@@ -853,6 +853,34 @@ class BillingStore:
                      device_limit=plan["devices"], grace_period_end=None,
                      current_period_end=float(end), pf_token=None)
 
+    def set_paid_until(self, org_id: int, period_end: float) -> float:
+        """Correct a company's paid-up date by hand. Returns the date set.
+
+        For when the recorded date is simply wrong. Nothing else moves a date
+        that is already in the future -- set_plan keeps it on purpose, and
+        suspending or restoring never touches it -- so a payment applied
+        with the old first-payment rule (a month too far) could not be
+        corrected from the panel at all.
+
+        Only a billing day is accepted, so a corrected account stays on the
+        same renewal day as every other.
+        """
+        lt = time.localtime(float(period_end))
+        if lt.tm_mday != BILLING_DAY:
+            raise ValueError(f"A paid-up date has to be the {BILLING_DAY}th "
+                             f"of a month, the day every account renews.")
+        end = time.mktime((lt.tm_year, lt.tm_mon, BILLING_DAY,
+                           0, 0, 0, 0, 0, -1))
+        cols = {"current_period_end": end}
+        row = self.get(org_id) or {}
+        # Paid up to a date still ahead means no grace deadline is running
+        # for an active account. A suspended one stays suspended: letting it
+        # back in is Restore's job, not a side effect of fixing a date.
+        if end > time.time() and row.get("status") in ("active", "trialing"):
+            cols["grace_period_end"] = None
+        self._upsert(org_id, **cols)
+        return end
+
     def orgs_never_invoiced(self) -> list:
         """Companies on a priced packet with no paid-up date.
 

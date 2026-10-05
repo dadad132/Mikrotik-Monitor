@@ -99,9 +99,18 @@ _PAGE_CSS = """
    box-shadow:var(--shadow)}
  .box h2{font-size:16px;margin:0 0 14px}
  form.inline{display:inline}
- input,select{font:inherit;padding:7px 9px;border:1px solid var(--border);
-   border-radius:7px;background:var(--surface);color:var(--text)}
- input:focus,select:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+ input,select,textarea{font:inherit;font-size:14px;padding:7px 9px;
+   border:1px solid var(--border);border-radius:7px;background:var(--surface);
+   color:var(--text)}
+ input:focus,select:focus,textarea:focus{outline:2px solid var(--accent-soft);
+   border-color:var(--accent)}
+ input::placeholder,textarea::placeholder{color:var(--text-faint)}
+ /* A button element with no class drew as the browser's grey default --
+    "Save" on the pay-link box, among others. */
+ button:not([class]){font:inherit;font-size:13px;font-weight:600;cursor:pointer;
+   padding:7px 13px;border-radius:7px;border:1px solid var(--border);
+   background:var(--surface-2);color:var(--text)}
+ button:not([class]):hover{border-color:var(--accent)}
  .fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));
    gap:14px 16px}
  .fields label.f{display:block;font-size:12px;color:var(--text-muted);font-weight:600;
@@ -137,7 +146,10 @@ _PAGE_CSS = """
  .rowtbl td{padding:4px 6px;border-bottom:1px solid var(--border)}
  .rowtbl input{padding:6px 8px}
  .btn{background:var(--accent);color:#fff;border:0;padding:8px 15px;border-radius:7px;
-   cursor:pointer;font:inherit;font-weight:600}.btn:hover{background:var(--accent-hover)}
+   cursor:pointer;font:inherit;font-weight:600;text-decoration:none;
+   display:inline-block}.btn:hover{background:var(--accent-hover)}
+ .btn:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid
+   var(--accent);outline-offset:2px}
  .btn.red{background:var(--danger)}.btn.red:hover{opacity:.85}
  .btn.ghost{background:var(--surface-2);color:var(--text)}
  .btn.ghost:hover{background:var(--border)}
@@ -403,7 +415,9 @@ _SHELL_CSS = """
 .dash-logout{font-size:12px;color:var(--text-faint);text-decoration:none;
   flex-shrink:0}
 .dash-logout:hover{color:var(--accent)}
-body.has-sidebar{margin-top:%(h)spx;min-height:100vh}
+/* Padding, not margin: a top margin here collapsed into the page's own
+   .wrap margin, which left every page title pressed against the nav. */
+body.has-sidebar{padding-top:%(h)spx;min-height:100vh}
 @media(max-width:820px){
   /* Narrow: the account block is the first thing worth losing -- the nav
      itself has to stay reachable, and it already scrolls horizontally. */

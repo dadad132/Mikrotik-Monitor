@@ -691,6 +691,40 @@ try:
           ">Add device</button>" in body
           and "You are at your device limit" not in body)
 
+    print("Correcting a paid-up date from the Platform panel:")
+    # Reported: an account given a month too many still said 61 days after
+    # being suspended and restored -- neither touches the date, and
+    # assigning a plan keeps a future one, so nothing could correct it.
+    from mikromon.billing import add_billing_months, next_billing_date
+    sa = opener()
+    req(sa, "/login", {"email": "admin@acme.test", "password": "admin123"},
+        base=QBASE)
+    _, _panel = req(sa, "/superadmin", base=QBASE)
+    check("each company on a packet has a 'Paid to' control in the panel",
+          'action="/superadmin/paid-until"' in _panel)
+    _first = next_billing_date()
+    _later = add_billing_months(_first, 1)
+    _sb.set_paid_until(_cid, _later)
+    _target = time.strftime("%Y-%m-%d", time.localtime(_first))
+    st, body = req(sa, "/superadmin/paid-until",
+                   {"csrf": csrf_of(_panel), "org_id": str(_cid),
+                    "date": _target}, base=QBASE)
+    check("the superadmin can move it back a month",
+          time.strftime("%Y-%m-%d", time.localtime(
+              _sb.get(_cid)["current_period_end"])) == _target
+          and "paid up to" in body)
+    st, body = req(sa, "/superadmin/paid-until",
+                   {"csrf": csrf_of(_panel), "org_id": str(_cid),
+                    "date": "2030-01-15"}, base=QBASE)
+    check("...but only to a 28th, the day every account renews",
+          "28th" in body and time.strftime("%Y-%m-%d", time.localtime(
+              _sb.get(_cid)["current_period_end"])) == _target)
+    _, _own = req(co, "/devices", base=QBASE)
+    st, _ = req(co, "/superadmin/paid-until",
+                {"csrf": csrf_of(_own), "org_id": str(_cid),
+                 "date": _target}, base=QBASE)
+    check("...and a company owner cannot set their own", st == 403)
+
     print("Platform staff are never locked out by billing:")
     # The panel that restores a suspended company sits behind the same guard.
     # Locking a superadmin out of it takes the recovery path down with the

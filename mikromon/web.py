@@ -1141,7 +1141,7 @@ def _throughput_chart(rx_pts, tx_pts, width=284) -> str:
     # grid lines at 25 / 50 / 75 %
     grid = "".join(
         f'<line x1="0" y1="{yp(hi * f):.1f}" x2="{width}" y2="{yp(hi * f):.1f}" '
-        f'stroke="#f1f5f9" stroke-width="1"/>'
+        f'stroke="#f1f5f9" style="stroke:var(--border)" stroke-width="1"/>'
         for f in (0.25, 0.5, 0.75, 1.0))
 
     # static peak marker (RX only)
@@ -1167,7 +1167,7 @@ def _throughput_chart(rx_pts, tx_pts, width=284) -> str:
 
     # x-axis
     axis = (f'<line x1="0" y1="{pad_t + plot_h + 1}" x2="{width}" '
-            f'y2="{pad_t + plot_h + 1}" stroke="#e2e8f0" stroke-width="1"/>')
+            f'y2="{pad_t + plot_h + 1}" stroke="#e2e8f0" style="stroke:var(--border)" stroke-width="1"/>')
     for mins_ago, lbl in [(60, "-1h"), (45, "-45m"), (30, "-30m"), (15, "-15m"), (0, "now")]:
         lx = xp(now_t - mins_ago * 60)
         anch = "start" if mins_ago == 60 else ("end" if mins_ago == 0 else "middle")
@@ -1567,6 +1567,33 @@ body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:var(--bg);
   color:var(--text)}
 a{color:var(--accent);text-decoration:none}
 .muted{color:var(--text-faint);font-size:12px}
+/* The first-visit welcome card. Its classes live in the shared page
+   stylesheet, which this page does not load, so it drew as bare text with
+   browser-default buttons. Scoped under .tipcard so nothing else here picks
+   them up. */
+.tipcard{background:var(--accent-soft);border:1px solid var(--border);
+  border-left:4px solid var(--accent);border-radius:10px;padding:18px 20px;
+  margin:0 0 18px;box-shadow:var(--shadow)}
+.tipcard .tiphead{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.tipcard .tiphead h2{font-size:17px;color:var(--text)}
+.tipcard .tipbadge{font-size:10.5px;font-weight:700;text-transform:uppercase;
+  letter-spacing:.09em;color:#fff;background:var(--accent);padding:3px 8px;
+  border-radius:20px}
+.tipcard .gsteps{counter-reset:gstep;list-style:none;padding:0;font-size:14px;
+  color:var(--text)}
+.tipcard .gsteps li{position:relative;padding-left:34px;margin-bottom:9px;
+  line-height:1.55}
+.tipcard .gsteps li::before{counter-increment:gstep;content:counter(gstep);
+  position:absolute;left:0;top:1px;width:23px;height:23px;border-radius:50%;
+  background:var(--accent);color:#fff;font-size:12px;font-weight:700;
+  display:flex;align-items:center;justify-content:center}
+.tipcard .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.tipcard .btn{background:var(--accent);color:#fff;border:0;padding:8px 15px;
+  border-radius:7px;cursor:pointer;font:inherit;font-weight:600}
+.tipcard .btn:hover{background:var(--accent-hover)}
+.tipcard .btn.ghost{background:var(--surface);color:var(--text);
+  border:1px solid var(--border)}
+.tipcard .btn.ghost:hover{background:var(--surface-2)}
 /* ── main column (the sidebar itself is _SHELL_CSS, shared with every
    other page via _header/_page) ─────────────────── */
 .dash-main{padding:22px 28px 40px}
@@ -2412,8 +2439,8 @@ def _render_device(store, state, name, user, csrf="",
         f'<div style="font-size:13px;font-weight:600;color:#0f172a">{esc(v)}</div>'
         f'</div>'
         for k, v in fi)
-    facts_bar = (f'<div style="display:flex;flex-wrap:wrap;background:#fff;'
-                 f'border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.08);'
+    facts_bar = (f'<div style="display:flex;flex-wrap:wrap;background:var(--surface);'
+                 f'border-radius:10px;box-shadow:var(--shadow);'
                  f'margin-bottom:16px;overflow:hidden">{fact_cells}</div>')
 
     # ── left column: gauges ────────────────────────────────────────────────────
@@ -2553,10 +2580,10 @@ def _render_device(store, state, name, user, csrf="",
         peak_rx = max((v for _, v in rx_pts), default=0)
         spark_rows += (
             f'<div style="margin-bottom:14px;padding-bottom:14px;'
-            f'border-bottom:1px solid #f1f5f9">'
+            f'border-bottom:1px solid var(--border)">'
             f'<div style="display:flex;justify-content:space-between;'
             f'align-items:center;margin-bottom:6px">'
-            f'<b style="font-size:13px;color:#334155">{esc(iface)}</b>'
+            f'<b style="font-size:13px;color:var(--text)">{esc(iface)}</b>'
             f'<span style="font-size:12px">'
             f'<span style="color:#2563eb">&darr;&nbsp;{human_bps(t.get("rx_bps", 0))}</span>'
             f'&nbsp;&nbsp;'
@@ -5294,7 +5321,7 @@ def _render_device_backups(name, user, facts, csrf, *, backups=None,
         # Step 2: show the dry-run plan and a confirm button.
         resolved = dry_plan.ops[0].params.get("name", "") if dry_plan.ops else ""
         action = (f'<div class="box"><h2>Dry run — nothing has been written yet</h2>'
-                  f'<pre style="background:#f8fafc;padding:12px;border-radius:8px;'
+                  f'<pre style="background:var(--surface-2);color:var(--text);border:1px solid var(--border);padding:12px;border-radius:8px;'
                   f'white-space:pre-wrap">{esc(dry_plan.diff_text())}</pre>'
                   f'<form method="POST" action="/device/backup" class="actions">'
                   f'<input type="hidden" name="csrf" value="{csrf}">'
@@ -5536,8 +5563,8 @@ def _field_html(desc) -> str:
         sub = (f'<div class="muted" style="margin-top:4px;font-size:12px">'
                f'{esc(desc["hint"])}</div>') if desc.get("hint") else ""
         return (f'<div class="f full" style="margin-top:18px;padding-top:14px;'
-                f'border-top:1px solid #e2e8f0">'
-                f'<b style="font-size:13px;color:#334155">{esc(label)}</b>'
+                f'border-top:1px solid var(--border)">'
+                f'<b style="font-size:13px;color:var(--text)">{esc(label)}</b>'
                 f'{sub}</div>')
     if t == "sortable":
         name = desc["name"]
@@ -5624,7 +5651,7 @@ def _recent_log_box(recent, device=None) -> str:
                  f'<td>{_log_status_badge(r["status"])}</td>'
                  f'<td>{esc(r["summary"])}'
                  f'<details><summary class="muted">detail</summary>'
-                 f'<pre style="white-space:pre-wrap;background:#f8fafc;padding:8px;'
+                 f'<pre style="white-space:pre-wrap;background:var(--surface-2);color:var(--text);padding:8px;'
                  f'border-radius:6px">{esc(r["detail"])}</pre></details></td></tr>')
     devh = "<th>Device</th>" if device is None else ""
     return (f'<div class="box"><h2>Recent activity</h2><table>'
@@ -5662,7 +5689,7 @@ def _activity_timeline_box(push_rows, alert_rows, device=None) -> str:
                      f'<td>{_log_status_badge(r["status"])}</td>'
                      f'<td>{esc(r["summary"])}'
                      f'<details><summary class="muted">detail</summary>'
-                     f'<pre style="white-space:pre-wrap;background:#f8fafc;padding:8px;'
+                     f'<pre style="white-space:pre-wrap;background:var(--surface-2);color:var(--text);padding:8px;'
                      f'border-radius:6px">{esc(r["detail"])}</pre></details></td></tr>')
         else:
             rows += (f'<tr><td class="muted">{when}</td>{dev}'
@@ -5767,7 +5794,7 @@ def _queue_script_box(name, csrf, facts=None) -> str:
         f'<div class="f"><label class="f">LAN subnet (first 3 octets)</label>'
         f'<input id="qb-base" type="text" {base_attr} oninput="qbGen()"></div>'
         f'</div>'
-        f'<hr style="margin:14px 0;border:none;border-top:1px solid #e2e8f0">'
+        f'<hr style="margin:14px 0;border:none;border-top:1px solid var(--border)">'
         f'<form method="POST" action="/device/push">'
         f'<input type="hidden" name="csrf" value="{csrf}">'
         f'<input type="hidden" name="device" value="{qn}">'
@@ -5812,7 +5839,7 @@ def _scripts_box(name, csrf, scripts) -> str:
                     f'<button class="btn {cls}" type="submit">{label}</button></form>')
         rows += (f'<tr><td><b>{sn}</b>{meta}'
                  f'<details><summary class="muted">source</summary>'
-                 f'<pre style="white-space:pre-wrap;background:#f8fafc;padding:8px;'
+                 f'<pre style="white-space:pre-wrap;background:var(--surface-2);color:var(--text);padding:8px;'
                  f'border-radius:6px">{esc(src)}</pre></details></td>'
                  f'<td style="white-space:nowrap">{act("run", "Run", "ghost")} '
                  f'{act("remove", "Remove", "ghost")}</td></tr>')
@@ -5823,7 +5850,8 @@ def _scripts_box(name, csrf, scripts) -> str:
             f'<table><tr><th>Script</th><th></th></tr>{rows}</table></div>')
 
 
-_PRE = ('white-space:pre-wrap;background:#f8fafc;padding:10px;border-radius:6px;'
+_PRE = ('white-space:pre-wrap;background:var(--surface-2);color:var(--text);'
+        'padding:10px;border-radius:6px;'
         'font-family:ui-monospace,Consolas,monospace')
 
 
@@ -5841,10 +5869,10 @@ def _wg_repair_report_html(report) -> str:
     """Render a WireGuard self-repair report: overall status + every check, with
     what was auto-fixed and a clear message for anything that needs a human."""
     color, title = _WG_REPORT_STYLE.get(report.get("status"),
-                                        ("#334155", "Tunnel report"))
+                                        ("var(--text-muted)", "Tunnel report"))
     items = []
     for s in report.get("steps", []):
-        icon, c = _WG_STEP.get(s.get("level"), ("•", "#334155"))
+        icon, c = _WG_STEP.get(s.get("level"), ("•", "var(--text-muted)"))
         items.append(f'<li style="margin:6px 0"><span style="color:{c};'
                      f'font-weight:bold">{icon}</span> {esc(s.get("msg", ""))}</li>')
     applied = report.get("applied", [])
@@ -5881,10 +5909,10 @@ def _nextdns_test_report_html(report, name) -> str:
     reading this on is — and conflating the two is what sent this round in
     circles in the first place."""
     color, title = _NEXTDNS_TEST_STYLE.get(report.get("status"),
-                                           ("#334155", "NextDNS test"))
+                                           ("var(--text-muted)", "NextDNS test"))
     items = []
     for st in report.get("steps", []):
-        icon, c = _WG_STEP.get(st.get("level"), ("•", "#334155"))
+        icon, c = _WG_STEP.get(st.get("level"), ("•", "var(--text-muted)"))
         items.append(f'<li style="margin:6px 0"><span style="color:{c};'
                      f'font-weight:bold">{icon}</span> {esc(st.get("msg", ""))}</li>')
     footer = ("This was asked of the router itself over its own API — no "
@@ -5910,10 +5938,10 @@ def _remote_test_report_html(report, tunnel_ip) -> str:
     whether your OWN computer is on the same tunnel (see Personal VPN
     access on the Team page)."""
     color, title = _REMOTE_TEST_STYLE.get(report.get("status"),
-                                          ("#334155", "Connectivity report"))
+                                          ("var(--text-muted)", "Connectivity report"))
     items = []
     for s in report.get("steps", []):
-        icon, c = _WG_STEP.get(s.get("level"), ("•", "#334155"))
+        icon, c = _WG_STEP.get(s.get("level"), ("•", "var(--text-muted)"))
         items.append(f'<li style="margin:6px 0"><span style="color:{c};'
                      f'font-weight:bold">{icon}</span> {esc(s.get("msg", ""))}</li>')
     return (f'<div class="box" style="border-left:4px solid {color}">'
@@ -6484,7 +6512,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                 f'minute later is still caught. Protects against locking yourself '
                 f'out.</label>')
         body = (f'<div class="box"><h2>Dry run — nothing has been written yet</h2>'
-                f'<pre style="background:#f8fafc;padding:12px;border-radius:8px;'
+                f'<pre style="background:var(--surface-2);color:var(--text);border:1px solid var(--border);padding:12px;border-radius:8px;'
                 f'white-space:pre-wrap">{esc(preview.diff_text())}</pre>'
                 f'<form method="POST" action="{confirm_action}">'
                 f'<input type="hidden" name="csrf" value="{csrf}">'
@@ -7798,6 +7826,46 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._redirect("/superadmin?error=" + quote(str(exc)))
             return self._redirect("/superadmin?ok=" +
                                   quote("Company plan updated."))
+
+        def _post_paid_until(self, user):
+            """Superadmin-only: correct a company's paid-up date (a 28th).
+
+            Suspending and restoring never touch the date, and assigning a
+            plan keeps a future one on purpose, so an account given a month
+            too many had no way back from the panel.
+            """
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if billing is None:
+                return self._redirect("/superadmin?error=" +
+                                      quote("Billing is not enabled on this server."))
+            try:
+                org_id = int(flat.get("org_id", "0"))
+            except (ValueError, TypeError):
+                org_id = 0
+            raw = (flat.get("date") or "").strip()
+            if not org_id or not raw:
+                return self._redirect("/superadmin?error=" + quote(
+                    "Pick the date this company is paid up to."))
+            try:
+                end = billing.set_paid_until(
+                    org_id, time.mktime(time.strptime(raw, "%Y-%m-%d")))
+            except (ValueError, OverflowError) as exc:
+                return self._redirect("/superadmin?error=" + quote(str(exc)))
+            name = ""
+            try:
+                name = auth.org_name(org_id) if auth else ""
+            except Exception:  # noqa: BLE001
+                pass
+            when = time.strftime("%d %b %Y", time.localtime(end))
+            log.info("org %s (%s) paid-up date set to %s by superadmin %s",
+                     org_id, name or "?", when, user.get("email", "?"))
+            return self._redirect("/superadmin?ok=" + quote(
+                f"{name or f'Company {org_id}'} is now paid up to {when}."))
 
         def _post_superadmin_suspend(self, user, restore: bool = False):
             """Superadmin-only: cut a company off for non-payment, or let them
@@ -11429,6 +11497,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_funds_hold(user)
             if path == "/superadmin/quoted-plan":
                 return self._post_quoted_plan(user)
+            if path == "/superadmin/paid-until":
+                return self._post_paid_until(user)
             if path == "/superadmin/pay-base":
                 return self._post_pay_base(user)
             if path == "/superadmin/mark-paid":
@@ -12028,15 +12098,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                          "applied", order_id)
                 return self._send(200, "ok")
             billing.apply_paid_order(order)
-            # The packet has moved. Now tell the invoicing provider, or Zoho
-            # goes on chasing a customer for money they have already paid.
-            try:
-                from .billing_runner import settle_matching_invoice
-                note = settle_matching_invoice(billing, auth, order)
-                if note:
-                    log.warning("after a card payment: %s", note)
-            except Exception:  # noqa: BLE001 - never undo a payment over this
-                log.exception("could not settle the matching invoice")
+            # (A call here once told Zoho about the payment. Zoho went with
+            # b8fe333 and the call stayed, failing with an ImportError on
+            # every card payment; Yoco is now the only rail, so there is no
+            # other provider to tell.)
             log.info("Order %s paid (%s): org %s now on %s for %s month(s)",
                      order_id, payment_id, order["org_id"], order["plan"],
                      order["months"])
@@ -12526,7 +12591,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if access_cfg.get("hub_host") and _device_tunnel_ip(name, devices_db):
                 sec_note = (
                     f'<p class="muted" style="margin:0;font-size:13px;padding:10px 12px;'
-                    f'background:#f1f5f9;border-radius:6px;border-left:3px solid #38bdf8">'
+                    f'background:var(--surface-2);border-radius:6px;border-left:3px solid #38bdf8">'
                     f'<b>No VPN needed:</b> along with the login, you will get public '
                     f'Winbox and WebFig addresses proxied through '
                     f'<code>{esc(self._link_host())}</code>. They close '
@@ -12534,7 +12599,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             else:
                 sec_note = (
                     '<p class="muted" style="margin:0;font-size:13px;padding:10px 12px;'
-                    'background:#f1f5f9;border-radius:6px;border-left:3px solid #38bdf8">'
+                    'background:var(--surface-2);border-radius:6px;border-left:3px solid #38bdf8">'
                     '<b>Network security:</b> Access is via the WireGuard tunnel '
                     '(address <code>10.10.0.x</code>). Only devices enrolled as WireGuard '
                     'peers can reach the router &mdash; so no additional IP restriction is '

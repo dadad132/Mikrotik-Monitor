@@ -195,7 +195,7 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
     org_name = user.get("org_name", "")
     uname_row = (f'<p>Username <span class="muted">(your existing login — you can '
                  f'keep using it)</span><br><input value="{esc(user["username"])}" '
-                 f'disabled style="width:100%;max-width:360px;background:#f1f5f9">'
+                 f'disabled style="width:100%;max-width:360px;background:var(--surface-2)">'
                  f'</p>') if user.get("username") else ""
     email_hint = ("Add an email to sign in with it too"
                   if user.get("username") and not user.get("email")
@@ -319,7 +319,7 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
 _EMAIL_POPUP_HTML = """
 <div id="mm-email-popup" style="display:none;position:fixed;inset:0;
   background:rgba(0,0,0,.5);z-index:9999;align-items:center;justify-content:center">
- <div style="background:#fff;border-radius:10px;max-width:440px;width:90%;
+ <div style="background:var(--surface);color:var(--text);border-radius:10px;max-width:440px;width:90%;
    padding:28px 28px 20px;box-shadow:0 8px 32px rgba(0,0,0,.25)">
   <div id="mm-ep-icon" style="font-size:36px;margin-bottom:10px"></div>
   <div id="mm-ep-title" style="font-weight:700;font-size:17px;margin-bottom:8px"></div>
@@ -1571,6 +1571,45 @@ def _quoted_plan_form(org_id, bill, csrf) -> str:
             f'</form>')
 
 
+def _paid_to_select(org_id, bill: dict | None, csrf: str) -> str:
+    """Correct a company's paid-up date: one of the next twelve 28ths.
+
+    Only offered for a company on a packet with a paid-up date, and only
+    28ths, so a correction cannot knock an account off the renewal day.
+    """
+    from .billing import BILLING_DAY, add_billing_months, next_billing_date
+    bill = bill or {}
+    cpe = bill.get("current_period_end")
+    if not cpe or not bill.get("plan"):
+        return ""
+    current = time.strftime("%Y-%m-%d", time.localtime(float(cpe)))
+    first = next_billing_date()
+    dates = [first] + [add_billing_months(first, i) for i in range(1, 12)]
+    values = [time.strftime("%Y-%m-%d", time.localtime(t)) for t in dates]
+    opts = "".join(
+        f'<option value="{v}"{" selected" if v == current else ""}>'
+        f'{time.strftime("%d %b %Y", time.localtime(t))}</option>'
+        for t, v in zip(dates, values))
+    if current not in values:
+        # A date outside the list (passed, or set long ago) is still shown,
+        # so the control never claims a date the account does not have.
+        opts = (f'<option value="" selected>'
+                f'{time.strftime("%d %b %Y", time.localtime(float(cpe)))}'
+                f'</option>' + opts)
+    return (f'<form method="POST" action="/superadmin/paid-until" '
+            f'style="display:flex;gap:4px;align-items:center;margin-top:4px" '
+            f'onsubmit="return confirm(\'Change this company\\\'s paid-up '
+            f'date? Their renewal moves with it.\')">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="org_id" value="{esc(str(org_id))}">'
+            f'<span class="muted" style="font-size:11px">Paid to</span>'
+            f'<select name="date" style="font-size:12px" '
+            f'title="Every account renews on the {BILLING_DAY}th">{opts}'
+            f'</select>'
+            f'<button class="btn ghost" type="submit" '
+            f'style="font-size:12px;padding:2px 8px">Set</button></form>')
+
+
 def _plan_select(org_id, current_plan, csrf) -> str:
     """A per-company plan-assign control for the superadmin (manual billing)."""
     opts = ['<option value="">— assign —</option>']
@@ -2435,6 +2474,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
             f' / {device_limit if device_limit else "∞"}</td>'
             f'<td>{created_str}</td>'
             + (f'<td>{_plan_select(r.get("id"), plan, csrf)}'
+               f'{_paid_to_select(r.get("id"), bill, csrf)}'
                f'{_quoted_plan_form(r.get("id"), bill, csrf)}'
                f'{_suspend_button(r.get("id"), status, csrf, r.get("has_superadmin", False))}</td>'
                if billing_on else "")
@@ -3047,8 +3087,8 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
 
 
 def _sa_tile(value, label: str, color: str) -> str:
-    return (f'<div style="background:#fff;border-radius:10px;padding:12px 16px;'
-            f'box-shadow:0 1px 3px rgba(0,0,0,.1);border-top:3px solid {color}">'
+    return (f'<div style="background:var(--surface);border-radius:10px;padding:12px 16px;'
+            f'box-shadow:var(--shadow);border-top:3px solid {color}">'
             f'<div style="font-size:26px;font-weight:700;color:{color}">{value}</div>'
             f'<div style="font-size:11px;color:#64748b;text-transform:uppercase;'
             f'letter-spacing:.04em;margin-top:4px">{label}</div>'
