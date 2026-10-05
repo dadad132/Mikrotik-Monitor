@@ -73,19 +73,72 @@ finally:
 
 print("\nReading what WireGuard is really doing")
 
+# The dashboard runs with NoNewPrivileges, so sudo from inside it is refused
+# by the kernel whatever sudoers says. The panel used to tell people to add
+# sudoers lines anyway; they did, and nothing changed. What only root can
+# read now comes from a root timer's snapshot in sc.STATUS_DIR.
+_real_status_dir = sc.STATUS_DIR
+sc.STATUS_DIR = tempfile.mkdtemp()
+_ran = []
+
+
+def _snap(name, text, age=0):
+    path = os.path.join(sc.STATUS_DIR, name)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    t = time.time() - age
+    os.utime(path, (t, t))
+
+
+def _unsnap(*names):
+    for n in names:
+        try:
+            os.remove(os.path.join(sc.STATUS_DIR, n))
+        except OSError:
+            pass
+
+
+def _no_root(cmd, timeout=6):
+    _ran.append(list(cmd))
+    return 1, "", "Unable to access interface: Operation not permitted"
+
+
 try:
-    sc._run = lambda cmd, timeout=6: (0, "", "") if "sudo" not in cmd else (1, "", "")
+    sc._run = lambda cmd, timeout=6: (0, "", "")
     check("readable directly is fine", sc.check_wg_readable()[0]["ok"])
 
-    sc._run = lambda cmd, timeout=6: (0, "", "") if "sudo" in cmd else (1, "", "")
-    check("readable only via sudo is also fine -- that is how it is meant to "
-          "be set up", sc.check_wg_readable()[0]["ok"])
-
-    sc._run = lambda cmd, timeout=6: (1, "", "Operation not permitted")
+    sc._run = _no_root
     f = sc.check_wg_readable()[0]
-    check("unreadable is a real finding: without it a wrong key and a "
-          "blocked link look identical, which is what cost a week",
-          not f["ok"] and "sudoers.d/mikromon-wg" in f["fix"])
+    check("unreadable with no snapshot is a real finding: without it a wrong "
+          "key and a blocked link look identical, which is what cost a week",
+          not f["ok"])
+    check("...whose fix is the installer that adds the root timer, not a "
+          "sudoers line that cannot take effect",
+          f["fix"] == "sudo bash deploy/install.sh" and "sudo" not in
+          f["detail"].replace("cannot use sudo", ""))
+    check("...and it never tries sudo itself",
+          not any(c[:1] == ["sudo"] for c in _ran))
+
+    _snap("wg0.dump", "(hidden)\tPUB=\t51820\toff\n", age=20)
+    f = sc.check_wg_readable()[0]
+    check("a fresh root snapshot counts as readable, and says how old it is",
+          f["ok"] and "read as root 20s ago" in f["title"])
+
+    _snap("wg0.dump", "(hidden)\tPUB=\t51820\toff\n", age=900)
+    f = sc.check_wg_readable()[0]
+    check("a snapshot fifteen minutes old is not passed off as live -- the "
+          "timer has stopped, and that is the finding",
+          not f["ok"] and "15 minutes old" in f["title"]
+          and "mikromon-status.timer" in f["fix"])
+
+    _unsnap("wg0.dump")
+    _snap("wg0.err", "Unable to access interface: No such device\n")
+    f = sc.check_wg_readable()[0]
+    check("root itself failing to read wg0 means the interface is down, and "
+          "points at wg-quick rather than at permissions",
+          not f["ok"] and "No such device" in f["detail"]
+          and "wg-quick@wg0" in f["fix"])
+    _unsnap("wg0.err")
 
     sc._run = lambda cmd, timeout=6: (None, "", "not installed")
     check("wireguard-tools missing says so plainly",
@@ -115,6 +168,51 @@ check("a path that does not exist yet is silent, not a failure",
 check("a writable directory means the file can be replaced atomically",
       one(sc.check_peers_dir(p), "wg:dir")["ok"])
 
+# On the server /etc/wireguard is 750: the dashboard can write the peers file
+# but not create files beside it. That used to be a warning whose fix was
+# `chmod 770` -- which lets the dashboard rename its own file over wg0.conf,
+# whose PostUp root runs. It is the intended state, not a fault.
+_real_access = os.access
+try:
+    os.access = lambda path, mode: (False if os.path.isdir(path)
+                                    else _real_access(path, mode))
+    f = one(sc.check_peers_dir(p), "wg:dir")
+    check("a read-only directory with a writable peers file is fine -- the "
+          "file is rewritten in place, never emptied", f["ok"])
+    check("...and nothing anywhere suggests making the directory writable",
+          "770" not in f["fix"] + f["detail"] + f["title"])
+    os.access = lambda path, mode: False
+    f = one(sc.check_peers_dir(p), "wg:dir")
+    check("a peers file the dashboard cannot write at all IS the fault: new "
+          "routers cannot be registered",
+          not f["ok"] and f["fix"] == "sudo bash deploy/install.sh")
+finally:
+    os.access = _real_access
+
+_inst = open(os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "deploy", "install.sh"),
+    encoding="utf-8").read()
+check("the installer never opens /etc/wireguard to group write",
+      "chmod 770 /etc/wireguard" not in _inst)
+check("...and writes no sudo rules, which cannot work for a NoNewPrivileges "
+      "service", "NOPASSWD" not in _inst)
+check("...removing the ones earlier builds and the panel put there",
+      all(n in _inst for n in ("/etc/sudoers.d/mikromon-access",
+                               "/etc/sudoers.d/mikromon-wg",
+                               "/etc/sudoers.d/mikromon-nginx")))
+_snapsh = _inst.split("<<'SNAP'")[1].split("\nSNAP\n")[0]
+check("the root snapshot blanks the hub's private key before anything is "
+      "written", 'NR == 1 { $1 = "(hidden)" }' in _snapsh
+      and "wg show wg0 dump 2> .wg0.err \\\n     | awk" in _snapsh)
+check("...keeps its directory between runs, or every oneshot deletes it",
+      "RuntimeDirectoryPreserve=yes" in _inst)
+check("...and is readable by the dashboard's group only",
+      "Group=${SERVICE_USER}" in _inst and "RuntimeDirectoryMode=0750"
+      in _inst)
+check("the snapshot directory the installer writes is the one the "
+      "dashboard reads", "/run/mikromon-status" in _inst
+      and _real_status_dir == "/run/mikromon-status")
+
 print("\nThe address the links actually point at")
 
 # Detection falls back to `hostname -I` when the public-IP lookup fails. On a
@@ -132,6 +230,22 @@ check("...explaining that the port IS open and it is the address that is "
       "wrong, since 'connection timed out' reads like the opposite",
       "the address just does not reach it" in f["detail"])
 check("...and naming the way to set it", "ACCESS_HOST=" in f["fix"])
+f = one(sc.check_access_host({"hub_host": "172.16.1.246"},
+                             "easymikrotik.com"), "access:host")
+check("...using the dashboard's own domain when there is one, which already "
+      "has a trusted certificate",
+      f["fix"] == "sudo ACCESS_HOST=easymikrotik.com bash deploy/install.sh")
+check("...and saying the router in front of a NATed server has to forward "
+      "the ports too", "forward TCP 20000-29999" in f["detail"])
+check("the installer keeps a deliberate host across plain re-runs, and "
+      "falls back to the dashboard's domain before guessing an address -- "
+      "a host fixed with ACCESS_HOST= used to last until the next upgrade",
+      "_config_get access hub_host" in open(os.path.join(
+          os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+          "deploy", "install.sh"), encoding="utf-8").read()
+      and "_config_get web domain" in open(os.path.join(
+          os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+          "deploy", "install.sh"), encoding="utf-8").read())
 
 for good in ("38.54.63.107", "easymikrotik.co.za", "hub.example.com"):
     check(f"{good} is fine and says where links point",
@@ -167,21 +281,37 @@ try:
     check("a permission error reading the key is NOT reported as a broken "
           "nginx config -- it is reported as a check that could not run",
           f["ok"] and f["warn"])
-    check("...and carries the sudoers line that would let it run",
-          "sudoers.d/mikromon-nginx" in f["fix"])
+    check("...whose fix is the root timer, not a sudoers line that cannot "
+          "take effect", f["fix"] == "sudo bash deploy/install.sh")
 
-    def _sudo_works(cmd, timeout=6):
+    # What actually reached the panel: sudo refused with "no new privileges"
+    # (the dashboard's own hardening), shown as nginx refusing its config.
+    def _nnp(cmd, timeout=6):
         if cmd[0] == "nginx" and "-v" in cmd:
             return 0, "", "nginx/1.24"
-        if cmd[:2] == ["sudo", "-n"]:
-            return 0, "syntax is ok", ""
+        if cmd[:1] == ["sudo"]:
+            return 1, "", ('sudo: The "no new privileges" flag is set, which '
+                           'prevents sudo from running as root.')
         if "is-failed" in cmd or "is-active" in cmd:
             return 0, "active", ""
         return 1, "", _denied
 
-    sc._run = _sudo_works
-    check("when sudo IS permitted the config is really tested, and passes",
-          one(sc.check_nginx({"nginx_http_conf": "/x"}), "nginx:running")["ok"])
+    sc._run = _nnp
+    f = one(sc.check_nginx({"nginx_http_conf": "/x"}), "nginx:conf")
+    check("sudo being refused is never reported as nginx refusing its own "
+          "configuration", f["ok"] and "no new privileges" not in f["detail"])
+
+    _snap("nginx-t", "nginx: configuration file test is successful\nexit=0\n")
+    check("root's own `nginx -t` passing is the answer, and it passes",
+          one(sc.check_nginx({"nginx_http_conf": "/x"}),
+              "nginx:running")["ok"])
+    _snap("nginx-t", 'nginx: [emerg] unknown directive "proxy_passs"\n'
+                     "exit=1\n")
+    f = one(sc.check_nginx({"nginx_http_conf": "/x"}), "nginx:conf")
+    check("...and root's `nginx -t` failing is reported loudly, with what "
+          "nginx said", not f["ok"] and "proxy_passs" in f["detail"]
+          and "exit=" not in f["detail"])
+    _unsnap("nginx-t")
 
     def _really_broken(cmd, timeout=6):
         if cmd[0] == "nginx" and "-v" in cmd:
@@ -195,6 +325,32 @@ try:
     check("a genuinely bad config is still reported, loudly -- softening the "
           "permission case must not soften this one",
           not f["ok"] and "proxy_passs" in f["detail"])
+finally:
+    sc._run = _rr
+
+print("\nCertificates root can read and the dashboard cannot")
+
+# /etc/letsencrypt/live is root-only, so from the dashboard the glob found
+# nothing and the openssl read failed: one yellow "cannot read" and several
+# checks silently skipped. Root's snapshot lists them.
+_rr = sc._run
+try:
+    sc._run = lambda cmd, timeout=6: (1, "", "Permission denied")
+    _le = "/etc/letsencrypt/live/easymikrotik.com/fullchain.pem"
+    _snap("certs.tsv", f"{_le}\tNov 30 12:00:00 2099 GMT\n")
+    _days = sc._cert_days_left(_le)
+    check("an unreadable certificate's expiry comes from the snapshot",
+          _days is not None and _days > 365)
+    check("...the Let's Encrypt certificates are found through it too",
+          sc._letsencrypt_paths() == [_le]
+          or os.path.isdir("/etc/letsencrypt/live"))
+    check("...and the expiry check covers them instead of going quiet",
+          any(x["ok"] and "easymikrotik.com" in x["title"]
+              for x in sc.check_tls_expiry({})))
+    _unsnap("certs.tsv")
+    check("with no snapshot it is still 'cannot read', pointing at the "
+          "installer rather than at a command that only inspects the file",
+          sc._cert_days_left(_le) is None)
 finally:
     sc._run = _rr
 
@@ -540,6 +696,49 @@ check("a Let's Encrypt path is trusted WITHOUT having to stat it -- this "
       "somebody to re-issue a certificate that was fine",
       f is not None and f["ok"])
 
+_ip_cfg = {"nginx_http_conf": "/x", "hub_host": "172.16.1.246",
+           "tls_cert": "/etc/ssl/easymikrotik-172.16.1.246.crt"}
+f = one(sc.check_webfig_cert(_ip_cfg, "easymikrotik.com"), "webfig:cert")
+check("for an IP address it never suggests certbot -- no certificate "
+      "authority issues one for a private address, so that 'fix' could only "
+      "fail", "certbot" not in f["fix"])
+check("...and does not claim HSTS walls it off: browsers never apply HSTS "
+      "to an IP address, so this is a warning, not 'cannot be opened at all'",
+      f["warn"] and "cannot be opened" not in f["title"])
+check("...pointing at the dashboard's domain instead, the same fix as the "
+      "address check", f["fix"]
+      == "sudo ACCESS_HOST=easymikrotik.com bash deploy/install.sh")
+
+_real_hsts = sc._hsts_hosts
+try:
+    sc._hsts_hosts = lambda: {"easymikrotik.com", "www.easymikrotik.com"}
+    f = one(sc.check_webfig_cert(
+        {"nginx_http_conf": "/x", "hub_host": "easymikrotik.com",
+         "tls_cert": "/etc/ssl/easymikrotik-easymikrotik.com.crt"}),
+        "webfig:cert")
+    check("a self-signed certificate on a host that HAS HSTS is the real "
+          "wall, and is reported as one", not f["ok"] and not f["warn"]
+          and "cannot be opened at all" in f["title"])
+    f = one(sc.check_webfig_cert(
+        {"nginx_http_conf": "/x", "hub_host": "other.example.com",
+         "tls_cert": "/etc/ssl/easymikrotik-other.example.com.crt"}),
+        "webfig:cert")
+    check("...but HSTS on the dashboard's domain does not wall off a "
+          "different host", f["warn"])
+finally:
+    sc._hsts_hosts = _real_hsts
+
+_snap("certs.tsv", "/etc/letsencrypt/live/easymikrotik.com/fullchain.pem\t"
+                   "Nov 30 12:00:00 2099 GMT\n")
+f = one(sc.check_webfig_cert(
+    {"nginx_http_conf": "/x", "hub_host": "easymikrotik.com",
+     "tls_cert": "/etc/ssl/easymikrotik-easymikrotik.com.crt"}),
+    "webfig:cert")
+check("a Let's Encrypt certificate root can see for the host counts, as it "
+      "does when access-apply (root) picks it -- the dashboard cannot list "
+      "/etc/letsencrypt itself", f["ok"])
+_unsnap("certs.tsv")
+
 check("no remote access configured means nothing to say",
       sc.check_webfig_cert({}) == [])
 check("...and neither does access configured with no certificate at all",
@@ -644,6 +843,33 @@ check("...but only with a real certificate: on a self-signed one HSTS also "
       "removes the click-through on the certificate warning, which locks "
       "the operator out of their own server",
       "letsencrypt/live" in _ngx.split("HSTS_LINE=\"\"")[1][:200])
+
+print("\nThe dashboard's Tunnel health table reads the same snapshot")
+
+import subprocess as _sp  # noqa: E402
+
+import mikromon.web as _web  # noqa: E402
+
+_real_sp_run = _sp.run
+try:
+    _sp.run = lambda *a, **k: _sp.CompletedProcess(
+        a[0], 1, "", "Unable to access interface: Operation not permitted")
+    _snap("wg0.dump", "(hidden)\tHUBPUB=\t51820\toff\n"
+                      "PEER1=\t(none)\t1.2.3.4:5555\t10.10.0.2/32\t"
+                      "1790000000\t100\t200\t25\n")
+    _peers, _err = _web._wg_dump()
+    check("handshakes come from root's reading when the dashboard cannot "
+          "read wg0 itself", not _err and _peers.get("PEER1=", {}).get(
+              "handshake") == 1790000000)
+    check("...and the blanked interface line is not mistaken for a peer",
+          "(hidden)" not in _peers)
+    _unsnap("wg0.dump")
+    _peers, _err = _web._wg_dump()
+    check("with no snapshot it says how to get one instead of offering sudo",
+          _peers == {} and "install.sh" in _err and "sudoers" not in _err)
+finally:
+    _sp.run = _real_sp_run
+    sc.STATUS_DIR = _real_status_dir
 
 print()
 if FAILS:

@@ -167,6 +167,50 @@ html = web_auth._upcoming_box(
 check("the figure on the panel is the figure on the invoice",
       "$25.00" in html and "R25.00" not in html)
 
+print("\nThe packet buttons show dollars only")
+
+# Asked for: "remove the zar and only let it show the usd amount". Yoco still
+# settles in rands -- the checkout converts and records the rate -- but the
+# billing page quotes the dollar price and nothing else.
+_bill = {"status": "trial", "plan": None, "device_limit": 1,
+         "trial_end": time.time() + 9 * 86400}
+page = web_auth._render_billing(
+    {"email": "o@x.test", "role": "owner", "org_name": "Alpha"},
+    _bill, False, "tok", device_count=3, yoco_on=True)
+_d5 = B.plan_by_name("d5")
+check("each card button names the packet's dollar price",
+      f'Pay ${_d5["price_usd"]:,.2f} for the month' in page)
+check("...with no rand figure, rate line or 'charged in rands' note beside "
+      "it", "Pay R" not in page and "charged in rands" not in page
+      and "ZAR" not in page and "16.2593" not in page)
+_was = dict(_FX._cache)
+_FX._cache.clear()
+_real_convert = _FX.convert
+
+
+def _no_rate(*a, **k):
+    raise _FX.RateUnavailable("offline")
+
+
+_FX.convert = _no_rate
+try:
+    page = web_auth._render_billing(
+        {"email": "o@x.test", "role": "owner", "org_name": "Alpha"},
+        _bill, False, "tok", device_count=3, yoco_on=True)
+    check("with no published rate there is still no card button -- the "
+          "charge would have no rate to convert at",
+          "Pay $" not in page and "Card payment is unavailable" in page)
+finally:
+    _FX.convert = _real_convert
+    _FX._cache.update(_was)
+
+box = web_auth._orders_box([{
+    "id": 9, "plan": "d5", "months": 1, "amount_cents": 81997,
+    "currency": "ZAR", "fx_rate": 16.734, "status": "paid",
+    "paid": time.time(), "created": time.time()}])
+check("a card payment, stored in the rands Yoco charged, is listed as the "
+      "dollars it was converted from", "$49.00" in box and "R819.97" not in box)
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

@@ -284,6 +284,42 @@ try:
           "already ended, not one month from today",
           _end2 == add_billing_months(_end, 1))
 
+    # Reported: "the new account that just paid is only expiring after 61
+    # days and not 30". A first payment added a month to TODAY, and
+    # add_billing_months always lands on the 28th of the NEXT month -- so
+    # paying on 5 October skipped 28 October and ran to 28 November. With
+    # the seven days of grace the panel counts down to, that read 61.
+    from mikromon.billing import days_until_suspension, first_billing_date
+    _oct5 = time.mktime((2026, 10, 5, 10, 0, 0, 0, 0, -1))
+    oid4 = store.create_order(4, "d25", cents, months=1)
+    store.mark_order_paid(oid4, "p_new")
+    store.apply_paid_order(store.order(oid4), now=_oct5)
+    _row4 = store.get(4)
+    check("a new account paying on 5 October is paid up to 28 October, the "
+          "first billing date, as when a packet is switched on by hand",
+          time.strftime("%Y-%m-%d", time.localtime(
+              _row4["current_period_end"])) == "2026-10-28")
+    check("...so its countdown reads 30 days (23 paid + 7 grace), not 61",
+          round(days_until_suspension(_row4, "active", now=_oct5)) == 30)
+    _oct20 = time.mktime((2026, 10, 20, 10, 0, 0, 0, 0, -1))
+    oid5 = store.create_order(5, "d25", cents, months=1)
+    store.mark_order_paid(oid5, "p_new2")
+    store.apply_paid_order(store.order(oid5), now=_oct20)
+    check("one paying on 20 October, eight days before the 28th, runs to 28 "
+          "November rather than being invoiced again within the week",
+          store.get(5)["current_period_end"] == first_billing_date(_oct20))
+    # A renewal paid after its period ended had the same fault: a month
+    # added to the day it was paid, then rounded on to the next 28th.
+    store._upsert(6, status="active", plan="d25", device_limit=25,
+                  current_period_end=time.mktime(
+                      (2026, 9, 28, 0, 0, 0, 0, 0, -1)))
+    oid6 = store.create_order(6, "d25", cents, months=1)
+    store.mark_order_paid(oid6, "p_late")
+    store.apply_paid_order(store.order(oid6), now=_oct5)
+    check("a renewal paid late runs to the next billing date, not a month "
+          "past it", time.strftime("%Y-%m-%d", time.localtime(
+              store.get(6)["current_period_end"])) == "2026-10-28")
+
     # A suspended company that pays should come back on its own.
     store.suspend(3)
     oid3 = store.create_order(3, "d50", 100, months=1)

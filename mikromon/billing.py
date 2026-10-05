@@ -1084,7 +1084,7 @@ class BillingStore:
             self.db.commit()
             return cur.rowcount > 0
 
-    def apply_paid_order(self, order: dict) -> None:
+    def apply_paid_order(self, order: dict, now: float | None = None) -> None:
         """Give the company what it paid for.
 
         Sets the packet's device cap, pushes the paid-until date out by the
@@ -1092,9 +1092,16 @@ class BillingStore:
         should not have to wait for a human to switch them back on, which was
         the whole point of taking the card.
 
-        The period extends from whichever is later: what they already had, or
-        now. Renewing early therefore adds to the end of the current period
-        instead of throwing away what is left of it.
+        A renewal paid while the current period is still running adds whole
+        months to the end of it, so renewing early throws nothing away.
+
+        Otherwise -- a new account, a trial, a renewal paid after its period
+        ended -- the period starts now and ends on the FIRST billing date,
+        exactly as set_plan does for a packet switched on by hand. This used
+        to add a month to now instead, and add_billing_months always lands on
+        the 28th of the NEXT month: paying on 5 October skipped 28 October
+        and ran to 28 November, a free month on every first payment (and on
+        every late one).
         """
         plan = plan_by_name(order.get("plan", ""))
         if plan is None:
@@ -1110,11 +1117,18 @@ class BillingStore:
         if str(order.get("kind") or "") == "upgrade":
             self.apply_upgrade(int(order["org_id"]), order["plan"])
             return
-        base = max(float(row.get("current_period_end") or 0.0), time.time())
+        now = now if now is not None else time.time()
+        current = float(row.get("current_period_end") or 0.0)
         months = max(1, int(order.get("months") or 1))
+        if current > now:
+            end = add_billing_months(current, months)
+        else:
+            end = first_billing_date(now)
+            if months > 1:
+                end = add_billing_months(end, months - 1)
         self._upsert(org_id, status="active", plan=plan["name"],
                      device_limit=plan["devices"],
-                     current_period_end=add_billing_months(base, months),
+                     current_period_end=end,
                      grace_period_end=None)
 
     # --- quote requests (companies past the last tier) --------------------

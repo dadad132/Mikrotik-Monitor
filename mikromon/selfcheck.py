@@ -29,6 +29,56 @@ def _finding(cid, ok, title, detail="", fix="", warn=False):
             "fix": fix, "warn": bool(warn)}
 
 
+# The dashboard runs unprivileged with NoNewPrivileges=true, which means sudo
+# can never work from inside it -- the kernel refuses, whatever sudoers says.
+# So what only root can see (the running WireGuard state, `nginx -t`, the
+# certificates under /etc/letsencrypt) is written here every 30 seconds by
+# mikromon-status.service, a root timer the installer sets up.
+STATUS_DIR = "/run/mikromon-status"
+STATUS_MAX_AGE = 180          # seconds; the timer runs every 30
+_CERTS_MAX_AGE = 86400        # an expiry date does not go stale in minutes
+_NO_SNAPSHOT_FIX = "sudo bash deploy/install.sh"
+
+
+def _status(name):
+    """(text, age in seconds) of one snapshot file, or (None, None)."""
+    path = os.path.join(STATUS_DIR, name)
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        return text, max(0.0, time.time() - os.path.getmtime(path))
+    except OSError:
+        return None, None
+
+
+def _snapshot_certs():
+    """{certificate path: notAfter} as root last read them."""
+    text, age = _status("certs.tsv")
+    if text is None or age > _CERTS_MAX_AGE:
+        return {}
+    out = {}
+    for line in text.splitlines():
+        path, _, when = line.partition("\t")
+        if path and when:
+            out[path.strip()] = when.strip()
+    return out
+
+
+def _letsencrypt_paths():
+    """Every Let's Encrypt certificate on this server.
+
+    /etc/letsencrypt/live is root-only, so from the dashboard the glob finds
+    nothing and every check built on it went quiet rather than wrong. The
+    root snapshot lists them instead.
+    """
+    import glob
+    found = sorted(glob.glob("/etc/letsencrypt/live/*/fullchain.pem"))
+    if found:
+        return found
+    return sorted(p for p in _snapshot_certs()
+                  if p.startswith("/etc/letsencrypt/live/"))
+
+
 def _run(cmd, timeout=6):
     """(rc, stdout, stderr). rc None when the command does not exist."""
     try:
@@ -98,19 +148,37 @@ def check_wg_readable(iface="wg0"):
                          err, "sudo apt-get install -y wireguard-tools")]
     if rc == 0:
         return [_finding("wg:read", True, "WireGuard state is readable")]
-    rc2, _, _ = _run(["sudo", "-n", "wg", "show", iface, "dump"])
-    if rc2 == 0:
+    # Reading it needs root. On the server that is the normal case, and the
+    # answer is the root snapshot -- never sudo, which this service cannot use.
+    dump, age = _status(f"{iface}.dump")
+    if dump is not None and age <= STATUS_MAX_AGE:
         return [_finding("wg:read", True,
-                         "WireGuard state is readable (via sudo)")]
-    user = os.environ.get("USER") or "mikromon"
+                         f"WireGuard state is readable (read as root "
+                         f"{age:.0f}s ago)")]
+    failed, fage = _status(f"{iface}.err")
+    if failed is not None and fage <= STATUS_MAX_AGE:
+        return [_finding(
+            "wg:read", False,
+            f"The WireGuard interface {iface} cannot be read -- is it up?",
+            failed.strip()[-300:],
+            f"sudo systemctl status wg-quick@{iface} --no-pager")]
+    if dump is not None or failed is not None:
+        stale = age if dump is not None else fage
+        return [_finding(
+            "wg:read", False,
+            f"The WireGuard reading is {stale / 60:.0f} minutes old",
+            "mikromon-status.timer reads it as root every 30 seconds and has "
+            "stopped, so the Tunnel health table is showing old handshakes.",
+            "sudo systemctl status mikromon-status.timer --no-pager")]
     return [_finding(
         "wg:read", False,
         "Cannot read what WireGuard is actually running",
         "Without this the Tunnel health table cannot tell a router whose key "
         "is wrong from one whose packets never arrive -- two problems with "
-        "opposite fixes. It is the single most useful fact about a tunnel.",
-        f"echo '{user} ALL=(root) NOPASSWD: /usr/bin/wg show *' "
-        f"| sudo tee /etc/sudoers.d/mikromon-wg")]
+        "opposite fixes. The dashboard runs without root and cannot use "
+        "sudo, so a small root timer (mikromon-status.timer) reads it "
+        "instead, and it is not installed yet.",
+        _NO_SNAPSHOT_FIX)]
 
 
 def check_peers_dir(peers_path):
@@ -129,12 +197,25 @@ def check_peers_dir(peers_path):
     if os.access(d, os.W_OK):
         return [_finding("wg:dir", True,
                          "Peers file can be replaced atomically")]
+    # Not being able to create files in /etc/wireguard is deliberate, and it
+    # used to be reported as a fault with `chmod 770` as the fix. Group write
+    # on that directory lets this service rename a file of its own over
+    # wg0.conf -- whose PostUp lines root runs -- whatever the modes of the
+    # files inside it. The writer copes instead: it rewrites the peers file
+    # in place without ever emptying it (web._inplace_write).
+    if os.path.exists(peers_path) and os.access(peers_path, os.W_OK):
+        return [_finding(
+            "wg:dir", True,
+            "Peers file is updated in place, never emptied",
+            f"The dashboard cannot create files in {d}, on purpose: that "
+            f"would let it replace the hub's own key and wg0.conf, which "
+            f"root runs.")]
     return [_finding(
         "wg:dir", False,
-        f"{d} is not writable, so the peers file cannot be replaced atomically",
-        "It is still written, in place, which leaves a narrow window where a "
-        "reload can read it mid-write and apply a stale peer list.",
-        f"sudo chmod 770 {d} && sudo chmod 600 {d}/wg0.key", warn=True)]
+        f"The dashboard cannot write {os.path.basename(peers_path)}, so new "
+        f"routers cannot be registered",
+        f"{peers_path} has to be writable by the dashboard's service user.",
+        "sudo bash deploy/install.sh")]
 
 
 def check_peers_file(peers_path, expected_peers=None):
@@ -179,30 +260,40 @@ def check_nginx(access_cfg):
     # says so in red, on the page people open when something is wrong. A
     # check that cannot tell working from broken is worse than no check: it
     # sends you after the wrong thing, which is exactly what it did here.
+    #
+    # It did it a second time through sudo: this service runs with
+    # NoNewPrivileges, so `sudo nginx -t` fails with "no new privileges"
+    # however sudoers is written, and that refusal was shown as nginx
+    # rejecting its own configuration. Root's own run of it is in the
+    # status snapshot; that is the answer.
+    good = [_finding("nginx:running", True, "nginx is running and its "
+                                            "configuration is valid")]
     rc2, _, err2 = _run(["nginx", "-t"])
-    if rc2 not in (0, None):
-        rc3, _, err3 = _run(["sudo", "-n", "nginx", "-t"])
-        if rc3 == 0:
-            return [_finding("nginx:running", True, "nginx is running and "
-                                                    "its configuration is valid")]
-        if rc3 is not None and _denied(err2) and _denied(err3):
-            user = os.environ.get("USER") or "mikromon"
-            return [_finding(
-                "nginx:conf", True,
-                "Could not verify the nginx configuration",
-                "Testing it means reading the TLS private key, which only "
-                "root may do -- so this says nothing either way about nginx.",
-                f"echo '{user} ALL=(root) NOPASSWD: /usr/sbin/nginx -t' "
-                f"| sudo tee /etc/sudoers.d/mikromon-nginx", warn=True)]
+    if rc2 == 0:
+        return good
+    snap, age = _status("nginx-t")
+    if snap is not None and age <= STATUS_MAX_AGE:
+        lines = snap.rstrip().splitlines()
+        if lines and lines[-1].strip() == "exit=0":
+            return good
         return [_finding("nginx:conf", False,
                          "nginx refuses its own configuration",
-                         ((err3 or err2) or "")[-400:],
-                         "sudo nginx -t")]
-    return [_finding("nginx:running", True, "nginx is running and its "
-                                            "configuration is valid")]
+                         "\n".join(lines[:-1])[-400:], "sudo nginx -t")]
+    if rc2 is not None and not _denied(err2):
+        return [_finding("nginx:conf", False,
+                         "nginx refuses its own configuration",
+                         (err2 or "")[-400:], "sudo nginx -t")]
+    return [_finding(
+        "nginx:conf", True,
+        "Could not verify the nginx configuration",
+        "Testing it means reading the TLS private key, which only root may "
+        "do, and the dashboard runs without root -- so this says nothing "
+        "either way about nginx. mikromon-status.timer tests it as root; it "
+        "is not installed, or has stopped.",
+        _NO_SNAPSHOT_FIX, warn=True)]
 
 
-def check_access_host(access_cfg):
+def check_access_host(access_cfg, domain=""):
     """Can anyone actually OPEN the remote-access links this server hands out?
 
     `access.hub_host` is detected at install time, and the detection falls
@@ -210,6 +301,9 @@ def check_access_host(access_cfg):
     NAT that yields a 172.16.x.x address: grants are created, nginx listens,
     every green tick stays green -- and the browser times out, because the
     address in the link exists only on the server's own LAN.
+
+    `domain` is the dashboard's own (web.domain), which is what the links
+    should use: it already has a trusted certificate.
     """
     host = str((access_cfg or {}).get("hub_host", "") or "").strip()
     if not host:
@@ -217,6 +311,7 @@ def check_access_host(access_cfg):
     if not _unroutable_host(host):
         return [_finding("access:host", True,
                          f"Remote-access links point at {host}")]
+    target = (domain or "").strip() or "your.domain"
     return [_finding(
         "access:host", False,
         f"Remote-access links point at {host}, which only works inside this "
@@ -225,8 +320,10 @@ def check_access_host(access_cfg):
         "time out for anyone browsing from anywhere else -- the port really "
         "is open, the address just does not reach it. Links now fall back to "
         "whatever address the browser used to reach the dashboard, so set "
-        "this to the public hostname to make it deliberate.",
-        "sudo ACCESS_HOST=your.public.hostname bash deploy/install.sh")]
+        "this to the public hostname to make it deliberate. A server with a "
+        "private address sits behind a router, and that router must also "
+        "forward TCP 20000-29999 to it.",
+        f"sudo ACCESS_HOST={target} bash deploy/install.sh")]
 
 
 def _unroutable_host(host):
@@ -431,9 +528,13 @@ def _cert_days_left(path):
     answer the browser will reach.
     """
     rc, out, _ = _run(["openssl", "x509", "-enddate", "-noout", "-in", path])
-    if rc != 0 or "notAfter=" not in (out or ""):
+    if rc == 0 and "notAfter=" in (out or ""):
+        when = out.split("notAfter=", 1)[1].strip()
+    else:
+        # /etc/letsencrypt is root-only; root read it for us.
+        when = _snapshot_certs().get(path, "")
+    if not when:
         return None
-    when = out.split("notAfter=", 1)[1].strip()
     for fmt in ("%b %d %H:%M:%S %Y %Z", "%b %d %H:%M:%S %Y"):
         try:
             import calendar
@@ -446,14 +547,16 @@ def _cert_days_left(path):
 
 def _cert_paths(access_cfg):
     """Every certificate this server actually serves."""
-    import glob
     paths = []
     cert = str((access_cfg or {}).get("tls_cert") or "").strip()
     if cert:
         paths.append(cert)
-    paths.extend(sorted(glob.glob("/etc/letsencrypt/live/*/fullchain.pem")))
+    paths.extend(_letsencrypt_paths())
+    # A path root has read counts as present even though os.path.exists()
+    # says no from here: the directory it sits in is root-only.
+    known = _snapshot_certs()
     seen = set()
-    return [p for p in paths if os.path.exists(p)
+    return [p for p in paths if (os.path.exists(p) or p in known)
             and not (p in seen or seen.add(p))]
 
 
@@ -508,9 +611,11 @@ def check_served_cert():
     days = _cert_days_left(path)
     if days is None:
         return [_finding("tls:served", False,
-                         f"Cannot read the certificate this site serves",
-                         path, f"sudo openssl x509 -noout -text -in {path}",
-                         warn=True)]
+                         "Cannot read the certificate this site serves",
+                         f"{path} is readable only by root. "
+                         f"mikromon-status.timer reads it as root; it is not "
+                         f"installed, or has stopped.",
+                         _NO_SNAPSHOT_FIX, warn=True)]
     if days < 0:
         return [_finding(
             "tls:served", False,
@@ -527,7 +632,39 @@ def check_served_cert():
         f"{days:.0f} days left")]
 
 
-def check_webfig_cert(access_cfg=None):
+def _is_ip(host):
+    import ipaddress
+    try:
+        ipaddress.ip_address((host or "").strip().strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
+def _hsts_hosts():
+    """Host names the dashboard's nginx site sends HSTS for.
+
+    HSTS binds to the names a browser saw it on -- never to an IP address --
+    so a WebFig link on a different host is not affected by it.
+    """
+    import re
+    for conf in ("/etc/nginx/sites-enabled/easymikrotik",
+                 "/etc/nginx/sites-available/easymikrotik"):
+        try:
+            with open(conf, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            continue
+        if "Strict-Transport-Security" not in text:
+            return set()
+        names = set()
+        for m in re.finditer(r"^\s*server_name\s+([^;]+);", text, re.M):
+            names.update(n.lower() for n in m.group(1).split())
+        return names
+    return set()
+
+
+def check_webfig_cert(access_cfg=None, domain=""):
     """Can a browser actually OPEN a WebFig link?
 
     Two things have to be true together, and each is harmless alone.
@@ -553,6 +690,12 @@ def check_webfig_cert(access_cfg=None):
 
     from .access import resolve_cert
     live, _key, source = resolve_cert(host, cert, cfg.get("tls_key", ""))
+    # access-apply runs as root and switches to a Let's Encrypt certificate
+    # for the host by itself. From here /etc/letsencrypt cannot be listed, so
+    # resolve_cert cannot see that one exists; the root snapshot can.
+    le_host = f"/etc/letsencrypt/live/{host}/fullchain.pem" if host else ""
+    if source != "letsencrypt" and le_host in _snapshot_certs():
+        live, source = le_host, "letsencrypt"
     # A configured Let's Encrypt path counts as trusted even when it cannot
     # be stat'd here: this runs off the server too, and reporting a lockout
     # that does not exist is its own kind of harm -- it sends somebody to
@@ -568,29 +711,34 @@ def check_webfig_cert(access_cfg=None):
         return [_finding("webfig:cert", True,
                          "WebFig uses a trusted certificate")]
 
-    hsts = False
-    for conf in ("/etc/nginx/sites-enabled/easymikrotik",
-                 "/etc/nginx/sites-available/easymikrotik"):
-        try:
-            with open(conf, encoding="utf-8") as f:
-                if "Strict-Transport-Security" in f.read():
-                    hsts = True
-                    break
-        except OSError:
-            continue
+    if _is_ip(host):
+        # No certificate authority issues a certificate for a private
+        # address, so `certbot -d <this address>` -- which this used to
+        # suggest -- can only fail. Browsers also never apply HSTS to an IP
+        # address, so this is a warning to click through, not a wall. The
+        # fix is the address itself, which check_access_host reports.
+        target = (domain or "").strip() or "your.domain"
+        return [_finding(
+            "webfig:cert", False,
+            f"WebFig links use a self-signed certificate for the address "
+            f"{host}",
+            "No certificate authority issues a trusted certificate for a "
+            "private address, so every WebFig link warns before it opens. "
+            "Point remote access at the dashboard's domain instead: it "
+            "already has a trusted certificate, which WebFig then uses.",
+            f"sudo ACCESS_HOST={target} bash deploy/install.sh", warn=True)]
 
-    if hsts:
+    if host.lower() in _hsts_hosts():
         return [_finding(
             "webfig:cert", False,
             "WebFig links cannot be opened at all",
             f"The WebFig ports serve {cert}, which no browser trusts, and "
-            f"HSTS is set on {host or 'this host'}. HSTS covers every port "
-            f"on a host and removes the click-through, so the certificate "
-            f"warning has no 'continue anyway' and remote access is "
-            f"unreachable. The error blames the certificate, which is only "
-            f"half of it.",
+            f"HSTS is set on {host}. HSTS covers every port on a host and "
+            f"removes the click-through, so the certificate warning has no "
+            f"'continue anyway' and remote access is unreachable. The error "
+            f"blames the certificate, which is only half of it.",
             f"sudo certbot certonly --nginx -d {host} && "
-            f"sudo systemctl restart easymikrotik-access-reload.service")]
+            f"sudo systemctl start easymikrotik-access-reload.service")]
     return [_finding(
         "webfig:cert", False,
         "WebFig is served with an untrusted certificate",
@@ -619,9 +767,8 @@ def check_https_enforced(config_path="", access_cfg=None):
     link, one typed address, one old bookmark, and the whole session is in
     the clear with nothing to say so.
     """
-    import glob
     out = []
-    live = sorted(glob.glob("/etc/letsencrypt/live/*/fullchain.pem"))
+    live = _letsencrypt_paths()
     if not live:
         return []                       # no cert, nothing to enforce yet
 
@@ -697,8 +844,10 @@ def check_tls_expiry(access_cfg=None, warn_days=21, critical_days=7):
         if days is None:
             out.append(_finding(f"tls:{path}", False,
                                 f"Cannot read the certificate for {name}",
-                                path, f"sudo openssl x509 -noout -text -in {path}",
-                                warn=True))
+                                f"{path} is readable only by root, and "
+                                f"mikromon-status.timer, which reads it as "
+                                f"root, is not installed or has stopped.",
+                                _NO_SNAPSHOT_FIX, warn=True))
         elif days < 0:
             out.append(_finding(
                 f"tls:{path}", False,
@@ -915,20 +1064,34 @@ def check_deployed_version(app_dir=""):
     return [_finding("version", True, f"Running version {running}", detail)]
 
 
+def _web_domain(config_path):
+    """The dashboard's own domain (web.domain), or ""."""
+    if not config_path or not os.path.exists(config_path):
+        return ""
+    try:
+        import yaml
+        with open(config_path, encoding="utf-8") as f:
+            web = (yaml.safe_load(f) or {}).get("web") or {}
+        return str(web.get("domain") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
             metrics_db="", retention_days=30, smtp_cfg=None,
             app_dir="", billing_db="", config_path="",
             card_ready=None, runner_status=None, pay_base=None):
     """Every check, in the order a person would want to read them."""
     out = []
+    domain = _web_domain(config_path)
     for fn in (lambda: check_deployed_version(app_dir),
                lambda: check_units(),
                lambda: check_wg_readable(),
                lambda: check_peers_dir(peers_path),
                lambda: check_peers_file(peers_path, expected_peers),
-               lambda: check_access_host(access_cfg),
+               lambda: check_access_host(access_cfg, domain),
                lambda: check_served_cert(),
-               lambda: check_webfig_cert(access_cfg),
+               lambda: check_webfig_cert(access_cfg, domain),
                lambda: check_tls_expiry(access_cfg),
                lambda: check_https_enforced(config_path, access_cfg),
                lambda: check_cert_renewal(),

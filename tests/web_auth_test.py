@@ -634,6 +634,63 @@ try:
     check("restoring puts them straight back in", st == 200
           and "Account Suspended" not in body)
 
+    print("A company cannot add more devices than its package allows:")
+    # The check existed, commented out "until after testing" -- so any
+    # company could add as many devices as it liked whatever it had paid for.
+    _a = AuthStore(adb)
+    _cid = _a.signup("owner@capped.test", "password123", "Capped Co")
+    _a.close()
+    co = opener()
+    req(co, "/login", {"email": "owner@capped.test", "password": "password123"},
+        base=QBASE)
+
+    def _add(name, original="", host="9.9.9.9"):
+        _, page = req(co, "/devices", base=QBASE)
+        return req(co, "/devices/save", {
+            "csrf": csrf_of(page), "original_name": original, "name": name,
+            "host": host, "api_port": "8728", "timeout": "25",
+            "username": "monitor", "password": "secret"}, base=QBASE)
+
+    def _devices_of(org):
+        _ds = DevicesStore(wdb)
+        try:
+            return sorted(_ds.names_for_org(org))
+        finally:
+            _ds.close()
+
+    st, body = _add("CapR1")
+    check("a company with no packet gets the free tier's one device",
+          _devices_of(_cid) == ["CapR1"])
+    st, body = _add("CapR2")
+    check("the next one is refused with the upgrade page, not saved",
+          "You are at your device limit" in body
+          and _devices_of(_cid) == ["CapR1"])
+    check("...which says what the package allows and links to upgrading it",
+          "allows 1 device and you have 1" in body
+          and 'href="/billing">Upgrade package' in body)
+    _, body = req(co, "/devices", base=QBASE)
+    check("the Devices page says so before anyone fills the form in, and "
+          "offers the upgrade where the Add button was",
+          "You are at your device limit" in body
+          and 'href="/billing">Upgrade package' in body
+          and ">Add device</button>" not in body
+          and 'id="add-modal"' not in body)
+    st, body = _add("CapR1", original="CapR1", host="9.9.9.8")
+    _ds_e = DevicesStore(wdb)
+    _host_now = (_ds_e.raw("CapR1") or {}).get("host")
+    _ds_e.close()
+    check("editing a device they already have is not adding one: it saves",
+          "The device was not added" not in body and _host_now == "9.9.9.8"
+          and _devices_of(_cid) == ["CapR1"])
+    _sb.set_plan(_cid, "d5")
+    st, body = _add("CapR2")
+    check("on a 5-device packet the second device goes in",
+          _devices_of(_cid) == ["CapR1", "CapR2"])
+    _, body = req(co, "/devices", base=QBASE)
+    check("...and below the cap the Add button is back",
+          ">Add device</button>" in body
+          and "You are at your device limit" not in body)
+
     print("Platform staff are never locked out by billing:")
     # The panel that restores a suspended company sits behind the same guard.
     # Locking a superadmin out of it takes the recovery path down with the

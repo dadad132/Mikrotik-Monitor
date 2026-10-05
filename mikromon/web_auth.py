@@ -17,7 +17,7 @@ from .billing import (payment_reference, PLANS, GRACE_DAYS,
                       CURRENCY_SYMBOL,
                       TRIAL_DEVICES, _TRIAL_DAYS, TIER_STEP,
                       MAX_TIER_DEVICES, QUOTE_ABOVE_DEVICES, needs_quote,
-                      plan_by_name)
+                      money, plan_by_name)
 from .util import human_bytes
 from .web_shared import (
     _BRAND, _PAGE_CSS, esc, _flash, _header, _page, _who,
@@ -611,6 +611,26 @@ def _quote_request_box(csrf: str, device_count: int = 0) -> str:
         f'</form></div>')
 
 
+def _order_usd(order: dict, plan: dict | None) -> str:
+    """An order's amount as the dollar figure the customer chose.
+
+    A card payment is stored in rands, because Yoco settles in rands, with
+    the rate it was converted at. The list shows the dollars that came from;
+    the invoice behind the button keeps the rand charge, since that is the
+    record of what the card was actually charged.
+    """
+    amount = (order.get("amount_cents") or 0) / 100
+    cur = str(order.get("currency") or BILLING_CURRENCY).upper()
+    if cur == "ZAR":
+        rate = float(order.get("fx_rate") or 0.0)
+        if rate > 0:
+            return money(round(amount / rate, 2), "USD")
+        if plan and plan.get("price_usd"):
+            return money(float(plan["price_usd"]) * int(order.get("months")
+                                                        or 1), "USD")
+    return money(amount, cur)
+
+
 def _orders_box(orders) -> str:
     """What this company has bought, newest first, each with its invoice.
 
@@ -627,9 +647,7 @@ def _orders_box(orders) -> str:
         plan = plan_by_name(o.get("plan", ""))
         what = (f'{plan["devices"]} devices' if plan else o.get("plan", "?"))
         months = int(o.get("months") or 1)
-        _sym = CURRENCY_SYMBOL.get(
-            str(o.get("currency") or BILLING_CURRENCY).upper(), "")
-        amount = f'{_sym}{(o.get("amount_cents") or 0) / 100:,.2f}'
+        amount = _order_usd(o, plan)
         if o.get("status") == "paid":
             state = '<span class="badge ok">Paid</span>'
             act = (f'<a class="btn ghost" style="padding:4px 12px" '
@@ -937,14 +955,6 @@ def _pending_from_row(bill) -> dict | None:
             "from": float((bill or {}).get("pending_from") or 0.0)}
 
 
-def _fx_line(conv) -> str:
-    """Name the rate a rand figure came from, so it can be checked."""
-    if not conv:
-        return ""
-    from .fxrate import describe
-    return describe({**conv, "pair": "USDZAR"})
-
-
 def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                     msg: str = "", error: str = "", contact: dict | None = None,
                     device_count: int = 0, yoco_on: bool = False,
@@ -1033,6 +1043,17 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
     # themselves, and the usual outcome of that is picking the cheapest row
     # and hitting the device cap a week later.
     fits = _fitting_tier(device_count)
+    # A card charge needs today's published USD/ZAR rate (Yoco settles in
+    # rands). Asked once for the whole ladder: without one, no card button
+    # is offered rather than a charge at a rate somebody made up.
+    card_rate_ok = False
+    if yoco_on:
+        try:
+            from .billing import zar_amount
+            zar_amount(1.0)
+            card_rate_ok = True
+        except Exception:  # noqa: BLE001 - no rate: say so, charge nothing
+            card_rate_ok = False
     plan_rows = ""
     for p in PLANS:
         is_current = (status in ("active", "trialing")
@@ -1045,30 +1066,19 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
             # sends only which packet was chosen -- never the amount, which
             # would otherwise be a number a customer could edit before
             # paying it.
-            # Yoco settles in rands, so a card is charged the converted
-            # figure. Shown at the published rate, with the rate named
-            # underneath -- the surprise is the charge appearing in another
-            # currency, not the number, and a figure a customer cannot check
-            # is the thing to avoid.
-            try:
-                from .billing import zar_amount
-                _conv = zar_amount(p["price_usd"])
-                _zar, _basis = _conv["amount"], _conv
-            except Exception:  # noqa: BLE001 - no rate: say so, charge nothing
-                _zar, _basis = None, None
+            # Dollars only, as every other price on the site. Yoco still
+            # settles in rands, so the checkout converts at the day's
+            # published rate and records it on the order -- and Yoco's own
+            # page shows the rand figure before the card is charged.
             btn = (f'<form method="POST" action="/billing/checkout">'
                    f'<input type="hidden" name="csrf" value="{csrf}">'
                    f'<input type="hidden" name="plan" value="{esc(p["name"])}">'
                    f'<button class="btn" type="submit" style="padding:6px 14px">'
-                   f'Pay R{_zar:,.0f} for the month</button></form>'
+                   f'Pay ${p["price_usd"]:,.2f} for the month</button></form>'
+                   if card_rate_ok else
                    f'<div class="muted" style="font-size:11px;margin-top:4px">'
-                   f'${p["price_usd"]:,.2f}/mo, charged in rands because the '
-                   f'card gateway settles in ZAR. '
-                   f'{esc(_fx_line(_basis))}</div>'
-                   if _zar is not None else
-                   f'<div class="muted" style="font-size:11px;margin-top:4px">'
-                   f'Card payment is unavailable while today\'s exchange '
-                   f'rate cannot be fetched. Please pay by EFT.</div>')
+                   f'Card payment is unavailable right now. Please pay by '
+                   f'EFT.</div>')
         elif pf_enabled:
             btn = (f'<form method="POST" action="/billing/subscribe">'
                    f'<input type="hidden" name="csrf" value="{csrf}">'
@@ -1955,10 +1965,10 @@ def _tunnel_health_box(rows, wg_err: str = "") -> str:
                 f'actually running ({esc(wg_err)}), so the last two columns '
                 f'are blank. That reading is the difference between "the hub '
                 f'never loaded this router" and "the router is not reaching '
-                f'us" &mdash; two problems with opposite fixes. Allow it '
-                f'with:<br><code>echo \'mikromon ALL=(root) NOPASSWD: '
-                f'/usr/bin/wg show *\' | sudo tee '
-                f'/etc/sudoers.d/mikromon-wg</code></p>')
+                f'us" &mdash; two problems with opposite fixes. The '
+                f'dashboard cannot use sudo, so a root timer reads it; '
+                f'install it with:<br><code>sudo bash deploy/install.sh'
+                f'</code></p>')
     else:
         bad = [r for r in rows if not r["ok"]]
         note = (f'<p style="margin:0 0 10px;font-size:12px;padding:8px 10px;'

@@ -321,7 +321,7 @@ def _build_wg_diagnostics_lines(devices_db) -> list:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return r.returncode, (r.stdout or "").rstrip(), (r.stderr or "").rstrip()
 
-    def run(label, cmd, timeout=8, sudo_retry=False):
+    def run(label, cmd, timeout=8, snapshot=""):
         lines.append(f"--- {label}: {' '.join(cmd)} ---")
         try:
             code, out, err = _try(cmd, timeout)
@@ -329,18 +329,18 @@ def _build_wg_diagnostics_lines(devices_db) -> list:
             # root, so the one command that answers "is this router reaching
             # the hub at all" was failing on every report -- and without it,
             # a router that cannot handshake looks exactly like one whose
-            # link is down, or one that is switched off.
-            if (sudo_retry and code != 0
+            # link is down, or one that is switched off. sudo cannot help
+            # (NoNewPrivileges), so use what root last read.
+            if (snapshot and code != 0
                     and "not permitted" in (err + out).lower()):
-                try:
-                    code2, out2, err2 = _try(["sudo", "-n"] + cmd, timeout)
-                    if code2 == 0:
-                        lines.append(out2 or "(no output)")
-                        lines.append("")
-                        return
-                    err = f"{err} (and via sudo: {err2})"
-                except Exception:  # noqa: BLE001
-                    pass
+                from .selfcheck import _status
+                text, age = _status(snapshot)
+                if text is not None:
+                    lines.append(f"(read as root by mikromon-status.timer "
+                                 f"{age:.0f}s ago)")
+                    lines.append(text.rstrip() or "(no output)")
+                    lines.append("")
+                    return
             if out:
                 lines.append(out)
             if code != 0:
@@ -355,15 +355,13 @@ def _build_wg_diagnostics_lines(devices_db) -> list:
         lines.append("")
 
     run("live WireGuard peer/handshake state", ["wg", "show", "wg0"],
-        sudo_retry=True)
+        snapshot="wg0.txt")
     if any("not permitted" in ln.lower() for ln in lines[-4:]):
         # Say how to fix it, here, rather than leaving the most useful
         # section of the report permanently blank.
-        lines.append("  To make the section above work, allow this one "
-                     "read-only command without a password:")
-        lines.append("    echo '%s ALL=(root) NOPASSWD: /usr/bin/wg show *' "
-                     "| sudo tee /etc/sudoers.d/mikromon-wg"
-                     % (os.environ.get("USER") or "mikromon"))
+        lines.append("  To make the section above work, install the root "
+                     "timer that reads it every 30 seconds:")
+        lines.append("    sudo bash deploy/install.sh")
         lines.append("  It is the difference between knowing a router never "
                      "handshook and guessing.")
         lines.append("")
@@ -3120,39 +3118,58 @@ def _inplace_write(path, text: str) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
-    log.warning(
-        "wrote %s in place rather than atomically: this service cannot "
-        "create files in %s. Run: sudo chmod 770 %s  -- until then a "
-        "reload that lands mid-write can apply a slightly stale peer list.",
-        path, os.path.dirname(os.path.abspath(path)) or ".",
-        os.path.dirname(os.path.abspath(path)) or ".")
+    # Expected, not a fault: /etc/wireguard stays closed to this service on
+    # purpose (group write there would let it replace wg0.conf, which root
+    # runs). It used to log "Run: sudo chmod 770" here, which is that hole.
+    log.debug("wrote %s in place (its directory is read-only to this "
+              "service by design)", path)
+
+
+def _wg_snapshot(iface: str = "wg0") -> tuple:
+    """(dump text, "") as root last read it, or ("", why there is none).
+
+    Written every 30 seconds by mikromon-status.service, with the hub's
+    private key blanked out of the first line.
+    """
+    from .selfcheck import STATUS_MAX_AGE, _status
+    dump, age = _status(f"{iface}.dump")
+    if dump is not None and age <= STATUS_MAX_AGE:
+        return dump, ""
+    failed, fage = _status(f"{iface}.err")
+    if failed is not None and fage <= STATUS_MAX_AGE:
+        return "", failed.strip() or f"{iface} cannot be read"
+    if dump is not None or failed is not None:
+        stale = age if dump is not None else fage
+        return "", (f"the last reading is {stale / 60:.0f} minutes old -- "
+                    f"mikromon-status.timer has stopped")
+    return "", ("this service runs without root; install the root reader "
+                "with: sudo bash deploy/install.sh")
 
 
 def _wg_dump(iface: str = "wg0") -> tuple:
     """(peers, error) from `wg show <iface> dump`.
 
     peers maps public key -> {"endpoint", "allowed", "handshake", "rx", "tx"}.
-    Needs CAP_NET_ADMIN, so it retries under sudo -n the same way the
-    diagnostics report does; without it this returns an error rather than
-    pretending the fleet is fine.
+    Needs CAP_NET_ADMIN, which this service does not have -- and it runs
+    with NoNewPrivileges, so sudo cannot give it that either. On the server
+    the answer comes from the root-run status snapshot (_wg_snapshot);
+    without one this returns an error rather than pretending the fleet is
+    fine.
     """
     import subprocess
-    cmds = [["wg", "show", iface, "dump"],
-            ["sudo", "-n", "wg", "show", iface, "dump"]]
-    out = err = ""
-    for cmd in cmds:
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
-        except FileNotFoundError:
-            return {}, "wireguard-tools is not installed on this server"
-        except Exception as exc:  # noqa: BLE001
-            return {}, str(exc)
-        if r.returncode == 0:
-            out = r.stdout
-            break
-        err = (r.stderr or "").strip() or f"exit {r.returncode}"
+    try:
+        r = subprocess.run(["wg", "show", iface, "dump"],
+                           capture_output=True, text=True, timeout=8)
+    except FileNotFoundError:
+        return {}, "wireguard-tools is not installed on this server"
+    except Exception as exc:  # noqa: BLE001
+        return {}, str(exc)
+    if r.returncode == 0:
+        out = r.stdout
     else:
-        return {}, err or "could not read the running WireGuard state"
+        out, err = _wg_snapshot(iface)
+        if err:
+            return {}, err
 
     peers = {}
     for i, line in enumerate(out.splitlines()):
@@ -6574,28 +6591,34 @@ def _render_logs(user, push_rows, alert_rows) -> str:
     return _page("Activity log", _header(user, "/logs") + inner)
 
 
-_FREE_PLAN_DEVICE_LIMIT = 1
+def _device_cap_text(used: int, limit: int) -> str:
+    """'Your package allows N devices and you have M.' -- said the same way
+    on the Devices page and on the page a refused add lands on."""
+    return (f'Your package allows {limit} device{"" if limit == 1 else "s"} '
+            f'and you have {used}.')
 
 
-def _render_upgrade_wall(user, current_count: int = 0) -> str:
+def _render_upgrade_wall(user, used: int, limit: int) -> str:
+    """Where adding a device past the package's cap lands."""
     inner = (
-        '<div class="wrap"><h1>Upgrade required</h1>'
+        '<div class="wrap"><h1>Upgrade your package</h1>'
         '<div class="box" style="text-align:center;padding:40px 24px">'
         '<div style="font-size:48px;margin-bottom:16px">&#128274;</div>'
-        '<h2 style="margin-top:0">Free plan: 1 device included</h2>'
-        f'<p class="muted">Your account has {current_count} device'
-        f'{"s" if current_count != 1 else ""} — the free plan allows '
-        f'{_FREE_PLAN_DEVICE_LIMIT}. Cloud and Enterprise plans '
-        f'(coming soon) remove this limit and unlock additional features.</p>'
+        '<h2 style="margin-top:0">You are at your device limit</h2>'
+        f'<p class="muted">{_device_cap_text(used, limit)} Upgrade your '
+        f'package to add more devices. The device was not added.</p>'
         '<p style="margin-top:24px">'
+        '<a class="btn" href="/billing">Upgrade package</a> '
         '<a class="btn ghost" href="/devices">Back to devices</a>'
         '</p></div></div>')
-    return _page("Upgrade required", _header(user, "/devices") + inner)
+    return _page("Upgrade your package", _header(user, "/devices") + inner)
 
 
 def _render_devices(store, csrf, user, edit_name=None, msg="",
                     all_devs=None, org_count: int = 0, org_total: int = 0,
-                    org_plan: str = "free") -> str:
+                    device_limit: int = 0) -> str:
+    """The Devices page. `device_limit` is the company's packet cap, 0 for
+    none; at the cap, the Add button becomes the way to a bigger packet."""
     if store is None:
         return _page("Devices", _header(user, "/devices") + '<div class="wrap">'
                      '<h1>Devices</h1><div class="box">Device management is not '
@@ -6777,21 +6800,28 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
         + field_add("Client-count sources", f'<div class="chips">{src_add}</div>', full=True)
         + field_add("Enabled checks", f'<div class="chips">{chk_add}</div>', full=True))
 
-    add_modal = _device_modal("add-modal", "Add a device", "/devices/save", "",
-                              "Add device", add_fields, add_intro)
+    # At the packet's cap the add form is not rendered at all, so there is
+    # nothing to fill in only to be refused at the end of it.
+    at_limit = bool(device_limit) and org_total >= device_limit
+    add_modal = ("" if at_limit else
+                 _device_modal("add-modal", "Add a device", "/devices/save",
+                               "", "Add device", add_fields, add_intro))
     edit_modal = _device_modal("edit-modal",
                                f"Edit: {esc(edit_name)}" if edit_name else "Edit device",
                                "/devices/save", edit_name or "",
                                "Save changes", fields)
 
+    add_btn = (f'<a class="btn" href="/billing">Upgrade package</a>'
+               if at_limit else
+               f'<button class="btn" type="button" '
+               f'onclick="document.getElementById(\'add-modal\')'
+               f'.classList.add(\'open\')">Add device</button>')
     inv_table = (
         f'<div class="box">'
         f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">'
         f'<input id="iq" placeholder="Search by name, model, version, serial…" '
         f'style="flex:1" onkeyup="invFilter()">'
-        f'<button class="btn" type="button" '
-        f'onclick="document.getElementById(\'add-modal\').classList.add(\'open\')">'
-        f'Add device</button></div>'
+        f'{add_btn}</div>'
         f'<table id="invt" style="width:100%">'
         f'<tr><th>Name</th><th>Model</th><th>RouterOS</th><th>Serial</th>'
         f'<th>Host / IP</th><th>Update available</th><th>Status</th><th>Actions</th></tr>'
@@ -6812,8 +6842,13 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
               '</script>')
 
     plan_banner = ""
-    # TODO: re-enable after testing
-    # if org_plan == "free": ...
+    if at_limit:
+        plan_banner = (
+            f'<div class="box" style="border-left:4px solid #d97706">'
+            f'<b>You are at your device limit.</b> '
+            f'{_device_cap_text(org_total, device_limit)} Upgrade your '
+            f'package to add more devices. '
+            f'<a href="/billing">Upgrade package &rarr;</a></div>')
 
     # Show active vs total count when there are waiting (never-connected) devices.
     count_note = ""
@@ -7499,6 +7534,27 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 msg=q.get("ok", [""])[0], error=q.get("error", [""])[0],
                 roadwarrior_box=rw_box),
                 "text/html; charset=utf-8")
+
+        def _device_cap(self, user) -> int:
+            """The most devices this user's company may have; 0 = no cap.
+
+            No cap without billing on this server, and none for the platform
+            superadmin, whose own company has no packet -- capping it at the
+            free tier would lock the operator out of their own platform.
+            """
+            if not billing or not user or user.get("is_superadmin"):
+                return 0
+            org_id = user.get("org_id")
+            if org_id is None:
+                return 0
+            try:
+                return int(billing.device_limit(int(org_id)) or 0)
+            except Exception:  # noqa: BLE001
+                # A billing database that cannot be read is our fault, not
+                # the customer's: log it, and do not block their devices.
+                log.exception("could not read the device cap for org %s",
+                              org_id)
+                return 0
 
         def _org_device_count(self, org_id) -> int:
             """How many routers this company has. 0 if we cannot tell.
@@ -8446,13 +8502,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 active_count = (sum(1 for n in (org_scope or []) if n in known_all)
                                 if org_scope is not None else len(known_all))
                 org_count = len(org_scope) if org_scope is not None else active_count
-                org_plan = (auth.org(user["org_id"]) or {}).get("plan", "free") if auth else "free"
                 page = _render_devices(store, self._session()["csrf"], user,
                                        edit_name=edit,
                                        all_devs=all_devs,
                                        org_count=active_count,
                                        org_total=org_count,
-                                       org_plan=org_plan)
+                                       device_limit=self._device_cap(user))
             finally:
                 if store:
                     store.close()
@@ -11118,17 +11173,23 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if path == "/devices/save":
                     raw = self._device_form_to_raw(store, flat, multi)
                     orig = flat.get("original_name") or None
-                    # TODO: re-enable after testing
-                    # if not orig and auth:
-                    #     state = _load_state(state_file)
-                    #     org_scope = sorted(store.names_for_org(user["org_id"]))
-                    #     active_count = sum(1 for n in org_scope
-                    #                       if n in set(_known_devices(self._store(), state)))
-                    #     org_plan = (auth.org(user["org_id"]) or {}).get("plan", "free")
-                    #     if org_plan == "free" and active_count >= _FREE_PLAN_DEVICE_LIMIT:
-                    #         return self._send(200,
-                    #             _render_upgrade_wall(user, active_count),
-                    #             "text/html; charset=utf-8")
+                    # The package's device cap, enforced on the one path that
+                    # creates a device -- before a tunnel address is reserved
+                    # for it. Edits and renames are not new devices, and
+                    # neither is re-saving a name the company already has.
+                    # This was commented out "until after testing", so any
+                    # company could add as many devices as it liked whatever
+                    # it had paid for.
+                    if not orig and store.raw(raw.get("name", "")) is None:
+                        limit = self._device_cap(user)
+                        used = self._org_device_count(user["org_id"])
+                        if limit and used >= limit:
+                            log.info("device add refused for org %s: %s of "
+                                     "%s devices in use", user["org_id"],
+                                     used, limit)
+                            return self._send(
+                                200, _render_upgrade_wall(user, used, limit),
+                                "text/html; charset=utf-8")
                     # Script-first add: no public IP entered -> provision over
                     # the tunnel. Pre-assign a stable tunnel IP now so the record
                     # is valid; the router dials home when the generated script

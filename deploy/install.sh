@@ -470,21 +470,20 @@ set +e
 
   mkdir -p /etc/wireguard
   # The wireguard package sets /etc/wireguard to 700 root:root.  Grant the
-  # service group traverse, read AND WRITE.
+  # service group traverse and read -- deliberately NOT write.
   #
-  # Write on the DIRECTORY (not just on wg-peers.conf) is what lets the
-  # dashboard replace that file by renaming a temp file over it, which is
-  # the only way to update it without a reader ever seeing it half-written.
-  # The mikromon-wg-reload.path unit watches this file and runs
-  # `wg syncconf` the moment it changes; syncconf removes every peer absent
-  # from the config it is handed, so a reader that catches a truncated file
-  # drops those peers from the running interface -- a fleet-wide outage from
-  # one short read.  At 750 the service falls back to overwriting in place,
-  # which works but reopens a narrower version of that window.
-  chmod 770 /etc/wireguard
+  # This used to be 770 so the dashboard could replace wg-peers.conf by
+  # renaming a temp file over it. But write on a DIRECTORY lets its group
+  # rename over ANY file in it, whatever that file's own mode: wg0.key, and
+  # wg0.conf, whose PostUp lines root runs. That made an internet-facing
+  # service one rename away from root. (It was also reset to 750 a few
+  # lines further down on every run, so it never stayed in effect anyway.)
+  #
+  # What the rename protected is kept another way: the dashboard rewrites
+  # wg-peers.conf in place without ever emptying it (web._inplace_write),
+  # so a reload that catches it mid-write never sees an empty peer list.
+  chmod 750 /etc/wireguard
   chgrp "${SERVICE_USER}" /etc/wireguard
-  # The hub's own private key stays root-only regardless: group write on the
-  # directory would otherwise let the service replace it.
   chmod 600 /etc/wireguard/wg0.key 2>/dev/null || true
   [ -f "${WG_PEERS}" ] || install -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
       -m 640 /dev/null "${WG_PEERS}"
@@ -655,28 +654,64 @@ fi
 
 # ---------------------------------------------------------------------------
 # On-demand WebFig/Winbox remote access (Option A) — an nginx reverse proxy on
-# the hub. ACCESS_HOST is auto-detected from the server's public IP if not set
-# explicitly. Set ACCESS_HOST=your.domain to use a hostname instead of an IP.
+# the hub. Its links are https://<ACCESS_HOST>:<port>, so the host has to be
+# reachable from wherever people browse. Chosen, in this order:
+#   1. ACCESS_HOST=... given for this run;
+#   2. the host a previous run configured -- unless it is a private address,
+#      so an earlier auto-detection gone wrong does not stick for ever;
+#   3. the dashboard's own domain (DOMAIN=, or web.domain in config.yaml),
+#      which already has a trusted certificate WebFig can use;
+#   4. this server's public IP, then whatever `hostname -I` lists first.
+# Every plain re-run used to start again from 4. On a server behind NAT that
+# lands on a private 172.16.x.x address, so a host fixed with ACCESS_HOST=
+# lasted exactly until the next upgrade.
 # ---------------------------------------------------------------------------
+_private_host() {
+  case "$1" in
+    ""|localhost|10.*|127.*|192.168.*|169.254.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*)
+      return 0 ;;
+  esac
+  return 1
+}
+_config_get() {  # _config_get <section> <key>: a value from config.yaml, or ""
+  [[ -f "${CONFIG_FILE}" && -x "${APP_DIR}/.venv/bin/python" ]] || return 0
+  "${APP_DIR}/.venv/bin/python" - "${CONFIG_FILE}" "$1" "$2" <<'PY' 2>/dev/null || true
+import sys, yaml
+try:
+    with open(sys.argv[1]) as f:
+        data = yaml.safe_load(f) or {}
+    print(str((data.get(sys.argv[2]) or {}).get(sys.argv[3]) or "").strip())
+except Exception:
+    pass
+PY
+}
+if [[ -z "${ACCESS_HOST:-}" ]]; then
+  PREV_ACCESS_HOST="$(_config_get access hub_host)"
+  if ! _private_host "${PREV_ACCESS_HOST}"; then
+    ACCESS_HOST="${PREV_ACCESS_HOST}"
+    log "Remote access: keeping ${ACCESS_HOST} (set ACCESS_HOST=... to change it)."
+  fi
+fi
+if [[ -z "${ACCESS_HOST:-}" ]]; then
+  ACCESS_HOST="${DOMAIN:-$(_config_get web domain)}"
+  if [[ -n "${ACCESS_HOST}" ]]; then
+    log "Remote access: using the dashboard's domain, ${ACCESS_HOST}."
+  fi
+fi
 if [[ -z "${ACCESS_HOST:-}" ]]; then
   # Try public IP first (works on OVHcloud, Hetzner, etc.), fall back to local.
-  ACCESS_HOST="$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null \
-    || hostname -I 2>/dev/null | awk '{print $1}')"
-  ACCESS_HOST="${ACCESS_HOST:-}"
-  # The fallback returns whatever `hostname -I` lists first, which on a NATed
-  # server is a private address. Everything then installs cleanly, every port
-  # really does open -- and every WebFig link times out, because the address
-  # in it exists only on this LAN. Say so here rather than leaving it to be
-  # discovered a browser tab at a time.
-  case "${ACCESS_HOST}" in
-    10.*|127.*|192.168.*|169.254.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*)
-      log "WARN: remote access auto-detected ${ACCESS_HOST}, a PRIVATE address."
-      log "      WebFig/Winbox links built from it only work on this LAN."
-      log "      Re-run with ACCESS_HOST=your.public.hostname to fix it."
-      log "      (Links fall back to the address you browse the dashboard on,"
-      log "       so this is a warning, not a dead feature.)"
-      ;;
-  esac
+  # -f, or an error page from the lookup service becomes the "address".
+  ACCESS_HOST="$(curl -4 -fs --max-time 5 https://api.ipify.org 2>/dev/null \
+    || hostname -I 2>/dev/null | awk '{print $1}')" || ACCESS_HOST=""
+fi
+# On a NATed server the fallback is a private address. Everything then
+# installs cleanly, every port really does open -- and every WebFig link
+# times out, because the address in it exists only on this LAN.
+if [[ -n "${ACCESS_HOST}" ]] && _private_host "${ACCESS_HOST}"; then
+  log "WARN: remote access is using ${ACCESS_HOST}, a PRIVATE address."
+  log "      WebFig/Winbox links built from it only work on this LAN."
+  log "      Re-run with ACCESS_HOST=your.domain to fix it, and have the router"
+  log "      in front of this server forward TCP 20000-29999 to it."
 fi
 if [[ -n "${ACCESS_HOST}" ]]; then
   step "Setting up remote access (nginx) for ${ACCESS_HOST}"
@@ -757,23 +792,10 @@ PY
     systemctl enable --now easymikrotik-access-reload.path
     systemctl enable --now easymikrotik-access-reload.timer
 
-    # Two narrow sudo rules for the web service, both read-only-ish and both
-    # scoped to one command:
-    #
-    #   * start the reload unit, so opening remote access applies IMMEDIATELY
-    #     and the dashboard can report the outcome, instead of writing a file
-    #     and trusting a chain it cannot see. The unit was failing on every
-    #     trigger from the day this shipped and nothing said so.
-    #   * read WireGuard state, which is the one fact that separates "this
-    #     router's key is wrong" from "its packets never arrive" -- two
-    #     problems with opposite fixes that look identical without it.
-    cat > /etc/sudoers.d/mikromon-access <<SUDO
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl start easymikrotik-access-reload.service
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/wg show *
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/sbin/nginx -t
-SUDO
-    chmod 440 /etc/sudoers.d/mikromon-access
-    visudo -cf /etc/sudoers.d/mikromon-access >/dev/null       || rm -f /etc/sudoers.d/mikromon-access
+    # No sudo rules here any more. mikromon-web runs with NoNewPrivileges,
+    # so sudo from inside it is refused by the kernel whatever sudoers says;
+    # the rules this used to write never once took effect. What they were
+    # for is done by mikromon-status.timer (below), which runs as root.
 
     if command -v ufw >/dev/null 2>&1; then
       ufw allow 20000:24999/tcp comment 'easymikrotik WebFig'
@@ -1035,6 +1057,123 @@ try:
 except Exception as e:
     print(f"  WARNING: could not check secure_cookies: {e}")
 PY
+
+# ---------------------------------------------------------------------------
+# Root status snapshot — what the dashboard cannot read for itself.
+#
+# mikromon-web runs unprivileged with NoNewPrivileges=true, so sudo can never
+# work from inside it: the kernel refuses, whatever sudoers says. Earlier
+# builds tried anyway (sudo wg show, sudo nginx -t), and the Platform panel
+# told people to add sudoers lines that could not take effect -- then
+# reported the refusal as "nginx refuses its own configuration".
+#
+# Instead this root timer writes what only root can see into
+# /run/mikromon-status every 30 seconds, readable by the service group only:
+#   wg0.dump   `wg show wg0 dump`, private and preshared keys blanked out
+#   wg0.txt    `wg show wg0`, which never prints the private key
+#   nginx-t    `nginx -t` output, last line exit=<code>
+#   certs.tsv  path <TAB> notAfter for every certificate this server holds
+# The directory belongs to root, so the dashboard can read it and nothing
+# more; the script lives outside ${APP_DIR}, which the dashboard can write.
+# ---------------------------------------------------------------------------
+step "Installing the root status snapshot (mikromon-status.timer)"
+set +e
+(
+  set -e
+  install -d -o root -g root -m 755 /usr/local/lib/mikromon
+  cat > /usr/local/lib/mikromon/status-snapshot.sh <<'SNAP'
+#!/usr/bin/env bash
+# Installed by mikromon's deploy/install.sh. Runs as root, with the
+# dashboard's group, from mikromon-status.service; see install.sh.
+set -u -o pipefail
+umask 027
+cd /run/mikromon-status || exit 1
+
+# WireGuard. A dump's first line carries the hub's private key and each peer
+# line its preshared key: both are blanked on the way through, so neither is
+# ever written to disk here.
+if wg show wg0 dump 2> .wg0.err \
+     | awk 'BEGIN { FS = OFS = "\t" }
+            NR == 1 { $1 = "(hidden)" }
+            NR > 1 && $2 != "(none)" { $2 = "(hidden)" }
+            { print }' > .wg0.dump; then
+  mv -f .wg0.dump wg0.dump
+  if wg show wg0 > .wg0.txt 2>/dev/null; then mv -f .wg0.txt wg0.txt; fi
+  rm -f .wg0.err wg0.err
+else
+  mv -f .wg0.err wg0.err
+  rm -f .wg0.dump .wg0.txt wg0.dump wg0.txt
+fi
+
+if command -v nginx >/dev/null 2>&1; then
+  rc=0
+  nginx -t > .nginx-t 2>&1 || rc=$?
+  echo "exit=${rc}" >> .nginx-t
+  mv -f .nginx-t nginx-t
+else
+  rm -f nginx-t
+fi
+
+: > .certs.tsv
+for c in /etc/letsencrypt/live/*/fullchain.pem /etc/ssl/easymikrotik-*.crt; do
+  [ -f "$c" ] || continue
+  end="$(openssl x509 -enddate -noout -in "$c" 2>/dev/null)" || continue
+  printf '%s\t%s\n' "$c" "${end#notAfter=}" >> .certs.tsv
+done
+mv -f .certs.tsv certs.tsv
+exit 0
+SNAP
+  chmod 755 /usr/local/lib/mikromon/status-snapshot.sh
+
+  # RuntimeDirectoryPreserve keeps /run/mikromon-status between runs: a
+  # oneshot "stops" the moment it finishes, and without it systemd would
+  # delete the directory -- and every reading in it -- each time.
+  cat > /etc/systemd/system/mikromon-status.service <<UNIT
+[Unit]
+Description=Snapshot WireGuard, nginx and certificate state for the mikromon dashboard
+[Service]
+Type=oneshot
+Group=${SERVICE_USER}
+RuntimeDirectory=mikromon-status
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+ExecStart=/usr/bin/bash /usr/local/lib/mikromon/status-snapshot.sh
+PrivateTmp=true
+ProtectHome=true
+UNIT
+  cat > /etc/systemd/system/mikromon-status.timer <<UNIT
+[Unit]
+Description=Refresh the mikromon dashboard's root status snapshot
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=30s
+AccuracySec=5s
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now mikromon-status.timer
+  systemctl start mikromon-status.service
+
+  # The sudo rules earlier builds wrote, and that the panel told people to
+  # add, cannot take effect for a NoNewPrivileges service. Removed so nobody
+  # mistakes them for what makes anything work.
+  for f in /etc/sudoers.d/mikromon-access /etc/sudoers.d/mikromon-wg \
+           /etc/sudoers.d/mikromon-nginx; do
+    if [[ -f "$f" ]]; then
+      rm -f "$f"
+      echo "Removed $f (sudo cannot work from inside the dashboard)."
+    fi
+  done
+)
+STATUS_OK=$?
+set -e
+if [[ ${STATUS_OK} -eq 0 ]]; then
+  log "Root status snapshot armed (mikromon-status.timer, every 30s)."
+else
+  log "WARN: could not install mikromon-status.timer. The Platform panel"
+  log "      will not be able to read WireGuard or nginx state."
+fi
 
 # ---------------------------------------------------------------------------
 # Enable and start both services — always, not just on upgrade.
