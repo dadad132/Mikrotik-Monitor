@@ -16,6 +16,13 @@ class PushError(Exception):
     """Raised when a read-write operation cannot be carried out."""
 
 
+class PlanRefused(PushError):
+    """A plan that was not built because what was asked for would break
+    something. The router was read fine and nothing was sent; the message
+    starts with "Nothing was sent to the router." and gives one reason per
+    line."""
+
+
 def _is_disconnect(exc) -> bool:
     """True when an exception looks like the session dropping / a read timeout
     (as opposed to the router actively rejecting the command). Used so that a

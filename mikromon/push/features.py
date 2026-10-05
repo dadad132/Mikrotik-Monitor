@@ -20,6 +20,7 @@ import hashlib
 import ipaddress
 import re
 
+from . import wgextra as _wgx
 from .api import PushError
 from .plan import Operation, Plan
 from .reconcile import _norm, reconcile_list
@@ -3411,6 +3412,9 @@ FEATURES = {
     # the router. It has its own push, run deliberately, because creating
     # VLANs and moving ports is not a thing to do on a page load.
     "departments": {"title": "Departments", "write": False},
+    "wgextra": {"title": "Extra WireGuard", "write": True,
+                "read": _wgx.wgextra_read, "summary": _wgx.wgextra_summary,
+                "form": _wgx.wgextra_form, "plan": _wgx.wgextra_plan},
 }
 
 # tab label -> url slug (Overview/Backups handled elsewhere)
@@ -3419,7 +3423,8 @@ TAB_SLUGS = {"Routes": "routes", "WAN": "wan", "Security": "security",
              "QoS": "qos", "Port forwarding": "portfwd", "Interfaces": "interfaces",
              "Remote access": "remote", "VPN": "tunnel",
              "Scripts": "scripts", "Update": "update",
-             "Departments": "departments"}
+             "Departments": "departments",
+             "Extra WireGuard": "wgextra"}
 
 
 # ===========================================================================

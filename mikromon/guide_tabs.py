@@ -293,6 +293,33 @@ TABS = [
             "the same unattended push that creates the VLANs is how "
             "somebody loses the link they are managing the router over."},
 
+    {"slug": "wgextra", "title": "Extra WireGuard", "art": None,
+     "what": "Connects this router to another WireGuard VPN server, such as "
+             "AdGuard VPN, alongside the tunnel we manage it over. Only the "
+             "addresses listed in Allowed IPs go through it: a route is added "
+             "for each one, devices on the LAN are masqueraded behind the "
+             "tunnel address, and new connections coming in from the tunnel "
+             "are dropped. Everything else, including our management "
+             "connection, carries on as before.",
+     "steps": ["Open the WireGuard config file the VPN provider gave you.",
+               "Give the connection a short name, like <code>adguard</code>. "
+               "It becomes the interface name on the router.",
+               "From <b>[Interface]</b>, copy <b>PrivateKey</b> and "
+               "<b>Address</b>. The DNS line is not used: the router has one "
+               "DNS setting, and the DNS tab owns it.",
+               "From <b>[Peer]</b>, copy <b>PublicKey</b>, "
+               "<b>AllowedIPs</b>, <b>Endpoint</b> and "
+               "<b>PersistentKeepalive</b>.",
+               "Preview, read the plan, then apply with Safe mode left on.",
+               "Reload the tab after a minute. The connection should show "
+               "a last handshake; if it says there is none yet, a key or "
+               "the endpoint is wrong."],
+     "warn": "Anything that would cut the site off is refused before it is "
+             "sent: 0.0.0.0/0, or a range covering our management server, the "
+             "router's internet gateway, its own networks or the VPN server "
+             "itself. The private key goes to the router and is not stored or "
+             "shown here; leave its box blank to keep the current key."},
+
     {"slug": "backups", "title": "Backups", "art": None,
      "what": "Configuration backups of the router. One is taken automatically "
              "before every change you apply, so there is always a way back "

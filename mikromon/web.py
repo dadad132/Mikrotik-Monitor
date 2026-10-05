@@ -2135,6 +2135,7 @@ _DEVICE_TABS = ["Overview", "Provision", "Routes", "WAN", "Security",
                 "VPN", "Scripts"]
 _MAINT_ITEMS = [("Update", "update"), ("Backups", "backups"),
                 ("Departments", "departments"),
+                ("Extra WireGuard", "wgextra"),
                 ("Restrict access", "harden"), ("Remote access", "remote"),
                 ("Temp Access", "tempaccess"), ("Share", "share")]
 # label -> url slug (all tabs are wired to the engine now)
@@ -2147,6 +2148,7 @@ _LIVE_TABS = {"Overview": "", "Provision": "provision",
               "VPN": "tunnel", "Scripts": "scripts",
               "Update": "update", "Backups": "backups",
               "Departments": "departments",
+              "Extra WireGuard": "wgextra",
               "Temp Access": "tempaccess", "Share": "share"}
 # tabs that WRITE to the router (admins only); Overview is read-only
 # Instant toggles are wrong where the act is not a small reversible change:
@@ -2155,11 +2157,13 @@ _LIVE_TABS = {"Overview": "", "Provision": "provision",
 #   scripts -- the payload is free text nobody has checked, so the preview
 #              IS the review.
 #   remote  -- creating a login is a one-way act with a password shown once.
-_INSTANT_TOGGLE_OFF = {"update", "scripts", "remote"}
+#   wgextra -- a new tunnel and its routes are read as a plan before they go.
+_INSTANT_TOGGLE_OFF = {"update", "scripts", "remote", "wgextra"}
 
 _ADMIN_TABS = {"provision", "routes", "wan", "security", "harden", "nextdns",
                "qos", "portfwd", "remote", "tunnel", "scripts",
-               "update", "backups", "tempaccess", "interfaces", "share"}
+               "update", "backups", "tempaccess", "interfaces", "share",
+               "wgextra"}
 
 
 def _help_dot(anchor: str, what: str = "") -> str:
@@ -5462,6 +5466,14 @@ def _field_html(desc) -> str:
                 f'<input name="{desc["name"]}" value="{esc(desc.get("value",""))}" '
                 f'placeholder="{esc(desc.get("placeholder",""))}" '
                 f'style="width:100%">{hint}</div>')
+    if t == "secret":
+        # Never pre-filled: a key or password typed here goes to the router
+        # and is not written back into any page.
+        return (f'<div class="f"><label class="f">{esc(label)}</label>'
+                f'<input type="password" name="{desc["name"]}" value="" '
+                f'autocomplete="new-password" '
+                f'placeholder="{esc(desc.get("placeholder",""))}" '
+                f'style="width:100%">{hint}</div>')
     if t == "textarea":
         return (f'<div class="f full"><label class="f">{esc(label)}</label>'
                 f'<textarea name="{desc["name"]}" rows="4" style="width:100%">'
@@ -6377,6 +6389,15 @@ def _friendly_push_error(error: str) -> str:
             '<li>Reconnect and run <code>/system/device-mode/print</code> '
             'to confirm <code>scheduler: yes</code> now shows.</li>'
             '</ol>After that, this works on this router going forward.')
+    # A refused plan (push.api.PlanRefused): the router was read fine, and
+    # saying "could not reach the router" above a list of reasons would send
+    # somebody off to check the wrong thing.
+    if error.startswith("Nothing was sent to the router."):
+        reasons = [r for r in error.split("\n")[1:] if r.strip()]
+        return ('<b>Nothing was sent to the router.</b> Fix these and '
+                'preview again:<ul style="margin:6px 0 0 20px">'
+                + "".join(f"<li>{esc(r)}</li>" for r in reasons)
+                + "</ul>")
     return ""
 
 
@@ -9397,9 +9418,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     plan = feature["plan"](pusher, cfg, flat, multi)
                 except (DeviceError, PushError) as exc:
                     if audit:
+                        from .push.api import PlanRefused
+                        what = ("refused" if isinstance(exc, PlanRefused)
+                                else "could not read the router")
                         audit.append(name, uname, slug,
                                      "apply" if commit else "dry-run", "error",
-                                     f"could not read the router: {exc}", str(exc))
+                                     f"{what}: {exc}", str(exc))
                     return self._feature_tab_page(name, user, view, error=str(exc))
                 # Safety net: snapshot the whole config to a named backup BEFORE
                 # committing a real change, so you can restore it from the
