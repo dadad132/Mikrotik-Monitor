@@ -50,8 +50,15 @@ _PAGE_CSS = """
  *{box-sizing:border-box}
  body{font-family:Segoe UI,Arial,sans-serif;margin:0;background:var(--bg);
    color:var(--text)}
- a{color:var(--accent)}
+ a{color:var(--accent);text-decoration:none}
+ /* Links in running text: the colour says "link", the underline comes on
+    hover. An underline on every router name and "back" link made pages look
+    unfinished. Anything with a class (buttons, nav, tabs) styles itself. */
+ a:not([class]):hover{text-decoration:underline;text-underline-offset:2px}
  h1{font-size:22px;margin:0 0 16px}
+ /* A sub-heading inside a card. Left at the browser's size it came out
+    bigger than the card's own title above it. */
+ h3{font-size:15px}
  /* device card grid */
  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));
    gap:16px;padding:18px 20px}
@@ -99,12 +106,22 @@ _PAGE_CSS = """
    box-shadow:var(--shadow)}
  .box h2{font-size:16px;margin:0 0 14px}
  form.inline{display:inline}
- input,select,textarea{font:inherit;font-size:14px;padding:7px 9px;
-   border:1px solid var(--border);border-radius:7px;background:var(--surface);
-   color:var(--text)}
+ /* font-weight is reset after `inherit`: a field inside a bold caption took
+    the caption's weight, so its value and placeholder rendered bold. */
+ input,select,textarea{font:inherit;font-weight:400;font-size:14px;
+   padding:7px 9px;border:1px solid var(--border);border-radius:7px;
+   background:var(--surface);color:var(--text)}
  input:focus,select:focus,textarea:focus{outline:2px solid var(--accent-soft);
    border-color:var(--accent)}
  input::placeholder,textarea::placeholder{color:var(--text-faint)}
+ /* A field's caption reads the same whichever way the form was written --
+    "Name<br><input>" in a label or a paragraph matches .fields label.f, where
+    it used to be body-size text on some pages and small caps-weight on
+    others. Tick-boxes and switches keep their own look. */
+ label:has(>input:not([type=checkbox]):not([type=radio]):not([type=hidden])),
+ label:has(>select),label:has(>textarea),
+ p:has(>br+input:not([type=checkbox]):not([type=radio])){font-size:12.5px;
+   font-weight:600;color:var(--text-muted);line-height:1.6}
  /* A button element with no class drew as the browser's grey default --
     "Save" on the pay-link box, among others. */
  button:not([class]){font:inherit;font-size:13px;font-weight:600;cursor:pointer;
@@ -150,7 +167,11 @@ _PAGE_CSS = """
    display:inline-block}.btn:hover{background:var(--accent-hover)}
  .btn:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid
    var(--accent);outline-offset:2px}
- .btn.red{background:var(--danger)}.btn.red:hover{opacity:.85}
+ /* Destructive, but not the loudest thing on the page: a solid red Delete on
+    every row out-shouted the rows themselves. It turns solid on hover, and
+    every one of them still asks before it does anything. */
+ .btn.red{background:var(--danger-bg);color:var(--danger)}
+ .btn.red:hover{background:var(--danger);color:#fff}
  .btn.ghost{background:var(--surface-2);color:var(--text)}
  .btn.ghost:hover{background:var(--border)}
  .actions{display:flex;gap:8px;align-items:center}
@@ -298,6 +319,36 @@ _PAGE_CSS = """
  .tabmenu button.reboot{color:var(--danger)}
  .tabmenu button.reboot:hover{background:var(--danger-bg)}
  .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+ /* Device overview columns space their cards with `gap`; a .box's own
+    margin added on top of it (flex margins never collapse) tripled it. */
+ /* One WAN line on the device overview. Classes rather than inline colours
+    so dark mode can have its own -- the light tints glared on a dark page. */
+ .wst{display:flex;align-items:center;gap:12px;padding:10px 14px;
+   border-radius:8px;border:1px solid}
+ .wst.ok{background:#f0fdf4;border-color:#bbf7d0}
+ .wst.bad{background:#fef2f2;border-color:#fecaca}
+ .wst-nm{font-weight:600;font-size:13px;color:var(--text);flex:1}
+ .wst-pr{font-size:11px;color:var(--text-faint);margin-right:6px}
+ .wst-tag{font-size:11px;font-weight:600;padding:2px 10px;border-radius:10px}
+ .wst.ok .wst-tag{background:#dcfce7;color:#15803d}
+ .wst.bad .wst-tag{background:#fee2e2;color:#b91c1c}
+ @media (prefers-color-scheme:dark){
+   :root:not([data-theme="light"]) .wst.ok{background:#04210f;border-color:#14532d}
+   :root:not([data-theme="light"]) .wst.bad{background:#260a0a;border-color:#7f1d1d}
+   :root:not([data-theme="light"]) .wst.ok .wst-tag{background:#14532d;color:#86efac}
+   :root:not([data-theme="light"]) .wst.bad .wst-tag{background:#7f1d1d;color:#fecaca}
+ }
+ :root[data-theme="dark"] .wst.ok{background:#04210f;border-color:#14532d}
+ :root[data-theme="dark"] .wst.bad{background:#260a0a;border-color:#7f1d1d}
+ :root[data-theme="dark"] .wst.ok .wst-tag{background:#14532d;color:#86efac}
+ :root[data-theme="dark"] .wst.bad .wst-tag{background:#7f1d1d;color:#fecaca}
+ .ovgrid{display:grid;grid-template-columns:220px minmax(0,1fr) 280px;gap:16px;
+   align-items:start}
+ .ovcol{display:flex;flex-direction:column;gap:16px;min-width:0}
+ .ovcol>.box{margin:0}
+ @media(max-width:980px){.ovgrid{grid-template-columns:220px minmax(0,1fr)}
+   .ovgrid>.ovcol:last-child{grid-column:1/-1}}
+ @media(max-width:640px){.ovgrid{grid-template-columns:minmax(0,1fr)}}
  .badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;
    font-weight:700}
  .badge.ok{background:var(--success-bg);color:var(--success)}
@@ -332,7 +383,7 @@ _PAGE_CSS = """
 _THEME_VARS = """
 :root{
   --bg:#f1f5f9;--surface:#ffffff;--surface-2:#f8fafc;--border:#e2e8f0;
-  --text:#0f172a;--text-muted:#475569;--text-faint:#94a3b8;
+  --text:#0f172a;--text-muted:#475569;--text-faint:#8492a6;
   --accent:#2563eb;--accent-hover:#1d4ed8;--accent-soft:#eff6ff;
   --success:#16a34a;--success-bg:#dcfce7;
   --warning:#d97706;--warning-bg:#fef3c7;
@@ -343,7 +394,7 @@ _THEME_VARS = """
 @media (prefers-color-scheme:dark){
   :root:not([data-theme="light"]){
     --bg:#0b1220;--surface:#111827;--surface-2:#0d1526;--border:#1f2937;
-    --text:#e5e7eb;--text-muted:#94a3b8;--text-faint:#64748b;
+    --text:#e5e7eb;--text-muted:#94a3b8;--text-faint:#718199;
     --accent:#3b82f6;--accent-hover:#60a5fa;--accent-soft:#13213b;
     --success:#22c55e;--success-bg:#052e16;
     --warning:#f59e0b;--warning-bg:#3a2a06;
@@ -354,7 +405,7 @@ _THEME_VARS = """
 }
 :root[data-theme="dark"]{
   --bg:#0b1220;--surface:#111827;--surface-2:#0d1526;--border:#1f2937;
-  --text:#e5e7eb;--text-muted:#94a3b8;--text-faint:#64748b;
+  --text:#e5e7eb;--text-muted:#94a3b8;--text-faint:#718199;
   --accent:#3b82f6;--accent-hover:#60a5fa;--accent-soft:#13213b;
   --success:#22c55e;--success-bg:#052e16;
   --warning:#f59e0b;--warning-bg:#3a2a06;

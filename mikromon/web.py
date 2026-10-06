@@ -1624,8 +1624,12 @@ a{color:var(--accent);text-decoration:none}
 .dash-search:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
 /* ── stat chips ──────────────────────────────────── */
 .dash-chips{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:18px}
+/* Content centred top to bottom: the chips stretch to the tallest one in the
+   row, and the Suggestions chip (a button, which centres by itself) sat lower
+   than the plain counters beside it. */
 .chip{background:var(--surface);border:1px solid var(--border);
-  border-radius:12px;padding:14px 22px;box-shadow:var(--shadow);min-width:110px}
+  border-radius:12px;padding:14px 22px;box-shadow:var(--shadow);min-width:110px;
+  display:flex;flex-direction:column;justify-content:center}
 .chip-num{font-size:26px;font-weight:800;color:var(--text);line-height:1}
 .chip-lbl{font-size:11px;color:var(--text-faint);text-transform:uppercase;
   letter-spacing:.05em;margin-top:6px;font-weight:600}
@@ -2388,8 +2392,8 @@ def _render_device(store, state, name, user, csrf="",
 
         # Rounded end-cap discs so the butt-capped track has tidy terminations
         dot = sw // 2
-        caps = (f'<circle cx="{sx:.2f}" cy="{sy:.2f}" r="{dot}" fill="#e8edf5"/>'
-                f'<circle cx="{ex:.2f}" cy="{ey:.2f}" r="{dot}" fill="#e8edf5"/>')
+        caps = (f'<circle cx="{sx:.2f}" cy="{sy:.2f}" r="{dot}" style="fill:var(--border)"/>'
+                f'<circle cx="{ex:.2f}" cy="{ey:.2f}" r="{dot}" style="fill:var(--border)"/>')
 
         # Fill arc: CW from start, spanning p × 220°
         fg = ""
@@ -2409,10 +2413,10 @@ def _render_device(store, state, name, user, csrf="",
         return (
             f'<div class="box" style="padding:16px 12px 14px;text-align:center">'
             f'<div style="font-size:10px;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:.08em;color:#94a3b8;margin-bottom:8px">{label}</div>'
+            f'letter-spacing:.08em;color:var(--text-faint);margin-bottom:8px">{label}</div>'
             f'<svg viewBox="0 0 {vb_w} {vb_h}" width="{vb_w}" height="{vb_h}" '
             f'style="display:block;margin:0 auto">'
-            f'<path d="{bg_d}" stroke="#e8edf5" stroke-width="{sw}" fill="none" '
+            f'<path d="{bg_d}" style="stroke:var(--border)" stroke-width="{sw}" fill="none" '
             f'stroke-linecap="butt"/>'
             f'{caps}'
             f'{fg}'
@@ -2433,10 +2437,10 @@ def _render_device(store, state, name, user, csrf="",
     if "temp_c" in m:     fi.append(("Temperature",   f'{m["temp_c"]:.0f}°C'))
     fact_cells = "".join(
         f'<div style="flex:1;min-width:130px;padding:11px 16px;'
-        f'border-right:1px solid #f0f4f8">'
-        f'<div style="font-size:10px;color:#94a3b8;text-transform:uppercase;'
+        f'border-right:1px solid var(--border)">'
+        f'<div style="font-size:10px;color:var(--text-faint);text-transform:uppercase;'
         f'letter-spacing:.06em;margin-bottom:3px">{esc(k)}</div>'
-        f'<div style="font-size:13px;font-weight:600;color:#0f172a">{esc(v)}</div>'
+        f'<div style="font-size:13px;font-weight:600;color:var(--text)">{esc(v)}</div>'
         f'</div>'
         for k, v in fi)
     facts_bar = (f'<div style="display:flex;flex-wrap:wrap;background:var(--surface);'
@@ -2462,18 +2466,18 @@ def _render_device(store, state, name, user, csrf="",
         tc = "#dc2626" if t > 70 else "#f97316" if t > 50 else "#16a34a"
         left_col += (f'<div class="box" style="padding:18px 14px;text-align:center">'
                      f'<div style="font-size:11px;font-weight:600;text-transform:uppercase;'
-                     f'letter-spacing:.06em;color:#94a3b8;margin-bottom:12px">'
+                     f'letter-spacing:.06em;color:var(--text-faint);margin-bottom:12px">'
                      f'Temperature</div>'
                      f'<div style="font-size:38px;font-weight:700;color:{tc};'
                      f'padding:8px 0">{t:.0f}°C</div></div>')
     if "client_count" in m:
         left_col += (f'<div class="box" style="padding:18px 14px;text-align:center">'
                      f'<div style="font-size:11px;font-weight:600;text-transform:uppercase;'
-                     f'letter-spacing:.06em;color:#94a3b8;margin-bottom:12px">'
+                     f'letter-spacing:.06em;color:var(--text-faint);margin-bottom:12px">'
                      f'Connected</div>'
-                     f'<div style="font-size:38px;font-weight:700;color:#2563eb;'
+                     f'<div style="font-size:38px;font-weight:700;color:var(--accent);'
                      f'padding:8px 0">{m["client_count"]:.0f}</div>'
-                     f'<div style="font-size:12px;color:#94a3b8;margin-top:4px">'
+                     f'<div style="font-size:12px;color:var(--text-faint);margin-top:4px">'
                      f'devices</div></div>')
     if not left_col:
         left_col = '<div class="box"><p class="muted">No telemetry yet.</p></div>'
@@ -2493,54 +2497,44 @@ def _render_device(store, state, name, user, csrf="",
         link_down = i > 0 and f"wan_link:{i}" in problem_keys
         if router_down or health == "down":
             # Router offline or full outage
-            dot_c = "#dc2626"; row_bg = "#fef2f2"; row_br = "#fecaca"
-            bdg_bg = "#fee2e2"; bdg_c = "#b91c1c"
+            dot_c = "#dc2626"; tone = "bad"
             slabel = "Offline"; sub = ""; glow = ""
         elif health == "partial" and i == 0:
             # Primary has failed — it is offline, not "in failover"
-            dot_c = "#dc2626"; row_bg = "#fef2f2"; row_br = "#fecaca"
-            bdg_bg = "#fee2e2"; bdg_c = "#b91c1c"
+            dot_c = "#dc2626"; tone = "bad"
             slabel = "Offline"; sub = ""; glow = ""
         elif health == "partial" and i > 0 and link_down:
             # Another backup, itself confirmed down — not the one actually
             # carrying traffic during this failover, whichever that is.
-            dot_c = "#dc2626"; row_bg = "#fef2f2"; row_br = "#fecaca"
-            bdg_bg = "#fee2e2"; bdg_c = "#b91c1c"
+            dot_c = "#dc2626"; tone = "bad"
             slabel = "Offline"; sub = ""; glow = ""
         elif health == "partial" and i > 0:
             # This backup is actively routing because primary is down
-            dot_c = "#16a34a"; row_bg = "#f0fdf4"; row_br = "#bbf7d0"
-            bdg_bg = "#dcfce7"; bdg_c = "#15803d"
+            dot_c = "#16a34a"; tone = "ok"
             slabel = "Failover"; sub = ""; glow = "box-shadow:0 0 0 4px rgba(22,163,74,0.18);"
         elif health == "full" and i == 0:
             # Primary is up and routing
-            dot_c = "#16a34a"; row_bg = "#f0fdf4"; row_br = "#bbf7d0"
-            bdg_bg = "#dcfce7"; bdg_c = "#15803d"
+            dot_c = "#16a34a"; tone = "ok"
             slabel = "Online"; sub = ""; glow = "box-shadow:0 0 0 4px rgba(22,163,74,0.18);"
         elif health == "full" and i > 0 and link_down:
             # Backup link is itself confirmed down (stopped/unreachable) —
             # standing by is not possible if it's dead.
-            dot_c = "#dc2626"; row_bg = "#fef2f2"; row_br = "#fecaca"
-            bdg_bg = "#fee2e2"; bdg_c = "#b91c1c"
+            dot_c = "#dc2626"; tone = "bad"
             slabel = "Offline"; sub = ""; glow = ""
         else:
             # health == "full" and i > 0: backup link is up but not routing
-            dot_c = "#4ade80"; row_bg = "#f0fdf4"; row_br = "#d1fae5"
-            bdg_bg = "#dcfce7"; bdg_c = "#15803d"
+            dot_c = "#4ade80"; tone = "ok"
             slabel = "Online"; sub = "Inactive"; glow = ""
         priority = "Primary" if i == 0 else f"Backup {i}"
-        sub_html = (f'<span style="font-size:10px;color:#94a3b8;margin-left:4px">'
-                    f'({sub})</span>') if sub else ""
+        sub_html = (f'<span style="font-size:10px;color:var(--text-faint);'
+                    f'margin-left:4px">({sub})</span>') if sub else ""
         wan_rows += (
-            f'<div style="display:flex;align-items:center;gap:12px;padding:10px 14px;'
-            f'border-radius:8px;background:{row_bg};border:1px solid {row_br}">'
+            f'<div class="wst {tone}">'
             f'<span style="width:10px;height:10px;border-radius:50%;'
             f'background:{dot_c};flex-shrink:0;{glow}"></span>'
-            f'<span style="font-weight:600;font-size:13px;color:#1e293b;flex:1">'
-            f'{esc(wname)}</span>'
-            f'<span style="font-size:11px;color:#94a3b8;margin-right:6px">{priority}</span>'
-            f'<span style="font-size:11px;font-weight:600;padding:2px 10px;'
-            f'border-radius:10px;background:{bdg_bg};color:{bdg_c}">[{slabel}]</span>'
+            f'<span class="wst-nm">{esc(wname)}</span>'
+            f'<span class="wst-pr">{priority}</span>'
+            f'<span class="wst-tag">[{slabel}]</span>'
             f'{sub_html}'
             f'</div>')
     if wan_rows:
@@ -2585,16 +2579,16 @@ def _render_device(store, state, name, user, csrf="",
             f'align-items:center;margin-bottom:6px">'
             f'<b style="font-size:13px;color:var(--text)">{esc(iface)}</b>'
             f'<span style="font-size:12px">'
-            f'<span style="color:#2563eb">&darr;&nbsp;{human_bps(t.get("rx_bps", 0))}</span>'
+            f'<span style="color:var(--accent)">&darr;&nbsp;{human_bps(t.get("rx_bps", 0))}</span>'
             f'&nbsp;&nbsp;'
             f'<span style="color:#f97316">&uarr;&nbsp;{human_bps(t.get("tx_bps", 0))}</span>'
             f'&nbsp;&nbsp;'
-            f'<span style="color:#94a3b8">peak&nbsp;{human_bps(peak_rx)}</span>'
+            f'<span style="color:var(--text-faint)">peak&nbsp;{human_bps(peak_rx)}</span>'
             f'</span></div>'
             f'{sp}</div>')
     center_throughput = (
         f'<div class="box"><h2 style="margin-bottom:14px">Network Throughput '
-        f'<span style="font-size:12px;color:#94a3b8;font-weight:400">'
+        f'<span style="font-size:12px;color:var(--text-faint);font-weight:400">'
         f'(last hour)</span></h2>'
         f'{spark_rows or "<p class=muted>No throughput data yet.</p>"}'
         f'</div>')
@@ -2626,7 +2620,7 @@ def _render_device(store, state, name, user, csrf="",
             when = 23 - i
             ago = "this hour" if when == 0 else f"{when}h ago"
             if b is None:
-                colour, tip = "#e2e8f0", f"{ago}: not measured"
+                colour, tip = "var(--border)", f"{ago}: not measured"
             elif b >= 0.9:
                 colour, tip = "#16a34a", f"{ago}: up"
             elif b < 0.1:
@@ -2645,7 +2639,7 @@ def _render_device(store, state, name, user, csrf="",
         gap_note = ("" if not gaps else
                     f'<p class="muted" style="font-size:12px;margin:8px 0 0">'
                     f'<span style="display:inline-block;width:9px;height:9px;'
-                    f'background:#e2e8f0;border-radius:2px;'
+                    f'background:var(--border);border-radius:2px;'
                     f'vertical-align:middle"></span> '
                     f'{gaps} hour{"" if gaps == 1 else "s"} not measured, so '
                     f'the figure above covers the other '
@@ -2658,7 +2652,7 @@ def _render_device(store, state, name, user, csrf="",
             f'<div class="box"><h2 style="margin-bottom:12px">Online Availability</h2>'
             f'<div style="display:flex;gap:2px;margin-bottom:8px">{bars_h}</div>'
             f'<div style="display:flex;justify-content:space-between;'
-            f'font-size:12px;color:#64748b">'
+            f'font-size:12px;color:var(--text-faint)">'
             f'<span>24h ago</span>'
             f'<span style="font-weight:700;color:{acol}">{avail:.1f}% uptime'
             f'{"" if not gaps else " of what was measured"}</span>'
@@ -2699,12 +2693,10 @@ def _render_device(store, state, name, user, csrf="",
         f'<h1 style="display:flex;align-items:center;gap:12px">{esc(name)}'
         f'<span class="badge {badge[0]}">{badge[1]}</span></h1>'
         f'{tabbar}{facts_bar}'
-        f'<div style="display:grid;grid-template-columns:220px 1fr 280px;'
-        f'gap:16px;align-items:start">'
-        f'<div style="display:flex;flex-direction:column;gap:16px">{left_col}</div>'
-        f'<div style="display:flex;flex-direction:column;gap:16px">'
-        f'{center_wan}{center_throughput}</div>'
-        f'<div style="display:flex;flex-direction:column;gap:16px">'
+        f'<div class="ovgrid">'
+        f'<div class="ovcol">{left_col}</div>'
+        f'<div class="ovcol">{center_wan}{center_throughput}</div>'
+        f'<div class="ovcol">'
         f'{avail_box}{access_html}{probs_box}{diag_html or ""}{iface_card}</div>'
         f'</div>'
         f'<p style="margin-top:16px"><a href="/dashboard">&larr; dashboard</a></p>'

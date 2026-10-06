@@ -126,6 +126,8 @@ class MockDevice:
         self.board = board
         self.version = version
         self.serial = serial or ("MT" + format(abs(hash(cfg.name)) % 10**10, "010d"))
+        # Same contract as Device: the probe's round trip, None when it failed.
+        self.last_probe_ms = None
 
     @property
     def name(self):
@@ -134,7 +136,9 @@ class MockDevice:
     def reachable(self, timeout=None, attempts=None):
         # Advances the scenario once per poll (engine calls this first).
         self.tick = min(self.tick + 1, len(self.frames) - 1)
-        return bool(self.frames[self.tick].get("reachable", True))
+        ok = bool(self.frames[self.tick].get("reachable", True))
+        self.last_probe_ms = 12.0 + (self.tick % 7) if ok else None
+        return ok
 
     def connect(self):
         return None
@@ -165,6 +169,14 @@ class MockDevice:
                 "model": self.board, "serial-number": self.serial,
                 "current-firmware": self.version}]
         return snap
+
+    def run_command(self, path, cmd: str, **params) -> bool:
+        return True
+
+    def run_command_err(self, path, cmd: str, **params) -> tuple:
+        # A simulated router accepts the engine's housekeeping commands
+        # (check-for-updates and the like); there is nothing to refuse them.
+        return True, ""
 
     def ping(self, address, count=3):
         return 100 if self._frame().get("note", "").find("outage") >= 0 else 0

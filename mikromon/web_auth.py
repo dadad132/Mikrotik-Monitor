@@ -29,8 +29,8 @@ from .web_shared import (
 
 def _auth_brand() -> str:
     from .brand import logo_img
-    return ('<div class="brand" style="justify-content:center;'
-            'align-items:center;gap:9px;color:var(--text);'
+    return ('<div class="brand" style="display:flex;justify-content:center;'
+            'align-items:center;gap:9px;color:var(--text);font-weight:700;'
             'font-size:22px;margin-bottom:6px">'
             + logo_img(30) + _BRAND + '</div>')
 
@@ -51,9 +51,9 @@ def _auth_page(title, body) -> str:
             f'<meta name="viewport" content="width=device-width, initial-scale=1">'
             f'{_THEME_INIT_JS}{_auth_favicon()}<title>{esc(title)}</title>'
             f'<style>{_THEME_VARS}{_PAGE_CSS}</style></head><body>'
-            f'<div class="wrap" style="max-width:400px;margin-top:9vh">'
-            f'<div style="display:flex;justify-content:center;margin-bottom:6px">'
+            f'<div style="position:fixed;top:14px;right:16px">'
             f'{_theme_toggle_btn()}</div>'
+            f'<div class="wrap" style="max-width:400px;margin-top:9vh">'
             f'{_auth_brand()}<div class="box">{body}</div></div>'
             f'{_THEME_TOGGLE_JS}</body></html>')
 
@@ -516,7 +516,8 @@ def _change_packet_box(csrf, current_plan, device_count, period_end,
         elif q and q["kind"] == "downgrade":
             note = f'free, from the {BILLING_DAY}th'
         else:
-            note = money(p["price"], currency) + "/mo"
+            # Nothing to add to the price the option already shows.
+            note = ""
         fits = "" if p["devices"] >= device_count else " — too small for your "
         fits += f"{device_count} devices" if fits else ""
         rows.append(
@@ -524,7 +525,7 @@ def _change_packet_box(csrf, current_plan, device_count, period_end,
             f'{" selected" if cur and p["name"] == cur["name"] else ""}'
             f'{" disabled" if p["devices"] < device_count else ""}>'
             f'{p["devices"]} devices &mdash; {money(p["price"], currency)}/mo'
-            f' ({esc(note)}){esc(fits)}</option>')
+            f'{f" ({esc(note)})" if note else ""}{esc(fits)}</option>')
 
     return (
         f'<div class="box"><h2>Change your packet</h2>'
