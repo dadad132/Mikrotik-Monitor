@@ -237,6 +237,13 @@ try:
     st, body = req(op0, "/signup",
                    {"company": "Startup", "email": "founder@startup.test",
                     "password": "startup1", "phone": "0821234567"}, B0)
+    check("signing up without accepting the Terms & Conditions is refused, "
+          "and no account is made", "Terms" in body
+          and AuthStore(adb_empty).get_user("founder@startup.test") is None)
+    st, body = req(op0, "/signup",
+                   {"company": "Startup", "email": "founder@startup.test",
+                    "password": "startup1", "phone": "0821234567",
+                    "agree": "1"}, B0)
     check("signing up creates the company + logs in",
           st == 200 and "easymikrotik" in body)
     st, body = req(op0, "/signup", base=B0)
@@ -838,13 +845,31 @@ try:
               "their money and shrink their account",
               'value="d10"' in abody and 'value="d5"' not in abody)
 
+        # Paying is agreeing to the Terms & Conditions, so a checkout that
+        # arrives without the tick goes nowhere near Yoco.
+        _sent.clear()
+        # yon does not follow redirects, so the refusal is read off the
+        # Location it sends the browser back to.
+        try:
+            yon.open(urllib.request.Request(
+                QBASE + "/billing/checkout", data=urllib.parse.urlencode(
+                    {"csrf": _ytok, "plan": "d25"}).encode()), timeout=5)
+            _back = ""
+        except urllib.error.HTTPError as e:
+            _back = urllib.parse.unquote(e.headers.get("Location", ""))
+        check("a checkout without the Terms & Conditions tick is refused and "
+              "never reaches the card gateway",
+              not _sent and _back.startswith("/billing?error=")
+              and "Terms" in _back)
+
         # The price is the whole reason this route exists server-side.
         st, _ = req(yon, "/billing/checkout",
                     # Every one of these is a field the browser must not
                     # be able to decide: three of them are prices, and
                     # months= no longer exists as a choice at all.
                     {"csrf": _ytok, "plan": "d25", "months": "3",
-                     "amount": "1", "amount_cents": "1", "price": "1"},
+                     "amount": "1", "amount_cents": "1", "price": "1",
+                     "agree": "1"},
                     base=QBASE)
         _want = int(round(_zar(_plan("d25")["price_usd"])["amount"] * 100))
         check("the amount charged is computed from our own plan table, not "
@@ -920,7 +945,8 @@ try:
         # A payment for less than the order. Yoco would not send this, but
         # being wrong here gives away a packet.
         st, _ = req(yon, "/billing/checkout",
-                    {"csrf": _ytok, "plan": "d50", "months": "1"}, base=QBASE)
+                    {"csrf": _ytok, "plan": "d50", "months": "1",
+                     "agree": "1"}, base=QBASE)
         _short_id = int(_sent["meta"]["order"])
         _short = json.dumps({
             "type": "payment.succeeded",

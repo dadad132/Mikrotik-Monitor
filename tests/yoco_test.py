@@ -305,9 +305,23 @@ try:
     oid5 = store.create_order(5, "d25", cents, months=1)
     store.mark_order_paid(oid5, "p_new2")
     store.apply_paid_order(store.order(oid5), now=_oct20)
-    check("one paying on 20 October, eight days before the 28th, runs to 28 "
-          "November rather than being invoiced again within the week",
-          store.get(5)["current_period_end"] == first_billing_date(_oct20))
+    check("one paying on 20 October is active to 28 October, not to the end "
+          "of November -- the first payment buys the rest of this month",
+          time.strftime("%Y-%m-%d", time.localtime(
+              store.get(5)["current_period_end"])) == "2026-10-28")
+    # Priced at 23:30 on the 27th, settled just after midnight: it covers
+    # what it was priced for, not a month from when the card cleared.
+    _late = time.mktime((2026, 10, 27, 23, 30, 0, 0, 0, -1))
+    oid8 = store.create_order(8, "d25", cents, months=1, kind="first")
+    store.db.execute("UPDATE orders SET created = ? WHERE id = ?",
+                     (_late, oid8))
+    store.db.commit()
+    store.mark_order_paid(oid8, "p_midnight")
+    store.apply_paid_order(store.order(oid8), now=_late + 3600)
+    check("a first payment covers the days it was priced for, even when the "
+          "card settles after midnight",
+          time.strftime("%Y-%m-%d", time.localtime(
+              store.get(8)["current_period_end"])) == "2026-10-28")
     # A renewal paid after its period ended had the same fault: a month
     # added to the day it was paid, then rounded on to the next 28th.
     store._upsert(6, status="active", plan="d25", device_limit=25,

@@ -5,11 +5,13 @@ and helpers from web_shared; web.py imports the render functions from here.
 """
 from __future__ import annotations
 
+import json
 import math
 import time
 
 from . import guide_art, guide_tabs
 from .auth import AuthStore
+from .web_terms import terms_checkbox
 from .billing import (payment_reference, PLANS, GRACE_DAYS,
                       FUNDS_HOLD_DAYS,
                       days_until_suspension,
@@ -110,6 +112,7 @@ def _render_signup(error: str = "", values=None, has_regions: bool = False) -> s
             f'<p><input name="alert_emails" type="text" '
             f'placeholder="it@company.com, manager@company.com" '
             f'value="{esc(v.get("alert_emails", ""))}" style="width:100%"></p>'
+            f'{terms_checkbox()}'
             f'<button class="btn" type="submit" style="width:100%">'
             f'Create account</button></form>'
             f'<p class="muted" style="margin:14px 0 0;text-align:center">'
@@ -178,6 +181,7 @@ def _plan_upgrade_box(csrf: str, bill, device_count: int = 0,
         f'<label style="flex:1;min-width:240px">Move up to'
         f'<br><select name="plan" style="width:100%">{opts}</select></label>'
         f'<button class="btn" type="submit">Upgrade</button>'
+        f'<div style="flex-basis:100%">{terms_checkbox()}</div>'
         f'</form>'
         f'<p class="muted" style="margin:10px 0 0;font-size:12px">'
         f'You pay by card on Yoco. The bigger packet switches on by itself as '
@@ -713,6 +717,7 @@ def _pay_page(order, error: str, *, paid: bool = False,
             f'Router monitoring, billed monthly.</p>'
             f'<form method="POST" action="/pay">'
             f'<input type="hidden" name="t" value="{esc(token)}">'
+            f'{terms_checkbox("Payments are not refundable.")}'
             f'<button class="btn" type="submit" style="width:100%;'
             f'padding:12px;font-size:15px">Pay by card</button></form>'
             f'<p class="muted" style="font-size:12px;margin:14px 0 0">'
@@ -781,6 +786,17 @@ def _invoice_fields(org: dict, order: dict, contact: dict | None,
     client_lines = "".join(
         f'<p><b>{esc(k)}:</b> {esc(str(v))}</p>' for k, v in client_bits)
 
+    # A first payment is pro rata to the first 28th, and says so: an invoice
+    # that reads like a full month for thirteen days' money is a dispute.
+    covers = ""
+    if str(order.get("kind") or "") == "first":
+        from .billing import BILLING_DAY, first_payment_quote
+        _q = first_payment_quote(0, float(issued))   # the checkout's own sum
+        _days = _q["days"]
+        covers = (f' Pro rata: {_days} day{"" if _days == 1 else "s"} to '
+                  f'{time.strftime("%d %B %Y", time.localtime(_q["period_end"]))}'
+                  f', after which the packet renews monthly on the '
+                  f'{BILLING_DAY}th.')
     # One line, because a renewal charges for one thing. A legacy order
     # bought for several months at once shows the months as the quantity.
     items = (
@@ -788,7 +804,7 @@ def _invoice_fields(org: dict, order: dict, contact: dict | None,
         f'<td class="item">Router monitoring &mdash; up to {devices} '
         f'devices<small>Continuous polling, alerting, remote access and '
         f'configuration push across up to {devices} RouterBOARD devices.'
-        f'</small></td>'
+        f'{esc(covers)}</small></td>'
         f'<td class="n">{months}</td>'
         f'<td class="n">{unit:,.2f}</td>'
         f'<td class="n">{total:,.2f}</td></tr>')
@@ -1010,8 +1026,42 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
 
     note = _flash(msg, error)
 
-    # Cancel button shown only when there's an active PayFast subscription token
+    # Cancelling: the month already paid for runs to the 28th, then access to
+    # every unit stops until the next invoice is paid. Said in the confirm
+    # dialog as well as on the page, because it is the one click on this page
+    # that turns routers off.
     cancel_btn = ""
+    cancel_note = ""
+    cpe = float((bill or {}).get("current_period_end") or 0.0)
+    paid_running = (status in ("active", "trialing") and cpe > time.time()
+                    and bool(plan_name))
+    ends = time.strftime("%d %B %Y", time.localtime(cpe)) if cpe else ""
+    if paid_running and not pf_token:
+        if (bill or {}).get("cancel_requested"):
+            cancel_note = (
+                f'<div class="box" style="border-left:4px solid #d97706">'
+                f'<b>Cancellation requested.</b> You keep access until '
+                f'<b>{esc(ends)}</b>. After that you lose access to all of '
+                f'your units, and get it back when you pay the next invoice.'
+                f'<form method="POST" action="/billing/cancel" '
+                f'style="margin-top:10px">'
+                f'<input type="hidden" name="csrf" value="{csrf}">'
+                f'<input type="hidden" name="action" value="undo">'
+                f'<button class="btn" type="submit">Keep my subscription'
+                f'</button></form></div>')
+        else:
+            warn = (f"Cancel your subscription? You keep access until {ends}. "
+                    f"After that you lose access to ALL of your units until "
+                    f"you pay the next invoice.")
+            cancel_btn = (
+                f'<form method="POST" action="/billing/cancel" '
+                f'style="display:inline" '
+                f'onsubmit="return confirm({esc(json.dumps(warn))});">'
+                f'<input type="hidden" name="csrf" value="{csrf}">'
+                f'<button class="btn ghost" type="submit" '
+                f'style="color:#dc2626;border-color:#dc2626">'
+                f'Cancel subscription</button></form>')
+    # The old PayFast subscription, for any company still on one.
     if pf_token and status in ("active", "trialing"):
         cancel_btn = (f'<form method="POST" action="/billing/cancel-sub" '
                       f'style="display:inline" '
@@ -1025,7 +1075,7 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                   f'<div style="display:flex;align-items:center;'
                   f'justify-content:space-between;flex-wrap:wrap;gap:10px">'
                   f'{status_html}{cancel_btn}</div>'
-                  f'</div>'
+                  f'</div>{cancel_note}'
                   # No bank-details panel here. Invoices go out through
                   # Zoho in USD, so a South African account shown on the
                   # dashboard would be a second set of payment instructions
@@ -1054,6 +1104,11 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
             card_rate_ok = True
         except Exception:  # noqa: BLE001 - no rate: say so, charge nothing
             card_rate_ok = False
+    # With no paid period running, a payment covers only the days to the
+    # next 28th and is priced for them -- the same sum the checkout charges.
+    from .billing import BILLING_DAY, first_payment_quote
+    first_time = not (float((bill or {}).get("current_period_end") or 0.0)
+                      > time.time())
     plan_rows = ""
     for p in PLANS:
         is_current = (status in ("active", "trialing")
@@ -1070,11 +1125,24 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
             # settles in rands, so the checkout converts at the day's
             # published rate and records it on the order -- and Yoco's own
             # page shows the rand figure before the card is charged.
-            btn = (f'<form method="POST" action="/billing/checkout">'
-                   f'<input type="hidden" name="csrf" value="{csrf}">'
-                   f'<input type="hidden" name="plan" value="{esc(p["name"])}">'
-                   f'<button class="btn" type="submit" style="padding:6px 14px">'
-                   f'Pay ${p["price_usd"]:,.2f} for the month</button></form>'
+            q = first_payment_quote(p["price_usd"]) if first_time else None
+            if q and q["amount"] < q["full"]:
+                to = time.strftime("%d %b", time.localtime(q["period_end"]))
+                label = f'Pay ${q["amount"]:,.2f} to {to}'
+                note = (f'<div class="muted" style="font-size:11px;'
+                        f'margin-top:4px">{q["days"]} day'
+                        f'{"" if q["days"] == 1 else "s"} to the '
+                        f'{BILLING_DAY}th, then ${p["price_usd"]:,.2f} a '
+                        f'month</div>')
+            else:
+                label = f'Pay ${p["price_usd"]:,.2f} for the month'
+                note = ""
+            # One form around the whole ladder (below), so a single
+            # Terms & Conditions tick covers whichever button is pressed;
+            # the button itself says which packet.
+            btn = (f'<button class="btn" type="submit" name="plan" '
+                   f'value="{esc(p["name"])}" style="padding:6px 14px">'
+                   f'{label}</button>{note}'
                    if card_rate_ok else
                    f'<div class="muted" style="font-size:11px;margin-top:4px">'
                    f'Card payment is unavailable right now. Please pay by '
@@ -1107,20 +1175,30 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
     # problem, so the customer is told about the payment route that does work
     # (the EFT box directly below) rather than being shown an empty page with
     # a note about a config file they will never open.
-    pay_line = ("Pick how long you want and pay by card — your packet "
-                "changes the moment the payment goes through."
+    pay_line = ("Pay by card — your packet changes the moment the payment "
+                "goes through."
                 if yoco_on else
                 "Cancel anytime." if pf_enabled
                 else "Pay monthly by EFT using the reference below.")
+    card_ladder = yoco_on and card_rate_ok
+    ladder_open = (f'<form method="POST" action="/billing/checkout">'
+                   f'<input type="hidden" name="csrf" value="{csrf}">'
+                   f'{terms_checkbox("Payments are not refundable.")}'
+                   if card_ladder else "")
+    ladder_close = "</form>" if card_ladder else ""
     plans_html = (f'<div class="box"><h2>Choose a packet</h2>'
                   f'<p class="muted" style="margin-top:0">Packets step in '
                   f'{TIER_STEP}s up to {MAX_TIER_DEVICES} devices, and the '
                   f'price per device drops as the packet grows. All prices '
-                  f'in USD, billed monthly. {pay_line}</p>'
+                  f'in USD, billed monthly. Every account renews on the '
+                  f'{BILLING_DAY}th, so a first payment covers only the days '
+                  f'until then. {pay_line}</p>'
+                  f'{ladder_open}'
                   f'<table><thead><tr>'
                   f'<th>Packet</th><th>Devices</th><th>Monthly</th>'
                   f'<th>Per device</th><th></th>'
-                  f'</tr></thead><tbody>{plan_rows}</tbody></table></div>')
+                  f'</tr></thead><tbody>{plan_rows}</tbody></table>'
+                  f'{ladder_close}</div>')
 
     plans_html += _orders_box(orders or [])
     plans_html += _quote_request_box(csrf, device_count)
@@ -1167,6 +1245,7 @@ def _locked_pay_block(user, csrf: str, yoco_on: bool, bill,
             f'<label style="display:block;margin-bottom:8px">Packet'
             f'<br><select name="plan" style="width:100%">{opts}</select>'
             f'</label>'
+            f'{terms_checkbox()}'
             f'<button class="btn" type="submit" style="width:100%">'
             f'Pay now and switch everything back on</button>'
             f'<p class="muted" style="font-size:12px;margin:10px 0 0;'

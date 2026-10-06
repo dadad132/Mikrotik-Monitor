@@ -178,11 +178,23 @@ page = web_auth._render_billing(
     {"email": "o@x.test", "role": "owner", "org_name": "Alpha"},
     _bill, False, "tok", device_count=3, yoco_on=True)
 _d5 = B.plan_by_name("d5")
-check("each card button names the packet's dollar price",
+_q5 = B.first_payment_quote(_d5["price_usd"])
+check("a company paying for the first time is shown the dollars for the "
+      "days to the 28th, and the monthly price after it",
+      (f'Pay ${_q5["amount"]:,.2f} to ' in page
+       and f'then ${_d5["price_usd"]:,.2f} a month' in page)
+      if _q5["amount"] < _q5["full"] else
       f'Pay ${_d5["price_usd"]:,.2f} for the month' in page)
 check("...with no rand figure, rate line or 'charged in rands' note beside "
       "it", "Pay R" not in page and "charged in rands" not in page
       and "ZAR" not in page and "16.2593" not in page)
+_paying = dict(_bill, status="active", plan="d10",
+               current_period_end=time.time() + 12 * 86400)
+page2 = web_auth._render_billing(
+    {"email": "o@x.test", "role": "owner", "org_name": "Alpha"},
+    _paying, False, "tok", device_count=3, yoco_on=True)
+check("a company already paying is shown the full monthly price",
+      f'Pay ${_d5["price_usd"]:,.2f} for the month' in page2)
 _was = dict(_FX._cache)
 _FX._cache.clear()
 _real_convert = _FX.convert

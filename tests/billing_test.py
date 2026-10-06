@@ -422,11 +422,9 @@ check("...on the 28th, like every other account -- the 28th because it is "
       "the only late-month day that exists in February, so there is no "
       "clamping rule and therefore no clamping bug",
       time.localtime(_row["current_period_end"]).tm_mday == billing.BILLING_DAY)
-check("...and a real month away, never the tail end of this one: activated "
-      "on the 26th, the plain next 28th would invoice a full month for a "
-      "day and a half of service",
-      billing.MIN_FIRST_DAYS
-      <= ((_row["current_period_end"] - time.time()) / 86400) <= 45)
+check("...the next 28th, never one further out: a first period is the rest "
+      "of this billing month",
+      0 < ((_row["current_period_end"] - time.time()) / 86400) <= 31)
 check("...which is exactly the date first_billing_date decides, rather than "
       "something set_plan works out for itself",
       _row["current_period_end"] == billing.first_billing_date(time.time()))
@@ -476,13 +474,12 @@ check("putting a company back on free takes it out of the renewal run "
       "rather than invoicing somebody who is not paying",
       4242 not in [o["org_id"] for o in _bs.orgs_due_for_renewal(400)])
 
-print("\nA first period is a month, not the rest of this one")
+print("\nA first payment buys the rest of this billing month, pro rata")
 
-# Everyone renews on the 28th. So a company put on a packet on the 26th got
-# a paid-up date two days later, and was invoiced a full month for two days
-# of service -- the invoice arriving before they had finished reading the
-# welcome email. Nothing was wrong with the arithmetic; the 28th is the 28th
-# and the price is the price. The two simply should not have met on day one.
+# Everyone renews on the 28th. Paying on the 15th buys the 13 days to the
+# 28th -- not until the 28th of NEXT month -- and is charged for those days
+# only. The old rule skipped to the following 28th whenever the next one was
+# under a fortnight away, which handed out six weeks for one month's price.
 
 
 def _at(y, m, d):
@@ -494,57 +491,63 @@ def _day_of(ts):
     return (lt.tm_year, lt.tm_mon, lt.tm_mday)
 
 
-check("signed up on the 1st, the first renewal is this month's 28th -- a "
-      "27-day period is a month by any reading",
+check("signed up on the 1st, the first renewal is this month's 28th",
       _day_of(billing.first_billing_date(_at(2026, 9, 1)))
       == (2026, 9, 28))
-check("signed up on the 13th, still this month's 28th: a fortnight is the "
-      "line, and this is a day the right side of it",
-      _day_of(billing.first_billing_date(_at(2026, 9, 13)))
-      == (2026, 9, 28))
-check("signed up on the 15th, the first renewal moves to NEXT month's 28th "
-      "rather than invoicing a full month for thirteen days",
+check("signed up on the 15th, active until THIS month's 28th -- 13 days, "
+      "not until the end of next month",
       _day_of(billing.first_billing_date(_at(2026, 9, 15)))
-      == (2026, 10, 28))
-check("signed up on the 26th -- the case that started this -- the customer "
-      "gets a whole month, not an invoice 36 hours after signing up",
+      == (2026, 9, 28))
+check("signed up on the 26th, still this month's 28th",
       _day_of(billing.first_billing_date(_at(2026, 9, 26)))
-      == (2026, 10, 28))
+      == (2026, 9, 28))
 check("signed up ON the 28th, the renewal is a month out, never the same "
       "day", _day_of(billing.first_billing_date(_at(2026, 9, 28)))
       == (2026, 10, 28))
 check("it holds across a year end too, where the month arithmetic is the "
       "easiest thing in this file to get wrong",
-      _day_of(billing.first_billing_date(_at(2026, 12, 20)))
+      _day_of(billing.first_billing_date(_at(2026, 12, 29)))
       == (2027, 1, 28))
 check("February, the month the 28th exists in precisely so that none of "
       "this needs a clamping rule",
-      _day_of(billing.first_billing_date(_at(2027, 1, 20)))
+      _day_of(billing.first_billing_date(_at(2027, 2, 20)))
       == (2027, 2, 28))
 
-# The rule is a floor, not a fixed offset: it may never hand out LESS than a
-# fortnight, and it may never quietly hand out two months.
+_q = billing.first_payment_quote(25.00, _at(2026, 9, 15))
+check("paying on the 15th is charged for 13 days of the month ending on the "
+      "28th, and no more", _q["days"] == 13 and _q["days_in_period"] == 31
+      and _q["amount"] == round(25.00 * 13 / 31, 2) and _q["full"] == 25.00)
+_q = billing.first_payment_quote(25.00, _at(2026, 9, 27))
+check("...the day before the 28th, a single day", _q["days"] == 1
+      and 0 < _q["amount"] < 1)
+_q = billing.first_payment_quote(25.00, _at(2026, 9, 28))
+check("...and ON the 28th, a whole month at the whole price",
+      _q["amount"] == 25.00 and _day_of(_q["period_end"]) == (2026, 10, 28))
+
+# Never more than a month, and never nothing.
 for _m in range(1, 13):
-    for _d in (1, 5, 13, 14, 15, 20, 26, 27, 28):
-        _now = _at(2026, _m, _d)
-        _days = (billing.first_billing_date(_now) - _now) / 86400
-        if not billing.MIN_FIRST_DAYS <= _days <= 45:
-            check(f"first period from 2026-{_m:02d}-{_d:02d} is sane "
-                  f"({_days:.1f} days)", False)
+    for _d in (1, 5, 13, 14, 15, 20, 26, 27, 28, 29, 30):
+        try:
+            _now = _at(2026, _m, _d)
+        except (OverflowError, ValueError):
+            continue
+        _q = billing.first_payment_quote(25.00, _now)
+        _days = (_q["period_end"] - _now) / 86400
+        if not (0 < _days <= 31 and 0 < _q["amount"] <= 25.00):
+            check(f"first payment from 2026-{_m:02d}-{_d:02d} is sane "
+                  f"({_days:.1f} days, ${_q['amount']})", False)
             break
     else:
         continue
     break
 else:
-    check("every day of the year gives a first period between a fortnight "
-          "and a month and a half -- never a stub, never two months free",
-          True)
+    check("every day of the year gives a first period of at most a month, "
+          "charged at most a month's price", True)
 
 # Renewals are untouched: the rule is about starting, not continuing.
-check("a RENEWAL is still an exact calendar month, so this does not quietly "
-      "give every existing customer a free fortnight every month",
+check("a RENEWAL is still an exact calendar month at the full price",
       _day_of(billing.add_billing_months(
-          billing.first_billing_date(_at(2026, 9, 26)), 1)) == (2026, 11, 28))
+          billing.first_billing_date(_at(2026, 9, 26)), 1)) == (2026, 10, 28))
 
 print()
 if FAILS:

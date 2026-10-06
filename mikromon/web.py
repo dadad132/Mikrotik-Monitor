@@ -7232,6 +7232,18 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     pass
                 return
 
+            # Terms & Conditions: public, so they can be read before signing
+            # up or paying -- which is when they are agreed to.
+            if path == "/terms":
+                from .web_terms import render_terms
+                contact = None
+                try:
+                    contact = auth.get_billing_contact() if auth else None
+                except Exception:  # noqa: BLE001 - terms without a name
+                    contact = None
+                return self._send(200, render_terms(contact),
+                                  "text/html; charset=utf-8")
+
             # Also reachable directly for previewing the landing page in
             # isolation — the real entry point is "/" below.
             if path == "/landing":
@@ -11613,6 +11625,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_billing_subscribe(flat, user)
             if path == "/billing/cancel-sub":
                 return self._post_billing_cancel(flat, user)
+            if path == "/billing/cancel":
+                return self._post_cancel_at_period_end(flat, user)
             if path == "/billing/quote":
                 return self._post_billing_quote(flat, user)
             if path == "/pay":
@@ -11776,9 +11790,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if len(_re.sub(r"\D", "", phone)) < 7:
                 return self._redirect("/signup?error=" + quote(
                     "A valid mobile number is required (at least 7 digits)."))
+            from .web_terms import TERMS_VERSION
+            if flat.get("agree") != "1":
+                return self._redirect("/signup?error=" + quote(
+                    "Please read and accept the Terms & Conditions to create "
+                    "an account."))
             try:
                 org_id = auth.signup(email, flat.get("password", ""),
                                      flat.get("company", ""), phone=phone)
+                auth.accept_terms(email, TERMS_VERSION)
                 if billing:
                     billing.start_trial(org_id)
                 alert_raw = flat.get("alert_emails", "")
@@ -11922,6 +11942,16 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     None, "Card payment is not switched on. Please pay by "
                           "bank transfer using the details on your invoice."),
                     "text/html; charset=utf-8")
+            # The browser will not submit the form without the tick; this is
+            # for anything that posts without one.
+            from .web_terms import TERMS_VERSION
+            if flat.get("agree") != "1":
+                return self._send(200, _pay_page(
+                    None, "Please go back, tick the box to accept the Terms "
+                          "& Conditions, and pay again."),
+                    "text/html; charset=utf-8")
+            billing.record_order_terms(int(order["id"]), TERMS_VERSION,
+                                       by="pay link")
 
             # The amount comes from the ORDER, never from the page. A price
             # that arrives from a browser is a price a customer can edit.
@@ -11998,10 +12028,27 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # rate of our own choosing would make the relationship between
             # the advertised dollar price and the charge something we
             # asserted rather than something a customer can check.
-            from .billing import zar_amount
+            from .billing import first_payment_quote, zar_amount
             from .fxrate import RateUnavailable, describe
+            from .web_terms import TERMS_VERSION
+            # Accepted with every payment, and recorded on the order. The
+            # form will not submit without the tick; this is the real rule.
+            if flat.get("agree") != "1":
+                return self._redirect("/billing?error=" + quote(
+                    "Please tick the box to accept the Terms & Conditions, "
+                    "then pay."))
+            # Everyone renews on the 28th. A company with no paid period
+            # running pays only for the days from today to the next 28th;
+            # one renewing pays the full month.
+            org_id = user["org_id"]
+            _row = billing.get(org_id) or {}
+            if float(_row.get("current_period_end") or 0.0) > time.time():
+                usd, kind = float(plan["price_usd"]), "renewal"
+            else:
+                usd = first_payment_quote(plan["price_usd"])["amount"]
+                kind = "first"
             try:
-                _fx = zar_amount(plan["price_usd"])
+                _fx = zar_amount(usd)
             except RateUnavailable as exc:
                 log.error("no published USD/ZAR rate: %s", exc)
                 return self._redirect("/billing?error=" + quote(
@@ -12010,11 +12057,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     "rate we made up. Please pay by EFT, or try shortly."))
             amount_cents = int(round(_fx["amount"] * 100))
             _fx_basis = describe({**_fx, "pair": "USDZAR"})
-            org_id = user["org_id"]
             order_id = billing.create_order(org_id, plan["name"], amount_cents,
                                             months=months, currency="ZAR",
+                                            kind=kind,
                                             fx_rate=_fx["rate"],
-                                            fx_basis=_fx_basis)
+                                            fx_basis=_fx_basis,
+                                            terms_version=TERMS_VERSION,
+                                            terms_by=user.get("login", ""))
             host = self.headers.get("Host", "localhost")
             base = ("https" if self._is_https() else "http") + "://" + host
             try:
@@ -12041,8 +12090,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._redirect("/billing?error=" + quote(
                     "Yoco did not return a payment page. Nothing was "
                     "charged - please try again."))
-            log.info("Yoco checkout %s: org %s wants %s for the month, "
-                     "R%.2f (order %s)", res.get("id"), org_id, plan["name"],
+            log.info("Yoco checkout %s: org %s wants %s (%s), R%.2f (order %s)",
+                     res.get("id"), org_id, plan["name"],
+                     "pro rata to the 28th" if kind == "first" else "a month",
                      amount_cents / 100, order_id)
             return self._redirect(url)
 
@@ -12355,6 +12405,35 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     f'<script>document.getElementById("pf").submit();</script>'
                     f'</body></html>')
             return self._send(200, html, "text/html; charset=utf-8")
+
+        def _post_cancel_at_period_end(self, flat, user):
+            """Cancel (or un-cancel) a company's subscription. Owner only.
+
+            Nothing stops today. On the paid-up date the daily billing pass
+            suspends the company with no grace -- access to every unit ends --
+            and paying the next invoice switches it back on.
+            """
+            if not billing:
+                return self._redirect("/billing?error=" + quote(
+                    "Billing is not enabled on this server."))
+            org_id = user["org_id"]
+            if (flat.get("action") or "") == "undo":
+                billing.withdraw_cancel(org_id)
+                log.info("org %s withdrew its cancellation (%s)", org_id,
+                         user.get("login", "?"))
+                return self._redirect("/billing?ok=" + quote(
+                    "Your subscription carries on as normal."))
+            try:
+                end = billing.request_cancel(org_id)
+            except ValueError as exc:
+                return self._redirect("/billing?error=" + quote(str(exc)))
+            when = time.strftime("%d %B %Y", time.localtime(end))
+            log.info("org %s asked to cancel, effective %s (%s)", org_id, when,
+                     user.get("login", "?"))
+            return self._redirect("/billing?ok=" + quote(
+                f"Subscription cancelled. You keep access until {when}; "
+                f"after that you lose access to all of your units until you "
+                f"pay the next invoice."))
 
         def _post_billing_cancel(self, flat, user):
             """Cancel the org's active PayFast subscription."""

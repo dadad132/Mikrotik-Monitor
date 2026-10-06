@@ -138,6 +138,10 @@ class AuthStore:
                                  "INTEGER NOT NULL DEFAULT 0")
         self._add_col_if_missing("users", "is_superadmin",
                                  "INTEGER NOT NULL DEFAULT 0")
+        # Which Terms & Conditions this person accepted, and when. Recorded
+        # at signup; payments record their own acceptance on the order.
+        self._add_col_if_missing("users", "terms_version", "TEXT")
+        self._add_col_if_missing("users", "terms_accepted", "REAL")
         self._add_col_if_missing("orgs", "plan", "TEXT NOT NULL DEFAULT 'free'")
         self._add_col_if_missing("orgs", "contact", "TEXT")
         self._add_col_if_missing("orgs", "phone", "TEXT")
@@ -822,6 +826,23 @@ class AuthStore:
 
     def set_phone(self, identifier: str, phone: str) -> None:
         self._update(self._require(identifier)["id"], phone=_norm_phone(phone) or None)
+
+    def accept_terms(self, identifier: str, version: str,
+                     when: float | None = None) -> None:
+        """Record that this person accepted the Terms & Conditions."""
+        import time as _t
+        self._update(self._require(identifier)["id"], terms_version=str(version),
+                     terms_accepted=float(when if when is not None else _t.time()))
+
+    def terms_of(self, identifier: str) -> tuple:
+        """(version, accepted_at) this person agreed to, or ("", None)."""
+        u = self.get_user(identifier) or {}
+        if not u.get("id"):
+            return "", None
+        row = self.db.execute(
+            "SELECT terms_version, terms_accepted FROM users WHERE id = ?",
+            (int(u["id"]),)).fetchone()
+        return ((row[0] or ""), row[1]) if row else ("", None)
 
     def org_name(self, org_id) -> str:
         org = self.org(org_id) if org_id is not None else None

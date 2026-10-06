@@ -61,8 +61,10 @@ _html = web_auth._render_billing(
     _bill, False, "tok", device_count=2, yoco_on=True)
 check("the Billing tab's pay buttons have none either",
       'name="months"' not in _html)
-check("...and say what the figure buys, now that nothing beside it does",
-      "for the month" in _html)
+check("...and say what the figure buys, now that nothing beside it does: "
+      "the month, or for a first payment the days to the 28th",
+      "for the month" in _html
+      or ("to the 28th, then $" in _html and "a month" in _html))
 
 _locked = web_auth._locked_pay_block(
     {"email": "o@x.test", "role": "owner"}, "tok", True,

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import re
 import sqlite3
 import threading
@@ -125,12 +126,6 @@ def money(amount, currency: str = BILLING_CURRENCY) -> str:
 # which drifted a packet's renewal date backwards about five days a year.
 BILLING_DAY = 28
 
-# A first period shorter than this is not a month, it is an accident of the
-# calendar -- and it would be invoiced as a full month, because the price of
-# a packet does not know how many days are left in the month it was bought
-# in. So a new account skips to the following 28th instead.
-MIN_FIRST_DAYS = 14
-
 
 def next_billing_date(after: float | None = None) -> float:
     """The next BILLING_DAY strictly after `after`, at the start of that day.
@@ -150,17 +145,35 @@ def next_billing_date(after: float | None = None) -> float:
 
 
 def first_billing_date(after: float | None = None) -> float:
-    """The first renewal date for a NEW paid account.
+    """The first renewal date for a NEW paid account: simply the next 28th.
 
-    The next 28th, unless that is less than MIN_FIRST_DAYS away, in which
-    case the one after it. A customer signing up on the 26th should not be
-    invoiced a full month on the 27th for a day and a half of service.
+    A first period is the rest of the billing month it starts in, however
+    short, and it is charged pro rata (first_payment_quote): paying on the
+    15th buys the 13 days to the 28th, and nothing more. This used to skip
+    to the following 28th whenever the next one was under a fortnight away,
+    which gave somebody paying on the 15th six weeks for one month's price.
     """
-    now = after if after is not None else time.time()
-    end = next_billing_date(now)
-    if (end - now) / 86400 < MIN_FIRST_DAYS:
-        end = add_billing_months(end, 1)
-    return end
+    return next_billing_date(after)
+
+
+def first_payment_quote(price: float, now: float | None = None) -> dict:
+    """What a first payment costs: the days from now to the first 28th.
+
+    Counted in whole days, rounded up -- paying at ten in the morning on the
+    15th buys the 15th as well -- and priced against the length of the
+    billing month those days fall in. Paying ON the 28th starts a whole
+    month and costs one.
+
+    Returns {"amount", "period_end", "days", "days_in_period", "full"}.
+    """
+    now = now if now is not None else time.time()
+    end = first_billing_date(now)
+    total = max(1, int(round(days_in_period(end))))
+    days = min(total, max(1, math.ceil((end - now) / 86400 - 1e-6)))
+    full = round(float(price), 2)
+    amount = full if days >= total else round(full * days / total, 2)
+    return {"amount": amount, "period_end": end, "days": int(days),
+            "days_in_period": total, "full": full}
 
 
 def add_billing_months(period_end: float, months: int = 1) -> float:
@@ -202,6 +215,9 @@ def suspends_at(row: dict | None, status: str = "") -> float | None:
     if status in ("active", "trialing", "grace"):
         cpe = row.get("current_period_end")
         if cpe:
+            # Cancelled: access ends on the paid-up date itself, no grace.
+            if row.get("cancel_requested"):
+                return float(cpe)
             # Not yet lapsed, so no grace deadline exists on the row. It is
             # still knowable: lapse_due() will set exactly this.
             return float(cpe) + _GRACE_SECS
@@ -693,10 +709,17 @@ class BillingStore:
         self._add_col_if_missing("billing", "custom_label", "TEXT")
         self._add_col_if_missing("billing", "pending_plan", "TEXT")
         self._add_col_if_missing("billing", "pending_from", "REAL")
+        # When the owner asked to cancel. Access then ends on the paid-up
+        # date with no grace, and comes back when the next invoice is paid.
+        self._add_col_if_missing("billing", "cancel_requested", "REAL")
         # Renewal or upgrade. A renewal extends the period; an upgrade
         # changes the packet and leaves the renewal date exactly where it
         # is, so nobody pays twice for the same days.
         self._add_col_if_missing("orders", "kind", "TEXT")
+        # The Terms & Conditions the payer accepted with this payment, and
+        # who they were -- the record that says a payment was made on terms.
+        self._add_col_if_missing("orders", "terms_version", "TEXT")
+        self._add_col_if_missing("orders", "terms_by", "TEXT")
         # What a rand charge was converted at. The question that matters
         # later is not what was charged but on what basis, and that has to
         # outlive the day it was charged on.
@@ -721,7 +744,8 @@ class BillingStore:
             "SELECT org_id, pf_token, payment_id, status, plan, "
             "device_limit, current_period_end, grace_period_end, trial_end, "
             "pending_plan, pending_from, custom_cents, custom_label, "
-            "suspended_since, funds_hold_until, dormant_warned "
+            "suspended_since, funds_hold_until, dormant_warned, "
+            "cancel_requested "
             "FROM billing WHERE org_id = ?",
             (int(org_id),)).fetchone()
         if not row:
@@ -730,7 +754,8 @@ class BillingStore:
                 "device_limit", "current_period_end", "grace_period_end",
                 "trial_end", "pending_plan", "pending_from",
                 "custom_cents", "custom_label",
-                "suspended_since", "funds_hold_until", "dormant_warned")
+                "suspended_since", "funds_hold_until", "dormant_warned",
+                "cancel_requested")
         return dict(zip(keys, row))
 
     def device_limit(self, org_id: int) -> int:
@@ -851,7 +876,8 @@ class BillingStore:
                 end = add_billing_months(end, months - 1)
         self._upsert(org_id, status="active", plan=plan_name,
                      device_limit=plan["devices"], grace_period_end=None,
-                     current_period_end=float(end), pf_token=None)
+                     current_period_end=float(end), pf_token=None,
+                     cancel_requested=None)
 
     def set_paid_until(self, org_id: int, period_end: float) -> float:
         """Correct a company's paid-up date by hand. Returns the date set.
@@ -880,6 +906,28 @@ class BillingStore:
             cols["grace_period_end"] = None
         self._upsert(org_id, **cols)
         return end
+
+    def request_cancel(self, org_id: int, now: float | None = None) -> float:
+        """The owner asked to cancel. Returns the date access ends.
+
+        Nothing stops today: the month they paid for runs to its end. On the
+        paid-up date the daily pass suspends the account with no grace --
+        access to every unit ends -- and paying the next invoice switches it
+        back on, the same way any payment does. Asking again does not move
+        the date.
+        """
+        row = self.get(org_id) or {}
+        end = float(row.get("current_period_end") or 0.0)
+        now = now if now is not None else time.time()
+        if row.get("status") not in ("active", "trialing") or end <= now:
+            raise ValueError("There is no paid month running to cancel.")
+        if not row.get("cancel_requested"):
+            self._upsert(org_id, cancel_requested=now)
+        return end
+
+    def withdraw_cancel(self, org_id: int) -> None:
+        """Changed their mind before the paid-up date: carry on as normal."""
+        self._upsert(org_id, cancel_requested=None)
 
     def orgs_never_invoiced(self) -> list:
         """Companies on a priced packet with no paid-up date.
@@ -958,7 +1006,8 @@ class BillingStore:
             raise ValueError(f"Unknown plan: {plan_name!r}")
         self._upsert(org_id, status="active", plan=plan["name"],
                      device_limit=plan["devices"], grace_period_end=None,
-                     pending_plan=None, pending_from=None)
+                     pending_plan=None, pending_from=None,
+                     cancel_requested=None)
 
     # --- orders (a packet somebody is paying for) --------------------------
 
@@ -971,7 +1020,8 @@ class BillingStore:
                      months: int = 1, currency: str = BILLING_CURRENCY,
                      provider: str = "yoco", due: float | None = None,
                      kind: str = "renewal", fx_rate: float | None = None,
-                     fx_basis: str = "") -> int:
+                     fx_basis: str = "", terms_version: str = "",
+                     terms_by: str = "") -> int:
         """Record what is being bought, before sending anyone to pay.
 
         The amount is stored here rather than recomputed when the webhook
@@ -986,13 +1036,32 @@ class BillingStore:
         with self._lock:
             cur = self.db.execute(
                 "INSERT INTO orders (org_id, plan, months, amount_cents, "
-                "currency, created, provider, due, kind, fx_rate, fx_basis) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "currency, created, provider, due, kind, fx_rate, fx_basis, "
+                "terms_version, terms_by) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (int(org_id), str(plan), max(1, int(months)),
                  int(amount_cents), str(currency), time.time(),
-                 str(provider), due, str(kind), fx_rate, str(fx_basis or "")))
+                 str(provider), due, str(kind), fx_rate, str(fx_basis or ""),
+                 str(terms_version or "") or None,
+                 str(terms_by or "") or None))
             self.db.commit()
             return int(cur.lastrowid)
+
+    def record_order_terms(self, order_id: int, version: str,
+                           by: str = "") -> None:
+        """The payer of this order accepted these Terms & Conditions."""
+        with self._lock:
+            self.db.execute(
+                "UPDATE orders SET terms_version = ?, terms_by = ? WHERE id = ?",
+                (str(version), str(by or "") or None, int(order_id)))
+            self.db.commit()
+
+    def order_terms(self, order_id: int) -> tuple:
+        """(terms_version, terms_by) recorded on an order."""
+        row = self.db.execute(
+            "SELECT terms_version, terms_by FROM orders WHERE id = ?",
+            (int(order_id),)).fetchone()
+        return (row[0] or "", row[1] or "") if row else ("", "")
 
     def set_order_checkout(self, order_id: int, checkout_id: str) -> None:
         with self._lock:
@@ -1125,11 +1194,14 @@ class BillingStore:
 
         Otherwise -- a new account, a trial, a renewal paid after its period
         ended -- the period starts now and ends on the FIRST billing date,
-        exactly as set_plan does for a packet switched on by hand. This used
-        to add a month to now instead, and add_billing_months always lands on
-        the 28th of the NEXT month: paying on 5 October skipped 28 October
-        and ran to 28 November, a free month on every first payment (and on
-        every late one).
+        the next 28th, exactly as set_plan does for a packet switched on by
+        hand. This used to add a month to now instead, and add_billing_months
+        always lands on the 28th of the NEXT month: paying on 5 October
+        skipped 28 October and ran to 28 November, a free month on every
+        first payment (and on every late one).
+
+        A "first" order was priced pro rata from the moment it was placed, so
+        it covers exactly those days even if the card settles after midnight.
         """
         plan = plan_by_name(order.get("plan", ""))
         if plan is None:
@@ -1151,13 +1223,16 @@ class BillingStore:
         if current > now:
             end = add_billing_months(current, months)
         else:
-            end = first_billing_date(now)
+            start = now
+            if str(order.get("kind") or "") == "first" and order.get("created"):
+                start = float(order["created"])
+            end = first_billing_date(start)
             if months > 1:
                 end = add_billing_months(end, months - 1)
         self._upsert(org_id, status="active", plan=plan["name"],
                      device_limit=plan["devices"],
                      current_period_end=end,
-                     grace_period_end=None)
+                     grace_period_end=None, cancel_requested=None)
 
     # --- quote requests (companies past the last tier) --------------------
 
@@ -1213,13 +1288,14 @@ class BillingStore:
         now = now if now is not None else time.time()
         rows = self.db.execute(
             "SELECT org_id, plan, status, current_period_end, "
-            "grace_period_end FROM billing "
+            "grace_period_end, cancel_requested FROM billing "
             "WHERE current_period_end IS NOT NULL "
             "AND current_period_end < ? "
             "AND status IN ('active','trialing','grace')",
             (now,)).fetchall()
         return [{"org_id": r[0], "plan": r[1], "status": r[2],
-                 "current_period_end": r[3], "grace_period_end": r[4]}
+                 "current_period_end": r[3], "grace_period_end": r[4],
+                 "cancel_requested": r[5]}
                 for r in rows]
 
     def lapse_due(self, now: float | None = None) -> dict:
@@ -1236,7 +1312,13 @@ class BillingStore:
         for row in self.orgs_to_lapse(now):
             org_id = int(row["org_id"])
             gpe = row.get("grace_period_end")
-            if row["status"] in ("active", "trialing") or not gpe:
+            if row.get("cancel_requested"):
+                # They asked to stop. The period they paid for has run out,
+                # so access ends now -- grace is for a payment that may be in
+                # transit, and nothing is in transit here.
+                self.suspend(org_id)
+                moved["suspended"].append(org_id)
+            elif row["status"] in ("active", "trialing") or not gpe:
                 # Just lapsed. A payment in transit and a customer who has
                 # stopped paying look the same for a few days, and only one
                 # of them deserves to be cut off -- so the service keeps
@@ -1281,7 +1363,7 @@ class BillingStore:
         if plan:
             self._upsert(org_id, status="active", grace_period_end=None,
                          suspended_since=None, funds_hold_until=None,
-                         dormant_warned=None)
+                         dormant_warned=None, cancel_requested=None)
         else:
             self._upsert(org_id, status="inactive", grace_period_end=None,
                          device_limit=FREE_DEVICES, suspended_since=None,

@@ -195,8 +195,9 @@ _FAQ = [
      "No. Each router dials out to us over WireGuard, so it works behind NAT, "
      "CGNAT and LTE, and you never open a port on the router."),
     ("Which RouterOS versions work?",
-     "Monitoring works on RouterOS 6 and 7. The dial-home tunnel, and the "
-     "features that use it, need RouterOS 7.1 or later."),
+     "RouterOS 7.1 or later. Every router connects to us over WireGuard, "
+     "which RouterOS added in version 7.1, so a router still on RouterOS 6 "
+     "needs upgrading to 7 first."),
     ("What happens if a change breaks a router?",
      "Every change is previewed first and backed up before it is sent. With "
      f"Safe mode on, the router checks {_REVERT_MINUTES} minutes later that it "
@@ -207,10 +208,13 @@ _FAQ = [
     ("How does billing work?",
      f"30 days free with {TRIAL_DEVICES} device. After that you pick a packet "
      f"by device count, priced in US dollars and billed monthly. Every account "
-     f"renews on the {BILLING_DAY}th, and a missed payment gets {GRACE_DAYS} "
-     f"days' grace."),
+     f"renews on the {BILLING_DAY}th, so your first payment covers only the "
+     f"days until then, and a missed payment gets {GRACE_DAYS} days' grace."),
     ("Can I cancel?",
-     "Yes, any time, from your Billing tab."),
+     f"Yes, any time, with the Cancel button on your Billing tab. You keep "
+     f"access until the {BILLING_DAY}th, the end of the month you have paid "
+     f"for. After that you lose access to all of your units, and get it back "
+     f"when you pay the next invoice. Payments are not refundable."),
 ]
 
 
@@ -579,11 +583,15 @@ footer{background:#0f172a;padding:44px 24px 28px}
 """
 
 # ---------------------------------------------------------------------------
-# The demo: a dashboard playing out what usually means a site visit.
+# The demo: the product's own screens, playing out what usually means a site
+# visit.
 #
-# Four scenarios, each a handful of steps, driven by a small script below.
-# Nothing in it is fetched or real -- it is a film, not a feed -- but every
-# step is something the product actually does, in the order it does it.
+# Every screen in it is one the product really has -- the dashboard's device
+# table and status badges, a tab's dry-run preview, the Safe-mode page that
+# follows a change, the Remote access box, the provisioning script -- in the
+# same layout and wording. Alerts appear in an inbox BESIDE the window, because
+# that is where they really arrive: by email. Nothing here may show something
+# the product does not do; that would be advertising a different product.
 # ---------------------------------------------------------------------------
 
 _DEMO_CSS = """
@@ -600,9 +608,12 @@ _DEMO_CSS = """
 .dt.on{background:var(--accent);border-color:var(--accent);color:#fff;
   box-shadow:0 4px 14px rgba(37,99,235,.3)}
 .dt.on .n{background:rgba(255,255,255,.2);color:#fff;border-color:transparent}
-.dw{background:var(--surface);border:1px solid var(--border);border-radius:14px;
+.dmo{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);gap:18px;
+  align-items:start}
+/* the browser window around the app */
+.dw{background:var(--bg);border:1px solid var(--border);border-radius:14px;
   box-shadow:var(--shadow-md),0 30px 60px -30px rgba(15,23,42,.35);overflow:hidden}
-.dw-bar{display:flex;align-items:center;gap:12px;padding:10px 14px;
+.dw-bar{display:flex;align-items:center;gap:12px;padding:9px 14px;
   background:var(--surface-2);border-bottom:1px solid var(--border)}
 .dw-dots{display:flex;gap:6px}
 .dw-dots i{width:10px;height:10px;border-radius:50%;display:block}
@@ -611,90 +622,133 @@ _DEMO_CSS = """
 .dw-url{flex:1;font-size:12px;color:var(--text-faint);background:var(--surface);
   border:1px solid var(--border);border-radius:7px;padding:4px 10px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.dw-live{font-size:10px;font-weight:800;letter-spacing:.08em;color:var(--danger);
-  display:inline-flex;align-items:center;gap:6px}
-.dw-live::before{content:"";width:7px;height:7px;border-radius:50%;
-  background:var(--danger);animation:dlive 1.6s ease-in-out infinite}
 .dw-pause{font:inherit;font-size:11px;font-weight:600;cursor:pointer;
   color:var(--text-muted);background:var(--surface);border:1px solid var(--border);
   border-radius:6px;padding:3px 9px}
 .dw-pause:hover{color:var(--text);border-color:var(--accent)}
-.dw-body{display:grid;grid-template-columns:1.25fr 1fr}
-.dw-sites{padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:12px;
-  align-content:start}
-.ds{--c:var(--success);border:1px solid var(--border);border-radius:10px;
-  padding:12px 12px 10px;background:var(--surface);
-  transition:border-color .3s,box-shadow .3s}
-.ds.warn{--c:var(--warning)}.ds.down{--c:var(--danger)}
-.ds.idle{--c:var(--text-faint)}.ds.info,.ds.fix{--c:var(--accent)}
-.ds.hl{border-color:var(--c);
-  box-shadow:0 0 0 3px color-mix(in srgb,var(--c) 18%,transparent)}
-.ds-head{display:flex;align-items:center;gap:8px;min-width:0}
-.ds-dot{flex:0 0 9px;height:9px;border-radius:50%;background:var(--c)}
-.ds.down .ds-dot,.ds.info .ds-dot,.ds.fix .ds-dot{animation:dpulse 1.2s ease-out infinite}
-.ds-name{font-size:13px;font-weight:700;color:var(--text);white-space:nowrap;
-  overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
-.ds-tag{font-size:10px;font-weight:700;color:var(--c);white-space:nowrap;
-  background:color-mix(in srgb,var(--c) 13%,transparent);
-  padding:2px 7px;border-radius:999px}
-.ds-wan{font-size:11px;color:var(--text-faint);margin:3px 0 6px 17px;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ds-spark{display:block;width:100%;height:34px}
-.ds-spark polyline{fill:none;stroke:var(--c);stroke-width:1.6;
-  vector-effect:non-scaling-stroke;stroke-linejoin:round}
-.ds-spark path{fill:var(--c);opacity:.12}
-.ds-foot{display:flex;justify-content:space-between;gap:8px;margin-top:6px;
-  font-size:11px;color:var(--text-muted);white-space:nowrap}
-.ds-mbps{font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
-.ds-extra{overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
-.dw-side{border-left:1px solid var(--border);padding:16px;display:flex;
-  flex-direction:column;gap:14px;background:var(--surface-2);min-width:0}
+/* the app itself: the same nav, cards, table and badges as the dashboard */
+.ap-nav{display:flex;align-items:center;gap:4px;padding:0 12px;height:42px;
+  background:var(--surface);border-bottom:1px solid var(--border);overflow:hidden}
+.ap-logo{display:flex;align-items:center;gap:6px;font-weight:700;font-size:13px;
+  color:var(--text);margin-right:8px;white-space:nowrap}
+.ap-logo img,.ap-logo svg{width:18px;height:18px}
+.ap-nav span.it{font-size:12px;color:var(--text-muted);padding:5px 9px;
+  border-radius:7px;white-space:nowrap}
+.ap-nav span.it.on{background:var(--accent-soft);color:var(--accent)}
+.ap-main{padding:16px 18px 18px;min-height:372px}
+.v{display:none}.v.on{display:block;animation:din .35s ease}
+.ap-top{display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:12px}
+.ap-top h3,.ap-devhead h3{font-size:17px;margin:0;color:var(--text)}
+.ap-search{font-size:11px;color:var(--text-faint);border:1px solid var(--border);
+  border-radius:8px;padding:5px 10px;background:var(--surface);width:150px}
+.ap-chips{display:flex;gap:10px;margin-bottom:12px}
+.ap-chip{background:var(--surface);border:1px solid var(--border);border-radius:12px;
+  padding:9px 14px;min-width:92px;box-shadow:var(--shadow)}
+.ap-chip b{display:block;font-size:20px;line-height:1.1;color:var(--text)}
+.ap-chip b.red{color:var(--danger)}
+.ap-chip span{font-size:10px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--text-faint)}
+.ap-card{background:var(--surface);border:1px solid var(--border);
+  border-radius:12px;box-shadow:var(--shadow);overflow:hidden}
+.ap-card-head{display:flex;align-items:center;justify-content:space-between;
+  padding:11px 14px}
+.ap-card-head b{font-size:13px;color:var(--text)}
+.ap-pills{display:flex;gap:5px}
+.ap-pills i{font-style:normal;font-size:10.5px;font-weight:600;padding:4px 9px;
+  border-radius:999px;background:var(--surface-2);border:1px solid var(--border);
+  color:var(--text-muted)}
+.ap-pills i.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.ap-table{width:100%;border-collapse:collapse;font-size:12px}
+.ap-table th{font-size:10px;text-transform:uppercase;letter-spacing:.04em;
+  color:var(--text-faint);text-align:left;padding:7px 14px;
+  border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.ap-table td{padding:9px 14px;border-bottom:1px solid var(--border)}
+.ap-table tr:last-child td{border-bottom:0}
+.ap-table tr.hl td{background:var(--accent-soft)}
+.ap-table tr.new td{animation:din .5s ease}
+.ap-table .nm{font-weight:600;color:var(--text);white-space:nowrap}
+.ap-table .nm i{font-style:normal;color:var(--text-faint);font-size:11px;
+  margin-right:7px}
+.ap-table .vw{text-align:right;color:var(--text-faint);font-size:11px;
+  font-weight:600;white-space:nowrap}
+.bdg{display:inline-block;padding:2px 9px;border-radius:999px;font-size:10.5px;
+  font-weight:700}
+.bdg.ok{background:var(--success-bg);color:var(--success)}
+.bdg.warn{background:var(--warning-bg);color:var(--warning)}
+.bdg.crit{background:var(--danger-bg);color:var(--danger)}
+.abdg{font-size:10.5px;font-weight:700;padding:2px 7px;border-radius:999px}
+.abdg.warn{background:rgba(217,119,6,.14);color:#b45309}
+.abdg.crit{background:var(--danger-bg);color:var(--danger)}
+.ap-devhead{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.ap-tabs{display:flex;gap:2px;border-bottom:2px solid var(--border);
+  margin-bottom:12px;overflow:hidden}
+.ap-tabs span{font-size:11.5px;color:var(--text-muted);padding:6px 9px;
+  border-bottom:2px solid transparent;margin-bottom:-2px;white-space:nowrap}
+.ap-tabs span.on{color:var(--accent);border-bottom-color:var(--accent);
+  font-weight:600}
+.ap-box{background:var(--surface);border:1px solid var(--border);border-radius:10px;
+  padding:13px 15px;box-shadow:var(--shadow);margin-bottom:10px}
+.ap-box.ok{border-left:4px solid var(--success)}
+.ap-box h4{font-size:13px;margin:0 0 8px;color:var(--text)}
+.ap-box p{font-size:11.5px;color:var(--text-muted);margin:0 0 6px;line-height:1.5}
+.ap-pre{font-family:Consolas,Menlo,monospace;font-size:10.5px;line-height:1.55;
+  background:var(--surface-2);color:var(--text);border:1px solid var(--border);
+  border-radius:7px;padding:8px 10px;white-space:pre-wrap;word-break:break-all;
+  margin:0 0 8px}
+.ap-chk{font-size:11px;color:var(--text-muted);display:block;margin:0 0 9px}
+.ap-chk b{color:var(--text)}
+.ap-btn{display:inline-block;background:var(--accent);color:#fff;font-size:11.5px;
+  font-weight:600;padding:6px 12px;border-radius:7px;transition:transform .15s,
+  box-shadow .15s}
+.ap-btn.ghost{background:var(--surface-2);color:var(--text);
+  border:1px solid var(--border)}
+.ap-btn.press{transform:scale(.94);box-shadow:0 0 0 4px var(--accent-soft)}
+.ap-count{font-size:19px;font-weight:700;color:var(--text);margin:4px 0 0}
+.ap-row{display:flex;align-items:center;gap:10px;padding:7px 0;
+  border-bottom:1px solid var(--border);font-size:11.5px;color:var(--text);
+  flex-wrap:wrap}
+.ap-row:last-child{border-bottom:0}
+.ap-row b{min-width:58px}
+.ap-row a{color:var(--accent)}
+.ap-row .muted{color:var(--text-faint)}
+/* beside the window: the narration, and the inbox alerts actually land in */
+.dside{display:flex;flex-direction:column;gap:14px;min-width:0}
+.dc{background:var(--surface);border:1px solid var(--border);border-radius:12px;
+  padding:14px 16px;box-shadow:var(--shadow)}
 .dc-step{font-size:10px;font-weight:700;letter-spacing:.08em;
   text-transform:uppercase;color:var(--accent)}
-.dc-text{font-size:16px;font-weight:600;color:var(--text);line-height:1.45;
+.dc-text{font-size:15.5px;font-weight:600;color:var(--text);line-height:1.45;
   min-height:4.4em;margin-top:4px}
 .dc-text.in{animation:din .45s ease}
-.dc-term{font-family:Consolas,Menlo,monospace;font-size:11.5px;line-height:1.55;
-  background:#0b1220;color:#7dd3fc;border-radius:8px;padding:10px 12px;
-  white-space:pre-wrap;word-break:break-all;border:1px solid #1e293b}
-.dc-term[hidden]{display:none}
-.df{display:flex;flex-direction:column;gap:8px}
-.df-title{font-size:10px;font-weight:700;letter-spacing:.08em;
-  text-transform:uppercase;color:var(--text-faint)}
-.df-item{--c:var(--accent);display:flex;gap:10px;align-items:flex-start;
-  background:var(--surface);border:1px solid var(--border);
-  border-left:3px solid var(--c);border-radius:8px;padding:10px 12px;
-  animation:din .4s ease}
-.df-item.ok{--c:var(--success)}.df-item.warn{--c:var(--warning)}
-.df-item.down{--c:var(--danger)}
-.df-ic{flex:0 0 20px;height:20px;border-radius:50%;background:var(--c);
-  color:#fff;font-style:normal;font-size:12px;font-weight:800;
-  display:flex;align-items:center;justify-content:center}
-.df-item.ok .df-ic::before{content:"\\2713"}
-.df-item.warn .df-ic::before{content:"!"}
-.df-item.down .df-ic::before{content:"!"}
-.df-item.info .df-ic::before{content:"i"}
-.df-item b{display:block;font-size:13px;color:var(--text);line-height:1.35}
-.df-item p{font-size:12px;color:var(--text-muted);line-height:1.5;margin-top:2px}
-.df-meta{display:block;font-size:10px;color:var(--text-faint);margin-top:4px}
-.df-empty{font-size:12px;color:var(--text-faint);border:1px dashed var(--border);
-  border-radius:8px;padding:12px;text-align:center}
+.dmail{background:var(--surface);border:1px solid var(--border);border-radius:12px;
+  box-shadow:var(--shadow);overflow:hidden}
+.dmail-head{display:flex;align-items:center;gap:8px;padding:9px 14px;
+  border-bottom:1px solid var(--border);font-size:11px;font-weight:700;
+  letter-spacing:.06em;text-transform:uppercase;color:var(--text-faint)}
+.dmail-head svg{flex:none}
+.dmail-list{display:flex;flex-direction:column}
+.dm{--c:var(--accent);padding:10px 14px;border-bottom:1px solid var(--border);
+  border-left:3px solid var(--c);animation:din .4s ease}
+.dm:last-child{border-bottom:0}
+.dm.warn{--c:var(--warning)}.dm.crit{--c:var(--danger)}.dm.ok{--c:var(--success)}
+.dm-from{font-size:10px;color:var(--text-faint)}
+.dm-sub{display:block;font-size:12px;color:var(--text);margin:2px 0 4px;
+  line-height:1.35}
+.dm p{font-size:11px;color:var(--text-muted);margin:0;line-height:1.5;
+  font-family:Consolas,Menlo,monospace}
+.dm-empty{font-size:12px;color:var(--text-faint);padding:16px 14px;text-align:center}
 .dp{height:3px;background:var(--border)}
 .dp-bar{display:block;height:100%;width:0;background:var(--accent);
   transition:width .6s ease}
 .demo-note{font-size:12px;color:var(--text-faint);margin-top:12px}
 @keyframes din{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
-@keyframes dpulse{0%{box-shadow:0 0 0 0 var(--c)}100%{box-shadow:0 0 0 8px transparent}}
-@keyframes dlive{0%,100%{opacity:1}50%{opacity:.3}}
-@media(max-width:860px){
-  .dw-body{grid-template-columns:1fr}
-  .dw-side{border-left:0;border-top:1px solid var(--border)}
-  .dc-text{min-height:3em}
-}
-@media(max-width:480px){
-  .dw-sites{gap:8px;padding:10px}
-  .ds{padding:10px 9px 8px}
-  .ds-tag,.dw-url{display:none}
+@media(max-width:900px){.dmo{grid-template-columns:1fr}}
+@media(max-width:560px){
+  .ap-search,.ap-nav span.it:nth-child(n+4),.ap-tabs span:nth-child(n+5){display:none}
+  .ap-main{padding:12px;min-height:0}
+  .ap-table th,.ap-table td{padding:7px 9px}
+  .ap-table .vw{display:none}
   .dt{font-size:12px;padding:7px 11px}
 }
 @media (prefers-reduced-motion:reduce){
@@ -702,15 +756,9 @@ _DEMO_CSS = """
 }
 """
 
-_DEMO_SITES = (
-    ("Head Office", "Fibre"),
-    ("Branch · Durban", "Fibre"),
-    ("Clinic · Paarl", "Fibre"),
-    ("Warehouse · Midrand", "LTE · behind CGNAT"),
-)
-
 
 def _demo_html() -> str:
+    from .brand import logo_img
     tabs = "".join(
         f'<button class="dt{" on" if i == 0 else ""}" type="button" '
         f'role="tab" aria-selected="{"true" if i == 0 else "false"}" '
@@ -718,41 +766,61 @@ def _demo_html() -> str:
         for i, t in enumerate(("Internet line fails", "A change goes wrong",
                                "Fix it from anywhere",
                                "Add a router in a minute")))
-    sites = "".join(
-        f'<div class="ds">'
-        f'<div class="ds-head"><i class="ds-dot"></i>'
-        f'<b class="ds-name">{esc(n)}</b><span class="ds-tag">Online</span></div>'
-        f'<div class="ds-wan">{esc(w)}</div>'
-        f'<svg class="ds-spark" viewBox="0 0 120 34" preserveAspectRatio="none" '
-        f'aria-hidden="true"><path d=""/><polyline points=""/></svg>'
-        f'<div class="ds-foot"><span class="ds-mbps">—</span>'
-        f'<span class="ds-extra"></span></div></div>'
-        for n, w in _DEMO_SITES)
+    nav = "".join(f'<span class="it{" on" if n == "Dashboard" else ""}">'
+                  f'{n}</span>' for n in ("Dashboard", "Devices", "Activity",
+                                         "Guide", "Account"))
+    dev_tabs = "".join(f'<span data-tab="{t}">{t}</span>' for t in (
+        "Overview", "Provision", "Routes", "WAN", "Security", "DNS", "Queues",
+        "Maintenance"))
+    mail_ic = ('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" '
+               'stroke="currentColor" stroke-width="2" aria-hidden="true">'
+               '<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-'
+               '2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>')
     return (
         f'<div class="demo" id="demo-app">'
         f'<div class="demo-tabs" role="tablist" '
         f'aria-label="Demo scenarios">{tabs}</div>'
+        f'<div class="dmo">'
         f'<div class="dw">'
         f'<div class="dw-bar"><span class="dw-dots"><i></i><i></i><i></i></span>'
-        f'<span class="dw-url">{esc(_BRAND.lower())} · dashboard</span>'
-        f'<span class="dw-live">LIVE DEMO</span>'
+        f'<span class="dw-url">{esc(_BRAND.lower())}.com/dashboard</span>'
         f'<button class="dw-pause" type="button">Pause</button></div>'
-        f'<div class="dw-body">'
-        f'<div class="dw-sites">{sites}</div>'
-        f'<div class="dw-side">'
-        f'<div><div class="dc-step">Scenario 1 · Internet line fails</div>'
-        f'<p class="dc-text" aria-live="polite">Pick a scenario above, or let '
-        f'it play.</p></div>'
-        f'<pre class="dc-term" hidden></pre>'
-        f'<div class="df" role="log" aria-label="Alerts">'
-        f'<div class="df-title">Alerts &amp; activity</div>'
-        f'<div class="df-list"><div class="df-empty">Alerts appear here, '
-        f'with what happened and why.</div></div></div>'
-        f'</div></div>'
+        f'<div class="ap-nav"><span class="ap-logo">{logo_img(18)}'
+        f'{esc(_BRAND)}</span>{nav}</div>'
+        f'<div class="ap-main">'
+        f'<div class="v v-dash on">'
+        f'<div class="ap-top"><h3>Dashboard</h3>'
+        f'<span class="ap-search">Search devices…</span></div>'
+        f'<div class="ap-chips"><div class="ap-chip"><b class="c-dev">4</b>'
+        f'<span>Devices</span></div><div class="ap-chip"><b class="c-off">0</b>'
+        f'<span>Offline</span></div></div>'
+        f'<div class="ap-card"><div class="ap-card-head"><b>Devices</b>'
+        f'<span class="ap-pills"><i class="on">All</i><i>Problems</i>'
+        f'<i>Offline</i></span></div>'
+        f'<table class="ap-table"><thead><tr><th>Name</th><th>Status</th>'
+        f'<th>Alerts</th><th class="vw"></th></tr></thead><tbody></tbody></table></div>'
+        f'</div>'
+        f'<div class="v v-dev">'
+        f'<div class="ap-devhead"><h3 class="ap-dname">—</h3>'
+        f'<span class="bdg ok ap-dbadge">Healthy</span></div>'
+        f'<div class="ap-tabs">{dev_tabs}</div>'
+        f'<div class="ap-body"></div>'
+        f'</div>'
+        f'</div>'
         f'<div class="dp"><span class="dp-bar"></span></div>'
         f'</div>'
-        f'<p class="demo-note">A recorded walk-through of real features, '
-        f'with made-up sites. Timings are sped up.</p>'
+        f'<aside class="dside">'
+        f'<div class="dc"><div class="dc-step">Scenario 1 · Internet line fails'
+        f'</div><p class="dc-text" aria-live="polite">Pick a scenario above, or '
+        f'let it play.</p></div>'
+        f'<div class="dmail" role="log" aria-label="Alert emails">'
+        f'<div class="dmail-head">{mail_ic}Your inbox</div>'
+        f'<div class="dmail-list"><div class="dm-empty">Alert emails arrive '
+        f'here.</div></div></div>'
+        f'</aside>'
+        f'</div>'
+        f'<p class="demo-note">The real screens, with made-up sites. Timings '
+        f'are sped up.</p>'
         f'</div>')
 
 
@@ -768,57 +836,63 @@ _DEMO_JS = r"""
                   matchMedia('(prefers-reduced-motion: reduce)').matches);
   var host = (location.hostname && location.hostname.indexOf('.') > 0)
              ? location.hostname : 'easymikrotik.com';
-  var cards = [].slice.call(app.querySelectorAll('.ds'));
+  function $(s){ return app.querySelector(s); }
   var tabs = [].slice.call(app.querySelectorAll('.dt'));
-  var capEl = app.querySelector('.dc-text'), stepEl = app.querySelector('.dc-step');
-  var term = app.querySelector('.dc-term'), list = app.querySelector('.df-list');
-  var bar = app.querySelector('.dp-bar'), pauseBtn = app.querySelector('.dw-pause');
-  var N = 40, TAG = {ok:'Online', warn:'Warning', down:'Down', idle:'Waiting',
-                     info:'Connecting', fix:'Restoring'};
-  var sites = cards.map(function(el){ return {el:el, data:[], base:0, state:'ok'}; });
+  var capEl = $('.dc-text'), stepEl = $('.dc-step'), list = $('.dmail-list');
+  var bar = $('.dp-bar'), pauseBtn = $('.dw-pause'), url = $('.dw-url');
+  var vDash = $('.v-dash'), vDev = $('.v-dev'), body = $('.ap-body');
+  var tbody = $('.ap-table tbody'), cDev = $('.c-dev'), cOff = $('.c-off');
+  var LABEL = {ok:'Healthy', warn:'Partial', crit:'Offline'};
+  var rows = [];
 
-  function jit(b){ return b <= 0 ? 0 : Math.max(0, b * (0.78 + Math.random() * 0.44)); }
-  function draw(s){
-    var max = 1, i, pts = [];
-    for (i = 0; i < s.data.length; i++) if (s.data[i] > max) max = s.data[i];
-    max = Math.max(max, s.base * 1.3, 1);
-    for (i = 0; i < s.data.length; i++)
-      pts.push((i * 120 / (N - 1)).toFixed(1) + ',' +
-               (32 - (s.data[i] / max) * 28).toFixed(1));
-    s.el.querySelector('polyline').setAttribute('points', pts.join(' '));
-    s.el.querySelector('path').setAttribute('d',
-      'M0,34 L' + pts.join(' L') + ' L120,34 Z');
-    var v = s.data[s.data.length - 1] || 0;
-    s.el.querySelector('.ds-mbps').textContent =
-      (s.state === 'ok' || s.state === 'warn') ? Math.round(v) + ' Mbit/s' :
-      '— Mbit/s';
-  }
-  function setSite(i, o){
-    var s = sites[i], el = s.el;
-    if (!s) return;
-    if (o.name != null) el.querySelector('.ds-name').textContent = o.name;
-    if (o.wan != null) el.querySelector('.ds-wan').textContent = o.wan;
-    if (o.extra != null) el.querySelector('.ds-extra').textContent = o.extra;
-    if (o.base != null) s.base = o.base;
-    if (o.state) {
-      s.state = o.state;
-      el.className = 'ds ' + o.state + (el.classList.contains('hl') ? ' hl' : '');
-      el.querySelector('.ds-tag').textContent = o.tag || TAG[o.state];
-    } else if (o.tag) { el.querySelector('.ds-tag').textContent = o.tag; }
-    if (o.hl != null) el.classList.toggle('hl', !!o.hl);
-    if (o.fill != null) {
-      s.data = [];
-      for (var k = 0; k < N; k++) s.data.push(o.fill ? jit(s.base) : 0);
-    }
-    draw(s);
-  }
-  function tick(){
-    sites.forEach(function(s){
-      var v = (s.state === 'down' || s.state === 'idle' || s.state === 'info' ||
-               s.state === 'fix') ? 0 : jit(s.base);
-      s.data.push(v); if (s.data.length > N) s.data.shift();
-      draw(s);
+  function esc(t){ var d = document.createElement('div');
+    d.textContent = t; return d.innerHTML; }
+  function drawTable(){
+    var html = '', off = 0;
+    rows.forEach(function(r){
+      if (r.st === 'crit') off++;
+      html += '<tr class="' + (r.hl ? 'hl ' : '') + (r.fresh ? 'new' : '') +
+        '"><td class="nm"><i>&#9638;</i>' + esc(r.name) + '</td>' +
+        '<td><span class="bdg ' + r.st + '">' + LABEL[r.st] + '</span></td>' +
+        '<td>' + (r.al ? '<span class="abdg ' + (r.st === 'crit' ? 'crit' : 'warn') +
+        '">&#9650; ' + r.al + '</span>' : '<span style="color:var(--text-faint)">&mdash;</span>') +
+        '</td><td class="vw">View &rarr;</td></tr>';
+      r.fresh = false;
     });
+    tbody.innerHTML = html;
+    cDev.textContent = rows.length;
+    cOff.textContent = off; cOff.className = 'c-off' + (off ? ' red' : '');
+  }
+  function row(name){ for (var i = 0; i < rows.length; i++)
+    if (rows[i].name === name) return rows[i]; }
+  function setRow(name, o){ var r = row(name); if (!r) return;
+    for (var k in o) r[k] = o[k]; drawTable(); }
+  function showDash(){ vDev.classList.remove('on'); vDash.classList.add('on');
+    url.textContent = host + '/dashboard'; }
+  function showDev(name, tab, st){
+    vDash.classList.remove('on'); vDev.classList.add('on');
+    $('.ap-dname').textContent = name;
+    var b = $('.ap-dbadge'); b.className = 'bdg ap-dbadge ' + (st || 'ok');
+    b.textContent = LABEL[st || 'ok'];
+    [].slice.call(app.querySelectorAll('.ap-tabs span')).forEach(function(s){
+      s.classList.toggle('on', s.getAttribute('data-tab') === tab); });
+    url.textContent = host + '/device?name=' + name.split(' ')[0] +
+      (tab === 'Overview' ? '' : '&tab=' + tab.toLowerCase());
+  }
+  function press(sel){ var b = body.querySelector(sel); if (!b) return;
+    b.classList.add('press'); later(260, function(){ b.classList.remove('press'); }); }
+  function mail(kind, when, subject, lines){
+    var empty = list.querySelector('.dm-empty');
+    if (empty) list.removeChild(empty);
+    var d = document.createElement('div');
+    d.className = 'dm ' + kind;
+    d.innerHTML = '<div class="dm-from"></div><b class="dm-sub"></b>';
+    d.querySelector('.dm-from').textContent = 'EasyMikrotik alerts · ' + when;
+    d.querySelector('.dm-sub').textContent = subject;
+    lines.forEach(function(t){ var p = document.createElement('p');
+      p.textContent = t; d.appendChild(p); });
+    list.insertBefore(d, list.firstChild);
+    while (list.children.length > 2) list.removeChild(list.lastChild);
   }
 
   var timers = [], cur = 0, step = 0, paused = false, scen = null;
@@ -826,119 +900,102 @@ _DEMO_JS = r"""
   function stopAll(){ timers.forEach(clearTimeout); timers = []; }
   function mmss(v){ v = Math.max(0, Math.round(v));
     return Math.floor(v / 60) + ':' + ('0' + (v % 60)).slice(-2); }
-  function count(i, label, from, to, ms){
+  function count(el, label, from, to, ms){
     var n = 14, k = 0;
     (function t(){
-      setSite(i, {extra: label + ' ' + mmss(from - (from - to) * (k / n))});
+      if (el) el.textContent = label + mmss(from - (from - to) * (k / n));
       if (k++ < n) later(ms / n, t);
     })();
   }
-  function type(lines, ms){
-    var text = lines.join('\n'), k = 0, per = Math.max(6, ms / text.length);
-    term.hidden = false; term.textContent = '';
-    (function t(){
-      term.textContent = text.slice(0, k);
-      if (k++ < text.length) later(per, t);
-    })();
+  function type(el, text, ms){
+    var k = 0, per = Math.max(6, ms / text.length);
+    (function t(){ el.textContent = text.slice(0, k);
+      if (k++ < text.length) later(per, t); })();
   }
-  function ev(kind, title, body, meta){
-    var empty = list.querySelector('.df-empty');
-    if (empty) list.removeChild(empty);
-    var d = document.createElement('div');
-    d.className = 'df-item ' + kind;
-    d.innerHTML = '<i class="df-ic"></i><div><b></b><p></p><span class="df-meta"></span></div>';
-    d.querySelector('b').textContent = title;
-    d.querySelector('p').textContent = body;
-    d.querySelector('.df-meta').textContent = meta;
-    list.insertBefore(d, list.firstChild);
-    while (list.children.length > 3) list.removeChild(list.lastChild);
+  function reset(){
+    rows = [{name:'Head Office', st:'ok', al:0},
+            {name:'Branch · Durban', st:'ok', al:0},
+            {name:'Clinic · Paarl', st:'ok', al:0},
+            {name:'Warehouse · Midrand', st:'ok', al:0}];
+    drawTable(); showDash(); body.innerHTML = '';
+    list.innerHTML = '<div class="dm-empty">Alert emails arrive here.</div>';
   }
-  function reset(fourth){
-    sites.forEach(function(s){ s.el.classList.remove('hl'); });
-    setSite(0, {name:'Head Office', wan:'Fibre', base:310, state:'ok', extra:'CPU 9%', fill:true});
-    setSite(1, {name:'Branch · Durban', wan:'Fibre · LTE backup', base:84, state:'ok', extra:'CPU 14%', fill:true});
-    setSite(2, {name:'Clinic · Paarl', wan:'Fibre', base:42, state:'ok', extra:'CPU 6%', fill:true});
-    setSite(3, fourth || {name:'Warehouse · Midrand', wan:'LTE · behind CGNAT', base:18,
-                          state:'ok', extra:'No public IP', fill:true});
-    term.hidden = true; term.textContent = '';
-    list.innerHTML = '<div class="df-empty">Alerts appear here, with what happened and why.</div>';
-  }
+  var PLAN = 'Clinic · Paarl: 2 change(s) [security]\n' +
+             '  + add SSH brute-force blacklist (5 rules)\n' +
+             '  ~ update /ip/service ssh: disabled=yes';
+  var SCRIPT = '/interface wireguard add name=mikromon listen-port=13231\n' +
+               '/interface wireguard peers add interface=mikromon \\\n' +
+               '    endpoint-address=' + host + ' endpoint-port=51820 \\\n' +
+               '    persistent-keepalive=25s\n' +
+               '/ip address add address=10.10.0.42/16 interface=mikromon';
 
   var SC = [
-    {title:'Internet line fails', init:function(){ reset(); }, steps:[
-      {d:2600, cap:'Branch · Durban is running normally on its fibre line.',
-       f:function(){ setSite(1, {hl:true}); }},
-      {d:2400, cap:'09:41 — the fibre stops answering.',
-       f:function(){ setSite(1, {state:'down', tag:'Fibre down', wan:'Fibre — no reply', base:0}); }},
-      {d:2800, cap:'The router switches to its LTE backup by itself. No reboot, nobody on site.',
-       f:function(){ setSite(1, {state:'warn', tag:'On backup', wan:'LTE backup', base:31}); }},
-      {d:3200, cap:'You get an email saying which line failed, and when.',
-       f:function(){ ev('warn', 'Branch · Durban is on its backup line',
-         'The fibre stopped answering at 09:41. Traffic moved to LTE, and the site stayed online.',
-         'Email · 09:41'); }},
-      {d:3200, cap:'Six minutes later the fibre is back, and so is the traffic.',
-       f:function(){ setSite(1, {state:'ok', wan:'Fibre · LTE backup', base:84});
-         ev('ok', 'Branch · Durban is back on fibre',
-            'The fibre answered again after 6 minutes. Traffic is on the main line.',
-            'Email · 09:47'); }},
-      {d:3000, cap:'You heard about it from an email, not from a phone call.'}
+    {title:'Internet line fails', init:reset, steps:[
+      {d:2600, cap:'The dashboard: every router, one row each.'},
+      {d:2800, cap:'09:41 — Branch · Durban’s fibre stops answering. The router moves to its LTE backup, and its row turns Partial.',
+       f:function(){ setRow('Branch · Durban', {st:'warn', al:1, hl:true}); }},
+      {d:3400, cap:'You get an email saying what happened and why.',
+       f:function(){ mail('warn', '09:41', '[EasyMikrotik] WARNING: Branch · Durban (1 event)',
+         ['[WARNING] Primary WAN "Fibre" is DOWN — running on backup "LTE"',
+          'Why: Primary uplink Fibre is not carrying traffic. Traffic is now flowing via LTE.']); }},
+      {d:3400, cap:'When the fibre answers again, the row goes back to Healthy and a second email says so.',
+       f:function(){ setRow('Branch · Durban', {st:'ok', al:0});
+         mail('ok', '09:47', '[EasyMikrotik] RESOLVED: Branch · Durban (1 event)',
+              ['[RESOLVED] WAN restored — back on primary uplink Fibre']); }},
+      {d:2600, cap:'You heard about it from an email, not from a phone call.'}
     ]},
-    {title:'A change goes wrong', init:function(){ reset(); }, steps:[
-      {d:2800, cap:'You push a firewall change to Clinic · Paarl. A preview comes first.',
-       f:function(){ setSite(2, {hl:true, extra:'Preview: 3 changes'}); }},
-      {d:2800, cap:'A backup is saved on the router before anything is sent.',
-       f:function(){ ev('info', 'Backup taken first',
-         'before-security-20261005-0941.backup saved on the router.',
-         'Activity log · 09:41'); }},
-      {d:2800, cap:'The change locks the router out: the moment that used to mean a drive to site.',
-       f:function(){ setSite(2, {state:'down', tag:'Unreachable', base:0, extra:''}); }},
-      {d:3200, cap:'With Safe mode on, the router checks after five minutes whether it can still reach us.',
-       f:function(){ count(2, 'Safe-mode check', 300, 0, 2800); }},
-      {d:2600, cap:'It can’t, so it restores the backup by itself.',
-       f:function(){ setSite(2, {state:'fix', tag:'Restoring', extra:'Loading backup…'}); }},
-      {d:3400, cap:'Back online with the old settings. Nobody locked out, nobody drove anywhere.',
-       f:function(){ setSite(2, {state:'ok', base:42, extra:'Restored'});
-         ev('ok', 'Clinic · Paarl undid the change itself',
-            'It could not reach us, so it loaded the backup taken before the change.',
-            'Email · 09:46'); }}
+    {title:'A change goes wrong', init:reset, steps:[
+      {d:3200, cap:'You change a router’s firewall. A dry run shows exactly what will be sent; nothing is written yet.',
+       f:function(){ showDev('Clinic · Paarl', 'Security', 'ok');
+         body.innerHTML = '<div class="ap-box"><h4>Dry run — nothing has been written yet</h4>' +
+           '<pre class="ap-pre">' + esc(PLAN) + '</pre>' +
+           '<span class="ap-chk"><b>☑ Safe mode</b> — 5 min after applying, the router checks it can still reach the hub and auto-reverts to the backup if it can’t.</span>' +
+           '<span class="ap-btn" id="dm-apply">Confirm &amp; apply to the router</span></div>'; }},
+      {d:3400, cap:'A backup is taken first, then the change goes out — and the router arms its own self-check.',
+       f:function(){ press('#dm-apply');
+         later(400, function(){
+           body.innerHTML = '<div class="ap-box ok"><h4>Change applied to Clinic · Paarl — safety net armed</h4>' +
+             '<p>In about 5 minutes the router will check whether it can still reach the hub. If it can’t, it restores the pre-change backup and comes back on the old config. No site visit.</p>' +
+             '<p class="ap-count" id="dm-count">self-check in 5:00</p></div>';
+           count(document.getElementById('dm-count'), 'self-check in ', 300, 160, 2600); }); }},
+      {d:3000, cap:'The change locked the router out. On the dashboard it shows Offline.',
+       f:function(){ showDash(); setRow('Clinic · Paarl', {st:'crit', al:1, hl:true}); }},
+      {d:3600, cap:'When the self-check runs, the router cannot reach us — so it loads the backup by itself and comes back online.',
+       f:function(){ later(1400, function(){ setRow('Clinic · Paarl', {st:'ok', al:0}); }); }},
+      {d:2600, cap:'Nobody locked out. Nobody drove anywhere.'}
     ]},
-    {title:'Fix it from anywhere', init:function(){ reset(); }, steps:[
-      {d:2800, cap:'Warehouse · Midrand sits behind CGNAT. No public IP, no port forwarding.',
-       f:function(){ setSite(3, {hl:true}); }},
-      {d:2000, cap:'One click on “Open WebFig”.',
-       f:function(){ setSite(3, {extra:'Opening WebFig…'}); }},
-      {d:3200, cap:'A private link straight to that router, through the encrypted tunnel.',
-       f:function(){ ev('info', 'WebFig is open for Warehouse · Midrand',
-         'https://' + host + ':20417 reaches this router and nothing else.',
-         'Remote access · 10:02'); count(3, 'Link closes in', 900, 840, 2800); }},
-      {d:3000, cap:'Every link closes itself after 15 minutes, so nothing is left open.',
-       f:function(){ count(3, 'Link closes in', 840, 0, 2600); }},
-      {d:3200, cap:'Closed. The port is gone until someone opens it again.',
-       f:function(){ setSite(3, {extra:'No public IP'});
-         ev('ok', 'Remote access closed',
-            'The 15 minutes were up, so the link closed itself.',
-            'Remote access · 10:17'); }}
+    {title:'Fix it from anywhere', init:reset, steps:[
+      {d:3000, cap:'Warehouse · Midrand is on LTE behind CGNAT: no public IP, no port forwarding. Its page has a Remote access box.',
+       f:function(){ showDev('Warehouse · Midrand', 'Overview', 'ok');
+         body.innerHTML = '<div class="ap-box"><h4>Remote access</h4>' +
+           '<div class="ap-row"><b>WebFig</b><span class="ap-btn" id="dm-open">Open WebFig</span></div>' +
+           '<div class="ap-row"><b>Winbox</b><span class="ap-btn">Open Winbox</span></div></div>'; }},
+      {d:3400, cap:'One click opens a private link to that router, through the encrypted tunnel.',
+       f:function(){ press('#dm-open');
+         later(400, function(){
+           body.querySelector('.ap-row').innerHTML = '<b>WebFig</b>' +
+             '<a>https://' + host + ':20417</a><span class="muted" id="dm-exp">expires in 15:00</span>' +
+             '<span class="ap-btn ghost">Close</span>';
+           count(document.getElementById('dm-exp'), 'expires in ', 900, 840, 2600); }); }},
+      {d:3200, cap:'It closes by itself after 15 minutes, so nothing is left open.',
+       f:function(){ count(document.getElementById('dm-exp'), 'expires in ', 840, 0, 2600); }},
+      {d:2800, cap:'Closed. The port is gone until someone opens it again.',
+       f:function(){ body.querySelector('.ap-row').innerHTML =
+         '<b>WebFig</b><span class="ap-btn">Open WebFig</span>'; }}
     ]},
-    {title:'Add a router in a minute', init:function(){
-        reset({name:'Shop · Cape Town', wan:'LTE · no public IP', base:0,
-               state:'idle', tag:'Waiting', extra:'Never connected', fill:false}); },
-     steps:[
-      {d:2800, cap:'A new site: LTE, no public IP, nothing configured yet.',
-       f:function(){ setSite(3, {hl:true}); }},
-      {d:3400, cap:'Paste one script into the router’s terminal.',
-       f:function(){ type(['/interface wireguard add name=mikromon',
-                           '/interface wireguard peers add interface=mikromon \\',
-                           '    endpoint-address=' + host + ' endpoint-port=51820',
-                           '/ip address add address=10.10.0.42/16 interface=mikromon',
-                           '# generated for this router: nothing to fill in'], 2600); }},
-      {d:2400, cap:'The router dials home over WireGuard.',
-       f:function(){ setSite(3, {state:'info', tag:'Connecting', extra:'Handshake…'}); }},
-      {d:3600, cap:'Online. Health, WAN and alerts are live, polled every 60 seconds.',
-       f:function(){ term.hidden = true;
-         setSite(3, {state:'ok', base:22, extra:'CPU 4%', fill:true});
-         ev('ok', 'Shop · Cape Town is online',
-            'Connected over the tunnel. No port forwarding, no public IP.',
-            'Dashboard · 10:20'); }}
+    {title:'Add a router in a minute', init:reset, steps:[
+      {d:3800, cap:'Add a router with no address, and its Provision tab hands you one script to paste into its terminal.',
+       f:function(){ showDev('Shop · Cape Town', 'Provision', 'ok');
+         $('.ap-dbadge').style.visibility = 'hidden';
+         body.innerHTML = '<div class="ap-box ok"><h4>Provisioning script — paste into the new router</h4>' +
+           '<p>Open the router in WinBox/WebFig → New Terminal, paste this, press Enter.</p>' +
+           '<pre class="ap-pre" id="dm-script"></pre></div>';
+         type(document.getElementById('dm-script'), SCRIPT, 2600); }},
+      {d:3400, cap:'The router dials home over WireGuard, and appears on the dashboard — no public IP needed.',
+       f:function(){ $('.ap-dbadge').style.visibility = '';
+         showDash(); rows.push({name:'Shop · Cape Town', st:'ok', al:0, hl:true, fresh:true});
+         drawTable(); }},
+      {d:2600, cap:'From here it is polled every 60 seconds, like every other router.'}
     ]}
   ];
 
@@ -977,12 +1034,11 @@ _DEMO_JS = r"""
     if (paused) stopAll(); else next();
   });
 
-  var started = false, visible = true;
+  var started = false;
   function start(){ if (!started) { started = true; play(0); } }
-  setInterval(function(){ if (visible && !reduce) tick(); }, 700);
   if ('IntersectionObserver' in window) {
     new IntersectionObserver(function(es){
-      es.forEach(function(e){ visible = e.isIntersecting; if (visible) start(); });
+      es.forEach(function(e){ if (e.isIntersecting) start(); });
     }, {threshold: 0.2}).observe(app);
   } else { start(); }
   reset();
@@ -1156,7 +1212,8 @@ def render_landing() -> str:
     <p class="s-label">See it work</p>
     <h2 class="s-title">The things that used to mean a site visit, handled from your desk</h2>
     <p class="s-sub">
-      Four everyday moments, played out in the dashboard. Pick one, or let it run.
+      Four everyday moments, played out on the product's own screens. Pick
+      one, or let it run.
     </p>
     {_demo_html()}
   </div>
@@ -1280,6 +1337,7 @@ def render_landing() -> str:
         <h4>Help</h4>
         <a href="#how-it-works">How it works</a>
         <a href="#faq">FAQ</a>
+        <a href="/terms">Terms &amp; Conditions</a>
       </div>
       <div class="foot-col">
         <h4>Account</h4>
