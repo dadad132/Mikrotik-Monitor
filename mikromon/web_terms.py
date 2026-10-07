@@ -13,9 +13,9 @@ of an agreement.
 from __future__ import annotations
 
 from .web_shared import (_BRAND, _THEME_INIT_JS, _THEME_TOGGLE_JS, _THEME_VARS,
-                         _REVERT_MINUTES, _theme_toggle_btn, esc)
+                         _theme_toggle_btn, esc)
 
-TERMS_VERSION = "2026-10-05"
+TERMS_VERSION = "2026-10-07"
 
 
 def terms_checkbox(note: str = "") -> str:
@@ -55,9 +55,9 @@ def _sections(provider: str, email: str) -> list:
           "over WireGuard, which RouterOS added in version 7.1.",
           "You are responsible for the routers you add and for the changes "
           f"you push to them. Previews, automatic backups and Safe mode (which "
-          f"restores a backup if a router cannot reach us {_REVERT_MINUTES} "
-          f"minutes after a change) reduce the risk of a change going wrong; "
-          f"they do not remove it."]),
+          f"restores a backup if, about a minute after a change, a router "
+          f"cannot reach us or we cannot log in to it) reduce the risk of a "
+          f"change going wrong; they do not remove it."]),
         ("3. Your account",
          ["Keep your login details private. You are responsible for "
           "everything done under your account, including by team members "

@@ -128,6 +128,32 @@ class Engine:
         self._start_ts = self.now_fn()
         self._grace_seconds = max(0, int(getattr(config, "startup_grace_minutes", 20))) * 60
         self._grace_resynced = self._grace_seconds == 0
+        # The AI monitor (aimonitor.py): an incident per lost line, its likely
+        # cause, a search online for outages in the area, and "still on the
+        # backup line" reminders. Its own failures are logged, never fatal.
+        self.aimon = None
+        try:
+            self.aimon = self._build_aimonitor(config)
+        except Exception:  # noqa: BLE001 -- monitoring matters more
+            log.exception("AI monitor could not start; carrying on without it")
+
+    def _build_aimonitor(self, config):
+        from .aimonitor import AIMonitor
+        from .incidents import IncidentStore, incidents_path
+        path = incidents_path(
+            getattr(config, "devices_db", None) or config.state_file,
+            getattr(config, "incidents_db", None))
+        return AIMonitor(
+            IncidentStore(path),
+            auth_db=getattr(config, "auth_db", None),
+            devices_db=getattr(config, "devices_db", None),
+            smtp_cfg=getattr(config, "smtp", None),
+            billing_db=(getattr(config, "billing", None) or {}).get("db"),
+            push_log_db=getattr(config, "push_log_db", None),
+            poll_interval=int(getattr(config, "poll_interval", 60) or 60),
+            confirmations=int(getattr(config, "confirmations", 2) or 2),
+            clock=lambda: self.now_fn(),
+            quiet=lambda: self.dry_run or self._in_startup_grace())
 
     def _in_startup_grace(self) -> bool:
         return self._grace_seconds > 0 and self.now_fn() - self._start_ts < self._grace_seconds
@@ -298,6 +324,8 @@ class Engine:
                  "(up to %d at once)%s",
                  len(self.devices), self.config.poll_interval,
                  self.poll_concurrency, " [DRY RUN]" if self.dry_run else "")
+        if getattr(self, "aimon", None) is not None:
+            self.aimon.start()
         while not self._stop.is_set():
             try:
                 self.run_once()
@@ -305,6 +333,8 @@ class Engine:
                 log.exception("Unexpected error during poll cycle")
             self._stop.wait(self.config.poll_interval)
         log.info("mikromon stopping; saving state.")
+        if getattr(self, "aimon", None) is not None:
+            self.aimon.stop()
         self._pool.shutdown(wait=False)
         self.state.save()
 
@@ -364,6 +394,13 @@ class Engine:
             except Exception:  # noqa: BLE001 — one device's crash must not
                 log.exception("Unexpected error polling a device")  # skip the rest
         batch = self._filter_fleet_wide_outage(batch, reach_before)
+        # Before dispatch, so a failover alert goes out already saying what
+        # the router and the rest of the fleet make of it.
+        if getattr(self, "aimon", None) is not None:
+            try:
+                self.aimon.observe(batch, self.state, self.devices)
+            except Exception:  # noqa: BLE001 -- alerts must still go out
+                log.exception("AI monitor observe failed")
         self.dispatch(batch)
         self._prune_if_due()
         self._maybe_resync_after_grace()
@@ -440,6 +477,12 @@ class Engine:
             log.exception("metrics prune failed")
 
     def _check_scheduled_reports(self) -> None:
+        # "Still on the backup line" -- its own try, like the passes below.
+        if getattr(self, "aimon", None) is not None:
+            try:
+                self.aimon.check_reminders(self.state)
+            except Exception:  # noqa: BLE001
+                log.exception("backup-line reminder pass failed")
         for n in self.notifiers:
             if hasattr(n, "check_scheduled"):
                 try:

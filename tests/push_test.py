@@ -250,17 +250,19 @@ check("the user's custom-named backup is never pruned",
 
 # ---- 5b. commit-confirm auto-revert (safe mode) ---------------------------
 print("commit-confirm auto-revert:")
+from mikromon.push.runner import revert_token  # noqa: E402
+
 api = FakeApi({("system", "scheduler"): []})
 p = Pusher(cfg, api, dry_run=True)
-arm = p.plan_arm_revert("before-scripts-20260101-101010", minutes=2,
-                        hub_ip="10.10.0.1")
+arm = p.plan_arm_revert("before-scripts-20260101-101010", seconds=60,
+                        hub_ip="10.10.0.1", token="tok123")
 op = arm.ops[0]
 ev = op.params.get("on-event", "")
 check("arm adds a scheduler named mikromon-autorevert",
       op.action == "add" and op.path == ("system", "scheduler")
       and op.params.get("name") == "mikromon-autorevert")
-check("arm fires after the window and can load the pre-change backup",
-      op.params.get("interval") == "2m"
+check("it fires every minute and can load the pre-change backup",
+      op.params.get("interval") == "60s"
       and '/system backup load name="before-scripts-20260101-101010.backup"' in ev)
 # This one matters more than the manual restore. It runs on the router AFTER
 # a change has already cut us off, so a load that RouterOS refuses means no
@@ -268,20 +270,46 @@ check("arm fires after the window and can load the pre-change backup",
 check("the auto-revert's load carries a password too -- without it the "
       "safety net silently does nothing, on a router already cut off",
       'load name="before-scripts-20260101-101010.backup" password=""' in ev)
-check("revert is gated on a hub connectivity check (not a human guess)",
-      "/ping 10.10.0.1 count=4" in ev and ":if (" in ev)
-check("when the router can still reach the hub, the scheduler just clears itself",
-      'else={' in ev
-      and 'scheduler remove [find name="mikromon-autorevert"]' in ev)
-# disarm finds the armed scheduler by name and removes it by id
+check("the router's own check pings the hub, three tries before it gives up "
+      "-- one lost burst on LTE must not reboot a site",
+      "/ping 10.10.0.1 count=2" in ev and "from=1 to=3" in ev
+      and ":delay 3s" in ev)
+check("a router that CAN reach the hub does not clear itself: it marks "
+      "itself and waits one more round for the server to log in",
+      ':grace' in ev and "scheduler remove" not in ev)
+check("on its second round, still not confirmed, it restores the backup "
+      "(the hub answers pings but the router cannot be managed)",
+      ev.count("/system backup load") == 2 and '($c ~ ":grace")' in ev)
+check("the comment carries the token, so a watcher only ever takes down "
+      "the timer it armed",
+      op.params.get("comment") == "mikromon:autorevert:tok123"
+      and revert_token(op.params) == "tok123"
+      and revert_token({"comment": "mikromon:autorevert:tok123:grace"}) == "tok123"
+      and revert_token({"comment": "mikromon:autorevert"}) == "")
+nop = p.plan_arm_revert("b", seconds=60, hub_ip="10.10.0.1", token="t",
+                        ping_check=False).ops[0].params["on-event"]
+check("for a router that could not ping the hub even BEFORE the change, "
+      "there is no ping test: the server's login decides",
+      "/ping" not in nop and ":grace" in nop
+      and '/system backup load name="b.backup"' in nop)
+
+# disarm: by token for a watcher, everything for a person or a new change
 api2 = FakeApi({("system", "scheduler"): [
-    {".id": "*9", "name": "mikromon-autorevert"},
+    {".id": "*9", "name": "mikromon-autorevert",
+     "comment": "mikromon:autorevert:aaa:grace"},
+    {".id": "*7", "name": "mikromon-autorevert",
+     "comment": "mikromon:autorevert:bbb"},
     {".id": "*8", "name": "something-else"}]})
 p2 = Pusher(cfg, api2, dry_run=True)
-dis = p2.plan_disarm_revert()
-check("disarm removes the autorevert scheduler by id",
-      len(dis.ops) == 1 and dis.ops[0].action == "remove"
-      and dis.ops[0].params.get(".id") == "*9")
+dis = p2.plan_disarm_revert(token="aaa")
+check("a watcher's disarm removes only the timer carrying its token",
+      [o.params.get(".id") for o in dis.ops] == ["*9"])
+check("...and never another change's timer",
+      Pusher(cfg, api2, dry_run=True).plan_disarm_revert(token="zzz").empty)
+everything = p2.plan_disarm_revert()
+check("without a token every pending timer goes (Keep, or clearing the way "
+      "for a new change) -- and nothing else",
+      sorted(o.params.get(".id") for o in everything.ops) == ["*7", "*9"])
 check("disarm is an empty (safe) plan when nothing is armed",
       Pusher(cfg, FakeApi({("system", "scheduler"): []}), dry_run=True)
       .plan_disarm_revert().empty)

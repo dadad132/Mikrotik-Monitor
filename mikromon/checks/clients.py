@@ -27,7 +27,7 @@ Source guide (best → least accurate for "currently connected"):
 from __future__ import annotations
 
 from ..alert import Severity
-from ..baseline import Baseline, is_high, sigma_str
+from ..baseline import is_high, is_low, learn, make_baseline, sigma_str
 from ..util import as_bool
 from .base import Check
 
@@ -123,16 +123,17 @@ class ClientCountCheck(Check):
 
         count = len(macs)
         ctx.sample("client_count", count)
-        bl = Baseline(ctx.memory("client_count").setdefault("bl", {}),
-                      alpha=dev.th("baseline_alpha"),
-                      warmup=dev.th("baseline_warmup"),
-                      scheme=dev.th("baseline_buckets"))
+        mem = ctx.memory("client_count")
+        bl = make_baseline(mem.setdefault("bl", {}), dev)
         s = bl.score(count, ctx.now)
         high = is_high(s, count, floor=dev.th("client_min_count"),
                        min_ratio=dev.th("client_count_ratio"),
                        z=dev.th("baseline_z"))
-        if not high:
-            bl.update(count, ctx.now)
+        low = is_low(s, count, min_typical=dev.th("client_low_min"),
+                     max_ratio=dev.th("client_low_ratio"),
+                     z=dev.th("baseline_z"))
+        learn(bl, count, ctx.now, high or low, mem, "count",
+              dev.th("baseline_accept_hours") * 3600)
 
         parts = ", ".join(f"{k}:{v}" for k, v in breakdown.items())
         pct = int((count - s["mean"]) / s["mean"] * 100) if s["mean"] else 0
@@ -146,4 +147,22 @@ class ClientCountCheck(Check):
             facts={"count": count, "typical": round(s["mean"], 1),
                    "breakdown": breakdown},
             recovery_title=f"Device count back to normal ({count})",
+        )
+        # Too FEW is usually the more useful of the two: an access point, a
+        # switch or the power at the site, noticed before anyone phones.
+        # Held for five polls -- devices come and go, and a lunch-hour dip
+        # is not a fault.
+        drop = int((s["mean"] - count) / s["mean"] * 100) if s["mean"] else 0
+        ctx.transition(
+            "client_count_low", healthy=not low, severity=Severity.WARNING,
+            title=f"Unusually few devices connected: {count}",
+            detail=f"Sources — {parts}.",
+            cause=f"Typical for this time is ~{s['mean']:.0f} device(s); now "
+                  f"{count} (-{drop}%, {sigma_str(s['z'])} normal). An access "
+                  f"point or switch may be off, the power at part of the "
+                  f"site, or a VLAN/DHCP problem keeping devices off.",
+            facts={"count": count, "typical": round(s["mean"], 1),
+                   "breakdown": breakdown},
+            recovery_title=f"Device count back to normal ({count})",
+            confirm=5,
         )

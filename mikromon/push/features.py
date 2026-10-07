@@ -20,6 +20,7 @@ import hashlib
 import ipaddress
 import re
 
+from . import vpnusers as _vu
 from . import wgextra as _wgx
 from .api import PushError
 from .plan import Operation, Plan
@@ -3415,6 +3416,10 @@ FEATURES = {
     "wgextra": {"title": "Extra WireGuard", "write": True,
                 "read": _wgx.wgextra_read, "summary": _wgx.wgextra_summary,
                 "form": _wgx.wgextra_form, "plan": _wgx.wgextra_plan},
+    # Shown on the VPN tab (its own box, not a tab): laptops and phones that
+    # connect straight to this router. See push/vpnusers.py.
+    "vpnusers": {"title": "VPN remote users", "write": True,
+                 "read": _vu.read, "plan": _vu.plan},
 }
 
 # tab label -> url slug (Overview/Backups handled elsewhere)

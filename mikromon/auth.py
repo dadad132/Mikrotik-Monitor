@@ -68,6 +68,21 @@ REPORT_INTERVALS = {"weekly": 7 * 86400, "biweekly": 14 * 86400, "monthly": 30 *
 # the morning is repeated before the end of the day -- without being frequent
 # enough to become something people filter.
 OUTAGE_REMINDER_SECONDS = 12 * 3600
+# "Still on the backup line" reminders: the choices offered, and the default
+# for a company that never picked one.
+BACKUP_REMINDER_CHOICES = (0, 1, 2, 4, 8, 12)
+BACKUP_REMINDER_DEFAULT_HOURS = 2
+# The AI monitor's platform settings (Platform admin -> AI monitor). The key
+# is stored like the SMTP password: this database is the server's secrets.
+AI_DEFAULTS = {
+    "enabled": False,
+    "api_key": "",
+    "web_search": True,
+    "max_searches": 3,      # per check
+    "daily_limit": 40,      # checks per day, across every company
+    "country": "ZA",        # localises the search
+    "timezone": "Africa/Johannesburg",
+}
 
 
 def _next_report_due(schedule: str, from_ts: float | None = None) -> float | None:
@@ -155,6 +170,11 @@ class AuthStore:
         # scheduled report because it answers a different question: the
         # report summarises a period, this one repeats a fault.
         self._add_col_if_missing("orgs", "outage_reminded", "REAL")
+        # The AI monitor: how often to repeat "still on the backup line" while
+        # a site runs on it (NULL = the default, 0 = never), and whether to
+        # send the follow-up "possible cause" email once it has looked online.
+        self._add_col_if_missing("orgs", "backup_reminder_hours", "INTEGER")
+        self._add_col_if_missing("orgs", "cause_emails", "INTEGER")
         # Platform-wide key/value settings (e.g. the SMTP relay the superadmin
         # configures from the dashboard instead of editing config.yaml).
         self.db.execute(
@@ -519,7 +539,8 @@ class AuthStore:
         try:
             row = self.db.execute(
                 "SELECT id, name, plan, created, contact, phone, address, "
-                "vat_number, alert_emails, report_schedule "
+                "vat_number, alert_emails, report_schedule, "
+                "backup_reminder_hours, cause_emails "
                 "FROM orgs WHERE id = ?",
                 (int(org_id),)).fetchone()
             if not row:
@@ -532,7 +553,11 @@ class AuthStore:
                     "contact": row[4] or "", "phone": row[5] or "",
                     "address": row[6] or "", "vat_number": row[7] or "",
                     "alert_emails": alert_emails,
-                    "report_schedule": row[9] or "none"}
+                    "report_schedule": row[9] or "none",
+                    "backup_reminder_hours": (
+                        BACKUP_REMINDER_DEFAULT_HOURS if row[10] is None
+                        else int(row[10])),
+                    "cause_emails": True if row[11] is None else bool(row[11])}
         except Exception:
             row = self.db.execute(
                 "SELECT id, name, created FROM orgs WHERE id = ?",
@@ -816,6 +841,49 @@ class AuthStore:
                 "UPDATE orgs SET outage_reminded=? WHERE id=?",
                 (ts, org_id))
             self.db.commit()
+
+    def get_backup_reminder_hours(self, org_id: int) -> int:
+        """Hours between "still on the backup line" reminders; 0 = off."""
+        row = self.db.execute(
+            "SELECT backup_reminder_hours FROM orgs WHERE id=?",
+            (int(org_id),)).fetchone()
+        if not row or row[0] is None:
+            return BACKUP_REMINDER_DEFAULT_HOURS
+        return max(0, int(row[0]))
+
+    def set_backup_reminder_hours(self, org_id: int, hours: int) -> None:
+        hours = int(hours)
+        if hours not in BACKUP_REMINDER_CHOICES:
+            raise ValueError(f"hours must be one of {BACKUP_REMINDER_CHOICES}")
+        with self._lock:
+            self.db.execute(
+                "UPDATE orgs SET backup_reminder_hours=? WHERE id=?",
+                (hours, int(org_id)))
+            self.db.commit()
+
+    def get_cause_emails(self, org_id: int) -> bool:
+        row = self.db.execute(
+            "SELECT cause_emails FROM orgs WHERE id=?",
+            (int(org_id),)).fetchone()
+        return True if not row or row[0] is None else bool(row[0])
+
+    def set_cause_emails(self, org_id: int, on: bool) -> None:
+        with self._lock:
+            self.db.execute("UPDATE orgs SET cause_emails=? WHERE id=?",
+                            (1 if on else 0, int(org_id)))
+            self.db.commit()
+
+    def get_ai(self) -> dict:
+        """The AI monitor's platform settings, with defaults filled in."""
+        out = dict(AI_DEFAULTS)
+        d = self.get_setting("ai")
+        if isinstance(d, dict):
+            out.update({k: v for k, v in d.items() if k in AI_DEFAULTS})
+        return out
+
+    def set_ai(self, cfg: dict) -> None:
+        self.set_setting("ai", {k: v for k, v in cfg.items()
+                                if k in AI_DEFAULTS})
 
     def set_report_next_due(self, org_id: int, ts: float | None) -> None:
         with self._lock:

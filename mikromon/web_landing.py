@@ -9,7 +9,7 @@ by adding this before the auth gate in web.py do_GET:
 
 Everything this page claims is something the product does today, in the
 numbers it actually uses: polled every 60 seconds, Safe mode checking back
-after 5 minutes, remote-access links that close after 15, prices read from
+after a minute, remote-access links that close after 15, prices read from
 the billing table. A landing page that oversells is one a customer catches
 out in the first week.
 """
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from .web_shared import (
     _BRAND, esc, _THEME_VARS, _THEME_INIT_JS, _THEME_TOGGLE_JS,
-    _theme_toggle_btn, _REVERT_MINUTES,
+    _theme_toggle_btn, _SAFE_CHECK_SECONDS,
 )
 # Prices come from billing, never from a second copy kept here. They used to
 # be hard-coded in both places and drifted apart -- the landing page went on
@@ -116,8 +116,8 @@ _FEATURES = [
      "which line failed and when."),
     ("rotate", "Safe config push & auto-revert",
      "Every change is previewed first and backed up before it is sent. If a "
-     f"change cuts the router off, it restores that backup by itself within "
-     f"{_REVERT_MINUTES} minutes."),
+     "change cuts the router off, it restores that backup by itself, usually "
+     "within two minutes."),
     ("archive", "Automated router backups",
      "One-click backups saved on the router's own flash, plus an automatic "
      "one before every change. The last 10 are kept; backups you made "
@@ -146,14 +146,26 @@ _FEATURES = [
 # The things people tell us they did not know it could do. Every one of them
 # is a feature that exists, described in the terms it actually works in.
 _DID_YOU_KNOW = [
-    ("search", "It tells you why a site is down",
-     "Down minutes after a change you pushed? It says so. Several sites down "
-     "at once? It calls it an area outage. Online but no internet? It says "
-     "that too."),
+    ("search", "It tells you why a line dropped",
+     "A dead port at the ISP's box, the ISP's own network, or a change you "
+     "pushed minutes before? It says which, from what the router saw and "
+     "from your other sites on the same ISP.__AI_SEARCH__"),
+    ("alert", "It keeps reminding you",
+     "While a site runs on its backup line you are reminded every two hours, "
+     "with how long it has been and how much data the backup has used, "
+     "until the main line is back."),
     ("trending", "It learns what normal looks like",
-     "Traffic and connected-device counts are compared with the same hour of "
-     "the same weekday, so an unusual spike stands out without you setting a "
-     "single threshold."),
+     "Traffic and connected devices are compared with the same hour over the "
+     "last several days, so an unusual spike, or an unusual drop like an "
+     "access point that went off, stands out without a single threshold."),
+    ("activity", "It notices internet that only looks up",
+     "A line that is up but carrying almost nothing in the middle of a "
+     "working day gets flagged: users with no working internet while every "
+     "light on the router is green."),
+    ("lock", "Laptops straight onto a site",
+     "Add a laptop or phone from a router's VPN tab. Paste its WireGuard key "
+     "and you get the settings to connect, with its own address and its own "
+     "off switch."),
     ("share", "Share one router with a contractor",
      "Give one person at another company access to a single router, read-only "
      "or with rights to change it, and take it back whenever you like."),
@@ -200,8 +212,10 @@ _FAQ = [
      "needs upgrading to 7 first."),
     ("What happens if a change breaks a router?",
      "Every change is previewed first and backed up before it is sent. With "
-     f"Safe mode on, the router checks {_REVERT_MINUTES} minutes later that it "
-     "can still reach us, and restores the backup by itself if it cannot."),
+     f"Safe mode on, about {_SAFE_CHECK_SECONDS} seconds later the router "
+     "checks it can still reach us and we check we can still log in to it. "
+     "If either fails, the router restores the backup by itself, and you get "
+     "an email saying so."),
     ("Can my whole team use it?",
      "Yes. One company account, as many team members as you like. The owner "
      "decides which routers each member can see and manage."),
@@ -651,6 +665,15 @@ _DEMO_CSS = """
   text-transform:uppercase;color:var(--text-faint)}
 .ap-card{background:var(--surface);border:1px solid var(--border);
   border-radius:12px;box-shadow:var(--shadow);overflow:hidden}
+.ap-bk{display:none;background:var(--surface);border:1px solid var(--border);
+  border-left:4px solid var(--warning);border-radius:12px;padding:9px 12px;
+  margin-bottom:12px;font-size:12px;line-height:1.45;color:var(--text-muted);
+  box-shadow:var(--shadow);animation:din .4s ease}
+.ap-bk.on{display:block}
+.ap-bk i{font-style:normal;font-size:9.5px;font-weight:700;letter-spacing:.05em;
+  text-transform:uppercase;background:var(--warning-bg);color:var(--warning);
+  border-radius:999px;padding:1px 7px;margin-right:6px}
+.ap-bk b{color:var(--text)}
 .ap-card-head{display:flex;align-items:center;justify-content:space-between;
   padding:11px 14px}
 .ap-card-head b{font-size:13px;color:var(--text)}
@@ -794,6 +817,9 @@ def _demo_html() -> str:
         f'<div class="ap-chips"><div class="ap-chip"><b class="c-dev">4</b>'
         f'<span>Devices</span></div><div class="ap-chip"><b class="c-off">0</b>'
         f'<span>Offline</span></div></div>'
+        f'<div class="ap-bk" id="dm-bk"><i>On backup</i><b>1 site running on '
+        f'the backup line</b><br><b>Branch · Durban</b> Vumatel down since '
+        f'09:41 · on LTE</div>'
         f'<div class="ap-card"><div class="ap-card-head"><b>Devices</b>'
         f'<span class="ap-pills"><i class="on">All</i><i>Problems</i>'
         f'<i>Offline</i></span></div>'
@@ -827,6 +853,12 @@ def _demo_html() -> str:
 # Written as plain ES5 so it runs on whatever a prospect opens it in. It only
 # ever touches the demo's own elements, and does nothing until the demo is
 # scrolled into view.
+# Only shown when the online check is on (see render_landing).
+_AI_DEMO_STEP = r"""{d:3600, cap:'A minute later: what is reported online for that area, with the sources.',
+       f:function(){ mail('', '09:42', '[EasyMikrotik] Branch · Durban: possible cause — Outage at the ISP',
+         ['Vumatel reports a fibre outage in Umhlanga since 09:30; repairs are under way.',
+          'Source: Vumatel status — Umhlanga fibre outage']); }},"""
+
 _DEMO_JS = r"""
 <script>
 (function(){
@@ -907,6 +939,14 @@ _DEMO_JS = r"""
       if (k++ < n) later(ms / n, t);
     })();
   }
+  function count2(el, from, to, ms){
+    var n = 12, k = 0;
+    (function t(){
+      if (el) el.textContent = 'In about ' + Math.round(from - (from - to) * (k / n)) +
+        ' s the router checks it can still reach the hub.';
+      if (k++ < n) later(ms / n, t);
+    })();
+  }
   function type(el, text, ms){
     var k = 0, per = Math.max(6, ms / text.length);
     (function t(){ el.textContent = text.slice(0, k);
@@ -918,6 +958,7 @@ _DEMO_JS = r"""
             {name:'Clinic · Paarl', st:'ok', al:0},
             {name:'Warehouse · Midrand', st:'ok', al:0}];
     drawTable(); showDash(); body.innerHTML = '';
+    var bk = document.getElementById('dm-bk'); if (bk) bk.classList.remove('on');
     list.innerHTML = '<div class="dm-empty">Alert emails arrive here.</div>';
   }
   var PLAN = 'Clinic · Paarl: 2 change(s) [security]\n' +
@@ -932,16 +973,22 @@ _DEMO_JS = r"""
   var SC = [
     {title:'Internet line fails', init:reset, steps:[
       {d:2600, cap:'The dashboard: every router, one row each.'},
-      {d:2800, cap:'09:41 — Branch · Durban’s fibre stops answering. The router moves to its LTE backup, and its row turns Partial.',
-       f:function(){ setRow('Branch · Durban', {st:'warn', al:1, hl:true}); }},
-      {d:3400, cap:'You get an email saying what happened and why.',
+      {d:2800, cap:'09:41 — Branch · Durban’s fibre stops answering. The router moves to its LTE backup: its row turns Partial, and an On backup card stays at the top until the line is back.',
+       f:function(){ setRow('Branch · Durban', {st:'warn', al:1, hl:true});
+         var bk = document.getElementById('dm-bk'); if (bk) bk.classList.add('on'); }},
+      {d:3800, cap:'You get an email saying what happened, and the likely cause: two other sites on the same ISP dropped too.',
        f:function(){ mail('warn', '09:41', '[EasyMikrotik] WARNING: Branch · Durban (1 event)',
-         ['[WARNING] Primary WAN "Fibre" is DOWN — running on backup "LTE"',
-          'Why: Primary uplink Fibre is not carrying traffic. Traffic is now flowing via LTE.']); }},
-      {d:3400, cap:'When the fibre answers again, the row goes back to Healthy and a second email says so.',
+         ['[WARNING] Primary WAN "Vumatel" is DOWN — running on backup "LTE"',
+          'Why: Primary uplink Vumatel is not carrying traffic. Likely cause: 2 other sites on Vumatel lost their line within 20 minutes of this one, so this is an outage at Vumatel, not a fault on site.']); }},
+      /*AI_STEP*/
+      {d:3400, cap:'Two hours later it is still on LTE, so you are reminded, with how much data the backup has carried.',
+       f:function(){ mail('warn', '11:41', '[EasyMikrotik] Branch · Durban is still on its backup line (2 hours)',
+         ['Branch · Durban: Vumatel line down since 09:41 (2 hours), running on LTE, 1.8 GB used on it.']); }},
+      {d:3400, cap:'When the fibre answers again, the row goes back to Healthy and a last email says so.',
        f:function(){ setRow('Branch · Durban', {st:'ok', al:0});
-         mail('ok', '09:47', '[EasyMikrotik] RESOLVED: Branch · Durban (1 event)',
-              ['[RESOLVED] WAN restored — back on primary uplink Fibre']); }},
+         var bk = document.getElementById('dm-bk'); if (bk) bk.classList.remove('on');
+         mail('ok', '11:58', '[EasyMikrotik] RESOLVED: Branch · Durban (1 event)',
+              ['[RESOLVED] WAN restored — back on primary uplink Vumatel']); }},
       {d:2600, cap:'You heard about it from an email, not from a phone call.'}
     ]},
     {title:'A change goes wrong', init:reset, steps:[
@@ -949,19 +996,22 @@ _DEMO_JS = r"""
        f:function(){ showDev('Clinic · Paarl', 'Security', 'ok');
          body.innerHTML = '<div class="ap-box"><h4>Dry run — nothing has been written yet</h4>' +
            '<pre class="ap-pre">' + esc(PLAN) + '</pre>' +
-           '<span class="ap-chk"><b>☑ Safe mode</b> — 5 min after applying, the router checks it can still reach the hub and auto-reverts to the backup if it can’t.</span>' +
+           '<span class="ap-chk"><b>☑ Safe mode</b> — a backup is taken and a safety timer is set on the router <i>before</i> the change is sent. About 60 seconds later the router checks it can still reach the hub and the server checks it can still log in. If either fails, the router puts its previous settings back by itself and restarts.</span>' +
            '<span class="ap-btn" id="dm-apply">Confirm &amp; apply to the router</span></div>'; }},
-      {d:3400, cap:'A backup is taken first, then the change goes out — and the router arms its own self-check.',
+      {d:3400, cap:'A backup is taken and a safety timer is set on the router first. Only then does the change go out.',
        f:function(){ press('#dm-apply');
          later(400, function(){
-           body.innerHTML = '<div class="ap-box ok"><h4>Change applied to Clinic · Paarl — safety net armed</h4>' +
-             '<p>In about 5 minutes the router will check whether it can still reach the hub. If it can’t, it restores the pre-change backup and comes back on the old config. No site visit.</p>' +
-             '<p class="ap-count" id="dm-count">self-check in 5:00</p></div>';
-           count(document.getElementById('dm-count'), 'self-check in ', 300, 160, 2600); }); }},
+           body.innerHTML = '<div class="ap-box ok"><h4>Change sent to Clinic · Paarl</h4>' +
+             '<p>Safe mode is watching it. About 60 seconds after the change the router pings this server, and then this server logs in to it. If either fails, the router restores the settings it had just before the change and restarts. No site visit.</p>' +
+             '<p class="ap-count"><b>Watching the change</b><br><span id="dm-count">In about 60 s the router checks it can still reach the hub.</span></p></div>';
+           count2(document.getElementById('dm-count'), 60, 8, 2400); }); }},
       {d:3000, cap:'The change locked the router out. On the dashboard it shows Offline.',
        f:function(){ showDash(); setRow('Clinic · Paarl', {st:'crit', al:1, hl:true}); }},
-      {d:3600, cap:'When the self-check runs, the router cannot reach us — so it loads the backup by itself and comes back online.',
-       f:function(){ later(1400, function(){ setRow('Clinic · Paarl', {st:'ok', al:0}); }); }},
+      {d:3600, cap:'A minute after the change the router cannot reach us, so it loads the backup by itself, restarts and comes back online.',
+       f:function(){ later(1400, function(){ setRow('Clinic · Paarl', {st:'ok', al:0});
+         mail('warn', '10:14', '[EasyMikrotik] Safe mode put Clinic · Paarl back to its previous settings',
+              ['A change to Clinic · Paarl (Security) cut the router off from the dashboard.',
+               'Safe mode restored the settings it had just before that change. The change is NOT on the router any more.']); }); }},
       {d:2600, cap:'Nobody locked out. Nobody drove anywhere.'}
     ]},
     {title:'Fix it from anywhere', init:reset, steps:[
@@ -1127,9 +1177,16 @@ def _tier_rows() -> str:
 # Public render function
 # ---------------------------------------------------------------------------
 
-def render_landing() -> str:
+def render_landing(ai_on: bool = False) -> str:
+    """The public page. `ai_on` is whether this server has the AI monitor's
+    online check switched on: the page only claims the search when it is
+    true -- a claim the product does not back is one a customer catches."""
     feat_cards = "\n".join(_feat_card(i, t, b) for i, t, b in _FEATURES)
-    dyk_cards = "\n".join(_dyk_card(i, t, b) for i, t, b in _DID_YOU_KNOW)
+    search = (" With the online check on, it also looks for outages and "
+              "load-shedding reported in that area, and sends the sources."
+              if ai_on else "")
+    dyk_cards = "\n".join(_dyk_card(i, t, b.replace("__AI_SEARCH__", search))
+                          for i, t, b in _DID_YOU_KNOW)
     step_cards = "\n".join(_step_card(n, t, b) for n, t, b in _STEPS)
     faq_items = "\n".join(_faq_item(q, a) for q, a in _FAQ)
     price_cards = "\n".join(_price_card(p) for p in _PLANS)
@@ -1190,7 +1247,7 @@ def render_landing() -> str:
     </div>
     <div class="hero-facts">
       <span class="hero-fact">Polled every <b>60 s</b></span>
-      <span class="hero-fact">Bad changes undo themselves in <b>{_REVERT_MINUTES} min</b></span>
+      <span class="hero-fact">Bad changes undo themselves in <b>about 2 min</b></span>
       <span class="hero-fact">Remote links close after <b>15 min</b></span>
       <span class="hero-fact"><b>No public IP</b> needed</span>
     </div>
@@ -1353,6 +1410,6 @@ def render_landing() -> str:
 </footer>
 
 {_THEME_TOGGLE_JS}
-{_DEMO_JS}
+{_DEMO_JS.replace("/*AI_STEP*/", _AI_DEMO_STEP if ai_on else "")}
 </body>
 </html>"""

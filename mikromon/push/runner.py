@@ -18,6 +18,19 @@ log = logging.getLogger(__name__)
 
 # Name of the on-router scheduler that performs the commit-confirm auto-revert.
 _REVERT_SCHED = "mikromon-autorevert"
+# Its comment: this tag, then ":<token>" naming the change that armed it, then
+# ":grace" once the router has passed its own check and is waiting for the
+# server. See Pusher.plan_arm_revert.
+_REVERT_TAG = "mikromon:autorevert"
+
+
+def revert_token(row: dict) -> str:
+    """The token in an auto-revert scheduler's comment, or "" for none."""
+    comment = str(row.get("comment", "") or "")
+    if not comment.startswith(_REVERT_TAG + ":"):
+        return ""
+    rest = comment[len(_REVERT_TAG) + 1:]
+    return rest.split(":", 1)[0] if rest != "grace" else ""
 
 _ROS_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun",
                "jul", "aug", "sep", "oct", "nov", "dec"]
@@ -196,49 +209,102 @@ class Pusher:
         return Plan(self.cfg.name, [op], summary=f"delete {name}")
 
     # ----- commit-confirm auto-revert (safe mode) ---------------------------
-    def plan_arm_revert(self, backup_name: str, minutes: int = 2,
-                        hub_ip: str = "10.10.0.1") -> Plan:
-        """Arm a local scheduler that, `minutes` after a change, VERIFIES the
-        router can still reach the management hub and reverts to `backup_name`
-        if it can't.
+    #
+    # The order matters more than anything else here. The timer is armed
+    # BEFORE the change goes out: a change that cuts the connection while it
+    # is being sent leaves nothing behind to add a timer afterwards, and that
+    # is exactly the change this exists for.
+    #
+    # Two things have to agree before a change is kept: the router can still
+    # reach the hub (it pings it, from the router, about a minute after the
+    # change), and the server can still manage the router (it logs in over
+    # the API and takes the timer down). Ping alone passes a change that
+    # blocks the API while leaving ICMP open -- the router answers pings and
+    # nobody can configure it any more.
+    def plan_arm_revert(self, backup_name: str, seconds: int = 60,
+                        hub_ip: str = "10.10.0.1", token: str = "",
+                        ping_check: bool = True) -> Plan:
+        """Arm a scheduler on the router that puts `backup_name` back unless
+        the change is confirmed.
 
-        Why connectivity-checked rather than "revert unless a human cancels":
-        a bad change often only bites a minute or two later, so a human clicking
-        'approve' early would cancel the net before the failure shows. Here the
-        router itself decides — at the mark it pings the hub; if it gets NO
-        replies the change cut us off, so it restores the backup (reboot into the
-        pre-change config); if it can still reach the hub the change is safe and
-        the scheduler just removes itself. Runs on the router, so it works even
-        when the box is otherwise unreachable from outside."""
+        It fires every `seconds` until something removes it:
+
+          * first firing -- pings the hub (three tries). No reply means the
+            change cut the router off: it restores the backup and reboots
+            into the pre-change config. A reply means the tunnel is fine, so
+            it marks itself and waits one more round for the server.
+          * second firing -- the server has had a full extra round to log in
+            and take the timer down, and has not. The router can reach the
+            hub but cannot be managed, so it restores the backup.
+
+        The server removes the timer as soon as it has logged in over the API
+        after the first round (see push/safemode.py), so a good change is
+        normally confirmed a little over a minute after it was sent.
+
+        `ping_check=False` skips the ping and goes straight to waiting for the
+        server -- for a router that could not reach the hub even BEFORE the
+        change (managed over a public address, say), where a failed ping
+        would only revert every change it was ever given.
+
+        `token` goes in the comment so the server only ever takes down the
+        timer it armed: a second change made inside the window replaces the
+        timer, and the first change's watcher must not confirm the second.
+        """
         if not backup_name.endswith(".backup"):
             backup_name += ".backup"
         # password="" for the same reason as plan_restore. It matters more
         # here: this runs on the router AFTER a change has cut us off, so a
         # silent failure means no revert and no way in to do one by hand.
-        event = (f':if ([/ping {hub_ip} count=4] = 0) do={{'
-                 f'/system backup load name="{backup_name}" password=""'
-                 f'}} else={{'
-                 f'/system scheduler remove [find name="{_REVERT_SCHED}"]'
-                 f'}}')
+        load = f'/system backup load name="{backup_name}" password=""'
+        mark = '/system scheduler set $s comment=($c . ":grace")'
+        if ping_check:
+            # Three tries a few seconds apart, so one lost burst on an LTE
+            # backup does not reboot a site into yesterday's config.
+            first = (':local ok 0; '
+                     ':for i from=1 to=3 do={ :if ($ok = 0) do={ '
+                     f':set ok [/ping {hub_ip} count=2]; '
+                     ':if ($ok = 0) do={ :delay 3s } } }; '
+                     f':if ($ok = 0) do={{ {load} }} else={{ {mark} }}')
+        else:
+            first = mark
+        event = (f':local s [/system scheduler find name="{_REVERT_SCHED}"]; '
+                 ':if ([:len $s] > 0) do={ '
+                 ':local c [/system scheduler get $s comment]; '
+                 f':if ($c ~ ":grace") do={{ {load} }} else={{ {first} }} }}')
+        comment = _REVERT_TAG + (f":{token}" if token else "")
+        how = (f"unless the router can still reach the hub ({hub_ip}) and "
+               f"the server can still log in" if ping_check else
+               "unless the server can still log in")
         op = Operation(
             "add", ("system", "scheduler"),
-            {"name": _REVERT_SCHED, "interval": f"{int(minutes)}m",
-             "on-event": event, "comment": "mikromon:autorevert",
+            {"name": _REVERT_SCHED, "interval": f"{int(seconds)}s",
+             "on-event": event, "comment": comment,
              "policy": "ftp,reboot,read,write,policy,test,password,"
                        "sensitive,romon"},
-            desc=f"arm auto-revert to {backup_name} in {minutes} min unless the "
-                 f"router can still reach the hub ({hub_ip})")
+            desc=f"arm safe mode: put {backup_name} back {how}")
         return Plan(self.cfg.name, [op], summary="arm auto-revert")
 
-    def plan_disarm_revert(self) -> Plan:
-        """Cancel the pending auto-revert (the user approved the change)."""
-        sid = next((s.get(".id") for s in self.api.fetch(("system", "scheduler"))
-                    if s.get("name") == _REVERT_SCHED), None)
-        if sid is None:
+    def plan_disarm_revert(self, token: str | None = None) -> Plan:
+        """Take the pending auto-revert down: the change is confirmed.
+
+        With `token`, only the timer that carries it is removed. A timer with
+        a different token belongs to a later change, which has its own
+        watcher; removing it from here would confirm a change nobody checked.
+        Without one (a person pressing Keep, or clearing the way for a new
+        change) every pending timer goes.
+        """
+        ops = []
+        for s in self.api.fetch(("system", "scheduler")):
+            if s.get("name") != _REVERT_SCHED or not s.get(".id"):
+                continue
+            if token is not None and revert_token(s) != token:
+                continue
+            ops.append(Operation(
+                "remove", ("system", "scheduler"), {".id": s[".id"]},
+                desc="confirm change — cancel the pending auto-revert"))
+        if not ops:
             return Plan(self.cfg.name, [], summary="auto-revert already cleared")
-        op = Operation("remove", ("system", "scheduler"), {".id": sid},
-                       desc="confirm change — cancel the pending auto-revert")
-        return Plan(self.cfg.name, [op], summary="confirm (cancel auto-revert)")
+        return Plan(self.cfg.name, ops, summary="confirm (cancel auto-revert)")
 
     # ----- generic managed-list reconcile (firewall, NAT, queues, …) --------
     def plan_managed_list(self, path, key, desired, *, manage_tag=None,

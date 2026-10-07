@@ -39,7 +39,7 @@ from .config import DEFAULT_CHECKS
 from .metrics import MetricsStore
 from .util import human_bps, human_duration
 from .web_shared import (
-    esc, _flash, _BRAND, _REVERT_MINUTES, _PAGE_CSS, _SHELL_CSS,
+    esc, _flash, _BRAND, _SAFE_CHECK_SECONDS, _PAGE_CSS, _SHELL_CSS, _AI_CSS,
     _header, _page, parse_multipart_form,
     _THEME_VARS, _THEME_INIT_JS, _THEME_TOGGLE_JS,
 )
@@ -77,8 +77,28 @@ def _problems(conditions: dict) -> list:
     for key, cond in (conditions or {}).items():
         if cond.get("status") == "problem" or cond.get("level") in ("warn", "crit"):
             out.append({"key": key, "since": cond.get("since"),
-                        "level": cond.get("level", "problem")})
+                        "level": cond.get("level", "problem"),
+                        "title": cond.get("title") or ""})
     return out
+
+
+# Graded thresholds record a level, not a title, so they are named here.
+_PROBLEM_NAMES = {"cpu": "CPU load high", "memory": "Free RAM low",
+                  "storage": "Free storage low", "temperature": "Temperature high",
+                  "voltage": "Voltage out of range"}
+
+
+def _problem_label(p: dict) -> str:
+    """What a problem is called on the page: its own recorded title, which
+    says what and where ("Backup WAN uplink "LTE" is DOWN"), rather than the
+    internal key ("wan_link:1") the box used to print."""
+    if p.get("title"):
+        return p["title"]
+    key = str(p.get("key", ""))
+    base = key.split(":")[0]
+    name = _PROBLEM_NAMES.get(base) or base.replace("_", " ").capitalize()
+    level = str(p.get("level") or "")
+    return f"{name} ({level})" if level in ("warn", "crit") else name
 
 
 def _device_view(store, state, name) -> dict:
@@ -1356,8 +1376,9 @@ def _diagnose(up, internet_down, mins_since_change, others_down):
             return ("change",
                     f"This router went unreachable about {mins_since_change} min "
                     "after a configuration change was pushed to it — that change "
-                    "is the most likely cause. If Safe mode was on it auto-reverts "
-                    f"within {_REVERT_MINUTES} minutes; otherwise restore the latest backup from "
+                    "is the most likely cause. If Safe mode was on, the router "
+                    "puts its previous settings back by itself within about two "
+                    "minutes; otherwise restore the latest backup from "
                     "Maintenance → Backups.")
         return ("offline",
                 "The router isn't responding and nothing points to a recent "
@@ -2077,7 +2098,8 @@ def _firmware_chip(devs) -> str:
 
 
 def _render_dashboard(store, state, user=None, allowed=None, csrf="",
-                      ignored=None, seen_tips=None, events=None) -> str:
+                      ignored=None, seen_tips=None, events=None,
+                      incidents=None) -> str:
     devs = sorted((d for d in _all_devices(store, state, allowed)
                    if _device_has_data(d)),
                   # Offline first, then Partial, then the rest: the order
@@ -2109,6 +2131,12 @@ def _render_dashboard(store, state, user=None, allowed=None, csrf="",
     cards = _suggestion_panel(devs, csrf=csrf, ignored_by_device=ignored,
                               items=sugg, events=events) if devs else ""
     charts = _render_noc_charts(devs) if devs else ""
+    # Sites running on their backup line, from the AI monitor's incidents.
+    # Above everything else on purpose, and there until the main line is
+    # back: the reminder this page gives is the one people actually see.
+    from .web_ai import backup_banner
+    backup_html = backup_banner(incidents or [], {d["device"] for d in devs},
+                                state)
     rows = _dash_device_rows(devs)
     empty_msg = ("No devices to show." if not devs
                 else "No devices match this filter.")
@@ -2138,7 +2166,7 @@ def _render_dashboard(store, state, user=None, allowed=None, csrf="",
 {_THEME_INIT_JS}{_favicon_tags()}
 <meta http-equiv="refresh" content="10">
 <title>{brand} &middot; Dashboard</title>
-<style>{_THEME_VARS}{_SHELL_CSS}{_DASH_CSS}</style></head>
+<style>{_THEME_VARS}{_SHELL_CSS}{_DASH_CSS}{_AI_CSS}</style></head>
 <body class="has-sidebar">
 {_header(user, "/dashboard")}
 <div class="dash-main">
@@ -2148,6 +2176,7 @@ def _render_dashboard(store, state, user=None, allowed=None, csrf="",
 <input id="q" class="dash-search" placeholder="Search devices…">
 </div></div>
 <div class="dash-chips">{chips}</div>
+{backup_html}
 {welcome}
 {cards}
 {charts}
@@ -2353,9 +2382,44 @@ def _render_inventory(store, state, user, allowed) -> str:
     return _page("Inventory", _header(user, "/inventory") + inner)
 
 
+def _safemode_notice(entry, now=None) -> str:
+    """A box on the router's page while Safe mode is checking a change, or
+    for a day after it had to undo one. Nothing once a change is kept: a
+    good change needs no ceremony."""
+    if not entry:
+        return ""
+    now = now if now is not None else time.time()
+    state = entry.get("state", "")
+    when = time.strftime("%H:%M", time.localtime(entry.get("armed_at") or now))
+    feature = _feature_titles().get(entry.get("feature", ""),
+                                    entry.get("feature", "a tab"))
+    who = entry.get("user") or "someone"
+    if state in ("waiting", "confirming", "unconfirmed"):
+        from .push.safemode import describe
+        d = describe(entry, now)
+        return (f'<div class="box" style="border-left:4px solid var(--warning)">'
+                f'<h2>Safe mode is checking a change</h2>'
+                f'<p style="margin:0">{esc(feature)} change at {esc(when)}: '
+                f'{esc(d["headline"].lower())}. {esc(d["detail"])}</p></div>')
+    if (state in ("reverted", "lost")
+            and now - (entry.get("finished") or now) < 24 * 3600):
+        head = ("Safe mode put this router back to its previous settings"
+                if state == "reverted" else
+                "This router has not come back after a change")
+        body = (f"The {feature} change {who} made at {when} cut it off from "
+                f"the dashboard, so it restored the backup taken just before "
+                f"({entry.get('backup', '')}). That change is not on the "
+                f"router any more." if state == "reverted" else
+                entry.get("detail", ""))
+        return (f'<div class="box" style="border-left:4px solid var(--danger)">'
+                f'<h2>{esc(head)}</h2><p style="margin:0">{esc(body)}</p></div>')
+    return ""
+
+
 def _render_device(store, state, name, user, csrf="",
                    last_change=None, others_down=0, access_html="",
-                   can_manage=None) -> str:
+                   can_manage=None, notice_html="", ai_html="",
+                   incident_open=False) -> str:
     d = _device_view(store, state, name)
     f = d["facts"]
     sev = _severity(d)
@@ -2661,13 +2725,20 @@ def _render_device(store, state, name, user, csrf="",
     # ── right: active problems ─────────────────────────────────────────────────
     _lc = {"warn": "#d97706", "crit": "#dc2626"}
     if d["problems"]:
+        def _since(p):
+            if not p.get("since"):
+                return ""
+            return (f'<div style="font-size:11.5px;color:var(--text-faint);'
+                    f'margin-top:2px">since '
+                    f'{time.strftime("%d %b %H:%M", time.localtime(p["since"]))}'
+                    f' ({esc(human_duration(time.time() - p["since"]))})</div>')
         phtml = "".join(
             f'<div style="padding:8px 10px;margin:4px 0;border-radius:6px;'
             f'border-left:3px solid {_lc.get(str(p["level"]), "#dc2626")};'
             f'background:{_lc.get(str(p["level"]), "#dc2626")}15">'
             f'<span style="font-weight:600;font-size:13px;'
             f'color:{_lc.get(str(p["level"]), "#dc2626")}">'
-            f'{esc(p["key"])}</span></div>'
+            f'{esc(_problem_label(p))}</span>{_since(p)}</div>'
             for p in d["problems"])
     else:
         phtml = ('<p style="color:#16a34a;font-weight:600;padding:4px 0">'
@@ -2680,7 +2751,12 @@ def _render_device(store, state, name, user, csrf="",
     internet_down = any(p["key"] in ("internet_down", "wan_failover")
                         for p in d["problems"])
     mins = (max(0, int((time.time() - last_change) / 60)) if last_change else None)
-    diag_html = _diagnosis_box(_diagnose(d["up"], internet_down, mins, others_down))
+    # While the AI monitor has an incident open it says all of this and more
+    # (with the router's evidence and anything found online), so the older
+    # one-line guess would only repeat it less well.
+    diag_html = ("" if incident_open else
+                 _diagnosis_box(_diagnose(d["up"], internet_down, mins,
+                                          others_down)))
 
     iface_card = (f'<div class="box"><h2>Interfaces</h2>'
                   f'<p class="muted">Port list, VLANs, bridges and IP addresses.</p>'
@@ -2692,12 +2768,17 @@ def _render_device(store, state, name, user, csrf="",
         f'<div class="wrap" style="max-width:1300px">'
         f'<h1 style="display:flex;align-items:center;gap:12px">{esc(name)}'
         f'<span class="badge {badge[0]}">{badge[1]}</span></h1>'
-        f'{tabbar}{facts_bar}'
+        f'{tabbar}{facts_bar}{notice_html}'
+        # During an outage "what happened" is the first thing anybody opening
+        # this page wants, so it spans the page; otherwise it is a footnote
+        # in the side column.
+        f'{ai_html if incident_open else ""}'
         f'<div class="ovgrid">'
         f'<div class="ovcol">{left_col}</div>'
         f'<div class="ovcol">{center_wan}{center_throughput}</div>'
         f'<div class="ovcol">'
-        f'{avail_box}{access_html}{probs_box}{diag_html or ""}{iface_card}</div>'
+        f'{"" if incident_open else ai_html}{avail_box}{access_html}'
+        f'{probs_box}{diag_html or ""}{iface_card}</div>'
         f'</div>'
         f'<p style="margin-top:16px"><a href="/dashboard">&larr; dashboard</a></p>'
         f'</div>')
@@ -6303,61 +6384,331 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None,
             f'</form><template id="tmpl-wl">{row(None)}</template></div>')
 
 
-def _render_confirm_page(name, user, slug, minutes, backup, hub_ip, csrf) -> str:
-    """Shown right after a safe-mode change is applied. The router itself
-    verifies, in `minutes`, that it can still reach the hub — and auto-reverts
-    if it can't. The human doesn't have to judge whether it'll break; the
-    'Keep now' button is only an early opt-out of that self-check."""
+def _safemode_open_api(devices_db, defaults):
+    """For the safe-mode watcher: a logged-in read-write session to a router,
+    built from its current saved settings. Raises when it cannot be reached
+    -- which is itself the answer the watcher is looking for."""
+    def open_api(device_name):
+        from .config import build_device
+        from .devices_store import DevicesStore
+        from .push import rw_device
+        from .push.api import PushApi
+        ds = DevicesStore(devices_db)
+        try:
+            raw = ds.raw(device_name)
+        finally:
+            ds.close()
+        if raw is None:
+            raise RuntimeError("the router is no longer in the device list")
+        import dataclasses
+        cfg = build_device(raw, defaults)
+        # A short timeout: a router that cannot be reached is an answer
+        # here, and waiting the usual minute for it would hold up every
+        # other change the watcher is settling.
+        dev = rw_device(dataclasses.replace(cfg, timeout=min(cfg.timeout, 10)))
+        api = PushApi(dev)
+        api.connect()
+        return api, dev.close
+    return open_api
+
+
+def _safemode_email(entry, event, org_name, when_str, feature_title):
+    """(subject, text) telling a company Safe mode undid a change, or that a
+    router has not come back from one."""
+    dev = entry.get("device", "")
+    who = entry.get("user") or "someone"
+    if event == "reverted":
+        subject = f"Safe mode put {dev} back to its previous settings"
+        text = (
+            f"A change to {dev} ({feature_title}), made by {who} at "
+            f"{when_str}, cut the router off from the dashboard.\n\n"
+            f"Safe mode restored the settings it had just before that change "
+            f"(backup {entry.get('backup', '')}). The router restarted and can "
+            f"be reached again.\n\n"
+            f"The change is NOT on the router any more. Look at what it was "
+            f"before trying it again: it was the change itself that broke the "
+            f"connection.\n\n{entry.get('detail', '')}\n")
+    else:
+        subject = f"{dev} has not come back after a change"
+        text = (
+            f"A change to {dev} ({feature_title}), made by {who} at "
+            f"{when_str}, could not be confirmed, and the router has not come "
+            f"back since.\n\n"
+            f"Safe mode should have restored its previous settings and "
+            f"restarted it. If it is still not reachable, it may need someone "
+            f"on site: check its power and its internet line first.\n\n"
+            f"{entry.get('detail', '')}\n")
+    return subject, text + f"\n-- {_BRAND}\n"
+
+
+def _start_safemode(devices_db, defaults, auth, smtp_cfg, push_log_db):
+    """Create and start the safe-mode watcher, or None without a device DB."""
+    if not devices_db:
+        return None
+    from .push.safemode import SafeModeTracker
+
+    def on_event(entry, event):
+        dev = entry.get("device", "")
+        feature = entry.get("feature", "")
+        title = (_feature_titles().get(feature) or feature or "a change")
+        if push_log_db:
+            try:
+                from .push import AuditLog
+                AuditLog(push_log_db).append(
+                    dev, "safe mode", f"{feature}:safemode", "apply",
+                    "ok" if event == "confirmed" else "error",
+                    {"confirmed": "change confirmed: the router can still be "
+                                  "reached and managed",
+                     "reverted": "the router put its previous settings back",
+                     "lost": "the router has not come back after the change",
+                     }.get(event, event),
+                    entry.get("detail", ""))
+            except Exception:  # noqa: BLE001
+                log.exception("safe mode: could not write the activity log")
+        if event not in ("reverted", "lost") or auth is None:
+            return
+        from email.message import EmailMessage
+
+        from .devices_store import DevicesStore
+        from .notify.org_email import _smtp_send, effective_smtp
+        smtp = effective_smtp(auth, smtp_cfg)
+        if not (smtp and getattr(smtp, "host", "")):
+            log.warning("safe mode: %s %s, but no mail server is configured",
+                        dev, event)
+            return
+        ds = DevicesStore(devices_db)
+        try:
+            org_id = ds.org_of(dev)
+        finally:
+            ds.close()
+        if org_id is None:
+            return
+        to = list(auth.recipients_for_device(org_id, dev))
+        who = (entry.get("user") or "").strip()
+        if "@" in who and who.lower() not in to:
+            to.append(who.lower())
+        if not to:
+            return
+        org = auth.org(org_id) or {}
+        subject, text = _safemode_email(
+            entry, event, org.get("name", ""),
+            time.strftime("%d %b %H:%M",
+                          time.localtime(entry.get("armed_at") or 0)),
+            title)
+        msg = EmailMessage()
+        msg["Subject"] = f"{smtp.subject_prefix} {subject}".strip()
+        msg["From"] = smtp.from_addr
+        msg["To"] = ", ".join(to)
+        msg.set_content(text)
+        _smtp_send(smtp, msg)
+        log.info("safe mode: told %d recipient(s) that %s %s", len(to), dev,
+                 event)
+
+    path = os.path.join(os.path.dirname(os.path.abspath(devices_db)),
+                        "safemode.json")
+    tracker = SafeModeTracker(path, open_api=_safemode_open_api(
+        devices_db, defaults), on_event=on_event)
+    tracker.start()
+    return tracker
+
+
+def _feature_titles() -> dict:
+    """Tab titles by feature slug, for messages that name a change."""
+    from .push import FEATURES
+    return {k: v.get("title", k) for k, v in FEATURES.items()}
+
+
+def _safe_apply(pusher, plan, *, slug, device, hub_ip, safe, tracker,
+                user="", org_id=None) -> dict:
+    """Send a committed change the safe way, and say what was armed.
+
+    1. Take down any safe-mode timer an earlier, unconfirmed change left, so
+       the backup below never contains one (a restored backup carrying a
+       live timer would revert again on its own).
+    2. Back the router up. No backup, no change.
+    3. Arm the timer -- BEFORE the change, so a change that cuts the
+       connection while it is being sent is still undone.
+    4. Send the change. If it fails part-way, apply() has rolled back what it
+       could; the timer is then taken down again, unless the failure took the
+       connection with it, in which case it is left to do its job.
+
+    Returns {"backup", "token", "mode"} ("token" is "" without safe mode).
+    Raises PushError with a message that says whether anything changed.
+    """
+    from .push import PushError
+
+    armed = _safe_arm(pusher, slug=slug, hub_ip=hub_ip,
+                      safe=safe, tracker=tracker)
+    safe, backup = bool(armed["token"]), armed["backup"]
+    token, mode = armed["token"], armed["mode"]
+    try:
+        pusher.apply(plan, feature=slug)  # logs its own outcome
+    except PushError as exc:
+        if not safe:
+            raise
+        try:
+            pusher.apply(pusher.plan_disarm_revert(token=token),
+                         feature=slug + ":arm-revert")
+        except PushError:
+            # The failure took the connection with it. Whatever half of the
+            # change landed is exactly what the timer is for: let it run, and
+            # watch for the router coming back.
+            tracker.register(device=device, feature=slug, backup=backup,
+                             token=token, user=user, mode=mode,
+                             org_id=org_id)
+            raise PushError(f"{exc} — the connection dropped while the change "
+                            f"was being sent, so Safe mode will put the "
+                            f"previous settings back within about a "
+                            f"minute.") from None
+        raise
+    if safe:
+        tracker.register(device=device, feature=slug, backup=backup,
+                         token=token, user=user, mode=mode, org_id=org_id)
+    return armed
+
+
+def _safe_arm(pusher, *, slug, hub_ip, safe, tracker) -> dict:
+    """Steps 1-3 of _safe_apply: clear old timers, back up, arm a new one.
+
+    Separate for the one writer that does not send a Plan (the WireGuard
+    self-repair), which arms first and then decides for itself whether
+    anything changed. Returns {"backup", "token", "mode"}; "token" is "" when
+    no timer was armed. The caller registers the token with the watcher once
+    something has actually been sent.
+    """
+    from .push import PushError
+    from .push.safemode import new_token
+
+    # A timer nobody is watching reverts every change two minutes later, good
+    # or bad. Without the watcher there is no safe mode.
+    safe = bool(safe) and tracker is not None
+    backup = f"before-{slug}-{time.strftime('%Y%m%d-%H%M%S')}"
+    if safe:
+        try:
+            pusher.apply(pusher.plan_disarm_revert(), feature=slug + ":arm-revert")
+        except PushError as exc:
+            raise PushError(f"Could not prepare Safe mode ({exc}). Nothing was "
+                            f"changed.") from None
+    try:
+        pusher.apply(pusher.plan_backup(backup), feature=slug + ":backup")
+    except PushError as exc:
+        raise PushError(f"Could not create the safety backup before applying "
+                        f"({exc}). Nothing was changed — free up flash space or "
+                        f"check the router, then retry.") from None
+    token, mode = "", ""
+    if safe:
+        # The ping test is only used when the router demonstrably passes it
+        # now. One that cannot reach the hub before the change (or could not
+        # be asked) would fail it after every change, good or bad.
+        reach = _router_reaches_hub(pusher.api, hub_ip)
+        mode = "ping" if reach is True else "login"
+        token = new_token()
+        try:
+            pusher.apply(pusher.plan_arm_revert(
+                backup, seconds=_SAFE_CHECK_SECONDS, hub_ip=hub_ip, token=token,
+                ping_check=(mode == "ping")), feature=slug + ":arm-revert")
+        except PushError as exc:
+            raise PushError(f"Could not arm Safe mode on the router ({exc}). "
+                            f"Nothing was changed. Untick Safe mode to send it "
+                            f"without the safety net.") from None
+    return {"backup": backup, "token": token, "mode": mode}
+
+
+def _router_reaches_hub(api, hub_ip):
+    """Can the router ping the hub right now? True / False, or None when it
+    could not be asked. Decides how the safe-mode timer checks: a router that
+    cannot reach the hub BEFORE a change would fail a ping test after every
+    change, so for that one the server's login is the only check."""
+    dev = getattr(api, "device", None)
+    if dev is None or not hub_ip or not hasattr(dev, "ping"):
+        return None
+    loss = dev.ping(hub_ip, count=2)
+    if loss is None:
+        return None
+    return loss < 100
+
+
+def _render_confirm_page(name, user, slug, backup, hub_ip, csrf, token="",
+                         mode="ping") -> str:
+    """Shown right after a change goes out with Safe mode on.
+
+    Nothing on it needs pressing. It follows the watcher (push/safemode.py)
+    live: the router checks it can still reach the hub about a minute after
+    the change, the server then logs in to confirm, and the page says which
+    of "kept", "put back" or "not back yet" it came to. A countdown that just
+    ran out and said "reload in a minute" left people guessing, and guessing
+    is when they press things.
+    """
+    from .push.safemode import CHECK_SECONDS
     q = quote(name)
-    secs = int(minutes) * 60
+    how = (f"pings this server (<code>{esc(hub_ip)}</code>), and then this "
+           f"server logs in to it"
+           if mode == "ping" else
+           "is logged in to again by this server (it could not ping the hub "
+           "before the change either, so the login is the test)")
     inner = (
         f'<div class="wrap" style="max-width:760px">'
-        f'<div class="box" style="border-left:4px solid #16a34a">'
-        f'<h1 style="margin-top:0">Change applied to {esc(name)} — safety net armed'
-        f'</h1>'
-        f'<p>You don\'t need to do anything. In about <b>{minutes} minutes</b> the '
-        f'router will check whether it can still reach the hub '
-        f'(<code>{esc(hub_ip)}</code>):</p>'
-        f'<ul><li>If it <b>can</b> — the change is safe and is kept.</li>'
-        f'<li>If it <b>can\'t</b> — the change cut it off, so it automatically '
-        f'restores the pre-change backup (<code>{esc(backup)}</code>) and reboots, '
-        f'and comes back on the old config. No site visit.</li></ul>'
-        f'<p class="muted">The check runs <b>on the router</b>, so it works even '
-        f'if the change made the box unreachable from here. Because it waits the '
-        f'full window and tests real connectivity, a change that only breaks a '
-        f'minute later is still caught.</p>'
-        f'<p style="font-size:24px;font-weight:700;margin:6px 0" '
-        f'data-countdown="{secs}">self-check in {minutes}:00</p>'
-        f'<p class="muted">Already verified it\'s fine and don\'t want to wait? '
-        f'You can keep it now (this skips the self-check):</p>'
-        f'<form method="POST" action="/device/confirm" class="actions">'
+        f'<div class="box" id="smbox" style="border-left:4px solid var(--accent)">'
+        f'<h1 style="margin-top:0">Change sent to {esc(name)}</h1>'
+        f'<p style="margin:0 0 10px">Safe mode is watching it. About '
+        f'{CHECK_SECONDS} seconds after the change the router {how}.</p>'
+        f'<ul style="margin:0 0 14px"><li>Both work: the change is kept.</li>'
+        f'<li>Either fails: the router restores the settings it had just '
+        f'before the change (<code>{esc(backup)}</code>) and restarts. No '
+        f'site visit, and you are told by email.</li></ul>'
+        f'<div style="background:var(--surface-2);border-radius:8px;'
+        f'padding:12px 14px;margin:0 0 14px" aria-live="polite">'
+        f'<div id="smhead" style="font-weight:700;font-size:16px">'
+        f'Watching the change</div>'
+        f'<div id="smdetail" class="muted" style="font-size:13px;'
+        f'margin-top:4px">Starting…</div></div>'
+        f'<form method="POST" action="/device/confirm" class="actions" '
+        f'id="smkeep">'
         f'<input type="hidden" name="csrf" value="{csrf}">'
         f'<input type="hidden" name="device" value="{esc(name)}">'
         f'<input type="hidden" name="feature" value="{esc(slug)}">'
-        f'<button class="btn" type="submit">Confirm (skip the self-check)</button>'
-        f'<a class="btn ghost" href="/device?name={q}&tab={slug}">Go to the tab</a>'
+        f'<button class="btn ghost" type="submit">Keep it now (skip the '
+        f'check)</button>'
+        f'<a class="btn" href="/device?name={q}&tab={slug}">Back to the tab</a>'
         f'</form></div></div>'
+        # "</" escaped: a device name is typed by a customer, and a raw one
+        # inside a script tag could close it.
+        f'<script>window.MM_SAFEMODE={{name:'
+        f'{json.dumps(name).replace("</", "<" + chr(92) + "/")},'
+        f'token:{json.dumps(token)}}};</script>'
         f'{_CONFIRM_JS}')
-    return _page(esc(name) + " · Change armed", _header(user, "/dashboard") + inner)
+    return _page(esc(name) + " · Change sent", _header(user, "/dashboard") + inner)
 
 
 _CONFIRM_JS = """
 <script>
  (function(){
-   var el=document.querySelector('[data-countdown]'); if(!el) return;
-   var end=Date.now()+ (+el.getAttribute('data-countdown'))*1000;
-   function tick(){
-     var s=Math.max(0,Math.round((end-Date.now())/1000));
-     var m=Math.floor(s/60);
-     if(s<=0){el.textContent='running the self-check…';
-       el.parentNode.insertAdjacentHTML('beforeend',
-         '<p style=\"color:#475569\">The router is now testing hub connectivity. '+
-         'If it lost contact it is reverting + rebooting; reload in a minute.</p>');
-       return;}
-     el.textContent='self-check in '+m+':' + ('0'+(s%60)).slice(-2);
-     setTimeout(tick,1000);
+   var cfg=window.MM_SAFEMODE; if(!cfg) return;
+   var head=document.getElementById('smhead'),
+       detail=document.getElementById('smdetail'),
+       box=document.getElementById('smbox'),
+       keep=document.getElementById('smkeep');
+   var colour={confirmed:'var(--success)',reverted:'var(--danger)',
+               lost:'var(--danger)',superseded:'var(--text-faint)'};
+   var done=false;
+   function poll(){
+     if(done) return;
+     fetch('/device/safemode-status?name='+encodeURIComponent(cfg.name)+
+           '&token='+encodeURIComponent(cfg.token),{credentials:'same-origin'})
+       .then(function(r){return r.json();})
+       .then(function(s){
+         if(s.state==='none'){ setTimeout(poll,3000); return; }
+         head.textContent=s.headline; detail.textContent=s.detail;
+         if(colour[s.state]){
+           done=true; box.style.borderLeftColor=colour[s.state];
+           var b=keep.querySelector('button'); if(b) b.style.display='none';
+           return;
+         }
+         setTimeout(poll,3000);
+       })
+       .catch(function(){ setTimeout(poll,5000); });
    }
-   tick();
+   poll();
  })();
 </script>"""
 
@@ -6425,7 +6776,10 @@ def _friendly_push_error(error: str) -> str:
             'RouterOS requires; it can’t be done over the network.</li>'
             '<li>Reconnect and run <code>/system/device-mode/print</code> '
             'to confirm <code>scheduler: yes</code> now shows.</li>'
-            '</ol>After that, this works on this router going forward.')
+            '</ol>After that, this works on this router going forward. '
+            'Safe mode needs this too: its safety timer is a scheduler '
+            'entry, so until Device Mode allows them a change can only be '
+            'sent with Safe mode unticked on the preview, unprotected.')
     # A refused plan (push.api.PlanRefused): the router was read fine, and
     # saying "could not reach the router" above a list of reasons would send
     # somebody off to check the wrong thing.
@@ -6497,12 +6851,13 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
         safe = ("" if slug == "update" else
                 f'<label class="chk" style="display:block;margin:10px 0">'
                 f'<input type="checkbox" name="safe_revert" value="1" checked> '
-                f'<b>Safe mode</b> — {_REVERT_MINUTES} min after applying, the '
-                f'router checks it can still reach the hub and <b>auto-reverts to '
-                f'the backup if it can\'t</b>. The router decides from real '
-                f'connectivity (not a guess), so a change that only breaks a '
-                f'minute later is still caught. Protects against locking yourself '
-                f'out.</label>')
+                f'<b>Safe mode</b> — a backup is taken and a safety timer is '
+                f'set on the router <i>before</i> the change is sent. About '
+                f'{_SAFE_CHECK_SECONDS} seconds later the router checks it can '
+                f'still reach the hub and the server checks it can still log '
+                f'in. If either fails, the router <b>puts its previous settings '
+                f'back by itself</b> and restarts. Protects against locking '
+                f'yourself out.</label>')
         body = (f'<div class="box"><h2>Dry run — nothing has been written yet</h2>'
                 f'<pre style="background:var(--surface-2);color:var(--text);border:1px solid var(--border);padding:12px;border-radius:8px;'
                 f'white-space:pre-wrap">{esc(preview.diff_text())}</pre>'
@@ -6737,6 +7092,11 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
                 f'value="{esc(str(pre.get("timeout", 60)))}">')
         # No username/password here — the provisioning script creates the login
         # for you. (Existing creds are preserved untouched when you edit.)
+        + field("Location <span class='muted'>(suburb and city, e.g. "
+                "Umhlanga, Durban — the AI monitor looks for outages and "
+                "load-shedding here when a line drops)</span>",
+                f'<input name="location" maxlength="120" '
+                f'placeholder="e.g. Umhlanga, Durban" value="{v("location")}">')
         + field("Security",
                 f'<div class="chkrow">'
                 f'<label class="chk"><input type="checkbox" name="use_ssl"'
@@ -7056,14 +7416,25 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 def _send_invoice(org_id, order_id, plan, amount, currency,
                                   period_end, due_days):
                     """Email one renewal invoice, carrying its pay link."""
+                    from .notify.org_email import effective_smtp
                     link = billing_runner.pay_link(auth, order_id, _public_base(auth))
-                    _email_renewal(auth, smtp_settings, org_id, order_id,
-                                   plan, amount, currency, period_end,
-                                   due_days, link)
+                    # Resolved per send, like every other mail this server
+                    # writes: the relay set in Platform admin wins over
+                    # config.yaml. This named a variable that does not exist
+                    # in this scope, so every renewal invoice was raised and
+                    # then failed to send with a NameError the runner logged
+                    # and nobody saw.
+                    _email_renewal(auth, effective_smtp(auth, smtp_cfg),
+                                   org_id, order_id, plan, amount, currency,
+                                   period_end, due_days, link)
 
                 billing_runner.start(billing, auth, send=_send_invoice)
             except Exception:  # noqa: BLE001 - dashboard still starts
                 log.exception("could not start the billing runner")
+    # Safe mode's server half (push/safemode.py): logs back in after a change
+    # to confirm it, and notices when a router had to put itself back.
+    safemode = _start_safemode(devices_db, defaults, auth, smtp_cfg,
+                               push_log_db)
     _pf_merchant_id = billing_cfg.get("payfast_merchant_id", "")
     _pf_merchant_key = billing_cfg.get("payfast_merchant_key", "")
     _pf_passphrase = billing_cfg.get("payfast_passphrase", "")
@@ -7240,7 +7611,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # isolation — the real entry point is "/" below.
             if path == "/landing":
                 from .web_landing import render_landing
-                return self._send(200, render_landing(), "text/html; charset=utf-8")
+                return self._send(200, render_landing(self._ai_on()),
+                                  "text/html; charset=utf-8")
 
             # "/" is the public marketing page (SaaS mode only — self-hosted/
             # no-auth installs keep "/" as the dashboard, handled below).
@@ -7250,7 +7622,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if self._session():
                     return self._redirect("/dashboard")
                 from .web_landing import render_landing
-                return self._send(200, render_landing(), "text/html; charset=utf-8")
+                return self._send(200, render_landing(self._ai_on()),
+                                  "text/html; charset=utf-8")
 
             # No auth configured -> open dashboard (back-compat / demo without auth).
             if auth is None:
@@ -7422,11 +7795,23 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         ignored=_ig,
                         seen_tips=(auth.seen_tips(user["login"])
                                    if auth else set()),
-                        events=self._recent_account_events(allowed)),
+                        events=self._recent_account_events(allowed),
+                        incidents=self._open_incidents()),
                         "text/html; charset=utf-8")
                 # if path == "/inventory":
                 #     return self._send(200, _render_inventory(store, state, user,
                 #                       allowed), "text/html; charset=utf-8")
+                if path == "/device/safemode-status":
+                    # Polled by the page shown after a change (_CONFIRM_JS).
+                    q = parse_qs(url.query)
+                    dev = q.get("name", [""])[0]
+                    if not self._can_manage_device(user, dev):
+                        return self._send(403, "forbidden")
+                    from .push.safemode import describe
+                    entry = (safemode.status(dev, q.get("token", [""])[0]
+                                             or None) if safemode else None)
+                    return self._send(200, json.dumps(describe(entry)),
+                                      "application/json")
                 if path == "/device":
                     q = parse_qs(url.query)
                     dev = q.get("name", [""])[0]
@@ -7500,11 +7885,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         if dd.get("device") != dev and not dd.get("up", True))
                     access_html = (self._access_box_html(dev, csrf)
                                   if can_manage else "")
+                    notice = (_safemode_notice(safemode.status(dev))
+                              if safemode is not None and can_manage else "")
+                    ai_html, inc_open = self._ai_box_for(dev, state, csrf,
+                                                         can_manage)
                     return self._send(200, _render_device(store, state, dev, user,
                                       csrf, last_change=last_change,
                                       others_down=others_down,
                                       access_html=access_html,
-                                      can_manage=can_manage),
+                                      can_manage=can_manage,
+                                      notice_html=notice, ai_html=ai_html,
+                                      incident_open=inc_open),
                                       "text/html; charset=utf-8")
                 if path == "/api/devices":
                     return self._send(200, json.dumps(
@@ -7745,6 +8136,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 quotes=open_quotes,
                 tunnel_rows=_tunnel_rows, tunnel_err=_tunnel_err,
                 selfcheck=_selfcheck,
+                ai_html=self._ai_settings_html(),
                 yoco=auth.get_yoco() if auth else {},
                 public_base=_pay_base,
                 dormant=(billing.all_dormant() if billing else []),
@@ -7927,6 +8319,69 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     else "Suspended — access and alerts stopped for ")
             return self._redirect("/superadmin?ok=" +
                                   quote(what + (name or f"org {org_id}") + "."))
+
+        def _ai_settings_html(self) -> str:
+            """Platform admin -> AI monitor box, with the last day's usage."""
+            if auth is None:
+                return ""
+            import importlib.util
+            from .web_ai import ai_settings_box
+            usage = {}
+            st = self._incidents()
+            if st is not None:
+                try:
+                    usage = st.ai_usage(time.time() - 86400)
+                finally:
+                    st.close()
+            return ai_settings_box(
+                auth.get_ai(), usage, self._session()["csrf"],
+                sdk_ok=importlib.util.find_spec("anthropic") is not None)
+
+        def _post_superadmin_ai(self, user):
+            """Superadmin-only: the AI monitor's settings. A blank key keeps
+            the saved one (the field is masked, like the SMTP password)."""
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if auth is None:
+                return self._redirect("/superadmin?error=" +
+                                      quote("Auth store is not enabled."))
+
+            def num(key, lo, hi, default):
+                try:
+                    return max(lo, min(hi, int(flat.get(key) or default)))
+                except (TypeError, ValueError):
+                    return default
+
+            old = auth.get_ai()
+            cfg = {
+                "enabled": flat.get("enabled") == "1",
+                "api_key": (flat.get("api_key") or "").strip()
+                           or old.get("api_key", ""),
+                "web_search": flat.get("web_search") == "1",
+                "max_searches": num("max_searches", 1, 8, 3),
+                "daily_limit": num("daily_limit", 0, 1000, 40),
+                "country": (flat.get("country") or "").strip().upper()[:2],
+                "timezone": (flat.get("timezone") or "").strip()[:60],
+            }
+            auth.set_ai(cfg)
+            if flat.get("test") == "1":
+                from .aimonitor import test_key
+                problem = test_key(cfg)
+                if problem:
+                    return self._redirect("/superadmin?error=" + quote(
+                        "AI settings saved, but the test failed: " + problem)
+                        + "#ai")
+                return self._redirect("/superadmin?ok=" + quote(
+                    "AI settings saved, and the key works.") + "#ai")
+            return self._redirect("/superadmin?ok=" + quote(
+                "AI settings saved." + ("" if cfg["enabled"] or not cfg["api_key"]
+                                        else " The online check is still "
+                                             "switched off: tick it to use it."))
+                + "#ai")
 
         def _post_superadmin_smtp(self, user):
             """Superadmin-only: save the platform SMTP relay in the DB so email
@@ -9055,6 +9510,72 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     audit.close()
 
         # ---- generic feature tabs (SD-WAN/Security/DNS/QoS/…) ----
+        def _ai_on(self) -> bool:
+            """Is the AI monitor's online check switched on, with a key to
+            use? The public page only claims the search when it is."""
+            if auth is None:
+                return False
+            ai = auth.get_ai()
+            return bool(ai.get("enabled") and (ai.get("api_key")
+                        or os.environ.get("ANTHROPIC_API_KEY")))
+
+        def _incidents(self):
+            """The AI monitor's incident store (written by the engine), or
+            None on a server without a device DB. Opened per request."""
+            if not devices_db:
+                return None
+            from .incidents import IncidentStore, incidents_path
+            try:
+                return IncidentStore(incidents_path(devices_db))
+            except Exception:  # noqa: BLE001 -- a page without it still works
+                log.exception("could not open the incidents store")
+                return None
+
+        def _device_ai_recheck_post(self, flat, user):
+            """"Look again now": the engine's AI worker picks the incident up
+            within a few seconds (it polls the store), so this only marks it."""
+            name = flat.get("device", "")
+            st = self._incidents()
+            if st is None:
+                return self._send(404, "no incidents store")
+            try:
+                inc = st.open_for(name)
+                if inc is not None:
+                    st.update(inc["id"], ai_state="pending")
+            finally:
+                st.close()
+            return self._redirect(
+                f"/device?name={quote(name)}&msg=" + quote(
+                    "Looking online again; the answer shows here within a "
+                    "minute or so." if inc else
+                    "That outage is already over."))
+
+        def _ai_box_for(self, dev, state, csrf, can_manage):
+            """(html, incident_open) for the AI monitor's box on a router's
+            page: the open incident if there is one, else the last 30 days."""
+            st = self._incidents()
+            if st is None:
+                return "", False
+            try:
+                inc = st.open_for(dev)
+                history = st.recent(dev, time.time() - 30 * 86400)
+            finally:
+                st.close()
+            ai_on = bool(auth.get_ai().get("enabled")) if auth else False
+            from .web_ai import ai_box
+            return (ai_box(inc, history, state, csrf=csrf,
+                           can_manage=bool(can_manage), ai_on=ai_on,
+                           name=dev), inc is not None)
+
+        def _open_incidents(self) -> list:
+            st = self._incidents()
+            if st is None:
+                return []
+            try:
+                return st.open_all()
+            finally:
+                st.close()
+
         def _auditlog(self):
             if not push_log_db:
                 return None
@@ -9292,6 +9813,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     elif slug == "tunnel":
                         extra_html = _vpn_group_box(
                             name, devices_db, (user or {}).get("org_id"), csrf)
+                        extra_html += self._vpn_users_html(
+                            name, pusher, cfg, csrf, can_manage)
                     # "nextdns" is computed above, before this try block —
                     # see the comment there.
                     elif slug == "remote":
@@ -9542,6 +10065,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                     hub, devices_db, (user or {}).get("org_id")))
                     if slug == "tunnel":
                         _prep_vpn_group(name, flat, devices_db)
+                    if slug == "vpnusers":
+                        self._prep_vpnusers(name, flat, commit)
                     plan = feature["plan"](pusher, cfg, flat, multi)
                 except (DeviceError, PushError) as exc:
                     if audit:
@@ -9552,27 +10077,31 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                      "apply" if commit else "dry-run", "error",
                                      f"{what}: {exc}", str(exc))
                     return self._feature_tab_page(name, user, view, error=str(exc))
-                # Safety net: snapshot the whole config to a named backup BEFORE
-                # committing a real change, so you can restore it from the
-                # Backups tab if the change breaks something. Skipped on dry-run
-                # previews and no-op plans. If the snapshot can't be made we do
-                # NOT proceed — better to fail safe than change without a backup.
-                bkname = ""
+                # A preview sends nothing. A committed change goes out the
+                # safe way (_safe_apply): backup first, the Safe mode timer
+                # armed BEFORE the change, then the change itself -- so one
+                # that cuts the connection while it is being sent is still
+                # undone. A no-op plan has nothing to protect.
+                armed = {"backup": "", "token": "", "mode": ""}
+                hub_ip = (_hub_tunnel_ip(_hub_load(_hub_path(devices_db)))
+                          if devices_db else "")
                 if commit and not plan.empty:
-                    bkname = f"before-{slug}-{time.strftime('%Y%m%d-%H%M%S')}"
+                    safe = (flat.get("safe_revert") == "1"
+                            and slug != "update")
                     try:
-                        pusher.apply(pusher.plan_backup(bkname),
-                                     feature=slug + ":backup")
+                        armed = _safe_apply(
+                            pusher, plan, slug=slug, device=name,
+                            hub_ip=hub_ip, safe=safe, tracker=safemode,
+                            user=uname, org_id=(user or {}).get("org_id"))
                     except PushError as exc:
-                        return self._feature_tab_page(
-                            name, user, view,
-                            error=f"Could not create the safety backup before "
-                                  f"applying ({exc}). Nothing was changed — free "
-                                  f"up flash space or check the router, then retry.")
-                try:
-                    pusher.apply(plan, feature=slug)  # logs its own outcome
-                except PushError as exc:
-                    return self._feature_tab_page(name, user, view, error=str(exc))
+                        return self._feature_tab_page(name, user, view,
+                                                      error=str(exc))
+                else:
+                    try:
+                        pusher.apply(plan, feature=slug)  # preview: logs itself
+                    except PushError as exc:
+                        return self._feature_tab_page(name, user, view,
+                                                      error=str(exc))
                 if not commit:
                     return self._feature_tab_page(name, user, view, preview=plan,
                                                   submitted=multi)
@@ -9603,37 +10132,35 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                             flat.get("_tempuser_password", ""), address,
                             _REMOTE_DEFAULT_MINUTES),
                             "text/html; charset=utf-8")
-                # Safe mode (commit-confirm): arm a local auto-revert so a change
-                # that locks us out heals itself. Best-effort — if arming fails
-                # the change still stands (just without the safety net).
-                if (bkname and flat.get("safe_revert") == "1"
-                        and slug != "update"):
-                    hub_ip = _hub_tunnel_ip(_hub_load(_hub_path(devices_db)))
-                    try:
-                        pusher.apply(
-                            pusher.plan_arm_revert(bkname, _REVERT_MINUTES,
-                                                   hub_ip=hub_ip),
-                            feature=slug + ":arm-revert")
-                        # A flipped switch goes back to the switch. The
-                        # countdown page is right when somebody deliberately
-                        # pressed Apply on a reviewed change; after flicking a
-                        # toggle it reads as an alarm, and it hides the switch
-                        # they were looking at. The net is armed either way.
-                        if flat.get("instant") == "1":
-                            return self._redirect(
-                                f"/device?name={quote(name)}&tab={view}&msg="
-                                + quote(
-                                    f"Sent to the router. It will check it "
-                                    f"can still reach us in {_REVERT_MINUTES} "
-                                    f"minutes and put itself back if it "
-                                    f"cannot."))
-                        sess = self._session()
-                        return self._send(200, _render_confirm_page(
-                            name, user, view, _REVERT_MINUTES, bkname, hub_ip,
-                            sess["csrf"] if sess else ""),
-                            "text/html; charset=utf-8")
-                    except PushError:
-                        pass  # couldn't arm; fall through to the normal result
+                if slug == "vpnusers":
+                    action = flat.get("vpnuser_action") or "add"
+                    if action == "add":
+                        return self._vpnuser_done(name, user, cfg, pusher,
+                                                  flat, multi, armed)
+                    return self._redirect(
+                        f"/device?name={quote(name)}&tab=tunnel&msg=" + quote(
+                            "Remote user removed: it can no longer connect."
+                            if action == "remove" else
+                            "Remote users are switched off on this router."))
+                if armed["token"]:
+                    # A flipped switch goes back to the switch. The watching
+                    # page is right when somebody deliberately pressed Apply
+                    # on a reviewed change; after flicking a toggle it reads
+                    # as an alarm and hides the switch they were looking at.
+                    # The net is armed either way.
+                    if flat.get("instant") == "1":
+                        return self._redirect(
+                            f"/device?name={quote(name)}&tab={view}&msg="
+                            + quote("Sent to the router. Safe mode checks it "
+                                    "in about a minute and puts the previous "
+                                    "settings back if the router can no "
+                                    "longer be reached or managed."))
+                    sess = self._session()
+                    return self._send(200, _render_confirm_page(
+                        name, user, view, armed["backup"], hub_ip,
+                        sess["csrf"] if sess else "", token=armed["token"],
+                        mode=armed["mode"]),
+                        "text/html; charset=utf-8")
                 return self._redirect(
                     f"/device?name={quote(name)}&tab={view}&msg=" +
                     quote("Sent to the router." if flat.get("instant") == "1"
@@ -9642,6 +10169,106 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 dev.close()
                 if audit:
                     audit.close()
+
+        def _hub_seen_ip(self, name) -> str:
+            """The router's public address as this server sees it on the
+            management tunnel ("" when unknown). The most reliable answer to
+            "where would a laptop find it" -- unless the router is behind
+            NAT, which reachability() works out separately."""
+            if not devices_db:
+                return ""
+            hub = _hub_load(_hub_path(devices_db))
+            pub = ((hub.get("leases_meta") or {}).get(name) or {}).get("pubkey")
+            if not pub:
+                return ""
+            peers, _err = _wg_dump()
+            ep = str((peers.get(pub) or {}).get("endpoint") or "")
+            if not ep or ep == "(none)":
+                return ""
+            host = ep.rsplit(":", 1)[0]
+            return host.strip("[]")
+
+        def _vpn_users_html(self, name, pusher, cfg, csrf, can_manage) -> str:
+            """The "Remote users" box under the VPN tab's site-to-site one."""
+            from .push import vpnusers as _vu
+            from .web_vpnusers import users_box
+            try:
+                cur = _vu.read(pusher, cfg)
+            except Exception:  # noqa: BLE001 -- the rest of the tab still works
+                log.exception("remote users: could not read %s", name)
+                return ""
+            reach = _vu.reachability(cur, self._hub_seen_ip(name))
+            return users_box(name, csrf, cur, reach, _vu._port(cur),
+                             bool(can_manage))
+
+        def _prep_vpnusers(self, name, flat, commit) -> None:
+            """What push/vpnusers.plan needs from outside the router: the
+            remote-user subnets other routers already have (so this one's is
+            unique across the platform), this router's own if it has one,
+            and -- when the dashboard makes the keys -- the pair itself, made
+            only when the change is really sent."""
+            hub = _hub_load(_hub_path(devices_db)) if devices_db else {}
+            subs = hub.get("vpn_user_subnets") or {}
+            flat["_vu_taken"] = [v for k, v in subs.items() if k != name]
+            if subs.get(name):
+                flat["_vu_subnet"] = subs[name]
+            if (commit and flat.get("vu_keys") == "make"
+                    and (flat.get("vpnuser_action") or "add") == "add"):
+                from .wgkeys import keypair
+                flat["_vu_privkey"], flat["_vu_pubkey"] = keypair()
+
+        def _vpnuser_done(self, name, user, cfg, pusher, flat, multi, armed):
+            """The device's WireGuard settings, shown ONCE (never a redirect:
+            a private key in a URL ends up in history and logs)."""
+            import ipaddress as _ip
+
+            from .push import vpnusers as _vu
+            from .web_vpnusers import config_page_inner
+            subnet = flat.get("_vu_subnet_chosen") or ""
+            if devices_db and subnet:
+                hub_file = _hub_path(devices_db)
+                hub = _hub_load(hub_file)
+                hub.setdefault("vpn_user_subnets", {})[name] = subnet
+                _hub_save(hub_file, hub)
+            cur = _vu.read(pusher, cfg)
+            # A DDNS name switched on a moment ago takes a few seconds to be
+            # issued; worth waiting for, since it is what goes in the file.
+            if flat.get("vu_ddns") == "1":
+                for _ in range(3):
+                    if (cur.get("cloud") or {}).get("dns_name"):
+                        break
+                    time.sleep(2)
+                    cur = _vu.read(pusher, cfg)
+            iface = cur.get("iface") or {}
+            port = int(iface.get("listen-port") or flat.get("_vu_port")
+                       or _vu.DEFAULT_PORT)
+            reach = _vu.reachability(cur, self._hub_seen_ip(name))
+            custom = (flat.get("vu_endpoint") or "").strip()
+            endpoint = custom or reach.get("endpoint") or "THIS-ROUTER-PUBLIC-ADDRESS"
+            full = flat.get("vu_full") == "1"
+            nets = [n for n in (multi.get("vu_net") or []) if n]
+            gw = str(_ip.ip_network(subnet).network_address + 1) if subnet else ""
+            allowed = ["0.0.0.0/0"] if full else nets + ([subnet] if subnet else [])
+            dns = ""
+            if cur.get("router_dns") and (full or flat.get("vu_dns") == "1"):
+                dns = gw
+            elif full:
+                dns = "1.1.1.1"
+            label = (flat.get("vu_label") or "").strip()
+            conf = _vu.client_config(
+                private_key=flat.get("_vu_privkey", ""),
+                address=f"{flat.get('_vu_ip', '')}/32",
+                router_pubkey=iface.get("public-key", ""),
+                endpoint=endpoint, port=port, allowed=allowed, dns=dns,
+                label=label)
+            inner = config_page_inner(
+                name, label, conf, made_keys=bool(flat.get("_vu_privkey")),
+                kind=flat.get("vu_type") or "windows",
+                reach=({"ok": True} if custom else reach),
+                safe_note=bool(armed.get("token")))
+            return self._send(200, _page(esc(name) + " · Remote user",
+                                         _header(user, "/dashboard") + inner),
+                              "text/html; charset=utf-8")
 
         def _device_reboot_post(self, flat, user):
             """Reboot the router now (/system reboot). Detached run — the API
@@ -9794,9 +10421,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if audit:
                     audit.close()
             if err is None:
+                if safemode is not None:
+                    safemode.mark_kept(name, by=(user or {}).get("login", ""))
                 return self._redirect(
                     f"/device?name={quote(name)}&tab={quote(slug)}&msg=" +
-                    quote("Change kept — auto-revert cancelled."))
+                    quote("Change kept — Safe mode's check was skipped."))
             q = quote(name)
             box = (f'<div class="box" style="border-left:4px solid #dc2626">'
                    f'<h2>Could not reach {esc(name)} to confirm</h2>'
@@ -10132,7 +10761,28 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             report, err = None, None
             try:
                 api.connect()
+                # The repair rewrites the tunnel itself, so it gets Safe mode
+                # like any other change: armed first, and taken down again
+                # straight away if the repair found nothing to fix.
+                from .push import Pusher
+                pusher = Pusher(cfg, api, dry_run=False,
+                                audit=self._auditlog(), user=actor)
+                armed = _safe_arm(
+                    pusher, slug="hubtunnel",
+                    hub_ip=(_hub_tunnel_ip(_hub_load(_hub_path(devices_db)))
+                            if devices_db else ""),
+                    safe=True, tracker=safemode)
                 report = wireguard_repair(api)
+                if armed["token"]:
+                    if report.get("applied"):
+                        safemode.register(
+                            device=name, feature="hubtunnel",
+                            backup=armed["backup"], token=armed["token"],
+                            user=actor, mode=armed["mode"],
+                            org_id=(user or {}).get("org_id"))
+                    else:
+                        pusher.apply(pusher.plan_disarm_revert(
+                            token=armed["token"]), feature="hubtunnel:arm-revert")
             except (DeviceError, PushError) as exc:
                 err = str(exc)
             finally:
@@ -10207,17 +10857,19 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                          f"failed: {exc}", str(exc))
                         errors.append(f"{member_name}: {exc}")
                         continue
-                    if not plan.empty:
-                        bkname = f"before-tunnel-{time.strftime('%Y%m%d-%H%M%S')}"
-                        try:
-                            pusher.apply(pusher.plan_backup(bkname),
-                                         feature="tunnel:backup")
-                        except PushError as exc:
-                            errors.append(f"{member_name}: backup failed, "
-                                          f"not applied ({exc})")
-                            continue
+                    if plan.empty:
+                        continue
+                    # Routes through the tunnel are the change most able to
+                    # cut a router off from the hub it is configured from,
+                    # so every router in the group gets the same safety net
+                    # as a change made on its own tab.
                     try:
-                        pusher.apply(plan, feature="tunnel")
+                        _safe_apply(
+                            pusher, plan, slug="tunnel", device=member_name,
+                            hub_ip=_hub_tunnel_ip(_hub_load(_hub_path(
+                                devices_db))),
+                            safe=True, tracker=safemode, user=uname,
+                            org_id=(user or {}).get("org_id"))
                     except PushError as exc:
                         errors.append(f"{member_name}: {exc}")
                 finally:
@@ -11411,6 +12063,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # can still find and delete the profiles it left behind.
                 "nextdns_wan_profiles": dict(
                     orig_raw.get("nextdns_wan_profiles") or {}),
+                # Also not on this form, and lost on every save until now:
+                # the DNS a router had before NextDNS (what turning it off
+                # puts back) and the suggestions somebody dismissed.
+                "nextdns_dns_snapshot": dict(
+                    orig_raw.get("nextdns_dns_snapshot") or {}),
+                "ignored_suggestions": list(
+                    orig_raw.get("ignored_suggestions") or []),
+                "location": (flat.get("location") or "").strip()[:120],
             }
 
         def _device_test(self, store, name, user):
@@ -11489,6 +12149,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_billing(user)
             if path == "/superadmin/smtp":
                 return self._post_superadmin_smtp(user)
+            if path == "/superadmin/ai":
+                return self._post_superadmin_ai(user)
             if path == "/superadmin/suspend":
                 return self._post_superadmin_suspend(user)
             if path == "/superadmin/restore":
@@ -11550,7 +12212,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                              "/device/nextdns-reapply", "/device/nextdns-test",
                              "/device/departments",
                              "/dashboard/suggestion",
-                             "/device/remote-regenerate", "/device/remote-test")
+                             "/device/remote-regenerate", "/device/remote-test",
+                             "/device/ai-recheck")
             if path in _DEVICE_WRITE:
                 if not self._can_manage_device(user, flat.get("device", "")):
                     return self._deny_manage(user, flat.get("device", ""), path)
@@ -11574,6 +12237,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._device_access_post(flat, user)
                 if path == "/device/confirm":
                     return self._device_confirm_post(flat, user)
+                if path == "/device/ai-recheck":
+                    return self._device_ai_recheck_post(flat, user)
                 if path == "/device/vpn-make-main":
                     return self._device_vpn_make_main_post(flat, user)
                 if path == "/device/vpn-add-member":
@@ -12874,6 +13539,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 sched = flat.get("report_schedule", "none")
                 if sched in ("none", "weekly", "biweekly", "monthly"):
                     auth.set_report_schedule(user["org_id"], sched)
+                hrs = (flat.get("backup_reminder_hours") or "").strip()
+                if hrs.isdigit():
+                    from .auth import BACKUP_REMINDER_CHOICES
+                    if int(hrs) in BACKUP_REMINDER_CHOICES:
+                        auth.set_backup_reminder_hours(user["org_id"], int(hrs))
+                auth.set_cause_emails(user["org_id"],
+                                      flat.get("cause_emails") == "1")
             except Exception as exc:  # noqa: BLE001
                 return self._redirect("/account?error=" + quote(str(exc)))
             return self._redirect("/account?ok=" + quote("Company details saved."))

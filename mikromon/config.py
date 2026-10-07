@@ -24,16 +24,29 @@ DEFAULT_THRESHOLDS = {
     "flap_window_s": 600,
     "flap_threshold": 4,
     # --- learned-baseline tuning (shared by the anomaly checks) ---
-    "baseline_alpha": 0.05,     # EWMA learning rate (lower = steadier / longer memory)
-    "baseline_warmup": 168,     # ~7 days of data before a bucket starts alerting
-    "baseline_z": 3.0,          # std-devs above normal to count as abnormal
+    "baseline_alpha": 0.05,     # per-SAMPLE rate; only the "global" scheme uses it
+    "baseline_warmup": 168,     # samples before a "global" bucket alerts
+    # The hour schemes learn per VISIT of a bucket (one hour on one day), so
+    # "normal for weekdays at 10:00" is the last week or two of 10:00s.
+    "baseline_day_alpha": 0.15,
+    "baseline_min_days": 3,     # separate days a bucket needs before alerting
+    "baseline_accept_hours": 72,  # an "abnormal" level this old is the new normal
+    "baseline_z": 3.0,          # std-devs from normal to count as abnormal
     "baseline_buckets": "hourweek",  # hour | hourweek | global
     # device-count anomaly
     "client_min_count": 5,      # ignore networks smaller than this
     "client_count_ratio": 1.5,  # must be >=1.5x the typical count to alert
+    # ...and too FEW: forty devices at 10:00 dropping to three is an access
+    # point, a switch or the power at the site, long before anyone phones.
+    "client_low_min": 10,       # only for sites that normally have this many
+    "client_low_ratio": 0.4,    # at or under 40% of normal
     # WAN throughput anomaly
     "traffic_floor_mbit": 1,    # ignore links quieter than this
     "traffic_ratio": 1.5,       # must be >=1.5x typical throughput to alert
+    # ...and traffic that has all but STOPPED on a line that is up: users
+    # with no internet while every light is green (DNS, an upstream filter).
+    "traffic_low_min_mbit": 2,  # only where this much is normal at that hour
+    "traffic_low_ratio": 0.1,   # at or under 10% of normal
     # per-client usage anomaly
     "client_floor_mbit": 5,     # ignore clients using less than this
 }
@@ -165,6 +178,10 @@ class DeviceConfig:
     # still alerts, because a dashboard tidy-up must never quietly turn
     # monitoring off.
     ignored_suggestions: list = field(default_factory=list)
+    # Where the site is ("Umhlanga, Durban"). The AI monitor searches for
+    # outages and load-shedding in this area when a line drops; without it
+    # the company's own address is used, which is wrong for every branch.
+    location: str = ""
 
     def nextdns_all_profile_ids(self) -> list:
         """Every NextDNS profile this device owns, main first: normally just
@@ -373,6 +390,7 @@ def build_device(d: dict, defaults: dict, where: str = "device") -> DeviceConfig
         nextdns_dns_snapshot=dict(d.get("nextdns_dns_snapshot") or {}),
         ignored_suggestions=[str(x) for x in
                              (d.get("ignored_suggestions") or []) if str(x)],
+        location=str(d.get("location", "") or "").strip()[:120],
     )
 
 
@@ -404,4 +422,5 @@ def device_to_dict(cfg: DeviceConfig) -> dict:
         "nextdns_wan_profiles": dict(cfg.nextdns_wan_profiles),
         "nextdns_dns_snapshot": dict(cfg.nextdns_dns_snapshot),
         "ignored_suggestions": list(cfg.ignored_suggestions),
+        "location": cfg.location,
     }

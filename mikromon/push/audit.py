@@ -94,6 +94,7 @@ class AuditLog:
                 "AND feature NOT LIKE '%:backup' "
                 "AND feature NOT LIKE '%:arm-revert' "
                 "AND feature NOT LIKE '%:confirm' "
+                "AND feature NOT LIKE '%:safemode' "
                 "ORDER BY id DESC LIMIT 1", (device,)).fetchone()
             return (row["ts"], row["feature"]) if row else (None, None)
         finally:

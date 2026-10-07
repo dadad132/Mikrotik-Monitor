@@ -41,10 +41,13 @@ def parse_multipart_form(content_type: str, body: bytes) -> dict:
 
 _BRAND = "easymikrotik"
 
-# How long the router waits after a config push to self-verify hub connectivity
-# before auto-reverting. Max 300 s per design; 5 min gives slow links enough
-# time without letting a broken change sit too long.
-_REVERT_MINUTES = 5
+# Safe mode: how long after a change the router checks it can still reach the
+# hub, and the server then checks it can still log in. A broken tunnel shows
+# within seconds -- WireGuard notices on its next keepalive -- so a minute is
+# enough to see it and short enough that a site cut off by a bad change is
+# back on its old settings in a couple of minutes. Must match
+# push/safemode.py's CHECK_SECONDS (a test holds them together).
+_SAFE_CHECK_SECONDS = 60
 
 _PAGE_CSS = """
  *{box-sizing:border-box}
@@ -372,6 +375,41 @@ _PAGE_CSS = """
  .modal-close:hover{color:var(--text)}
 """
 
+
+# The AI monitor's pieces (web_ai.py): the dashboard banner and the box on a
+# router's page. Kept apart from _PAGE_CSS because the dashboard has its own
+# stylesheet and includes this one alongside it.
+_AI_CSS = """
+.bk-card{background:var(--surface);border:1px solid var(--border);
+  border-left:4px solid var(--warning);border-radius:12px;padding:14px 18px;
+  box-shadow:var(--shadow);margin-bottom:18px}
+.bk-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  margin-bottom:6px}
+.bk-head h2{font-size:15px;margin:0}
+.bk-pill{font-size:11px;font-weight:700;padding:2px 9px;border-radius:999px;
+  background:var(--warning-bg);color:var(--warning);text-transform:uppercase;
+  letter-spacing:.04em}
+.bk-row{padding:9px 0;border-top:1px solid var(--border);font-size:13.5px;
+  line-height:1.5}
+.bk-row:first-of-type{border-top:0}
+.bk-row a.bk-dev{font-weight:700;color:var(--text);text-decoration:none}
+.bk-row a.bk-dev:hover{text-decoration:underline}
+.bk-meta{color:var(--text-muted)}
+.bk-cause{color:var(--text-muted);font-size:13px;margin-top:2px}
+.bk-cause b{color:var(--text)}
+.bk-src{font-size:12px;margin-right:10px}
+.ai-box h2{display:flex;align-items:center;gap:8px}
+.ai-tag{font-size:10.5px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;color:#fff;background:var(--accent);
+  border-radius:999px;padding:2px 8px}
+.ai-verdict{border-left:3px solid var(--accent);background:var(--accent-soft);
+  border-radius:0 8px 8px 0;padding:9px 12px;margin:8px 0;font-size:13.5px;
+  line-height:1.5}
+.ai-status{font-size:12px;color:var(--text-faint);margin-top:8px}
+.ai-ev{margin:6px 0 0;padding-left:18px;font-size:12.5px;
+  color:var(--text-muted)}
+"""
+_PAGE_CSS += _AI_CSS
 
 # ---------------------------------------------------------------------------
 # Light/dark theme: CSS custom properties + a persisted toggle. _PAGE_CSS

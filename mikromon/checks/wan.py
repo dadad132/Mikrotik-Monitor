@@ -161,9 +161,69 @@ def _fo_route_idx(comment: str, links) -> int | None:
     return None
 
 
+_LOG_HINTS = ("link down", "link up", "disconnected", "terminating",
+              "lost", "timeout", "not responding", "authentication failed",
+              "no response", "down", "pppoe", "dhcp")
+
+
+def _link_evidence(snap, links, cur_idx, preferred) -> dict:
+    """What the router itself shows about a failover, for working out why.
+
+    Read at the moment the alert fires and kept with the incident: by the
+    time somebody looks, the line may be back and the evidence gone.
+
+      * whether the main line's PORT is still up -- a port with no link is
+        the cable, the ISP's box or its power; a port that is up but carries
+        nothing is the ISP's network
+      * its DHCP client or PPPoE session state, and the gateway status
+      * the router's own log lines that mention it
+      * the backup line's byte counters now, so the data it uses from here
+        on can be worked out later
+    """
+    from ..util import as_int
+    ev: dict = {}
+    prim = links[0] if links else None
+    iface = (prim.interface or "") if prim else ""
+    ev["primary_iface"] = iface
+    ev["primary_status"] = str(preferred.get("gateway-status", "") or "")
+    by_name = {_norm_iface(i.get("name", "")): i
+               for i in snap.rows("interface") if i.get("name")}
+    row = by_name.get(_norm_iface(iface)) if iface else None
+    if row is not None:
+        ev["primary_running"] = as_bool(row.get("running"))
+        ev["primary_disabled"] = as_bool(row.get("disabled"))
+        ev["primary_type"] = str(row.get("type", "") or "")
+        # A PPPoE line rides on an ethernet port; its session is the
+        # pppoe-out interface, the port is the one beneath it. Both matter.
+        if str(row.get("type", "")).startswith("pppoe"):
+            ev["pppoe"] = "up" if as_bool(row.get("running")) else "down"
+    for c in snap.rows("dhcp_client"):
+        if _norm_iface(c.get("interface", "")) == _norm_iface(iface) and iface:
+            ev["dhcp_status"] = str(c.get("status", "") or "")
+            break
+    if cur_idx is not None and 0 <= cur_idx < len(links):
+        bif = links[cur_idx].interface or ""
+        ev["backup_iface"] = bif
+        brow = by_name.get(_norm_iface(bif)) if bif else None
+        if brow is not None:
+            ev["backup_rx"] = as_int(brow.get("rx-byte"))
+            ev["backup_tx"] = as_int(brow.get("tx-byte"))
+    if iface:
+        want = iface.lower()
+        lines = []
+        for r in snap.rows("log")[-300:]:
+            msg = str(r.get("message", "") or "")
+            low = msg.lower()
+            if want in low and any(h in low for h in _LOG_HINTS):
+                lines.append(f"{r.get('time', '')} {msg}".strip())
+        ev["log"] = lines[-6:]
+    return ev
+
+
 class WanCheck(Check):
     flags = ("wan_failover", "internet_down")
-    requires = ("route", "dhcp_client", "ip_address")
+    # interface: is the main line's port up (physical) or not (ISP side)?
+    requires = ("route", "dhcp_client", "ip_address", "interface")
     name = "wan"
 
     def run(self, snap, dev, ctx) -> None:
@@ -376,11 +436,14 @@ class WanCheck(Check):
             rank = ""
 
         cause = ""
+        evidence = {}
         if on_backup:
             prim_status = str(preferred.get("gateway-status", "")) or "inactive"
             cause = (f"Primary uplink {prim_name} ({_label(preferred)}) is not "
                      f"carrying traffic ({prim_status}). Traffic is now flowing via "
                      f"{cur_name} ({_label(current)}).")
+            if links:
+                evidence = _link_evidence(snap, links, cur_idx, preferred)
         ctx.transition(
             "wan_failover", healthy=not on_backup, severity=Severity.WARNING,
             title=f"Primary WAN \"{prim_name}\" is DOWN — running on backup "
@@ -388,7 +451,8 @@ class WanCheck(Check):
             detail=f"Active default route: {_label(current)}.",
             cause=cause,
             facts={"current": _label(current), "preferred": _label(preferred),
-                   "current_link": cur_name, "primary_link": prim_name},
+                   "current_link": cur_name, "primary_link": prim_name,
+                   "evidence": evidence},
             recovery_title=f"WAN restored — back on primary uplink {prim_name}",
             recovery_detail=f"Traffic is flowing via {_label(current)} again.",
         )

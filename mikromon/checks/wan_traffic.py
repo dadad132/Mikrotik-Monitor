@@ -9,7 +9,8 @@ returns to normal.
 from __future__ import annotations
 
 from ..alert import Severity
-from ..baseline import Baseline, is_high, rate_bps, sigma_str
+from ..baseline import (is_high, is_low, learn, make_baseline, rate_bps,
+                        sigma_str)
 from ..util import as_bool, as_int, human_bps
 from .base import Check
 
@@ -54,6 +55,15 @@ class WanTrafficCheck(Check):
         floor = as_int(dev.th("traffic_floor_mbit")) * 1_000_000
         ratio = dev.th("traffic_ratio")
         zth = dev.th("baseline_z")
+        low_min = float(dev.th("traffic_low_min_mbit") or 0) * 1_000_000
+        low_ratio = float(dev.th("traffic_low_ratio") or 0)
+        accept = dev.th("baseline_accept_hours") * 3600
+        # While the router is on a backup line (or has none at all) the main
+        # line carrying nothing is the failover alert's news, not this one's.
+        conds = (ctx.store.data.get("devices", {}).get(ctx.device, {})
+                 .get("conditions", {}))
+        line_trouble = any(conds.get(k, {}).get("status") == "problem"
+                           for k in ("wan_failover", "internet_down"))
 
         by_name = {_norm_iface(i.get("name", "")): i for i in snap.rows("interface")}
         for name in targets:
@@ -72,14 +82,15 @@ class WanTrafficCheck(Check):
                 if bps is None:
                     continue
                 ctx.sample(f"{direction}_bps", bps, label=name)
-                bl = Baseline(bl_store.setdefault(f"{name}|{direction}", {}),
-                              alpha=dev.th("baseline_alpha"),
-                              warmup=dev.th("baseline_warmup"),
-                              scheme=dev.th("baseline_buckets"))
+                bl = make_baseline(
+                    bl_store.setdefault(f"{name}|{direction}", {}), dev)
                 s = bl.score(bps, ctx.now)
                 high = is_high(s, bps, floor=floor, min_ratio=ratio, z=zth)
-                if not high:
-                    bl.update(bps, ctx.now)
+                low = (direction == "rx" and not line_trouble and low_min > 0
+                       and is_low(s, bps, min_typical=low_min,
+                                  max_ratio=low_ratio, z=zth))
+                learn(bl, bps, ctx.now, high or low, mem,
+                      f"{name}|{direction}", accept)
                 ctx.transition(
                     f"wan_traffic:{name}:{direction}", healthy=not high,
                     severity=Severity.WARNING,
@@ -92,4 +103,25 @@ class WanTrafficCheck(Check):
                            "interface": name, "direction": direction},
                     recovery_title=f"{name} {direction} traffic back to normal "
                                    f"({human_bps(bps)})",
+                )
+                if direction != "rx":
+                    continue
+                # Held for ten polls: a quiet few minutes is not a fault, a
+                # line that has carried nearly nothing for ten minutes in the
+                # middle of a working morning is.
+                ctx.transition(
+                    f"wan_traffic_low:{name}", healthy=not low,
+                    severity=Severity.WARNING,
+                    title=f"Traffic on {name} has nearly stopped: "
+                          f"{human_bps(bps)}",
+                    cause=f"Typical download for this time is "
+                          f"~{human_bps(s['mean'])}; now {human_bps(bps)}. The "
+                          f"line is up, so users may have no working internet "
+                          f"anyway: DNS failing, an upstream filter, or the "
+                          f"ISP passing nothing beyond its own network.",
+                    facts={"bps": int(bps), "typical_bps": int(s["mean"]),
+                           "interface": name},
+                    recovery_title=f"Traffic on {name} back to normal "
+                                   f"({human_bps(bps)})",
+                    confirm=10,
                 )

@@ -293,6 +293,22 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
             + _sched_opt("biweekly", "Bi-weekly (every 14 days)")
             + _sched_opt("monthly", "Monthly (every 30 days)")
             + f'</select></label>'
+            f'<label class="f full">While a site runs on its backup line'
+            f'<span style="color:#64748b;font-size:12px;font-weight:normal;'
+            f'margin-left:6px">Remind the alert recipients that it is still '
+            f'on the backup, until the main line is back</span>'
+            f'<select name="backup_reminder_hours" style="width:auto">'
+            + "".join(
+                f'<option value="{h}"'
+                f'{" selected" if h == o.get("backup_reminder_hours", 2) else ""}>'
+                f'{"Never" if not h else ("Every hour" if h == 1 else f"Every {h} hours")}'
+                f'</option>' for h in (1, 2, 4, 8, 12, 0))
+            + f'</select></label>'
+            f'<label class="chk full" style="margin-top:4px">'
+            f'<input type="checkbox" name="cause_emails" value="1"'
+            f'{" checked" if o.get("cause_emails", True) else ""}> '
+            f'Email the possible cause once the AI monitor has looked online '
+            f'for outages in the area</label>'
             f'</div>'
             f'<div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">'
             f'<button class="btn" type="submit">Save company details</button>'
@@ -2505,7 +2521,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        outstanding=None,
                        tunnel_rows=None,
                        tunnel_err: str = "",
-                       selfcheck=None) -> str:
+                       selfcheck=None, ai_html: str = "") -> str:
     """Platform superadmin panel — shows all orgs, billing status, and device counts."""
     note = _flash(msg, error)
 
@@ -2681,6 +2697,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
              f'{_tunnel_health_box(tunnel_rows or [], tunnel_err)}'
              f'{quote_html}{table}'
              f'{_smtp_settings_box(smtp, csrf)}'
+             f'{ai_html}'
              f'{_billing_contact_box(billing_contact, csrf)}'
              f'{_yoco_box(yoco, csrf, yoco_hook_url)}'
              f'{_paylink_base_box(public_base, csrf)}'
@@ -2825,11 +2842,12 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
         ("devices", "Devices, ownership &amp; team access"),
         ("provision", "Adding a new router (Provision)"),
         ("tabs", "What each device tab does"),
-        ("vpn", "VPN — connecting sites together"),
+        ("vpn", "VPN — sites together, and remote users"),
         ("safety", "Backups, Preview/Apply &amp; Safe mode"),
         ("devicemode", "“Device Mode” errors"),
         ("billing", "Trials, plans &amp; billing"),
         ("activity", "Activity log"),
+        ("linemon", "When a line drops: the AI monitor"),
         ("alerts", "Who gets emailed, and about what"),
         ("tips", "The tips that appear once"),
         ("glossary", "Glossary — what do these words mean?"),
@@ -2916,7 +2934,7 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
         'tab bar that jumps straight to its section below.</p>'
         + "".join(_guide_tab_block(t) for t in guide_tabs.TABS)))
 
-    vpn = _guide_section("vpn", "VPN — connecting sites together", (
+    vpn = _guide_section("vpn", "VPN — sites together, and remote users", (
         '<p>This dashboard\'s server runs its own always-on WireGuard '
         'VPN — the <b>hub</b>. Every provisioned router dials home to it, '
         'which is also how the dashboard reaches routers with no public IP '
@@ -2959,7 +2977,31 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
         'sites, and it routes through this '
         'dashboard\'s hub rather than a direct tunnel between the two '
         'routers, so if the hub is down, cross-site traffic pauses (each '
-        'site\'s own local network and internet keep working normally).</p>'))
+        'site\'s own local network and internet keep working normally).</p>'
+        '<h3>Remote users: a laptop or phone straight onto a site</h3>'
+        '<p>The <b>Remote users</b> box on a router\'s VPN tab lets one '
+        'device (a laptop, a phone) connect to that site over WireGuard and '
+        'reach its network from anywhere. The router itself is the VPN '
+        'server, on an interface of its own, kept apart from the tunnel '
+        'this dashboard manages it over.</p>'
+        '<ol><li>Install the WireGuard app on the device. Either let the '
+        'app make the keys (Windows/Mac: <b>Add empty tunnel</b>; '
+        'phone: <b>Create from scratch → Generate keypair</b>) and paste '
+        'its <b>Public key</b> into the form, or tick <b>Make the keys for '
+        'me</b>.</li>'
+        '<li>Name the device, tick the networks it may reach (or send all '
+        'its traffic through the site), <b>Preview</b>, then <b>Apply</b>.'
+        '</li>'
+        '<li>The next page shows the settings once: paste them under the '
+        'app\'s PrivateKey line, or download the file and import it. Then '
+        '<b>Activate</b>.</li></ol>'
+        '<p>The box says up front whether a device CAN reach the router: '
+        'that needs a public address leading to it. A router whose main '
+        'line hands it a private address (every LTE line, and fibre behind '
+        'another router or the ISP\'s CGNAT) cannot be reached from outside '
+        'unless the device in front forwards the UDP port to it. Each '
+        'device can be removed on its own, and <b>Switch remote users off'
+        '</b> takes away everything the feature added.</p>'))
 
     safety = _guide_section("safety", "Backups, Preview/Apply &amp; Safe mode", (
         '<p><b>Preview, then Apply.</b> Every change you make on a tab is a '
@@ -2971,13 +3013,17 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
         'the dashboard takes a full snapshot of the router\'s configuration '
         'and stores it on the Backups tab, so you can restore to exactly '
         'how it was before if something goes wrong.</p>'
-        '<p><b>Safe mode.</b> For changes that could cut off access to the '
-        'router itself (e.g. firewall or WAN changes), you can tick '
-        '"Safe mode" before applying. The router checks, a few minutes '
-        'later, that it can still reach the dashboard\'s hub — if it can\'t '
-        '(because the change locked everyone out), it automatically '
-        'reverts itself back to the backup taken just before. You don\'t '
-        'have to guess whether a change is risky.</p>'))
+        '<p><b>Safe mode.</b> On by default for any change that could cut '
+        'off access to the router (firewall, WAN, routes, VPN). Before the '
+        'change is sent, the router is given a safety timer pointing at the '
+        'backup just taken. About a minute after the change two checks run: '
+        'the router pings the dashboard\'s hub, and the dashboard logs back '
+        'in to the router. Both pass, and the timer is taken down and the '
+        'change is kept. Either fails, and the router restores that backup '
+        'by itself and restarts, so a change that locked everyone out is '
+        'undone within about two minutes with no site visit. You get an '
+        'email when that happens, and the change shows in the Activity log. '
+        'You don\'t have to guess whether a change is risky.</p>'))
 
     devicemode = _guide_section("devicemode", "“Device Mode” errors", (
         '<p>Some newer MikroTik routers ship with a security feature '
@@ -3066,8 +3112,57 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
         'new login appears on one of your routers — if you did not create it, '
         'treat that as a compromise: someone with access has given themselves '
         'a way back in that survives a password change.</p>'
+        '<p>When a main line drops there are two more: the <b>possible '
+        'cause</b> once the AI monitor has looked online (it can be switched '
+        'off under Account → Alert notifications), and a <b>still on the '
+        'backup line</b> reminder every two hours (or as often as you choose '
+        'there) until the line is back. Safe mode also emails if it ever has '
+        'to put a router back to its previous settings after a change.</p>'
         '<p class="muted">Turning your switch on affects nobody else, and '
         'turning it off does not stop anyone else being told.</p>'))
+
+    linemon = _guide_section("linemon", "When a line drops: the AI monitor", (
+        '<p>When a site loses its main internet line and moves to its '
+        'backup, the dashboard works out why straight away, from three '
+        'places:</p>'
+        '<ul><li><b>What the router saw.</b> If the port the line plugs '
+        'into has no link at all, it is the cable, the ISP\'s box (ONT or '
+        'modem) or its power, so a power cut or load-shedding at the box '
+        'looks like this. If the port is up but nothing passes, it is the '
+        'ISP\'s side; the PPPoE session, the DHCP from the ISP\'s box and '
+        'the router\'s own log narrow it down.</li>'
+        '<li><b>The rest of the fleet.</b> Other monitored sites on the same '
+        'ISP, or in the same area, dropping within twenty minutes make it '
+        'an outage, not a fault on site. A configuration change sent '
+        'minutes before is named first, because that one you can undo.</li>'
+        '<li><b>A search online</b>, when it is switched on (Platform admin '
+        '→ AI monitor): outages and maintenance that ISP or its fibre '
+        'network has reported for the site\'s area, and load-shedding or '
+        'power cuts there, with the sources it found.</li></ul>'
+        '<p>The first two go into the alert email itself. The online search '
+        'follows a minute later as a "possible cause" email, and is repeated '
+        'every couple of hours while the outage lasts in case the ISP has '
+        'said more. The router\'s page shows all of it in a <b>What '
+        'happened</b> box, with how long the site has been on its backup '
+        'line and how much data the backup has carried.</p>'
+        '<p>Give each router a <b>Location</b> (suburb and city) on the '
+        'Devices page: it is where the search looks. Without one the '
+        'company\'s address is used, which is wrong for every branch.</p>'
+        '<p><b>It keeps reminding you.</b> While a site runs on its backup '
+        'line, the alert recipients are reminded every two hours (change it '
+        'under Account → Alert notifications), and the dashboard shows an '
+        '<b>On backup</b> card at the top until the main line is back. A '
+        'backup line is slower, often metered, and has nothing behind it if '
+        'it fails too, which is why this does not go quiet after one '
+        'email.</p>'
+        '<p><b>It learns what normal looks like.</b> For each hour of the '
+        'week it learns how many devices are usually connected and how busy '
+        'each line usually is, over several days, and says when something '
+        'is far outside that: unusually many devices, unusually few (an '
+        'access point or switch off), or a line that is up but carrying '
+        'almost nothing (users with no working internet while every light is '
+        'green). A new level that lasts for three days is taken as the new '
+        'normal, so a site that grew stops being flagged by itself.</p>'))
 
     tips = _guide_section("tips", "The tips that appear once", (
         '<p>The first time you open a tab, a short panel explains what that '
@@ -3161,7 +3256,8 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
              f'walkthrough of what everything on this dashboard does, and a '
              f'glossary of the networking terms it uses.</p>'
              f'{toc}{overview}{dashboard}{devices}{provision}{tabs}{vpn}'
-             f'{safety}{devicemode}{billing}{activity}{alerts}{tips}'
+             f'{safety}{devicemode}{billing}{activity}{linemon}{alerts}'
+             f'{tips}'
              f'{glossary}</div>')
     return _page("Guide", _header(user, "/guide") + inner)
 

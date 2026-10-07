@@ -136,11 +136,11 @@ TABS = [
                "not have to &mdash; <b>Preview changes</b> shows exactly "
                "which services you are about to shut the door on.",
                "If a switch does lock this server out, the router restores "
-               "its own backup a few minutes later and comes back."],
+               "its own backup within about two minutes and comes back."],
      "warn": "Include this monitoring server's own IP in the allowed list. "
              "Leave it out and the router locks easymikrotik out along with "
-             "the attackers. The safe-mode self-check will undo it, but you "
-             "lose the router for a few minutes first."},
+             "the attackers. The safe-mode check will undo it, but you "
+             "lose the router for a couple of minutes first."},
 
     {"slug": "nextdns", "title": "DNS", "art": None,
      "what": "Points the router at a DNS provider, and can force every client "
@@ -199,7 +199,9 @@ TABS = [
      "what": "Lets two of your sites reach each other's LANs across the "
              "tunnels their routers already hold open to the hub. You are not "
              "building a new VPN here, just choosing which networks are "
-             "allowed through the one that exists.",
+             "allowed through the one that exists. Further down, <b>Remote "
+             "users</b> lets a laptop or phone connect straight to this site "
+             "over WireGuard (see the Guide's VPN section).",
      "steps": ["Both routers have to be provisioned and online already.",
                "Tick the other sites this router should be able to reach.",
                "<b>Preview</b>, then <b>Apply</b>.",
