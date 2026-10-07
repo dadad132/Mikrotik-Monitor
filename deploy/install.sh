@@ -398,6 +398,28 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 8b. Network stack — hold up under a flood
+# ---------------------------------------------------------------------------
+# SYN cookies keep a SYN flood from filling the queue of half-open
+# connections, so real visitors still get in during one. Pings are NOT
+# rate-limited here: routers ping this server during Safe mode and a limit
+# could make a healthy router revert. Stop ping floods at the edge router.
+step "Hardening the network stack against floods"
+cat > /etc/sysctl.d/90-easymikrotik-net.conf <<'SYS'
+# Written by deploy/install.sh (EasyMikroTik).
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_max_syn_backlog = 4096
+net.ipv4.tcp_synack_retries = 3
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+SYS
+if sysctl -p /etc/sysctl.d/90-easymikrotik-net.conf >/dev/null 2>&1; then
+    log "SYN-flood protection on"
+else
+    log "Could not apply /etc/sysctl.d/90-easymikrotik-net.conf (container?) — skipped"
+fi
+
+# ---------------------------------------------------------------------------
 # 9. systemd service units (monitor + web dashboard)
 # ---------------------------------------------------------------------------
 step "Registering systemd services"
@@ -910,8 +932,28 @@ NGX
       HSTS_LINE='    add_header Strict-Transport-Security "max-age=31536000" always;'
     fi
 
-    # Full HTTPS reverse-proxy config.
+    # Rate limits, per visitor address, so one visitor cannot flood the
+    # site: 10 requests a second (bursts of 120 -- far above a person
+    # clicking around), 20 login/sign-up posts a minute, 60 connections at
+    # once. Past them nginx answers 429 without bothering Python. The
+    # dashboard keeps its own limits too (mikromon/webguard.py), which is
+    # also why X-Real-IP below must stay \$remote_addr: the app trusts it
+    # from nginx and from nowhere else. Single quotes: written as-is.
+    RL_ZONES='# Rate limits per visitor address (see deploy/install.sh).
+limit_req_zone  $binary_remote_addr zone=em_req:10m rate=10r/s;
+map $request_method $em_post_addr { POST $binary_remote_addr; default ""; }
+limit_req_zone  $em_post_addr zone=em_auth:10m rate=20r/m;
+limit_conn_zone $binary_remote_addr zone=em_conn:10m;'
+    RL_SERVER='    limit_req_status  429;
+    limit_conn_status 429;
+    limit_conn        em_conn 60;'
+    RL_ALL='        limit_req zone=em_req burst=120 nodelay;'
+    RL_AUTH='        limit_req zone=em_auth burst=20 nodelay;'
+
+    write_site() {
     cat > "${NGINX_CONF}" <<NGX
+${RL_ZONES}
+
 # HTTP → HTTPS redirect
 server {
     listen 80;
@@ -939,19 +981,55 @@ server {
     add_header Referrer-Policy        strict-origin-when-cross-origin;
 ${HSTS_LINE}
 
-    # Proxy to the Python dashboard
+    # Slow or oversized requests: a visitor trickling headers or a body to
+    # hold connections open is cut off; forms are small.
+${RL_SERVER}
+    client_header_timeout 15s;
+    client_body_timeout   30s;
+    send_timeout          60s;
+    keepalive_timeout     30s;
+    client_max_body_size  2m;
+
+    # Proxy to the Python dashboard (every location below inherits these).
+    proxy_http_version 1.1;
+    proxy_set_header   Host              \$host;
+    proxy_set_header   X-Real-IP         \$remote_addr;
+    proxy_set_header   X-Forwarded-For   \$proxy_add_x_forwarded_for;
+    proxy_set_header   X-Forwarded-Proto \$scheme;
+    proxy_read_timeout 120s;
+    proxy_buffering    off;
+
     location / {
-        proxy_pass         http://127.0.0.1:${WEB_PORT};
-        proxy_http_version 1.1;
-        proxy_set_header   Host              \$host;
-        proxy_set_header   X-Real-IP         \$remote_addr;
-        proxy_set_header   X-Forwarded-For   \$proxy_add_x_forwarded_for;
-        proxy_set_header   X-Forwarded-Proto \$scheme;
-        proxy_read_timeout 120s;
-        proxy_buffering    off;
+${RL_ALL}
+        proxy_pass http://127.0.0.1:${WEB_PORT};
+    }
+    # Logging in and signing up: each try costs a password hash, and a
+    # sign-up sends an email, so posts here are limited far more tightly.
+    location ~ ^/(login|signup)(/|\$) {
+${RL_ALL}
+${RL_AUTH}
+        proxy_pass http://127.0.0.1:${WEB_PORT};
+    }
+    # The superadmin's server-backup upload is the one large body.
+    location = /superadmin/backup/restore-upload {
+        client_max_body_size    4g;
+        client_body_timeout     120s;
+        proxy_request_buffering off;
+        proxy_read_timeout      600s;
+        proxy_pass http://127.0.0.1:${WEB_PORT};
     }
 }
 NGX
+    }
+    write_site
+    # A config nginx refuses would stay on disk and stop nginx at its next
+    # restart. If it is the rate limits it objects to (an old nginx, say),
+    # keep the site and drop them, rather than leave a broken file behind.
+    if ! nginx -t >/dev/null 2>&1; then
+      echo "nginx refused the rate limits; writing the site without them."
+      RL_ZONES=""; RL_SERVER=""; RL_ALL=""; RL_AUTH=""
+      write_site
+    fi
     nginx -t && { systemctl reload nginx || systemctl restart nginx; }
 
     # Save domain to config.yaml.

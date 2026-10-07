@@ -60,7 +60,10 @@ CREATE TABLE IF NOT EXISTS ai_calls (
 CREATE INDEX IF NOT EXISTS ix_ai_calls_ts ON ai_calls(ts);
 """
 
-_JSON_COLS = ("evidence", "sources")
+_JSON_COLS = ("evidence", "sources", "search_queries")
+# Added after the first release; an older incidents.db gets them on open.
+_LATER_COLS = (("search_queries", "TEXT"), ("search_html", "TEXT"),
+               ("ai_provider", "TEXT"))
 
 
 def incidents_path(devices_db: str | None, explicit: str | None = None) -> str:
@@ -92,6 +95,10 @@ class IncidentStore:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(_SCHEMA)
+        have = {r[1] for r in self.db.execute("PRAGMA table_info(incidents)")}
+        for col, kind in _LATER_COLS:
+            if col not in have:
+                self.db.execute(f"ALTER TABLE incidents ADD COLUMN {col} {kind}")
         self.db.commit()
 
     def close(self) -> None:
@@ -107,7 +114,7 @@ class IncidentStore:
             try:
                 d[c] = json.loads(d[c]) if d.get(c) else (
                     {} if c == "evidence" else [])
-            except ValueError:
+            except (TypeError, ValueError):
                 d[c] = {} if c == "evidence" else []
         return d
 

@@ -191,8 +191,9 @@ _DID_YOU_KNOW = [
 
 _STEPS = [
     ("1", "Create your account",
-     f"Sign up with your company email. You get a 30-day free trial with "
-     f"{TRIAL_DEVICES} device immediately — no credit card needed."),
+     f"Sign up with your company email and type in the code we send to it. "
+     f"You get a 30-day free trial with {TRIAL_DEVICES} device straight away "
+     f"— no credit card needed."),
     ("2", "Add your first router",
      "Leave the address blank and the Provision tab hands you one script to "
      "paste into the router. It dials home over WireGuard — no public IP, no "

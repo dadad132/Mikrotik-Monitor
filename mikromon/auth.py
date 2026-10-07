@@ -68,6 +68,12 @@ REPORT_INTERVALS = {"weekly": 7 * 86400, "biweekly": 14 * 86400, "monthly": 30 *
 # the morning is repeated before the end of the day -- without being frequent
 # enough to become something people filter.
 OUTAGE_REMINDER_SECONDS = 12 * 3600
+# Signing up: the code emailed to the address, how long it lasts, how many
+# wrong tries it takes, and how often one address can be sent one.
+OTP_TTL = 15 * 60
+OTP_MAX_ATTEMPTS = 5
+OTP_RESEND_COOLDOWN = 60
+OTP_MAX_SENDS_PER_HOUR = 5
 # "Still on the backup line" reminders: the choices offered, and the default
 # for a company that never picked one.
 BACKUP_REMINDER_CHOICES = (0, 1, 2, 4, 8, 12)
@@ -76,7 +82,12 @@ BACKUP_REMINDER_DEFAULT_HOURS = 2
 # is stored like the SMTP password: this database is the server's secrets.
 AI_DEFAULTS = {
     "enabled": False,
-    "api_key": "",
+    # Which AI looks online: "gemini" (Google; cheap, with a free daily
+    # allowance of searches) or "claude" (Anthropic).
+    "provider": "gemini",
+    "gemini_api_key": "",
+    "gemini_model": "gemini-2.5-flash",
+    "api_key": "",          # the Claude (Anthropic) key
     "web_search": True,
     "max_searches": 3,      # per check
     "daily_limit": 40,      # checks per day, across every company
@@ -180,6 +191,7 @@ class AuthStore:
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS platform_settings ("
             "key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        self._pending_tables()
         self.db.commit()
 
     def _add_col_if_missing(self, table: str, col: str, col_def: str) -> None:
@@ -237,7 +249,8 @@ class AuthStore:
 
     # ----- mutations --------------------------------------------------------
     def signup(self, email: str, password: str, company: str,
-               role: str = "owner", phone: str = "") -> int:
+               role: str = "owner", phone: str = "",
+               hashed: tuple | None = None) -> int:
         """Self-service registration: create a new company + its owner.
 
         If no superadmin exists yet anywhere on this server (a fresh
@@ -256,9 +269,11 @@ class AuthStore:
         company = (company or "").strip()
         if not company:
             raise AuthError("Company name cannot be empty.")
-        self._check_new_user(email, password)
+        # `hashed` is a password already hashed when the signup started
+        # (start_signup): the plain one is never kept while a code is out.
+        self._check_new_user(email, password, check_password=hashed is None)
         phone = _norm_phone(phone)
-        salt, pw_hash, iters = hash_password(password)
+        salt, pw_hash, iters = hashed or hash_password(password)
         with self._lock:
             cur = self.db.execute(
                 "INSERT INTO orgs (name, plan, created) VALUES (?, 'free', ?)",
@@ -299,14 +314,15 @@ class AuthStore:
                  _dump_devices(devices), time.time()))
             self.db.commit()
 
-    def _check_new_user(self, email: str, password: str) -> None:
+    def _check_new_user(self, email: str, password: str,
+                        check_password: bool = True) -> None:
         if not email:
             raise AuthError("Email cannot be empty.")
         if not _EMAIL_RE.match(email):
             raise AuthError("Enter a valid email address.")
         if self.get_user(email):
             raise AuthError("An account with that email already exists.")
-        if len(password) < 6:
+        if check_password and len(password) < 6:
             raise AuthError("Password must be at least 6 characters.")
 
     def set_password(self, identifier: str, password: str) -> None:
@@ -534,6 +550,159 @@ class AuthStore:
 
     def count_users(self) -> int:
         return self.db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+    # ----- signing up with a code from the email address --------------------
+    #
+    # A signup creates nothing until the code sent to the address is typed
+    # back: it waits here, with its password already hashed, and becomes a
+    # company and an owner only on the right code. So an address somebody
+    # does not own -- a typo, or someone else's -- never ends up with an
+    # account, and a run of fake signups leaves no companies behind.
+    def _pending_tables(self) -> None:
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS pending_signups ("
+            "token TEXT PRIMARY KEY, email TEXT NOT NULL, data TEXT NOT NULL, "
+            "code_hash TEXT NOT NULL, created REAL NOT NULL, "
+            "expires REAL NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, "
+            "sends INTEGER NOT NULL DEFAULT 1, last_sent REAL NOT NULL)")
+        # Every code sent, so one address cannot be sent a flood of them --
+        # a signup form is otherwise a free way to mailbomb a stranger.
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS signup_codes_sent ("
+            "email TEXT NOT NULL, ts REAL NOT NULL)")
+
+    @staticmethod
+    def _code_hash(token: str, code: str) -> str:
+        return hmac.new(token.encode(), code.strip().encode(),
+                        hashlib.sha256).hexdigest()
+
+    def _sends_last_hour(self, email: str, now: float) -> int:
+        return self.db.execute(
+            "SELECT COUNT(*) FROM signup_codes_sent WHERE email=? AND ts>?",
+            (email, now - 3600)).fetchone()[0]
+
+    def start_signup(self, email: str, password: str, company: str,
+                     phone: str = "", extra: dict | None = None,
+                     now: float | None = None) -> tuple:
+        """Hold a signup until its email is confirmed. Returns (token,
+        code): the token names the waiting signup (it goes in the verify
+        page's address), the code goes ONLY in the email."""
+        now = now if now is not None else time.time()
+        email = _norm_email(email)
+        company = (company or "").strip()
+        if not company:
+            raise AuthError("Company name cannot be empty.")
+        self._check_new_user(email, password)
+        if self._sends_last_hour(email, now) >= OTP_MAX_SENDS_PER_HOUR:
+            raise AuthError("Too many codes have been sent to this address. "
+                            "Please try again in an hour.")
+        salt, pw_hash, iters = hash_password(password)
+        token = secrets.token_urlsafe(24)
+        code = f"{secrets.randbelow(10 ** 6):06d}"
+        data = {"company": company, "phone": _norm_phone(phone),
+                "salt": salt, "pw_hash": pw_hash, "iterations": iters,
+                **(extra or {})}
+        with self._lock:
+            self.db.execute("DELETE FROM pending_signups WHERE expires<?",
+                            (now,))
+            # A second try with the same address replaces the first.
+            self.db.execute("DELETE FROM pending_signups WHERE email=?",
+                            (email,))
+            self.db.execute(
+                "INSERT INTO pending_signups (token, email, data, code_hash, "
+                "created, expires, attempts, sends, last_sent) "
+                "VALUES (?,?,?,?,?,?,0,1,?)",
+                (token, email, json.dumps(data), self._code_hash(token, code),
+                 now, now + OTP_TTL, now))
+            self.db.execute("INSERT INTO signup_codes_sent VALUES (?,?)",
+                            (email, now))
+            self.db.commit()
+        return token, code
+
+    def pending_signup(self, token: str, now: float | None = None):
+        """The waiting signup for `token` ({"email", "company", ...}), or
+        None when there is none or it has expired."""
+        now = now if now is not None else time.time()
+        row = self.db.execute(
+            "SELECT email, data, expires, attempts, last_sent FROM "
+            "pending_signups WHERE token=?", (token or "",)).fetchone()
+        if not row or row[2] < now:
+            return None
+        data = json.loads(row[1])
+        return {"email": row[0], "company": data.get("company", ""),
+                "expires": row[2], "attempts": row[3], "last_sent": row[4],
+                "tries_left": max(0, OTP_MAX_ATTEMPTS - row[3])}
+
+    def drop_pending_signup(self, token: str) -> None:
+        with self._lock:
+            self.db.execute("DELETE FROM pending_signups WHERE token=?",
+                            (token or "",))
+            self.db.commit()
+
+    def resend_signup_code(self, token: str, now: float | None = None) -> tuple:
+        """A fresh code for a waiting signup: (email, code). Not more than
+        once a minute, nor past the hourly cap for the address."""
+        now = now if now is not None else time.time()
+        p = self.pending_signup(token, now)
+        if p is None:
+            raise AuthError("That sign-up has expired. Please start again.")
+        wait = int(OTP_RESEND_COOLDOWN - (now - p["last_sent"]))
+        if wait > 0:
+            raise AuthError(f"A code was sent moments ago. You can ask for "
+                            f"another in {wait} seconds.")
+        if self._sends_last_hour(p["email"], now) >= OTP_MAX_SENDS_PER_HOUR:
+            raise AuthError("Too many codes have been sent to this address. "
+                            "Please try again in an hour.")
+        code = f"{secrets.randbelow(10 ** 6):06d}"
+        with self._lock:
+            self.db.execute(
+                "UPDATE pending_signups SET code_hash=?, attempts=0, "
+                "sends=sends+1, last_sent=?, expires=? WHERE token=?",
+                (self._code_hash(token, code), now, now + OTP_TTL, token))
+            self.db.execute("INSERT INTO signup_codes_sent VALUES (?,?)",
+                            (p["email"], now))
+            self.db.commit()
+        return p["email"], code
+
+    def finish_signup(self, token: str, code: str,
+                      now: float | None = None) -> tuple:
+        """Check the code; on the right one create the company and its owner.
+        Returns (org_id, email, extra-data dict). Raises AuthError saying
+        how many tries are left, or that it is time to start again."""
+        now = now if now is not None else time.time()
+        row = self.db.execute(
+            "SELECT email, data, code_hash, expires, attempts FROM "
+            "pending_signups WHERE token=?", (token or "",)).fetchone()
+        if not row or row[3] < now:
+            raise AuthError("That code has expired. Please sign up again.")
+        email, data, want, _exp, attempts = row
+        if attempts >= OTP_MAX_ATTEMPTS:
+            self.drop_pending_signup(token)
+            raise AuthError("Too many wrong codes. Please sign up again.")
+        got = self._code_hash(token, re.sub(r"\D", "", code or ""))
+        if not hmac.compare_digest(got, want):
+            left = OTP_MAX_ATTEMPTS - attempts - 1
+            with self._lock:
+                if left <= 0:
+                    self.db.execute(
+                        "DELETE FROM pending_signups WHERE token=?", (token,))
+                else:
+                    self.db.execute(
+                        "UPDATE pending_signups SET attempts=attempts+1 "
+                        "WHERE token=?", (token,))
+                self.db.commit()
+            if left <= 0:
+                raise AuthError("Too many wrong codes. Please sign up again.")
+            raise AuthError(f"That code is not right. {left} "
+                            f"tr{'y' if left == 1 else 'ies'} left.")
+        d = json.loads(data)
+        org_id = self.signup(email, "", d["company"], phone=d.get("phone", ""),
+                             hashed=(d["salt"], d["pw_hash"], d["iterations"]))
+        self.drop_pending_signup(token)
+        extra = {k: v for k, v in d.items()
+                 if k not in ("company", "phone", "salt", "pw_hash",
+                              "iterations")}
+        return org_id, email, extra
 
     def org(self, org_id: int) -> dict | None:
         try:
@@ -879,6 +1048,10 @@ class AuthStore:
         d = self.get_setting("ai")
         if isinstance(d, dict):
             out.update({k: v for k, v in d.items() if k in AI_DEFAULTS})
+            # Saved before there was a choice: a Claude key and no provider
+            # means it was set up for Claude, and stays that way.
+            if "provider" not in d and d.get("api_key"):
+                out["provider"] = "claude"
         return out
 
     def set_ai(self, cfg: dict) -> None:

@@ -32,6 +32,7 @@ poll.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import time
@@ -463,6 +464,169 @@ def test_key(settings: dict, client=None) -> str:
     return ""
 
 
+# ---- the same question, asked of Gemini ---------------------------------------
+# Google's Gemini with "Grounding with Google Search". Chosen per server in
+# Platform admin -> AI monitor; far cheaper than Claude for this job (Gemini
+# 2.5 Flash includes a daily allowance of grounded searches before any
+# per-search charge). Plain HTTPS to the documented generateContent endpoint,
+# so it needs no extra package.
+GEMINI_MODEL = "gemini-2.5-flash"
+_GEMINI_URL = ("https://generativelanguage.googleapis.com/v1beta/models/"
+               "{model}:generateContent")
+_MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9.\-]{2,60}$")
+# A candidate that ended for one of these carries no usable answer.
+_GEMINI_BLOCKED = {"SAFETY", "BLOCKED_UNKNOWN", "PROHIBITED_CONTENT", "SPII",
+                   "RECITATION", "BLOCKLIST"}
+
+
+def gemini_key(settings: dict) -> str:
+    return ((settings.get("gemini_api_key") or "").strip()
+            or os.environ.get("GEMINI_API_KEY", "").strip()
+            or os.environ.get("GOOGLE_API_KEY", "").strip())
+
+
+def _gemini_post(model: str, key: str, body: dict, timeout: float = 120.0):
+    """POST to generateContent; the parsed JSON, or AIError saying what to
+    do. The key goes in a header, never in the URL, so it is not in any
+    proxy's access log."""
+    import json
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(
+        _GEMINI_URL.format(model=model), data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "x-goog-api-key": key},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        try:
+            err = json.loads(exc.read().decode("utf-8", "replace")).get(
+                "error") or {}
+        except Exception:  # noqa: BLE001
+            err = {}
+        msg = str(err.get("message") or "")
+        if exc.code == 400 and "api key" in msg.lower():
+            raise AIError("The Gemini key was rejected. Check it under "
+                          "Platform admin -> AI monitor.") from exc
+        if exc.code in (401, 403):
+            raise AIError("The Gemini key is not allowed to do this (is the "
+                          "Generative Language API enabled for its "
+                          "project?).") from exc
+        if exc.code == 404:
+            raise AIError(f"Gemini has no model called '{model}'. Check the "
+                          f"model name under Platform admin -> AI "
+                          f"monitor.") from exc
+        if exc.code == 429:
+            raise AIError("Gemini's quota for this key is used up for now; it "
+                          "will try again later.") from exc
+        raise AIError(f"Gemini returned an error ({exc.code}): "
+                      f"{msg[:200]}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise AIError("Could not reach Gemini from this server.") from exc
+    except ValueError as exc:
+        raise AIError("Gemini sent back something that was not JSON.") from exc
+
+
+def gemini_analyze(inc: dict, settings: dict, now: float | None = None,
+                   post=None) -> dict:
+    """The outage question, asked of Gemini with Google Search grounding.
+
+    Returns what claude_analyze returns, plus "search_queries" and
+    "search_html": the searches Google ran and its Search suggestions,
+    which Google's terms require to be shown with a grounded answer (the
+    router's page renders them). `post` is injectable for tests.
+    """
+    key = gemini_key(settings)
+    if not key:
+        raise AIError("No Gemini key is set (Platform admin -> AI monitor).")
+    model = (settings.get("gemini_model") or GEMINI_MODEL).strip()
+    if not _MODEL_ID.match(model):
+        raise AIError(f"'{model}' is not a Gemini model name.")
+    prompt = build_prompt(inc, now)
+    if settings.get("country"):
+        # Gemini's search tool takes no location, so the question carries it.
+        prompt = (f"The site is in country code "
+                  f"{str(settings['country']).upper()[:2]}.\n" + prompt)
+    body = {"systemInstruction": {"parts": [{"text": _SYSTEM}]},
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.2,
+                                 "maxOutputTokens": 4096}}
+    if settings.get("web_search", True):
+        body["tools"] = [{"google_search": {}}]
+    data = (post or _gemini_post)(model, key, body)
+    if (data.get("promptFeedback") or {}).get("blockReason"):
+        raise AIError("Gemini declined to answer this one.")
+    cand = (data.get("candidates") or [{}])[0]
+    finish = str(cand.get("finishReason") or "")
+    if finish in _GEMINI_BLOCKED:
+        raise AIError("Gemini declined to answer this one.")
+    text = "".join(str(p.get("text") or "")
+                   for p in ((cand.get("content") or {}).get("parts") or [])
+                   if not p.get("thought"))
+    if not text.strip():
+        raise AIError("Gemini gave an empty answer"
+                      + (f" ({finish.lower()})." if finish else "."))
+    gm = cand.get("groundingMetadata") or {}
+    sources, seen = [], set()
+    for ch in gm.get("groundingChunks") or []:
+        web = ch.get("web") or {}
+        uri = str(web.get("uri") or "")
+        if uri and uri not in seen:
+            seen.add(uri)
+            sources.append({"url": uri, "title": str(web.get("title") or uri)})
+    queries = [str(q) for q in (gm.get("webSearchQueries") or []) if q][:5]
+    out = parse_answer(text)
+    out.update(sources=sources[:5], searches=len(queries),
+               search_queries=queries,
+               search_html=str((gm.get("searchEntryPoint") or {})
+                               .get("renderedContent") or ""),
+               provider="gemini")
+    return out
+
+
+def gemini_test_key(settings: dict, post=None) -> str:
+    key = gemini_key(settings)
+    if not key:
+        return "No Gemini key is set."
+    model = (settings.get("gemini_model") or GEMINI_MODEL).strip()
+    if not _MODEL_ID.match(model):
+        return f"'{model}' is not a Gemini model name."
+    try:
+        (post or _gemini_post)(model, key, {
+            "contents": [{"role": "user",
+                          "parts": [{"text": "Reply with the word OK."}]}],
+            "generationConfig": {"maxOutputTokens": 512}})
+    except AIError as exc:
+        return str(exc)
+    return ""
+
+
+def analyze(inc: dict, settings: dict, now: float | None = None) -> dict:
+    """The online check, with whichever provider this server uses."""
+    if (settings.get("provider") or "gemini") == "claude":
+        out = claude_analyze(inc, settings, now)
+        out.setdefault("provider", "claude")
+        return out
+    return gemini_analyze(inc, settings, now)
+
+
+def test_ai(settings: dict) -> str:
+    """"" if the chosen provider's key works, else what is wrong."""
+    if (settings.get("provider") or "gemini") == "claude":
+        return test_key(settings)
+    return gemini_test_key(settings)
+
+
+def provider_name(provider: str) -> str:
+    return "Claude" if provider == "claude" else "Gemini"
+
+
+def search_link(query: str) -> str:
+    from urllib.parse import quote_plus
+    return "https://www.google.com/search?q=" + quote_plus(query)
+
+
 # ---- emails ------------------------------------------------------------------
 def _when(ts) -> str:
     return time.strftime("%d %b %H:%M", time.localtime(ts)) if ts else "?"
@@ -480,6 +644,10 @@ def cause_email(inc: dict, prefix: str, every_hours: int) -> tuple:
             f"{dev} went offline at about {_when(inc['started'])}.")
     verdict = VERDICTS.get(inc.get("verdict") or "unknown", "Not clear yet")
     sources = inc.get("sources") or []
+    # Google's terms ask for the searches behind a grounded answer to be
+    # shown with it; an email cannot carry its rendered suggestions, so it
+    # carries the searches themselves, as links.
+    queries = list(inc.get("search_queries") or [])[:5]
     ev = evidence_lines(inc.get("evidence") or {})
     subject = f"{prefix} {dev}: possible cause — {verdict}"
     remind = (f"You will be reminded every {every_hours} hour"
@@ -493,6 +661,9 @@ def cause_email(inc: dict, prefix: str, every_hours: int) -> tuple:
         + (f"What to do: {inc['action']}\n\n" if inc.get("action") else "")
         + ("Sources:\n" + "".join(f"  - {s['title']} — {s['url']}\n"
                                   for s in sources) + "\n" if sources else "")
+        + ("Searched Google for:\n" + "".join(
+            f"  - {q} — {search_link(q)}\n" for q in queries) + "\n"
+           if queries else "")
         + ("What the router showed:\n" + "".join(f"  - {line}\n" for line in ev)
            + "\n" if ev else "")
         + (f"{remind}\n" if remind else "")
@@ -513,6 +684,11 @@ def cause_email(inc: dict, prefix: str, every_hours: int) -> tuple:
            if inc.get("action") else "")
         + (f'<p style="margin:0">Sources:</p><ul style="margin:4px 0 12px">'
            f'{src_html}</ul>' if sources else "")
+        + (f'<p style="margin:0">Searched Google for:</p>'
+           f'<ul style="margin:4px 0 12px">'
+           + "".join(f'<li><a href="{render.esc(search_link(q))}">'
+                     f'{render.esc(q)}</a></li>' for q in queries)
+           + '</ul>' if queries else "")
         + (f'<p style="margin:0">What the router showed:</p>'
            f'<ul style="margin:4px 0 12px;color:#475569">{ev_html}</ul>'
            if ev else "")
@@ -600,7 +776,7 @@ class AIMonitor:
         self.poll_interval = int(poll_interval or 60)
         self.confirmations = max(1, int(confirmations or 1))
         self.clock = clock
-        self.analyzer = analyzer or claude_analyze
+        self.analyzer = analyzer or analyze
         # True while the engine is in its startup grace: nothing is mailed
         # then, the same as the alerts themselves.
         self.quiet = quiet or (lambda: False)
@@ -799,6 +975,9 @@ class AIMonitor:
                 inc["id"], verdict=shared["verdict"],
                 confidence=shared["confidence"], summary=shared["summary"],
                 action=shared["action"], sources=shared["sources"],
+                search_queries=shared.get("search_queries") or [],
+                search_html=shared.get("search_html") or "",
+                ai_provider=shared.get("ai_provider") or "",
                 ai_state="done", ai_checked=now, ai_error="",
                 ai_runs=int(inc.get("ai_runs") or 0) + 1)
             self._mail_cause(self.store.get(inc["id"]))
@@ -825,6 +1004,9 @@ class AIMonitor:
         self.store.log_ai_call(inc["device"], res.get("searches", 0), True,
                                ts=now)
         fields = {"ai_state": "done", "ai_checked": now, "ai_error": "",
+                  "ai_provider": res.get("provider") or "",
+                  "search_queries": res.get("search_queries") or [],
+                  "search_html": res.get("search_html") or "",
                   "ai_runs": int(inc.get("ai_runs") or 0) + 1,
                   "ai_searches": int(inc.get("ai_searches") or 0)
                   + int(res.get("searches") or 0)}

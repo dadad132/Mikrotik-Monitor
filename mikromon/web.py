@@ -3504,6 +3504,54 @@ def _renewal_email(org_name, plan, amount, currency, period_end, due_days,
     return f"EasyMikroTik invoice \u2014 {total}, due {when}", text
 
 
+def _signup_code_email(code: str, company: str) -> tuple:
+    """(subject, text, html) of the email carrying a sign-up code. The code
+    leads the subject, so a phone's notification shows it without opening
+    the message."""
+    from html import escape
+
+    from .auth import OTP_TTL
+    from .brand import BRAND
+    mins = OTP_TTL // 60
+    subject = f"{code} is your {BRAND} sign-up code"
+    text = (f"Hello,\n\n"
+            f"Someone (hopefully you) is creating an {BRAND} account for "
+            f"\"{company}\" with this email address.\n\n"
+            f"Your code: {code}\n\n"
+            f"Type it on the sign-up page to finish. It works for {mins} "
+            f"minutes.\n\n"
+            f"Not you? Ignore this email -- no account is created without "
+            f"the code.\n")
+    html = (f'<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;'
+            f'color:#0f172a">'
+            f'<p>Someone (hopefully you) is creating an {BRAND} account for '
+            f'<b>{escape(company)}</b> with this email address.</p>'
+            f'<p style="margin:18px 0 6px">Your code:</p>'
+            f'<p style="font-size:30px;font-weight:700;letter-spacing:8px;'
+            f'margin:0 0 18px;font-family:Consolas,monospace">{code}</p>'
+            f'<p>Type it on the sign-up page to finish. It works for {mins} '
+            f'minutes.</p>'
+            f'<p style="color:#64748b;font-size:12px">Not you? Ignore this '
+            f'email &mdash; no account is created without the code.</p></div>')
+    return subject, text, html
+
+
+def _send_signup_code(smtp_cfg, to: str, code: str, company: str) -> None:
+    """Email a sign-up code. Raises if it could not be sent, so the sign-up
+    page can say so rather than wait for a code that is never coming."""
+    from email.message import EmailMessage
+
+    from .notify.org_email import _smtp_send
+    subject, text, html = _signup_code_email(code, company)
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = smtp_cfg.from_addr
+    msg["To"] = to
+    msg.set_content(text)
+    msg.add_alternative(html, subtype="html")
+    _smtp_send(smtp_cfg, msg)
+
+
 def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
                    period_end, due_days, link) -> None:
     """The renewal invoice, as an email somebody can act on.
@@ -7382,11 +7430,24 @@ class SessionManager:
 
 
 # ============================ HTTP handler =================================
+# A form post is a few KB; only these two take a file. Anything bigger is
+# refused before it is read, so nobody can make the server hold gigabytes
+# in memory by claiming a long body on the login page.
+MAX_FORM_BYTES = 2 * 1024 * 1024
+_UPLOAD_PATHS = frozenset({"/superadmin/backup/restore-upload",
+                           "/superadmin/invoice-template"})
+
+
 def make_handler(metrics_db, state_file, auth: AuthStore | None,
                  sessions: SessionManager, secure_cookies=False,
                  metrics_token=None, devices_db=None, defaults=None,
                  push_log_db=None, access_cfg=None, billing_cfg=None,
-                 smtp_cfg=None, config_path=None, alert_log_db=None):
+                 smtp_cfg=None, config_path=None, alert_log_db=None,
+                 rate_limit=True):
+    from .webguard import WebGuard
+    # Requests per second per visitor (see webguard.py). The server's own
+    # requests -- local tools, the tests -- are never limited.
+    guard = WebGuard() if rate_limit else None
     defaults = defaults or {}
     access_cfg = access_cfg or {}
     billing_cfg = billing_cfg or {}
@@ -7442,9 +7503,48 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "mikromon"
+        # An idle keep-alive or a stalled client gives its thread back after
+        # this long instead of holding it for ever.
+        timeout = 60
 
         def log_message(self, *_):
             pass
+
+        def parse_request(self):
+            """Every request passes here first: refused before any page is
+            built if its sender is over the limit, or if it claims a body
+            too big to be a form."""
+            if not super().parse_request():
+                return False
+            path = urlparse(self.path).path
+            wait = (guard.check(self.client_address[0], self.headers,
+                                self.command, path) if guard else 0)
+            if wait:
+                return self._refuse(429, "Too many requests. Please wait "
+                                         f"{wait} seconds and try again.",
+                                    {"Retry-After": str(wait)})
+            raw = (self.headers.get("Content-Length") or "0").strip()
+            if not raw.isdigit():
+                return self._refuse(400, "Bad Content-Length.")
+            if int(raw) > MAX_FORM_BYTES and path not in _UPLOAD_PATHS:
+                return self._refuse(413, "That request is too large.")
+            return True
+
+        def _refuse(self, code, text, headers=None):
+            data = (text + "\n").encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            if self.command != "HEAD":
+                try:
+                    self.wfile.write(data)
+                except OSError:
+                    pass
+            return False
 
         # ---- low-level helpers ----
         def _send(self, code, body, ctype="text/plain; charset=utf-8", headers=None):
@@ -7654,8 +7754,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._redirect("/dashboard")
                 err = parse_qs(url.query).get("error", [""])[0]
                 return self._send(200, _render_signup(
-                    err, has_regions=bool(auth.get_regions())),
+                    err, has_regions=bool(auth.get_regions()),
+                    confirm_email=auth.count_users() > 0),
                     "text/html; charset=utf-8")
+            if path == "/signup/verify":
+                if self._session():
+                    return self._redirect("/dashboard")
+                return self._signup_verify_page(url.query)
             # With no accounts yet, send first-time visitors to sign up.
             if auth.count_users() == 0 and path not in ("/login",):
                 return self._redirect("/signup")
@@ -8357,8 +8462,18 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return default
 
             old = auth.get_ai()
+            from .aimonitor import GEMINI_MODEL, _MODEL_ID
+            model = (flat.get("gemini_model") or "").strip() or GEMINI_MODEL
+            if not _MODEL_ID.match(model):
+                return self._redirect("/superadmin?error=" + quote(
+                    f"'{model}' is not a Gemini model name.") + "#ai")
             cfg = {
                 "enabled": flat.get("enabled") == "1",
+                "provider": ("claude" if flat.get("provider") == "claude"
+                             else "gemini"),
+                "gemini_api_key": (flat.get("gemini_api_key") or "").strip()
+                                  or old.get("gemini_api_key", ""),
+                "gemini_model": model,
                 "api_key": (flat.get("api_key") or "").strip()
                            or old.get("api_key", ""),
                 "web_search": flat.get("web_search") == "1",
@@ -8369,16 +8484,18 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             }
             auth.set_ai(cfg)
             if flat.get("test") == "1":
-                from .aimonitor import test_key
-                problem = test_key(cfg)
+                from .aimonitor import test_ai
+                problem = test_ai(cfg)
                 if problem:
                     return self._redirect("/superadmin?error=" + quote(
                         "AI settings saved, but the test failed: " + problem)
                         + "#ai")
                 return self._redirect("/superadmin?ok=" + quote(
                     "AI settings saved, and the key works.") + "#ai")
+            has_key = bool(cfg["api_key"] if cfg["provider"] == "claude"
+                           else cfg["gemini_api_key"])
             return self._redirect("/superadmin?ok=" + quote(
-                "AI settings saved." + ("" if cfg["enabled"] or not cfg["api_key"]
+                "AI settings saved." + ("" if cfg["enabled"] or not has_key
                                         else " The online check is still "
                                              "switched off: tick it to use it."))
                 + "#ai")
@@ -9516,8 +9633,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if auth is None:
                 return False
             ai = auth.get_ai()
-            return bool(ai.get("enabled") and (ai.get("api_key")
-                        or os.environ.get("ANTHROPIC_API_KEY")))
+            if not ai.get("enabled"):
+                return False
+            if ai.get("provider") == "claude":
+                return bool(ai.get("api_key")
+                            or os.environ.get("ANTHROPIC_API_KEY"))
+            from .aimonitor import gemini_key
+            return bool(gemini_key(ai))
 
         def _incidents(self):
             """The AI monitor's incident store (written by the engine), or
@@ -12118,6 +12240,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(404, "not found")
             if path == "/signup":
                 return self._post_signup()
+            if path == "/signup/verify":
+                return self._post_signup_verify()
+            if path == "/signup/resend":
+                return self._post_signup_resend()
             if path == "/login":
                 return self._post_login()
             if path == "/logout":
@@ -12452,21 +12578,136 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._redirect("/signup?error=" + quote(
                     "Please read and accept the Terms & Conditions to create "
                     "an account."))
+            alert_list = [e.strip().lower()
+                          for e in flat.get("alert_emails", "").split(",")
+                          if e.strip()]
+            if auth.count_users() > 0:
+                return self._start_signup(flat, email, phone, alert_list)
+            # The very first account -- the platform's own superadmin, on a
+            # server whose mail is not set up yet -- is made straight away;
+            # every account after it confirms its address with a code.
             try:
                 org_id = auth.signup(email, flat.get("password", ""),
                                      flat.get("company", ""), phone=phone)
-                auth.accept_terms(email, TERMS_VERSION)
-                if billing:
-                    billing.start_trial(org_id)
-                alert_raw = flat.get("alert_emails", "")
-                alert_list = [e.strip().lower() for e in alert_raw.split(",")
-                              if e.strip()]
-                if alert_list:
-                    auth.set_alert_emails(org_id, alert_list)
+                self._finish_new_account(org_id, email, TERMS_VERSION,
+                                         alert_list)
             except Exception as exc:  # noqa: BLE001 — show the reason on the form
                 return self._redirect("/signup?error=" + quote(str(exc)))
             token = sessions.create(email)
             return self._redirect("/dashboard", self._cookie_header(token))
+
+        def _finish_new_account(self, org_id, email, terms_version,
+                                alert_list):
+            auth.accept_terms(email, terms_version)
+            if billing:
+                billing.start_trial(org_id)
+            if alert_list:
+                auth.set_alert_emails(org_id, alert_list)
+
+        def _signup_smtp(self):
+            from .notify.org_email import effective_smtp
+            smtp = effective_smtp(auth, smtp_cfg)
+            return smtp if smtp and getattr(smtp, "host", "") else None
+
+        def _start_signup(self, flat, email, phone, alert_list):
+            """Nothing is created yet: the signup waits, and a code goes to
+            the address. The account exists only once the code comes back
+            (/signup/verify) -- so nobody can sign up with an address that
+            is not theirs."""
+            from .auth import AuthError
+            from .web_terms import TERMS_VERSION
+            smtp = self._signup_smtp()
+            if smtp is None:
+                log.warning("signup: no mail server is configured, so no "
+                            "sign-up code can be sent -- set one in "
+                            "Platform admin")
+                return self._redirect("/signup?error=" + quote(
+                    "Sign-ups are paused for a moment: we cannot send the "
+                    "confirmation email yet. Please try again later."))
+            company = flat.get("company", "")
+            try:
+                t, code = auth.start_signup(
+                    email, flat.get("password", ""), company, phone=phone,
+                    extra={"alert_emails": alert_list,
+                           "terms": TERMS_VERSION})
+            except AuthError as exc:
+                return self._redirect("/signup?error=" + quote(str(exc)))
+            try:
+                _send_signup_code(smtp, email, code, company.strip())
+            except Exception:  # noqa: BLE001
+                log.exception("signup: could not send the code to %s", email)
+                auth.drop_pending_signup(t)
+                return self._redirect("/signup?error=" + quote(
+                    "We could not send a code to that address. Check it and "
+                    "try again."))
+            log.info("signup: code sent to %s", email)
+            return self._redirect("/signup/verify?t=" + quote(t))
+
+        def _signup_verify_page(self, query):
+            q = parse_qs(query)
+            t = q.get("t", [""])[0]
+            p = auth.pending_signup(t)
+            if p is None:
+                return self._redirect("/signup?error=" + quote(
+                    "That sign-up has expired. Please start again."))
+            from .web_auth import _render_signup_verify
+            notice = ("A new code is on its way."
+                      if q.get("sent", [""])[0] == "1" else "")
+            # The address names the waiting signup: keep it out of the
+            # Referer of anything this page links to, and out of caches.
+            return self._send(200, _render_signup_verify(
+                t, p["email"], p["company"], q.get("error", [""])[0], notice),
+                "text/html; charset=utf-8",
+                {"Referrer-Policy": "no-referrer", "Cache-Control": "no-store"})
+
+        def _post_signup_verify(self):
+            from .auth import AuthError
+            from .web_terms import TERMS_VERSION
+            flat, _ = self._form()
+            t = flat.get("t", "")
+            try:
+                org_id, email, extra = auth.finish_signup(
+                    t, flat.get("code", ""))
+            except AuthError as exc:
+                if auth.pending_signup(t) is None:
+                    return self._redirect("/signup?error=" + quote(str(exc)))
+                return self._redirect(f"/signup/verify?t={quote(t)}&error="
+                                      + quote(str(exc)))
+            try:
+                self._finish_new_account(
+                    org_id, email, extra.get("terms") or TERMS_VERSION,
+                    extra.get("alert_emails") or [])
+            except Exception:  # noqa: BLE001 — the account exists; let them in
+                log.exception("signup: finishing %s's account", email)
+            log.info("signup: %s confirmed their address; account created",
+                     email)
+            token = sessions.create(email)
+            return self._redirect("/dashboard", self._cookie_header(token))
+
+        def _post_signup_resend(self):
+            from .auth import AuthError
+            flat, _ = self._form()
+            t = flat.get("t", "")
+            p = auth.pending_signup(t)
+            back = f"/signup/verify?t={quote(t)}"
+            smtp = self._signup_smtp()
+            try:
+                if smtp is None:
+                    raise AuthError("We cannot send email just now. Please "
+                                    "try again later.")
+                email, code = auth.resend_signup_code(t)
+            except AuthError as exc:
+                if p is None:
+                    return self._redirect("/signup?error=" + quote(str(exc)))
+                return self._redirect(back + "&error=" + quote(str(exc)))
+            try:
+                _send_signup_code(smtp, email, code, p["company"])
+            except Exception:  # noqa: BLE001
+                log.exception("signup: could not resend the code to %s", email)
+                return self._redirect(back + "&error=" + quote(
+                    "We could not send a new code just now. Please try "
+                    "again in a minute."))
+            return self._redirect(back + "&sent=1")
 
         def _post_billing_itn(self):
             """PayFast Instant Transaction Notification handler.
@@ -13592,7 +13833,8 @@ def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,
         log.info("No accounts yet — open the dashboard and create a company "
                  "account at /signup.")
     sessions = SessionManager()
-    httpd = ThreadingHTTPServer(
+    from .webguard import GuardedHTTPServer
+    httpd = GuardedHTTPServer(
         (host, port), make_handler(metrics_db, state_file, auth, sessions,
                                    secure_cookies, metrics_token, devices_db,
                                    defaults, push_log_db, access_cfg,

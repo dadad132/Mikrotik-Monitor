@@ -450,6 +450,155 @@ check("the count is in the subject", subj == "[EM] 2 sites still on their "
 check("each site with its duration", "3 hours" in text
       and "1 day 2 hours" in text)
 
+print("\nGemini instead of Claude")
+import io  # noqa: E402
+import json as _json  # noqa: E402
+import urllib.error  # noqa: E402
+
+GEM_ANSWER = {
+    "candidates": [{
+        "content": {"role": "model", "parts": [
+            {"text": "thinking...", "thought": True},
+            {"text": "VERDICT: isp_outage\nCONFIDENCE: high\nSUMMARY: Vumatel "
+                     "reports a fibre break in Umhlanga since 09:30.\nACTION: "
+                     "Wait for Vumatel."}]},
+        "finishReason": "STOP",
+        "groundingMetadata": {
+            "webSearchQueries": ["Vumatel outage Umhlanga today"],
+            "searchEntryPoint": {"renderedContent": "<div class=chip>Vumatel "
+                                                    "outage Umhlanga</div>"},
+            "groundingChunks": [
+                {"web": {"uri": "https://vertexaisearch.cloud.google.com/r/1",
+                         "title": "vumatel.co.za"}},
+                {"web": {"uri": "https://vertexaisearch.cloud.google.com/r/1",
+                         "title": "vumatel.co.za"}},
+                {"web": {"uri": "https://vertexaisearch.cloud.google.com/r/2",
+                         "title": "iol.co.za"}}]}}]}
+sent_gem = []
+
+
+def fake_post(model, key, body):
+    sent_gem.append((model, key, body))
+    return GEM_ANSWER
+
+
+gset = {"enabled": True, "provider": "gemini", "gemini_api_key": "AIza-test",
+        "gemini_model": "gemini-2.5-flash", "web_search": True,
+        "country": "za"}
+res = am.gemini_analyze(inc_for_ai, gset, now=T0 + 120, post=fake_post)
+model, key, body = sent_gem[0]
+check("it asks the configured Gemini model with Google Search grounding",
+      model == "gemini-2.5-flash" and key == "AIza-test"
+      and body["tools"] == [{"google_search": {}}]
+      and "outage analyst" in body["systemInstruction"]["parts"][0]["text"])
+gprompt = body["contents"][0]["parts"][0]["text"]
+check("the question carries the country (Gemini's search takes no location), "
+      "the ISP, the area and the evidence -- and no names",
+      "country code ZA" in gprompt and "Vumatel" in gprompt
+      and "Umhlanga, Durban" in gprompt and "R1" not in gprompt
+      and "Alpha" not in gprompt)
+check("the answer is read the same way as Claude's, ignoring its thinking",
+      res["verdict"] == "isp_outage" and res["confidence"] == "high"
+      and "fibre break" in res["summary"] and res["action"] == "Wait for Vumatel."
+      and "thinking" not in res["summary"])
+check("sources come from what Google grounded it on, once each",
+      [x["title"] for x in res["sources"]] == ["vumatel.co.za", "iol.co.za"])
+check("the searches and Google's Search suggestions are kept, to be shown "
+      "with the answer as Google's terms require",
+      res["search_queries"] == ["Vumatel outage Umhlanga today"]
+      and "chip" in res["search_html"] and res["searches"] == 1
+      and res["provider"] == "gemini")
+blocked = dict(GEM_ANSWER, candidates=[dict(GEM_ANSWER["candidates"][0],
+                                            finishReason="SAFETY")])
+try:
+    am.gemini_analyze(inc_for_ai, gset, post=lambda *a: blocked)
+    gem_refused = False
+except am.AIError:
+    gem_refused = True
+check("a blocked answer is an error to show, not an empty cause", gem_refused)
+try:
+    am.gemini_analyze(inc_for_ai, dict(gset, gemini_api_key=""),
+                      post=fake_post)
+    nokey = ""
+except am.AIError as exc:
+    nokey = str(exc)
+check("no key: it says where to put one", "Platform admin" in nokey)
+
+import urllib.request as _ur  # noqa: E402
+_orig_urlopen = _ur.urlopen
+
+
+def http_error(code, message):
+    def opener(req, timeout=None):
+        raise urllib.error.HTTPError(
+            req.full_url, code, "err", {},
+            io.BytesIO(_json.dumps({"error": {"code": code,
+                                              "message": message}}).encode()))
+    return opener
+
+
+try:
+    _ur.urlopen = http_error(400, "API key not valid. Please pass a valid "
+                                  "API key.")
+    try:
+        am.gemini_analyze(inc_for_ai, gset)
+        bad = ""
+    except am.AIError as exc:
+        bad = str(exc)
+    check("a rejected Gemini key is reported in plain words", "rejected" in bad)
+    _ur.urlopen = http_error(429, "Resource has been exhausted")
+    try:
+        am.gemini_analyze(inc_for_ai, gset)
+        quota = ""
+    except am.AIError as exc:
+        quota = str(exc)
+    check("...and so is a used-up quota", "quota" in quota)
+    seen_req = []
+
+    class _Resp:
+        def __init__(self, data):
+            self.data = data
+
+        def read(self):
+            return self.data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def capture(req, timeout=None):
+        seen_req.append(req)
+        return _Resp(_json.dumps(GEM_ANSWER).encode())
+
+    _ur.urlopen = capture
+    am.gemini_analyze(inc_for_ai, gset)
+    check("the key travels in a header, never in the URL (so it is in no "
+          "proxy's log)", "key=" not in seen_req[0].full_url
+          and seen_req[0].get_header("X-goog-api-key") == "AIza-test"
+          and seen_req[0].full_url.endswith(
+              "/models/gemini-2.5-flash:generateContent"))
+    check("testing a Gemini key makes one small call and says it works",
+          am.test_ai(gset) == "")
+finally:
+    _ur.urlopen = _orig_urlopen
+
+check("Gemini is the default; an older setup with only a Claude key stays "
+      "on Claude", am.analyze.__name__ == "analyze")
+_a = AuthStore(os.path.join(tmp, "prov.db"))
+check("a fresh server defaults to Gemini", _a.get_ai()["provider"] == "gemini")
+_a.set_setting("ai", {"enabled": True, "api_key": "sk-ant-old"})
+check("...a server saved with only a Claude key keeps Claude",
+      _a.get_ai()["provider"] == "claude")
+_a.close()
+body = am.cause_email(dict(mon.store.open_for("R1"),
+                           search_queries=["Vumatel outage Umhlanga today"]),
+                      "[EM]", 2)[1]
+check("the cause email lists the Google searches as links",
+      "Searched Google for" in body
+      and "google.com/search?q=Vumatel+outage+Umhlanga+today" in body)
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}: {', '.join(FAILS)}")

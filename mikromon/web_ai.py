@@ -10,6 +10,7 @@ import time
 from urllib.parse import quote
 
 from .aimonitor import (MAX_RUNS, VERDICTS, backup_bytes_used, evidence_lines,
+                        provider_name, search_link,
                         for_how_long, human_bytes)
 from .web_shared import esc
 
@@ -24,6 +25,27 @@ def _src_links(sources, limit=3) -> str:
         f'</a>' for s in (sources or [])[:limit])
 
 
+def _search_suggestions(inc: dict) -> str:
+    """Google's Search suggestions for a Gemini answer grounded in Google
+    Search -- which Google's terms require to be shown with it. Rendered
+    exactly as Google sent it, inside a sandboxed frame so its own styles
+    cannot touch this page; failing that, the searches as plain links."""
+    html = inc.get("search_html") or ""
+    if html:
+        return (f'<iframe title="Google Search suggestions" '
+                f'sandbox="allow-popups allow-popups-to-escape-sandbox" '
+                f'srcdoc="{esc(html)}" style="width:100%;height:76px;border:0;'
+                f'margin-top:6px;background:transparent"></iframe>')
+    queries = list(inc.get("search_queries") or [])[:5]
+    if not queries:
+        return ""
+    return ('<div style="font-size:12.5px;margin-top:4px">Searched Google '
+            'for: ' + " · ".join(
+                f'<a href="{esc(search_link(q))}" target="_blank" '
+                f'rel="noopener noreferrer">{esc(q)}</a>' for q in queries)
+            + '</div>')
+
+
 def _ai_status(inc: dict, ai_on: bool, now: float) -> str:
     st = inc.get("ai_state") or ""
     if st in _PENDING:
@@ -31,7 +53,9 @@ def _ai_status(inc: dict, ai_on: bool, now: float) -> str:
     if st == "done":
         ago = for_how_long(now - (inc.get("ai_checked") or now))
         n = int(inc.get("ai_searches") or 0)
-        return (f"Checked online {ago} ago"
+        who = (f" with {provider_name(inc['ai_provider'])}"
+               if inc.get("ai_provider") else "")
+        return (f"Checked online{who} {ago} ago"
                 + (f" ({n} search{'' if n == 1 else 'es'} so far)" if n else "")
                 + ("; looks again every two hours while it lasts."
                    if not inc.get("ended") and int(inc.get("ai_runs") or 0)
@@ -166,6 +190,7 @@ def ai_box(inc: dict | None, history: list | None, state, *, csrf: str = "",
         + '</div>'
         + (f'<div style="font-size:12.5px">Sources: {_src_links(sources, 5)}'
            f'</div>' if sources else "")
+        + _search_suggestions(inc)
         + (f'<details style="margin-top:6px"><summary class="muted" '
            f'style="cursor:pointer;font-size:12.5px">What the router showed'
            f'</summary><ul class="ai-ev">'
@@ -182,12 +207,15 @@ def ai_box(inc: dict | None, history: list | None, state, *, csrf: str = "",
 
 def ai_settings_box(settings: dict, usage: dict, csrf: str,
                     sdk_ok: bool = True, msg: str = "") -> str:
-    """Platform admin -> AI monitor. The key is never shown back: a blank
+    """Platform admin -> AI monitor. Keys are never shown back: a blank
     field keeps the one already saved."""
-    key = (settings.get("api_key") or "").strip()
-    key_hint = (f"saved …{esc(key[-4:])} (blank keeps it)" if key
+    def hint(key):
+        key = (key or "").strip()
+        return (f"saved …{esc(key[-4:])} (blank keeps it)" if key
                 else "not set yet")
+
     on = bool(settings.get("enabled"))
+    prov = settings.get("provider") or "gemini"
     last_err = ""
     if usage.get("last_error"):
         when = time.strftime("%d %b %H:%M",
@@ -195,23 +223,33 @@ def ai_settings_box(settings: dict, usage: dict, csrf: str,
         last_err = (f'<p style="color:var(--danger);font-size:12.5px;'
                     f'margin:6px 0 0">Last failure ({when}): '
                     f'{esc(usage["last_error"])}</p>')
-    sdk_note = ("" if sdk_ok else
+    sdk_note = ("" if sdk_ok or prov != "claude" else
                 '<p style="color:var(--danger);font-size:12.5px">The '
                 '<code>anthropic</code> package is not installed on this '
                 'server yet: run <code>sudo bash deploy/install.sh</code>.</p>')
+
+    def opt(val, label):
+        return (f'<option value="{val}"{" selected" if prov == val else ""}>'
+                f'{label}</option>')
+
     return (
         f'<div class="box" id="ai"><h2>AI monitor</h2>'
         f'<p class="muted" style="margin:0 0 10px">When a site loses its '
         f'main line, the monitor works out the likely cause from what the '
         f'router shows and from the rest of the fleet straight away. With '
-        f'this switched on it also asks Claude to search online for '
-        f'outages, maintenance and load-shedding reported for that ISP in '
-        f'the site\'s area, and emails what it found with its sources. Only '
-        f'the ISP\'s name, the site\'s area, the time and what the router '
-        f'showed are sent, never a company\'s or a router\'s name. Each '
-        f'check is one request to Claude Opus 5.5 with up to the number of '
-        f'searches below (web search costs $10 per 1,000 searches, plus '
-        f'the tokens). Sites that drop together share one check.</p>'
+        f'this switched on it also asks an AI to search online for outages, '
+        f'maintenance and load-shedding reported for that ISP in the site\'s '
+        f'area, and emails what it found with its sources. Only the ISP\'s '
+        f'name, the site\'s area, the time and what the router showed are '
+        f'sent, never a company\'s or a router\'s name. Sites that drop '
+        f'together share one check.</p>'
+        f'<p class="muted" style="margin:0 0 10px;font-size:12.5px">'
+        f'<b>Gemini</b> (Google, recommended for cost): Gemini 2.5 Flash '
+        f'comes with a free daily allowance of Google searches before any '
+        f'per-search charge, and its tokens cost cents &mdash; current '
+        f'figures at ai.google.dev/pricing. Get a key at aistudio.google.com. '
+        f'<b>Claude</b> (Anthropic): Claude Opus 5.5, $10 per 1,000 '
+        f'searches plus tokens.</p>'
         f'{msg}{sdk_note}'
         f'<form method="POST" action="/superadmin/ai">'
         f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
@@ -221,9 +259,19 @@ def ai_settings_box(settings: dict, usage: dict, csrf: str,
         f'</label>'
         f'<div style="display:grid;grid-template-columns:repeat(auto-fit,'
         f'minmax(200px,1fr));gap:10px">'
-        f'<label>Anthropic API key<br><input name="api_key" type="password" '
-        f'autocomplete="off" placeholder="{key_hint}" style="width:100%">'
-        f'</label>'
+        f'<label>AI to use<br><select name="provider" style="width:100%">'
+        f'{opt("gemini", "Gemini (Google)")}{opt("claude", "Claude (Anthropic)")}'
+        f'</select></label>'
+        f'<label>Gemini API key<br><input name="gemini_api_key" '
+        f'type="password" autocomplete="off" '
+        f'placeholder="{hint(settings.get("gemini_api_key"))}" '
+        f'style="width:100%"></label>'
+        f'<label>Gemini model<br><input name="gemini_model" maxlength="60" '
+        f'value="{esc(settings.get("gemini_model") or "gemini-2.5-flash")}" '
+        f'style="width:100%"></label>'
+        f'<label>Claude API key<br><input name="api_key" type="password" '
+        f'autocomplete="off" placeholder="{hint(settings.get("api_key"))}" '
+        f'style="width:100%"></label>'
         f'<label>Searches per check<br><input name="max_searches" '
         f'type="number" min="1" max="8" value="{int(settings.get("max_searches") or 3)}" '
         f'style="width:100%"></label>'
@@ -240,7 +288,7 @@ def ai_settings_box(settings: dict, usage: dict, csrf: str,
         f'<label class="chk" style="display:flex;margin:10px 0 0">'
         f'<input type="checkbox" name="web_search" value="1"'
         f'{" checked" if settings.get("web_search", True) else ""}> '
-        f'Search the web (untick to have Claude reason from the router\'s '
+        f'Search the web (untick to have the AI reason from the router\'s '
         f'evidence only)</label>'
         f'<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">'
         f'<button class="btn" type="submit">Save AI settings</button>'

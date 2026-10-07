@@ -84,9 +84,15 @@ def _render_login(error: str = "", has_regions: bool = False) -> str:
             f'New here? <a href="/signup">Create a company account</a></p>')
 
 
-def _render_signup(error: str = "", values=None, has_regions: bool = False) -> str:
+def _render_signup(error: str = "", values=None, has_regions: bool = False,
+                   confirm_email: bool = True) -> str:
     v = values or {}
     msg = (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
+    # Every account but the very first confirms its address with a code.
+    confirm_note = (
+        '<p style="color:#64748b;font-size:12px;margin:-8px 0 4px">'
+        'We will email a 6-digit code to this address to confirm it is '
+        'yours.</p>' if confirm_email else "")
     return _auth_page("Create account",
             f'{_region_banner(has_regions, "signup")}'
             f'<h2 style="margin-top:0">Create your company account</h2>'
@@ -97,6 +103,7 @@ def _render_signup(error: str = "", values=None, has_regions: bool = False) -> s
             f'value="{esc(v.get("company", ""))}" style="width:100%"></p>'
             f'<p><input name="email" type="email" placeholder="Your email" '
             f'value="{esc(v.get("email", ""))}" style="width:100%"></p>'
+            f'{confirm_note}'
             f'<p><input name="phone" type="tel" placeholder="Mobile number (e.g. +27 82 555 1234)" '
             f'value="{esc(v.get("phone", ""))}" style="width:100%"></p>'
             f'<p style="color:#64748b;font-size:12px;margin:-8px 0 4px">'
@@ -114,9 +121,41 @@ def _render_signup(error: str = "", values=None, has_regions: bool = False) -> s
             f'value="{esc(v.get("alert_emails", ""))}" style="width:100%"></p>'
             f'{terms_checkbox()}'
             f'<button class="btn" type="submit" style="width:100%">'
-            f'Create account</button></form>'
+            f'{"Continue" if confirm_email else "Create account"}</button></form>'
             f'<p class="muted" style="margin:14px 0 0;text-align:center">'
             f'Already have an account? <a href="/login">Sign in</a></p>')
+
+
+def _render_signup_verify(token: str, email: str, company: str,
+                          error: str = "", notice: str = "") -> str:
+    """Step two of signing up: the code from the email."""
+    from .auth import OTP_TTL
+    msg = (f'<p style="color:#dc2626">{esc(error)}</p>' if error else
+           f'<p style="color:#16a34a">{esc(notice)}</p>' if notice else "")
+    hidden = f'<input type="hidden" name="t" value="{esc(token)}">'
+    return _auth_page("Confirm your email",
+            f'<h2 style="margin-top:0">Check your email</h2>'
+            f'<p class="muted" style="margin-top:0">We sent a 6-digit code to '
+            f'<b style="color:var(--text);word-break:break-all">{esc(email)}</b>. '
+            f'Type it below to finish creating <b style="color:var(--text)">'
+            f'{esc(company)}</b>.</p>{msg}'
+            f'<form method="POST" action="/signup/verify">{hidden}'
+            f'<p><input name="code" inputmode="numeric" '
+            f'autocomplete="one-time-code" maxlength="7" required autofocus '
+            f'pattern="[0-9 ]{{6,7}}" placeholder="000000" aria-label="Code" '
+            f'style="width:100%;font-size:24px;letter-spacing:8px;'
+            f'text-align:center;font-family:Consolas,monospace"></p>'
+            f'<button class="btn" type="submit" style="width:100%">'
+            f'Confirm and create account</button></form>'
+            f'<p class="muted" style="font-size:12px;margin:12px 0 0">'
+            f'The code works for {OTP_TTL // 60} minutes. Not there after a '
+            f'minute? Check your spam or junk folder.</p>'
+            f'<form method="POST" action="/signup/resend" style="display:flex;'
+            f'justify-content:space-between;align-items:center;gap:10px;'
+            f'flex-wrap:wrap;margin:14px 0 0">{hidden}'
+            f'<button class="btn ghost" type="submit">Send a new code</button>'
+            f'<a href="/signup" style="font-size:13px">Wrong address? '
+            f'Start again</a></form>')
 
 
 def _plan_upgrade_box(csrf: str, bill, device_count: int = 0,
