@@ -274,6 +274,9 @@ def _build_wg_diagnostics_lines(devices_db) -> list:
     # eye.
     known_devices = set()
     try:
+        # Imported here like everywhere else in this file. It was not, so
+        # the NameError below was swallowed and every peer read as orphaned.
+        from .devices_store import DevicesStore
         _ds = DevicesStore(devices_db)
         try:
             known_devices = {str(n) for n in _ds.names()}
@@ -3561,23 +3564,54 @@ def _send_signup_code(smtp_cfg, to: str, code: str, company: str) -> None:
     _smtp_send(smtp_cfg, msg)
 
 
+def _upgrade_email(org_name, plan, amount, currency, days, link,
+                   ref) -> tuple:
+    """(subject, body) for the invoice a mid-month upgrade raises: the
+    difference between the packets for the days left, and nothing else."""
+    from .billing import money
+
+    total = money(amount, currency)
+    pay = (f"Pay now: {link}" if link else
+           "To pay, sign in to your account and open Billing.")
+    text = (
+        f"Hello,\n\n"
+        f"You asked to move {org_name} up to {plan['label']} now.\n\n"
+        f"  Router monitoring, up to {plan['devices']} devices, for the "
+        f"{days} day{'' if days == 1 else 's'} left of this month\n"
+        f"  {total}: the difference between your packets for those days\n"
+        f"  Payable within 7 days\n\n"
+        f"{pay}\n\n"
+        f"The bigger packet arrives the moment this is paid. Your renewal "
+        f"date does not change; from then on each month's invoice is the "
+        f"new packet's price.\n\n"
+        f"Paying by bank transfer instead? Quote {ref} so the payment can "
+        f"be matched to your account.\n\n"
+        f"Thank you,\nEasyMikroTik\n")
+    return (f"EasyMikroTik invoice \u2014 {total}, upgrade to "
+            f"{plan['label']}", text)
+
+
 def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
-                   period_end, due_days, link) -> None:
+                   period_end, due_days, link, kind="renewal",
+                   days=0) -> list:
     """The renewal invoice, as an email somebody can act on.
 
     Sent to the owner. The pay link is the point of the message, so it is
     the first thing after the amount rather than a footnote -- an invoice
     that has to be hunted through for a way to pay gets paid by bank
     transfer, which is the path that needs a human here.
+
+    kind="upgrade" sends the invoice a mid-month upgrade raises instead
+    (`days` left in the month). Returns who it went to; [] if nobody.
     """
     from .billing import payment_reference
     from .notify.org_email import _smtp_send
     from email.message import EmailMessage
 
     if not (smtp_cfg and getattr(smtp_cfg, "host", "")):
-        log.warning("renewal: org %s invoiced but no mail server is "
-                    "configured, so nothing was sent", org_id)
-        return
+        log.warning("%s: org %s invoiced but no mail server is "
+                    "configured, so nothing was sent", kind, org_id)
+        return []
     to = []
     for u in (auth.list_users(org_id) if auth else []) or []:
         if u.get("role") == "owner" and u.get("email"):
@@ -3585,8 +3619,8 @@ def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
     to += [e for e in ((auth.org(org_id) or {}).get("alert_emails") or [])
            if e not in to] if auth else []
     if not to:
-        log.warning("renewal: org %s has nobody to email", org_id)
-        return
+        log.warning("%s: org %s has nobody to email", kind, org_id)
+        return []
 
     org = (auth.org(org_id) if auth else None) or {}
     name = org.get("name") or f"Company {org_id}"
@@ -3596,8 +3630,12 @@ def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
                     "the public address in Platform admin, or every renewal "
                     "needs recording by hand", org_id)
 
-    subject, text = _renewal_email(name, plan, amount, currency, period_end,
-                                   due_days, link, ref)
+    if kind == "upgrade":
+        subject, text = _upgrade_email(name, plan, amount, currency, days,
+                                       link, ref)
+    else:
+        subject, text = _renewal_email(name, plan, amount, currency,
+                                       period_end, due_days, link, ref)
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -3606,9 +3644,12 @@ def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
     msg.set_content(text)
     try:
         _smtp_send(smtp_cfg, msg)
-        log.info("renewal: invoice for org %s emailed to %s", org_id, to)
+        log.info("%s: invoice for org %s emailed to %s", kind, org_id, to)
+        return to
     except Exception:  # noqa: BLE001 - the invoice exists either way
-        log.exception("renewal: could not email the invoice for org %s", org_id)
+        log.exception("%s: could not email the invoice for org %s", kind,
+                      org_id)
+        return []
 
 
 def _server_selfcheck(devices_db, metrics_db, access_cfg, smtp_cfg,
@@ -5469,6 +5510,9 @@ def _space_accounting_html(acc: dict) -> str:
                         + (" — disabled" if p.get("disabled") else "")
                         for p in pk)
             + ')</span></li>')
+    if acc.get("bad_blocks"):
+        lines.append(f'<li>Lost to bad blocks (worn-out flash): <b>about '
+                     f'{_human(acc["bad_blocks"])}</b></li>')
     elsewhere = int(acc.get("elsewhere") or 0)
     lines.append(f'<li>Not in any file: <b>{_human(elsewhere)}</b></li>')
     # Worth explaining only when it is a real share of the flash.
@@ -8327,13 +8371,21 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # could charge a customer and never hear that they paid,
             # which is worse than not offering the button at all.
             yoco_on = self._yoco_live()
+            orders = billing.orders_for_org(user["org_id"]) if billing else []
+            # An unpaid upgrade invoice is paid from here as well as from its
+            # email -- whoever pressed Change now is looking at this page.
+            if yoco_on:
+                from . import billing_runner
+                base = _public_base(auth) or self._request_base()
+                for o in orders:
+                    if o.get("kind") == "upgrade" and o.get("status") != "paid":
+                        o["pay_link"] = billing_runner.pay_link(
+                            auth, int(o["id"]), base)
             return self._send(200, _render_billing(
                 user, bill, pf_enabled, self._session()["csrf"],
                 msg=q.get("ok", [""])[0], error=q.get("error", [""])[0],
                 contact=contact, device_count=dev_count,
-                yoco_on=yoco_on,
-                orders=(billing.orders_for_org(user["org_id"])
-                        if billing else [])),
+                yoco_on=yoco_on, orders=orders),
                 "text/html; charset=utf-8")
 
         def _serve_superadmin(self, url, user):
@@ -8799,13 +8851,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     f"Booked: you move to {plan['label']} on {on}. Nothing "
                     f"is owed now, and nothing changes before then."))
 
-            # Upgrade now: invoice the difference for the days remaining.
-            prov = _invoicing_provider(auth)
-            if prov is None:
-                billing.schedule_plan_change(org_id, plan["name"], period_end)
-                return self._redirect("/billing?ok=" + quote(
-                    "Invoicing is not connected, so the change is booked for "
-                    "your renewal date instead. Nothing is owed now."))
+            # Upgrade now: an invoice for the difference over the days left,
+            # raised here like every other invoice since invoicing moved off
+            # Zoho -- this still called the provider that went with it, so
+            # the button failed with nothing but a 502. Paid by card from its
+            # link, or by transfer; paying it moves the packet
+            # (apply_paid_order sees kind="upgrade") and the renewal date
+            # stays where it is.
             amount = float(quote_["due_now"])
             cur = str(quote_.get("currency") or BILLING_CURRENCY)
             if amount <= 0:
@@ -8813,41 +8865,54 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._redirect("/billing?ok=" + quote(
                     f"Moved to {plan['label']}. There was nothing left in "
                     f"this month to charge for."))
+            from . import billing_runner
+            from .billing import payment_reference
+            from .notify.org_email import effective_smtp
+            days = int(round(quote_["days_left"]))
+            # Pressed twice, the second press finds the first invoice rather
+            # than raising another one to be paid twice.
+            order_id = self._open_upgrade_order(org_id, plan["name"])
+            if order_id is None:
+                order_id = billing.create_order(
+                    org_id, plan["name"], int(round(amount * 100)), months=1,
+                    currency=cur, provider="yoco", kind="upgrade",
+                    due=time.time() + 7 * 86400)
+            link = billing_runner.pay_link(
+                auth, order_id, _public_base(auth) or self._request_base())
             try:
-                org = (auth.org(org_id) if auth else None) or {}
-                to = ""
-                for u in (auth.list_users(org_id) if auth else []) or []:
-                    if u.get("role") == "owner" and u.get("email"):
-                        to = u["email"]
-                        break
-                from .billing import payment_reference
-                client_id = prov.ensure_client(
-                    org_id, org.get("name") or f"Company {org_id}", email=to)
-                days = int(round(quote_["days_left"]))
-                inv = prov.create_invoice(
-                    client_id,
-                    description=(f"Upgrade to {plan['label']} — {days} day"
-                                 f"{'' if days == 1 else 's'} remaining of "
-                                 f"this month, charged at the difference "
-                                 f"between packets."),
-                    amount=amount, due_days=7,
-                    reference=payment_reference(org_id, org.get("name", "")),
-                    currency=cur)
-                prov.email_invoice(inv["id"])
-            except Exception as exc:  # noqa: BLE001
-                log.exception("upgrade invoice failed for org %s", org_id)
-                return self._redirect("/billing?error=" + quote(
-                    f"Could not raise the upgrade invoice: {exc}"))
-            order_id = billing.create_order(
-                org_id, plan["name"], int(round(amount * 100)), months=1,
-                currency=cur, provider=prov.name, kind="upgrade",
-                due=period_end)
-            billing.set_order_external(order_id, inv["id"])
+                sent = _email_renewal(
+                    auth, effective_smtp(auth, smtp_cfg), org_id, order_id,
+                    plan, amount, cur, period_end, 7, link, kind="upgrade",
+                    days=days)
+            except Exception:  # noqa: BLE001 - the invoice exists either way
+                log.exception("upgrade: could not email org %s", org_id)
+                sent = []
+            org_name = auth.org_name(org_id) if auth else ""
             return self._redirect("/billing?ok=" + quote(
-                f"Invoice {inv.get('number') or inv['id']} for "
-                f"{money(amount, cur)} is on its way. You move to "
-                f"{plan['label']} as soon as it is paid — your renewal date "
-                f"does not change."))
+                f"Invoice for {money(amount, cur)} raised"
+                + (f" and emailed to {', '.join(sent)}" if sent else "")
+                + f". Pay it below{' or from the email' if sent else ''}: "
+                f"you move to {plan['label']} the moment it is paid, and "
+                f"your renewal date does not change. By bank transfer, quote "
+                f"{payment_reference(org_id, org_name)}."))
+
+        def _open_upgrade_order(self, org_id, plan_name):
+            """An unpaid upgrade invoice for this packet raised today, if
+            there is one."""
+            for o in billing.orders_for_org(org_id, limit=10):
+                if (o.get("kind") == "upgrade" and o.get("status") != "paid"
+                        and o.get("plan") == plan_name
+                        and time.time() - float(o.get("created") or 0)
+                        < 86400):
+                    return int(o["id"])
+            return None
+
+        def _request_base(self) -> str:
+            """This request's own scheme and host, for a link when no
+            public address is set in Platform admin."""
+            host = self.headers.get("Host", "")
+            return (("https" if self._is_https() else "http") + "://" + host
+                    if host else "")
 
         def _post_invoice_template(self, user):
             """Replace the invoice design, or go back to the built-in one.

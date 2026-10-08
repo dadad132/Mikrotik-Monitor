@@ -691,6 +691,26 @@ def _order_usd(order: dict, plan: dict | None) -> str:
     return money(amount, cur)
 
 
+def _waiting_box(orders) -> str:
+    """An invoice raised on this page and not yet paid, with its Pay button,
+    at the top -- where whoever pressed Change now is looking, rather than
+    under the whole packet list."""
+    for o in orders:
+        if o.get("status") == "paid" or not o.get("pay_link"):
+            continue
+        plan = plan_by_name(o.get("plan", ""))
+        what = (f'Upgrade to {plan["devices"]} devices' if plan
+                else "Invoice")
+        return (f'<div class="box" style="border-left:4px solid #d97706;'
+                f'display:flex;align-items:center;justify-content:space-between;'
+                f'gap:12px;flex-wrap:wrap"><div><b>{esc(what)}</b> &middot; '
+                f'{_order_usd(o, plan)} waiting for payment'
+                f'<div class="muted" style="font-size:13px">The bigger '
+                f'packet arrives the moment it is paid.</div></div>'
+                f'<a class="btn" href="{esc(o["pay_link"])}">Pay now</a></div>')
+    return ""
+
+
 def _orders_box(orders) -> str:
     """What this company has bought, newest first, each with its invoice.
 
@@ -707,17 +727,23 @@ def _orders_box(orders) -> str:
         plan = plan_by_name(o.get("plan", ""))
         what = (f'{plan["devices"]} devices' if plan else o.get("plan", "?"))
         months = int(o.get("months") or 1)
+        upgrade = o.get("kind") == "upgrade"
+        span = ("upgrade for the rest of the month" if upgrade else
+                f'{months} month{"" if months == 1 else "s"}')
         amount = _order_usd(o, plan)
         if o.get("status") == "paid":
             state = '<span class="badge ok">Paid</span>'
             act = (f'<a class="btn ghost" style="padding:4px 12px" '
                    f'href="/billing/invoice?id={int(o["id"])}">Invoice</a>')
+        elif o.get("pay_link"):
+            state = '<span style="color:#d97706">Waiting for payment</span>'
+            act = (f'<a class="btn" style="padding:4px 12px" '
+                   f'href="{esc(o["pay_link"])}">Pay</a>')
         else:
             state = '<span class="muted">Not completed</span>'
             act = ""
         rows += (f'<tr><td>{esc(when)}</td>'
-                 f'<td>{esc(what)} &middot; {months} month'
-                 f'{"" if months == 1 else "s"}</td>'
+                 f'<td>{esc(what)} &middot; {esc(span)}</td>'
                  f'<td style="white-space:nowrap">{amount}</td>'
                  f'<td>{state}</td><td>{act}</td></tr>')
     return (f'<div class="box"><h2>Payments</h2>'
@@ -770,7 +796,11 @@ def _pay_page(order, error: str, *, paid: bool = False,
             f'<div style="font-size:34px;font-weight:700;letter-spacing:-.02em;'
             f'margin-bottom:4px">{esc(money(amount, cur))}</div>'
             f'<p class="muted" style="margin:0 0 20px;font-size:13px">'
-            f'Router monitoring, billed monthly.</p>'
+            + ("Upgrade for the rest of this month: the difference between "
+               "your packets. Your renewal date does not change."
+               if order.get("kind") == "upgrade" else
+               "Router monitoring, billed monthly.")
+            + '</p>'
             f'<form method="POST" action="/pay">'
             f'<input type="hidden" name="t" value="{esc(token)}">'
             f'{terms_checkbox("Payments are not refundable.")}'
@@ -845,6 +875,13 @@ def _invoice_fields(org: dict, order: dict, contact: dict | None,
     # A first payment is pro rata to the first 28th, and says so: an invoice
     # that reads like a full month for thirteen days' money is a dispute.
     covers = ""
+    if str(order.get("kind") or "") == "upgrade":
+        from .billing import first_payment_quote
+        _to = first_payment_quote(0, float(issued))["period_end"]
+        covers = (f' Upgrade for the rest of the month, to '
+                  f'{time.strftime("%d %B %Y", time.localtime(_to))}: the '
+                  f'difference between the two packets for the days that '
+                  f'were left. The renewal date does not change.')
     if str(order.get("kind") or "") == "first":
         from .billing import BILLING_DAY, first_payment_quote
         _q = first_payment_quote(0, float(issued))   # the checkout's own sum
@@ -1185,20 +1222,23 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
             if q and q["amount"] < q["full"]:
                 to = time.strftime("%d %b", time.localtime(q["period_end"]))
                 label = f'Pay ${q["amount"]:,.2f} to {to}'
-                note = (f'<div class="muted" style="font-size:11px;'
-                        f'margin-top:4px">{q["days"]} day'
-                        f'{"" if q["days"] == 1 else "s"} to the '
-                        f'{BILLING_DAY}th, then ${p["price_usd"]:,.2f} a '
-                        f'month</div>')
+                # Not `note`: that is the banner saying what just happened,
+                # and reusing the name here swallowed every message on this
+                # page whenever card payment was switched on.
+                price_note = (f'<div class="muted" style="font-size:11px;'
+                              f'margin-top:4px">{q["days"]} day'
+                              f'{"" if q["days"] == 1 else "s"} to the '
+                              f'{BILLING_DAY}th, then ${p["price_usd"]:,.2f} '
+                              f'a month</div>')
             else:
                 label = f'Pay ${p["price_usd"]:,.2f} for the month'
-                note = ""
+                price_note = ""
             # One form around the whole ladder (below), so a single
             # Terms & Conditions tick covers whichever button is pressed;
             # the button itself says which packet.
             btn = (f'<button class="btn" type="submit" name="plan" '
                    f'value="{esc(p["name"])}" style="padding:6px 14px">'
-                   f'{label}</button>{note}'
+                   f'{label}</button>{price_note}'
                    if card_rate_ok else
                    f'<div class="muted" style="font-size:11px;margin-top:4px">'
                    f'Card payment is unavailable right now. Please pay by '
@@ -1260,7 +1300,7 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
     plans_html += _quote_request_box(csrf, device_count)
 
     inner = (f'<div class="wrap"><h1>Billing</h1>{note}'
-             f'{status_box}{plans_html}</div>')
+             f'{_waiting_box(orders or [])}{status_box}{plans_html}</div>')
     return _page("Billing", _header(user, "/billing") + inner)
 
 

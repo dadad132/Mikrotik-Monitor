@@ -519,7 +519,8 @@ api_gap = FakeApi({
                 {".id": "*2", "name": "before-wan-20261008-090000.backup",
                  "size": str(180 * 1024)}],
     ("system", "resource"): [{"total-hdd-space": str(128 * MB),
-                              "free-hdd-space": "0", "bad-blocks": "4%"}],
+                              "free-hdd-space": "0", "bad-blocks": "4%",
+                              "version": "7.16.2 (stable)"}],
     ("system", "package"): [{"name": "routeros", "size": str(13 * MB)},
                             {"name": "wifi-qcom", "size": str(7 * MB)},
                             {"name": "container", "size": str(1 * MB),
@@ -534,8 +535,10 @@ acc = Pusher(cfg, api_gap, dry_run=True).space_report()["accounting"]
 check("the scan adds up where the space goes: used, in files, in packages, "
       "and what is left over",
       acc["used"] == 128 * MB and acc["in_files"] == 350 * 1024
-      and acc["in_packages"] == 21 * MB
-      and acc["elsewhere"] == 128 * MB - 350 * 1024 - 21 * MB)
+      and acc["in_packages"] == 20 * MB
+      and acc["bad_blocks"] == int(128 * MB * 0.04)
+      and acc["elsewhere"] == (128 * MB - 350 * 1024 - 20 * MB
+                               - int(128 * MB * 0.04)))
 found = " ".join(acc["findings"])
 check("...and checks the usual reasons for space outside the files: worn "
       "flash, revocation lists kept on it, a proxy cache, partitions",
@@ -548,16 +551,127 @@ page_gap = _render_device_backups("R1", _u, {}, "tok", backups=[],
                                   .space_report())
 check("the page shows it, says plainly that no file explains it, and lists "
       "what it found", "Where the space goes" in page_gap
-      and "Not in any file: <b>106.7 MB</b>" in page_gap
+      and "Not in any file: <b>102.5 MB</b>" in page_gap
+      and "Lost to bad blocks (worn-out flash): <b>about 5.1 MB</b>"
+      in page_gap
       and "no file here explains it" in page_gap
       and "Found on this router" in page_gap
-      and "container 1.0 MB — disabled" in page_gap)
+      and "container" not in page_gap.split("Where the space goes")[1]
+                                     .split("Found on this router")[0])
 calm = FakeApi({("file",): [], ("system", "resource"): [
     {"total-hdd-space": str(128 * MB), "free-hdd-space": str(100 * MB)}],
     ("system", "package"): [{"name": "routeros", "size": str(27 * MB)}]})
 page_calm = _render_device_backups(
     "R1", _u, {}, "tok", backups=[], flash=info,
     space=Pusher(cfg, calm, dry_run=True).space_report())
+# A real one: a 16 MB router, 172 KB free, 706.7 KB of files. RouterOS 7
+# listed six packages coming to 31.8 MB -- twice the flash -- because the
+# four it has not installed show as disabled. Only the installed two count.
+MB16 = 16 * MB
+api16 = FakeApi({
+    ("file",): [{".id": "*1", "name": "before-wan-20261008-090000.backup",
+                 "size": str(int(706.7 * 1024))}],
+    ("system", "resource"): [{"total-hdd-space": str(MB16),
+                              "free-hdd-space": str(172 * 1024),
+                              "version": "7.19.4 (stable)"}],
+    ("system", "package"): [
+        {"name": "routeros", "size": str(int(11.5 * MB))},
+        {"name": "wifi-qcom", "size": str(int(9.5 * MB)), "disabled": "true"},
+        {"name": "rose-storage", "size": str(3 * MB), "disabled": "true"},
+        {"name": "wifi-qcom-ac", "size": str(int(2.6 * MB)),
+         "disabled": "true"},
+        {"name": "wireless", "size": str(int(1.9 * MB))},
+        {"name": "dude", "size": str(int(1.2 * MB)), "disabled": "true"}]})
+rep16 = Pusher(cfg, api16, dry_run=True).space_report()
+acc16 = rep16["accounting"]
+check("RouterOS 7's packages that are not installed (listed as disabled) "
+      "take no flash: only the installed ones are counted",
+      acc16["in_packages"] == int(11.5 * MB) + int(1.9 * MB)
+      and [p["name"] for p in acc16["packages"]] == ["routeros", "wireless"])
+check("...so a full 16 MB router adds up: RouterOS, files, and a little "
+      "for its settings -- with no false alarm about missing space",
+      0 < acc16["elsewhere"] < 2 * MB)
+page16 = _render_device_backups("R1", _u, {}, "tok", backups=[], flash=info,
+                                space=rep16)
+check("...and says plainly that RouterOS itself takes most of a 16 MB flash",
+      "no file here explains it" not in page16
+      and "take 13.4 MB of this router" in page16
+      and "16.0 MB flash, so little is left" in page16
+      and "wifi-qcom" not in page16)
+api6 = FakeApi({("file",): [], ("system", "resource"): [
+    {"total-hdd-space": str(MB16), "free-hdd-space": str(2 * MB),
+     "version": "6.49.10"}],
+    ("system", "package"): [{"name": "system", "size": str(9 * MB)},
+                            {"name": "ppp", "size": str(MB),
+                             "disabled": "true"}]})
+check("on RouterOS 6, which lists only installed packages, a disabled one "
+      "still counts: it is on the flash",
+      Pusher(cfg, api6, dry_run=True).space_report()["accounting"]
+      ["in_packages"] == 10 * MB)
+# Graphing keeps its graphs on the flash by default, outside the file list.
+# Named only when a real share of the flash is unaccounted for -- nearly every
+# router graphs something, and most of the time it does not matter.
+graphs = {("tool", "graphing", "interface"): [
+              {"interface": "all", "store-on-disk": "yes"}],
+          ("tool", "graphing", "queue"): [
+              {"simple-queue": "q1", "store-on-disk": "yes"},
+              {"simple-queue": "q2", "store-on-disk": "yes"},
+              {"simple-queue": "q3", "store-on-disk": "yes"},
+              {"simple-queue": "q4", "store-on-disk": "no"},
+              {"simple-queue": "q5", "store-on-disk": "yes",
+               "disabled": "true"}]}
+api_g = FakeApi({("file",): [], ("system", "resource"): [
+    {"total-hdd-space": str(128 * MB), "free-hdd-space": "0",
+     "version": "7.19.4 (stable)"}],
+    ("system", "package"): [{"name": "routeros", "size": str(13 * MB)}],
+    **graphs})
+found_g = " ".join(Pusher(cfg, api_g, dry_run=True).space_report()
+                   ["accounting"]["findings"])
+check("with a big share of the flash unaccounted for, graphing kept on the "
+      "flash is named -- counting only rules that store on disk and are on",
+      "Graphing keeps its graphs on the flash for all interfaces, 3 queues"
+      in found_g and "store-on-disk=no" in found_g)
+api_g16 = FakeApi({("file",): [], ("system", "resource"): [
+    {"total-hdd-space": str(16 * MB), "free-hdd-space": str(MB),
+     "version": "7.19.4 (stable)"}],
+    ("system", "package"): [{"name": "routeros", "size": str(13 * MB)}],
+    **graphs})
+check("...and not when the space adds up, where it would only be noise",
+      "Graphing" not in " ".join(Pusher(cfg, api_g16, dry_run=True)
+                                 .space_report()["accounting"]["findings"]))
+# The other real one: a newer 128 MB router, nothing free, 28.9 KB of files,
+# and RouterOS reporting 82.7% bad blocks. The worn-out flash is the space.
+api_bad = FakeApi({
+    ("file",): [{".id": "*1", "name": "test.backup", "size": "29286"},
+                {".id": "*2", "name": "console-dump.txt", "size": "296"}],
+    ("system", "resource"): [{"total-hdd-space": str(128 * MB),
+                              "free-hdd-space": "0", "bad-blocks": "82.7%",
+                              "version": "7.19.4 (stable)"}],
+    ("system", "package"): [
+        {"name": "routeros", "size": str(int(11.5 * MB))},
+        {"name": "wifi-qcom", "size": str(int(9.3 * MB)), "disabled": "true"},
+        {"name": "wifi-mediatek", "size": str(int(5.5 * MB)),
+         "disabled": "true"},
+        {"name": "rose-storage", "size": str(int(2.9 * MB)),
+         "disabled": "true"},
+        {"name": "wireless", "size": str(int(1.8 * MB)), "disabled": "true"}]})
+rep_bad = Pusher(cfg, api_bad, dry_run=True).space_report()
+acc_bad = rep_bad["accounting"]
+check("worn-out flash is counted as its own share: 82.7% of 128 MB is about "
+      "106 MB gone, and with RouterOS and the files the rest adds up",
+      acc_bad["bad_blocks"] == int(128 * MB * 0.827)
+      and acc_bad["in_packages"] == int(11.5 * MB)
+      and acc_bad["elsewhere"] < 12 * MB)
+page_bad = _render_device_backups("R1", _u, {}, "tok", backups=[],
+                                  flash=info, space=rep_bad)
+check("...the page says so, with no puzzle about space nobody can find",
+      "Lost to bad blocks (worn-out flash): <b>about 105.9 MB</b>"
+      in page_bad and "no file here explains it" not in page_bad)
+check("...and says what to do: save the settings without needing flash "
+      "space, then find what wore it out before a replacement goes in",
+      "/export show-sensitive" in page_bad
+      and "write-sect-total" in page_bad
+      and "plan to replace this router" in page_bad)
 check("...while a router whose space is accounted for gets no warning",
       "Where the space goes" in page_calm
       and "no file here explains it" not in page_calm

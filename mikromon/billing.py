@@ -1137,7 +1137,11 @@ class BillingStore:
         date window, so it stays correct if the job misses a day or the
         server's clock moves.
         """
+        # Renewal invoices only. An unpaid upgrade (or any other kind of
+        # order) due near the 28th is not the month's invoice, and counting
+        # it would stop the real one from ever being raised.
         sql = ("SELECT 1 FROM orders WHERE org_id = ? AND status != 'paid' "
+               "AND COALESCE(NULLIF(kind, ''), 'renewal') = 'renewal' "
                "AND due IS NOT NULL AND ABS(due - ?) < 86400")
         args: list = [int(org_id), float(period_end or 0.0)]
         if provider:

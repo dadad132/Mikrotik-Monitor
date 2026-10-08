@@ -481,29 +481,50 @@ class Pusher:
         if total <= 0 or free < 0:
             return {}
         used = max(0, total - free)
+        # RouterOS 7 lists every package made for the router, and the ones
+        # it has not installed show as disabled: they take no flash at all
+        # (on a 16 MB router they came to 31.8 MB, twice the flash). Only
+        # RouterOS 6 lists just what is installed, disabled ones included.
+        v6 = str(res.get("version") or "").startswith("6.")
         packages = []
         try:
             for p in self.api.fetch(("system", "package")):
                 size = _bytes(p.get("size"))
-                if size > 0:
+                disabled = _yes(p.get("disabled"))
+                if size > 0 and (v6 or not disabled):
                     packages.append({"name": str(p.get("name") or "?"),
-                                     "size": size,
-                                     "disabled": _yes(p.get("disabled"))})
+                                     "size": size, "disabled": disabled})
         except Exception:
             pass
         packages.sort(key=lambda p: p["size"], reverse=True)
         in_packages = sum(p["size"] for p in packages)
         findings = []
+        if in_packages >= total * 0.6:
+            findings.append(
+                f"RouterOS and its packages take {_human(in_packages)} of "
+                f"this router's {_human(total)} flash, so little is left for "
+                f"anything else: its settings, files and the dashboard's "
+                f"backups share the rest. Removing files it does not need is "
+                f"the only room to be had.")
         bad = str(res.get("bad-blocks") or "").strip().rstrip("%").strip()
         try:
             bad_pct = float(bad) if bad else 0.0
         except ValueError:
             bad_pct = 0.0
+        # Bad blocks are flash that has worn out: still counted in the
+        # total, never free again. That share is where the space went.
+        bad_bytes = int(total * bad_pct / 100) if bad_pct > 0 else 0
         if bad_pct > 0:
             findings.append(
                 f"{bad_pct:g}% of the flash is bad blocks: worn out and no "
-                f"longer usable. The flash is failing; plan to replace this "
-                f"router.")
+                f"longer usable, so about {_human(bad_bytes)} is gone for "
+                f"good. The flash is failing; plan to replace this router. "
+                f"Save its settings first: /export show-sensitive in a "
+                f"terminal prints them without needing any space on the "
+                f"flash. Flash wears out from constant writing, so before a "
+                f"replacement goes in, check what writes to it: scripts on "
+                f"short timers, logging to disk, graphing "
+                f"(/system resource print shows write-sect-total).")
         try:
             crl = (self.api.fetch(("certificate", "settings")) or [{}])[0]
         except Exception:
@@ -536,11 +557,49 @@ class Pusher:
                 f"The flash is split into {len(parts)} partitions "
                 f"(/partitions); this RouterOS only has its own partition's "
                 f"share of it.")
+        elsewhere = max(0, used - in_files - in_packages - bad_bytes)
+        # Graphing keeps its graphs on the flash unless told otherwise, and
+        # with many interfaces or queues they grow. Nearly every router
+        # graphs something, though, so it is named only when a real share
+        # of the flash is unaccounted for.
+        if elsewhere > max(5 * 1024 * 1024, total // 10):
+            graphed = self._graphing_on_disk()
+            if graphed:
+                findings.append(
+                    "Graphing keeps its graphs on the flash for "
+                    + ", ".join(graphed)
+                    + " (store-on-disk=yes), outside the file list. With many "
+                      "interfaces or queues they can take a lot of space; "
+                      "/tool graphing queue set [find] store-on-disk=no (and "
+                      "the same for interface) keeps them in memory.")
         return {"total": total, "free": free, "used": used,
                 "in_files": in_files, "in_packages": in_packages,
-                "packages": packages[:6],
-                "elsewhere": max(0, used - in_files - in_packages),
-                "findings": findings}
+                "packages": packages[:6], "bad_blocks": bad_bytes,
+                "elsewhere": elsewhere, "findings": findings}
+
+    def _graphing_on_disk(self) -> list:
+        """What /tool graphing stores on the flash: ["all queues", "3
+        interfaces", ...]; [] when nothing, or when it cannot be read."""
+        out = []
+        for menu, key, noun in (("interface", "interface", "interface"),
+                                ("queue", "simple-queue", "queue")):
+            try:
+                rules = self.api.fetch(("tool", "graphing", menu))
+            except Exception:
+                continue
+            rules = [r for r in rules
+                     if not _yes(r.get("disabled"))
+                     and str(r.get("store-on-disk", "yes")).lower()
+                     not in ("no", "false")
+                     and r.get("store-on-disk") is not False]
+            if not rules:
+                continue
+            if any(str(r.get(key) or "").lower() == "all" for r in rules):
+                out.append(f"all {noun}s")
+            else:
+                out.append(f"{len(rules)} {noun}"
+                           + ("s" if len(rules) != 1 else ""))
+        return out
 
     def _external_disks(self) -> set:
         """USB sticks and SD cards (/disk): their files do not use the

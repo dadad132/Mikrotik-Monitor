@@ -16,9 +16,12 @@ would have caught it, and each carrying the command that fixes it.
 """
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import time
+
+log = logging.getLogger(__name__)
 
 # A check answers one question. `ok` False means act; `fix` is the command.
 # `warn` means worth knowing but nothing is broken right now.
