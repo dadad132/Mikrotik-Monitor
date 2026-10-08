@@ -12539,6 +12539,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_yoco_webhook()
             if auth is None:
                 return self._send(404, "not found")
+            # Paying an invoice from its emailed link: public, like the page
+            # it is posted from. Its signed token is the authority, not a
+            # session -- behind the login and CSRF checks below, a customer
+            # was sent to log in and a logged-in one got "bad csrf token",
+            # so no emailed invoice could be paid by card.
+            if path == "/pay":
+                return self._post_pay()
             if path == "/signup":
                 return self._post_signup()
             if path == "/signup/verify":
@@ -12713,8 +12720,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_cancel_at_period_end(flat, user)
             if path == "/billing/quote":
                 return self._post_billing_quote(flat, user)
-            if path == "/pay":
-                return self._post_pay()
             if path == "/billing/checkout":
                 return self._post_billing_checkout(flat, user)
             # Org isolation: an owner may only touch devices their company owns.
