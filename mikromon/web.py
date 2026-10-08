@@ -5453,6 +5453,52 @@ def _flash_line(flash: dict) -> str:
             + '. It never deletes a file it did not make.</p>')
 
 
+def _space_accounting_html(acc: dict) -> str:
+    """"Where the space goes": used, in files, in packages, and what is left
+    over -- the line that matters when the files do not add up."""
+    if not acc:
+        return ""
+    from .push.runner import _human
+    pk = acc.get("packages") or []
+    lines = [f'<li>Files: <b>{_human(acc["in_files"])}</b></li>']
+    if acc.get("in_packages"):
+        lines.append(
+            f'<li>RouterOS and its packages: <b>{_human(acc["in_packages"])}'
+            f'</b> <span class="muted" style="font-size:12px">('
+            + ", ".join(f'{esc(p["name"])} {_human(p["size"])}'
+                        + (" — disabled" if p.get("disabled") else "")
+                        for p in pk)
+            + ')</span></li>')
+    elsewhere = int(acc.get("elsewhere") or 0)
+    lines.append(f'<li>Not in any file: <b>{_human(elsewhere)}</b></li>')
+    # Worth explaining only when it is a real share of the flash.
+    big_gap = elsewhere > max(5 * 1024 * 1024, acc["total"] // 10)
+    why = ""
+    if big_gap:
+        why = ('<p style="font-size:13px;margin:6px 0 0">That space is used '
+               'outside the router\'s file list, so no file here explains it. '
+               + ("" if acc.get("in_packages") else
+                  "RouterOS itself and its packages take a few tens of MB of "
+                  "it. ")
+               + 'The rest is usually its settings, certificate revocation '
+               'lists kept on the flash, or flash lost to bad blocks. Space '
+               'held by a file that was deleted while still in use only comes '
+               'back after a reboot.</p>')
+    found = "".join(f'<li>{esc(f)}</li>' for f in acc.get("findings") or [])
+    return (f'<div style="border:1px solid var(--border);border-radius:8px;'
+            f'padding:10px 14px;margin:0 0 12px">'
+            f'<b>Where the space goes</b> '
+            f'<span class="muted" style="font-size:13px">'
+            f'{_human(acc["used"])} used of {_human(acc["total"])}, '
+            f'{_human(acc["free"])} free</span>'
+            f'<ul style="margin:6px 0 0;padding-left:20px;font-size:13.5px">'
+            f'{"".join(lines)}</ul>{why}'
+            + (f'<p style="font-size:13px;margin:8px 0 2px"><b>Found on this '
+               f'router:</b></p><ul style="margin:0;padding-left:20px;'
+               f'font-size:13px">{found}</ul>' if found else "")
+            + '</div>')
+
+
 def _space_box(name, csrf, space=None, scan_error="") -> str:
     """"Free up space": what is using the router's storage, and deleting
     what the dashboard made itself. It never deletes anything else -- those
@@ -5532,7 +5578,8 @@ def _space_box(name, csrf, space=None, scan_error="") -> str:
            f'[find action={esc(logs[0])}] action=memory</code> keeps them in '
            f'memory instead.</p>' if logs else "")
     # (The free-space line is in the box just above; not repeated here.)
-    return (head + ours + others + tip
+    return (head + _space_accounting_html(space.get("accounting") or {})
+            + ours + others + tip
             + f'<div class="actions" style="margin-top:12px">'
             f'<a class="btn ghost" href="/device?name={q}&tab=backups&scan=1'
             f'#space">Check again</a></div></div>')

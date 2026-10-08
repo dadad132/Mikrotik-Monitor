@@ -511,6 +511,58 @@ page128 = _render_device_backups("R1", _u, {}, "tok", backups=[],
 check("the page shows a folder with how many files it holds",
       "pihole/" in page128 and "(40 files)" in page128)
 
+# The case that started this: 128 MB, nothing free, and the files come to
+# 350 KB. The rest is outside the file list, and the scan has to say so.
+api_gap = FakeApi({
+    ("file",): [{".id": "*1", "name": "before-wan-20261001-090000.backup",
+                 "size": str(170 * 1024)},
+                {".id": "*2", "name": "before-wan-20261008-090000.backup",
+                 "size": str(180 * 1024)}],
+    ("system", "resource"): [{"total-hdd-space": str(128 * MB),
+                              "free-hdd-space": "0", "bad-blocks": "4%"}],
+    ("system", "package"): [{"name": "routeros", "size": str(13 * MB)},
+                            {"name": "wifi-qcom", "size": str(7 * MB)},
+                            {"name": "container", "size": str(1 * MB),
+                             "disabled": "true"}],
+    ("certificate", "settings"): [{"crl-download": "yes",
+                                   "crl-store": "system", "crl-use": "yes"}],
+    ("ip", "proxy"): [{"enabled": "true", "cache-on-disk": "true",
+                       "max-cache-size": "unlimited"}],
+    ("partitions",): [{"name": "part0"}, {"name": "part1"}],
+})
+acc = Pusher(cfg, api_gap, dry_run=True).space_report()["accounting"]
+check("the scan adds up where the space goes: used, in files, in packages, "
+      "and what is left over",
+      acc["used"] == 128 * MB and acc["in_files"] == 350 * 1024
+      and acc["in_packages"] == 21 * MB
+      and acc["elsewhere"] == 128 * MB - 350 * 1024 - 21 * MB)
+found = " ".join(acc["findings"])
+check("...and checks the usual reasons for space outside the files: worn "
+      "flash, revocation lists kept on it, a proxy cache, partitions",
+      "4% of the flash is bad blocks" in found
+      and "crl-store=ram" in found and "cache-on-disk=no" in found
+      and "2 partitions" in found)
+page_gap = _render_device_backups("R1", _u, {}, "tok", backups=[],
+                                  flash=info, space=Pusher(
+                                      cfg, api_gap, dry_run=True)
+                                  .space_report())
+check("the page shows it, says plainly that no file explains it, and lists "
+      "what it found", "Where the space goes" in page_gap
+      and "Not in any file: <b>106.7 MB</b>" in page_gap
+      and "no file here explains it" in page_gap
+      and "Found on this router" in page_gap
+      and "container 1.0 MB — disabled" in page_gap)
+calm = FakeApi({("file",): [], ("system", "resource"): [
+    {"total-hdd-space": str(128 * MB), "free-hdd-space": str(100 * MB)}],
+    ("system", "package"): [{"name": "routeros", "size": str(27 * MB)}]})
+page_calm = _render_device_backups(
+    "R1", _u, {}, "tok", backups=[], flash=info,
+    space=Pusher(cfg, calm, dry_run=True).space_report())
+check("...while a router whose space is accounted for gets no warning",
+      "Where the space goes" in page_calm
+      and "no file here explains it" not in page_calm
+      and "Found on this router" not in page_calm)
+
 plan = Pusher(cfg, api, dry_run=True).plan_free_space([
     "flash/before-wan-20261001-090000.backup",       # ours, old: goes
     "flash/before-dns-20261005-090000.backup",       # locked: stays

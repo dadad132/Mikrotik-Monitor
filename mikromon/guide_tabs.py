@@ -341,7 +341,9 @@ TABS = [
                "ticked, to delete in one go; everything else (upgrade "
                "packages, containers, a web proxy cache, logs, backups made "
                "in Winbox) is listed with what it is and how big it is, "
-               "folders added up, for you to remove in Winbox → Files.",
+               "folders added up, for you to remove in Winbox → Files. When "
+               "the files do not add up to the space used, it says how much "
+               "is used outside them, and checks the usual reasons.",
                "To keep a copy off the router, download it in Winbox → "
                "Files."],
      "warn": "The dashboard only ever deletes files it made itself, named "

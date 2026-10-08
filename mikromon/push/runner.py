@@ -217,6 +217,11 @@ def _space_group(name: str) -> tuple:
     return name, ""
 
 
+def _yes(v) -> bool:
+    """A RouterOS yes/true, however the API library handed it over."""
+    return v is True or str(v).strip().lower() in ("yes", "true")
+
+
 def _folder_what(folder: str, containers: dict) -> str:
     """What a folder of files probably is."""
     low = folder.lower()
@@ -434,6 +439,7 @@ class Pusher:
         containers = self._container_folders()
         groups: dict = {}
         count = total = 0
+        ours_total = sum(max(0, i["size"]) for i in items)
         for r in files:
             name = str(r.get("name", ""))
             size = _bytes(r.get("size"))
@@ -455,7 +461,86 @@ class Pusher:
                 "others_count": count, "others_groups": len(others),
                 "others_total": total,
                 "flash": self.flash_info(),
-                "disk_logging": self._disk_logging()}
+                "disk_logging": self._disk_logging(),
+                "accounting": self._space_accounting(ours_total + total)}
+
+    def _space_accounting(self, in_files: int) -> dict:
+        """Where the used space goes, for when the files do not add up.
+
+        The file list is not everything on the flash: RouterOS keeps its
+        packages, its settings and some downloads outside it, and worn-out
+        flash simply disappears. So: used, in files, in packages, and what
+        is left over -- with the settings that usually explain the rest.
+        """
+        try:
+            res = (self.api.fetch(("system", "resource")) or [{}])[0]
+        except Exception:
+            return {}
+        total = _bytes(res.get("total-hdd-space"))
+        free = _bytes(res.get("free-hdd-space"))
+        if total <= 0 or free < 0:
+            return {}
+        used = max(0, total - free)
+        packages = []
+        try:
+            for p in self.api.fetch(("system", "package")):
+                size = _bytes(p.get("size"))
+                if size > 0:
+                    packages.append({"name": str(p.get("name") or "?"),
+                                     "size": size,
+                                     "disabled": _yes(p.get("disabled"))})
+        except Exception:
+            pass
+        packages.sort(key=lambda p: p["size"], reverse=True)
+        in_packages = sum(p["size"] for p in packages)
+        findings = []
+        bad = str(res.get("bad-blocks") or "").strip().rstrip("%").strip()
+        try:
+            bad_pct = float(bad) if bad else 0.0
+        except ValueError:
+            bad_pct = 0.0
+        if bad_pct > 0:
+            findings.append(
+                f"{bad_pct:g}% of the flash is bad blocks: worn out and no "
+                f"longer usable. The flash is failing; plan to replace this "
+                f"router.")
+        try:
+            crl = (self.api.fetch(("certificate", "settings")) or [{}])[0]
+        except Exception:
+            crl = {}
+        if _yes(crl.get("crl-download")) and \
+                str(crl.get("crl-store") or "").lower() == "system":
+            findings.append(
+                "Certificate revocation lists are downloaded and kept on the "
+                "flash (crl-download=yes, crl-store=system). With many CA "
+                "certificates imported they can take tens of MB, outside the "
+                "file list. /certificate settings set crl-store=ram keeps "
+                "them in memory instead.")
+        try:
+            proxy = (self.api.fetch(("ip", "proxy")) or [{}])[0]
+        except Exception:
+            proxy = {}
+        if _yes(proxy.get("enabled")) and _yes(proxy.get("cache-on-disk")):
+            findings.append(
+                "The web proxy keeps its cache on the flash "
+                "(/ip proxy cache-on-disk=yes"
+                + (f", max-cache-size={proxy.get('max-cache-size')}"
+                   if proxy.get("max-cache-size") else "")
+                + "). /ip proxy set cache-on-disk=no keeps it in memory.")
+        try:
+            parts = self.api.fetch(("partitions",))
+        except Exception:
+            parts = []
+        if len(parts) > 1:
+            findings.append(
+                f"The flash is split into {len(parts)} partitions "
+                f"(/partitions); this RouterOS only has its own partition's "
+                f"share of it.")
+        return {"total": total, "free": free, "used": used,
+                "in_files": in_files, "in_packages": in_packages,
+                "packages": packages[:6],
+                "elsewhere": max(0, used - in_files - in_packages),
+                "findings": findings}
 
     def _external_disks(self) -> set:
         """USB sticks and SD cards (/disk): their files do not use the
