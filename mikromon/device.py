@@ -101,6 +101,10 @@ _REACH_ATTEMPTS = 2
 _REACH_MIN_TIMEOUT = 4.0
 
 
+# What run_command_err answers when the poll's connection is already gone.
+NOT_CONNECTED = "not connected to the router"
+
+
 class DeviceError(Exception):
     """Raised when we cannot talk to a device."""
 
@@ -268,7 +272,7 @@ class Device:
         logs -- from a router with nothing to update.
         """
         if self.api is None:
-            return False, "not connected to the router"
+            return False, NOT_CONNECTED
         try:
             list(self.api.path(*path)(cmd, **params))
             return True, ""

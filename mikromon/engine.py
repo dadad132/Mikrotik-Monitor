@@ -12,7 +12,7 @@ from .alert import Severity
 from .checks import enabled_checks, required_datasets
 from .checks.wan_traffic import _wan_interfaces
 from .context import CheckContext
-from .device import Device, DeviceError
+from .device import NOT_CONNECTED, Device, DeviceError
 from .metrics import MetricsStore
 from .notify import build_notifiers
 from .state import StateStore
@@ -282,7 +282,19 @@ class Engine:
         # reboot, no DNS at that second -- cost a full day of update state,
         # and nothing said so. Most of the fleet showing a dash is what that
         # looked like from the outside.
-        if last:
+        # A refusal stored as "not connected to the router" is the mark of
+        # that bug, not of the router: ask again on the first poll instead of
+        # waiting out the retry hour, so the fix shows straight after an
+        # update. Once per run, so if it ever recurred it could not become a
+        # check (and a warning) on every poll.
+        retried = getattr(self, "_stale_update_retry", None)
+        if retried is None:
+            retried = self._stale_update_retry = set()
+        stale = (ok_last is False and cfg.name not in retried
+                 and facts.get("update_check_error") == NOT_CONNECTED)
+        if stale:
+            retried.add(cfg.name)
+        if last and not stale:
             if ok_last is False:
                 if now - last < _UPDATE_RETRY_SECONDS:
                     return
@@ -572,17 +584,19 @@ class Engine:
 
         if snap.errors:
             log.debug("%s: datasets unavailable: %s", cfg.name, snap.errors)
-        self._flush_metrics(ctx)
-        # Last, deliberately: this reaches out from the router to MikroTik and
-        # can be slow, so everything worth recording is already flushed before
-        # it runs. Its result lands in /system/package/update and is picked up
-        # by a later poll -- nothing here waits for an answer.
+        # The update check last, deliberately: it reaches out from the router
+        # to MikroTik and can be slow, so everything worth recording is
+        # flushed before it runs. Its result lands in /system/package/update
+        # and is picked up by a later poll -- nothing here waits for an answer.
         #
         # But BEFORE the connection is closed: the check is a command sent
         # over this same API session. It used to run after close(), with no
         # session left to send it on, so every router in the fleet answered
-        # "not connected to the router" and showed "Check refused".
+        # "not connected to the router" and showed "Check refused". And the
+        # close is in a finally, so a failure saving the readings cannot
+        # leave the connection open either.
         try:
+            self._flush_metrics(ctx)
             self._maybe_check_updates(device, cfg, ctx.now)
         finally:
             device.close()

@@ -475,6 +475,42 @@ check("...each with what it probably is",
 check("logging to disk is spotted, as the usual reason a flash refills",
       rep["disk_logging"] == ["disk"])
 
+# A 128 MB router is not filled by backups: it is filled by folders of many
+# small files -- a container, a proxy cache -- which only show when added up.
+big = [{".id": f"*c{i}", "name": f"pihole/root/usr/lib/f{i}.so",
+        "size": str(2 * MB)} for i in range(40)]
+big += [{".id": f"*w{i}", "name": f"web-proxy/cache/{i}",
+         "size": str(MB)} for i in range(8)]
+big += [{".id": "*u1", "name": "usb1/films/holiday.mkv", "size": str(900 * MB)},
+        {".id": "*t1", "name": "pull/layer.tar", "size": str(3 * MB)},
+        {".id": "*b1", "name": "before-wan-20261008-090000.backup",
+         "size": str(200 * 1024)}]
+api128 = FakeApi({("file",): big,
+               ("system", "resource"): [{"total-hdd-space": str(128 * MB),
+                                         "free-hdd-space": "0"}],
+               ("disk",): [{"slot": "usb1"}],
+               ("container",): [{"name": "pihole", "root-dir": "pihole/root"}],
+               ("container", "config"): [{"tmpdir": "pull"}]})
+rep128 = Pusher(cfg, api128, dry_run=True).space_report()
+top = rep128["others"][0]
+check("a container's thousands of files are added up into one line, named "
+      "as that container's", top["name"] == "pihole/" and top["folder"]
+      and top["files"] == 40 and top["size"] == 80 * MB
+      and "container pihole" in top["what"])
+check("...as are a proxy cache and the container download folder",
+      any(o["name"] == "web-proxy/" and "proxy" in o["what"].lower()
+          for o in rep128["others"])
+      and any(o["name"] == "pull/" and "tmpdir" in o["what"]
+              for o in rep128["others"]))
+check("files on a USB stick or SD card are left out: they do not use the "
+      "router's own storage", all(not o["name"].startswith("usb1")
+                                  for o in rep128["others"])
+      and rep128["others_total"] == 91 * MB)
+page128 = _render_device_backups("R1", _u, {}, "tok", backups=[],
+                                 flash=info, space=rep128)
+check("the page shows a folder with how many files it holds",
+      "pihole/" in page128 and "(40 files)" in page128)
+
 plan = Pusher(cfg, api, dry_run=True).plan_free_space([
     "flash/before-wan-20261001-090000.backup",       # ours, old: goes
     "flash/before-dns-20261005-090000.backup",       # locked: stays

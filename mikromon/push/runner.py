@@ -198,7 +198,43 @@ def _what_is(name: str) -> str:
         return "Backup made outside the dashboard."
     if base.endswith(".rsc"):
         return "Export or script file."
+    if base.endswith((".pcap", ".pcapng")):
+        return "Packet capture (/tool sniffer)."
     return ""
+
+
+def _space_group(name: str) -> tuple:
+    """(entry, folder): a file at the top, or directly in flash/, is its own
+    entry; anything deeper is added up under its top-level folder -- a
+    container or a proxy cache is thousands of small files, and only their
+    sum says where the space went."""
+    prefix, rest = "", name
+    if rest.startswith("flash/"):
+        prefix, rest = "flash/", rest[len("flash/"):]
+    if "/" in rest:
+        folder = rest.split("/", 1)[0]
+        return prefix + folder + "/", folder
+    return name, ""
+
+
+def _folder_what(folder: str, containers: dict) -> str:
+    """What a folder of files probably is."""
+    low = folder.lower()
+    if folder in containers:
+        return containers[folder]
+    if "proxy" in low:
+        return "Web proxy cache (/ip proxy, with its cache on disk)."
+    if low.startswith(("user-manager", "userman", "um5")):
+        return "User Manager's database."
+    if low.startswith("dude"):
+        return "The Dude's database."
+    if low == "hotspot":
+        return "Hotspot login pages: needed while the hotspot is in use."
+    if low == "skins":
+        return "WebFig skins."
+    if low == "pub":
+        return "FTP public folder."
+    return "Folder."
 
 
 class Pusher:
@@ -394,20 +430,69 @@ class Pusher:
                           "locked": locked,
                           "tick": not (locked or labelled or name == newest),
                           "note": note})
-        others = []
+        external = self._external_disks()
+        containers = self._container_folders()
+        groups: dict = {}
+        count = total = 0
         for r in files:
             name = str(r.get("name", ""))
             size = _bytes(r.get("size"))
             if (made_by_dashboard(name) or size <= 0
-                    or str(r.get("type", "")) == "directory"):
+                    or str(r.get("type", "")) == "directory"
+                    or name.split("/", 1)[0] in external):
                 continue
-            others.append({"name": name, "size": size, "what": _what_is(name)})
-        others.sort(key=lambda o: o["size"], reverse=True)
+            key, folder = _space_group(name)
+            g = groups.setdefault(key, {
+                "name": key, "size": 0, "files": 0, "folder": bool(folder),
+                "what": (_folder_what(folder, containers) if folder
+                         else _what_is(name))})
+            g["size"] += size
+            g["files"] += 1
+            count += 1
+            total += size
+        others = sorted(groups.values(), key=lambda o: o["size"], reverse=True)
         return {"ours": items, "others": others[:others_shown],
-                "others_count": len(others),
-                "others_total": sum(o["size"] for o in others),
+                "others_count": count, "others_groups": len(others),
+                "others_total": total,
                 "flash": self.flash_info(),
                 "disk_logging": self._disk_logging()}
+
+    def _external_disks(self) -> set:
+        """USB sticks and SD cards (/disk): their files do not use the
+        router's own storage, so they are left out of the count."""
+        try:
+            rows = self.api.fetch(("disk",))
+        except Exception:
+            return set()
+        names = {str(r.get("slot") or r.get("name") or "") for r in rows}
+        return {n for n in names if n and n != "flash"}
+
+    def _container_folders(self) -> dict:
+        """{top-level folder: description} for /container's files, which
+        is what fills a 128 MB router fastest."""
+        out = {}
+        try:
+            rows = self.api.fetch(("container",))
+        except Exception:
+            rows = []
+        for c in rows:
+            label = str(c.get("name") or c.get("tag")
+                        or c.get("remote-image") or "").strip()
+            for key in ("root-dir",):
+                folder = _space_group(str(c.get(key) or "") + "/x")[1]
+                if folder:
+                    out[folder] = (f"Files of container {label} (/container)."
+                                   if label else "A container's files "
+                                                 "(/container).")
+        try:
+            conf = (self.api.fetch(("container", "config")) or [{}])[0]
+        except Exception:
+            conf = {}
+        tmp = _space_group(str(conf.get("tmpdir") or "") + "/x")[1]
+        if tmp:
+            out.setdefault(tmp, "Container download and unpack folder "
+                                "(/container config tmpdir).")
+        return out
 
     def _disk_logging(self) -> list:
         """Logging actions that write to disk and are in use: the usual way

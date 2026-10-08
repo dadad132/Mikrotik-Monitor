@@ -339,8 +339,9 @@ TABS = [
                "<b>Check for space to free</b> lists everything using the "
                "router's storage. The dashboard's own old backups come "
                "ticked, to delete in one go; everything else (upgrade "
-               "packages, support files, logs, backups made in Winbox) is "
-               "listed with what it is, for you to remove in Winbox → Files.",
+               "packages, containers, a web proxy cache, logs, backups made "
+               "in Winbox) is listed with what it is and how big it is, "
+               "folders added up, for you to remove in Winbox → Files.",
                "To keep a copy off the router, download it in Winbox → "
                "Files."],
      "warn": "The dashboard only ever deletes files it made itself, named "

@@ -2312,7 +2312,9 @@ def _update_cell(f) -> tuple:
                 if rights else "")
         return ("Check refused", "#b45309",
                 f"The router would not run the update check{tail}.{hint} "
-                f"Retried within the hour.")
+                + (f"Last tried {when}; " if when else "")
+                + ("tried again within the hour." if when
+                   else "Retried within the hour."))
     if f.get("update_available") is True:
         latest = str(f.get("update_latest") or "").strip()
         return (f"{latest} available" if latest else "Update available",
@@ -5503,10 +5505,15 @@ def _space_box(name, csrf, space=None, scan_error="") -> str:
         ours = ('<p class="muted">The dashboard has no files of its own on this '
                 'router to delete.</p>')
     orows = "".join(
-        f'<tr><td>{esc(o["name"])}</td><td class="muted">{size(o["size"])}</td>'
+        f'<tr><td>{esc(o["name"])}'
+        + (f' <span class="muted" style="font-size:12px">'
+           f'({int(o.get("files") or 0):,} files)</span>'
+           if o.get("folder") else "")
+        + f'</td><td class="muted">{size(o["size"])}</td>'
         f'<td class="muted" style="font-size:12.5px">{esc(o["what"])}</td></tr>'
         for o in space.get("others") or [])
-    more = int(space.get("others_count") or 0) - len(space.get("others") or [])
+    more = (int(space.get("others_groups") or 0)
+            - len(space.get("others") or []))
     others = (
         f'<h3 style="margin:18px 0 6px">Not made by the dashboard</h3>'
         f'<p class="muted" style="margin:0 0 8px;font-size:13px">'
@@ -5516,7 +5523,7 @@ def _space_box(name, csrf, space=None, scan_error="") -> str:
         f'<table><tr><th>File</th><th>Size</th><th>What it is</th></tr>'
         f'{orows}</table>'
         + (f'<p class="muted" style="font-size:12.5px">…and {more} smaller '
-           f'file(s).</p>' if more > 0 else "")
+           f'one(s).</p>' if more > 0 else "")
     ) if orows else ""
     logs = space.get("disk_logging") or []
     tip = (f'<p style="font-size:13px;margin:12px 0 0"><b>Logging writes to '

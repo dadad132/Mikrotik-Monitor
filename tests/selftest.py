@@ -801,6 +801,55 @@ check("a real poll sends the update check while it still holds the router's "
       and _pdev.sent == (("system", "package", "update"), "check-for-updates"))
 check("...and the connection is still closed at the end of the poll",
       not _pdev.connected)
+
+# A router still showing the old bug's "not connected" refusal is asked again
+# on the first poll after the update, not an hour later -- and only once a
+# run, so a recurrence could not become a check on every poll.
+_pt = _at(2026, 10, 8, 10, 0)
+_ue.state = _FactStore()
+_ue._stale_update_retry = set()
+_sf = _ue.state.facts("R")
+_sf.update(update_checked=_pt - 120, update_check_ok=False,
+           update_check_error="not connected to the router")
+_stale_dev = _CmdDev(ok=True)
+_ue._maybe_check_updates(_stale_dev, _ucfg, _pt)
+check("a refusal stored by the old bug ('not connected to the router') is "
+      "retried on the very next poll, so the fix shows straight away",
+      len(_stale_dev.calls) == 1 and _sf.get("update_check_ok") is True)
+_sf.update(update_checked=_pt, update_check_ok=False,
+           update_check_error="not connected to the router")
+_ue._maybe_check_updates(_stale_dev, _ucfg, _pt + 60)
+check("...but only once a run: if it ever recurred, it waits the hour like "
+      "any refusal", len(_stale_dev.calls) == 1)
+_ue.state = _FactStore()
+_rf2 = _ue.state.facts("R")
+_rf2.update(update_checked=_pt - 120, update_check_ok=False,
+            update_check_error="no permission (write)")
+_perm_dev = _CmdDev(ok=True)
+_ue._maybe_check_updates(_perm_dev, _ucfg, _pt)
+check("...while a real refusal from the router still waits for the hour",
+      _perm_dev.calls == [])
+check("the card says when the refused check was last tried",
+      "Last tried" in _update_cell({"update_checked": _pt,
+                                    "update_check_ok": False,
+                                    "update_check_error": "timed out"})[2])
+
+# Saving the readings failing must not leave the router connection open.
+_fdev = _StrictMock(_pcfg.devices[0], build_frames(incident=False))
+
+
+def _boom(ctx):
+    raise RuntimeError("metrics store unavailable")
+
+
+_peng._flush_metrics = _boom
+try:
+    _peng._poll_device(_fdev)
+    _raised = False
+except RuntimeError:
+    _raised = True
+check("if saving the readings fails, the poll still closes the router "
+      "connection", _raised and not _fdev.connected)
 _peng._pool.shutdown(wait=False)
 if _peng.metrics is not None:
     _peng.metrics.close()
