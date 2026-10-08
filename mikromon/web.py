@@ -2302,10 +2302,17 @@ def _update_cell(f) -> tuple:
     if f.get("update_check_ok") is False:
         why = str(f.get("update_check_error") or "").strip()
         tail = f": {why}" if why else ""
+        # Blame the login only when the router said so. A dropped or timed-
+        # out connection is not a rights problem, and saying it was sent
+        # people to fix a login that was fine.
+        low = why.lower()
+        rights = any(w in low for w in ("permission", "not allowed",
+                                         "policy", "denied"))
+        hint = (" The stored monitoring login lacks the rights to run it."
+                if rights else "")
         return ("Check refused", "#b45309",
-                f"The router would not run the update check{tail}. Usually "
-                f"the stored monitoring login lacks the rights. Retried "
-                f"within the hour.")
+                f"The router would not run the update check{tail}.{hint} "
+                f"Retried within the hour.")
     if f.get("update_available") is True:
         latest = str(f.get("update_latest") or "").strip()
         return (f"{latest} available" if latest else "Update available",
@@ -5425,22 +5432,133 @@ def _fmt_backup_date(bname, ctime) -> str:
     return str(ctime or "—")
 
 
+def _flash_line(flash: dict) -> str:
+    """Free flash, and how many of the dashboard's backups this router
+    keeps -- the two numbers that explain a full router."""
+    if not flash:
+        return ""
+    from .push.runner import FLASH_RESERVE_BYTES, _human
+    free, total, keep = flash["free"], flash["total"], flash["keep"]
+    # Red near the point where a change would be refused for want of room,
+    # not merely below a percentage: 1.5 MB free is normal on a 16 MB router.
+    low = 0 <= free < 2 * FLASH_RESERVE_BYTES + 256 * 1024
+    color = "#dc2626" if low else "var(--muted)"
+    return (f'<p style="margin:0 0 10px;font-size:13px;color:{color}">'
+            f'Flash: <b>{_human(max(free, 0))}</b> free of {_human(total)}. '
+            f'The dashboard keeps its newest {keep} automatic backups here '
+            f'and deletes older ones before saving a new one'
+            + (", fewer if the flash needs the room" if keep < 10 else "")
+            + '. It never deletes a file it did not make.</p>')
+
+
+def _space_box(name, csrf, space=None, scan_error="") -> str:
+    """"Free up space": what is using the router's storage, and deleting
+    what the dashboard made itself. It never deletes anything else -- those
+    files are listed, with what they probably are, for removing in Winbox."""
+    from .push.runner import _human
+    q = quote(name)
+    head = (f'<div class="box" id="space"><h2>Free up space</h2>')
+    scan_btn = (f'<a class="btn ghost" href="/device?name={q}&tab=backups'
+                f'&scan=1#space">Check for space to free</a>')
+    if space is None:
+        return (head + f'<p class="muted" style="margin-top:0">Lists what is '
+                f'using the router\'s storage. The dashboard can delete the '
+                f'files it made itself; anything else is shown so you can '
+                f'remove it in Winbox. It never deletes a file it did not '
+                f'make.</p>'
+                + (f'<p style="color:#dc2626">{esc(scan_error)}</p>'
+                   if scan_error else "")
+                + f'<div class="actions">{scan_btn}</div></div>')
+
+    def size(n):
+        return _human(n) if n >= 0 else "?"
+
+    rows = ""
+    for it in space.get("ours") or []:
+        box = (f'<input type="checkbox" name="file" value="{esc(it["name"])}"'
+               f'{" checked" if it["tick"] else ""}'
+               f'{" disabled" if it["locked"] else ""} '
+               f'aria-label="Delete {esc(it["name"])}">')
+        rows += (f'<tr><td>{box}</td><td><b>{esc(it["name"])}</b>'
+                 + (f'<div class="muted" style="font-size:12px">'
+                    f'{esc(it["note"])}</div>' if it["note"] else "")
+                 + f'</td><td class="muted">{size(it["size"])}</td>'
+                 f'<td class="muted">'
+                 f'{esc(_fmt_backup_date(it["name"], it.get("time")))}</td>'
+                 f'</tr>')
+    if rows:
+        ours = (f'<h3 style="margin:14px 0 6px">Made by the dashboard</h3>'
+                f'<form method="POST" action="/device/backup" '
+                f'onsubmit="return confirm(\'Delete the ticked files from the '
+                f'router? This cannot be undone.\')">'
+                f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+                f'<input type="hidden" name="device" value="{esc(name)}">'
+                f'<input type="hidden" name="backup_action" value="cleanup">'
+                f'<table><tr><th style="width:34px"></th><th>File</th>'
+                f'<th>Size</th><th>Created</th></tr>{rows}</table>'
+                f'<div class="actions" style="margin-top:10px">'
+                f'<button class="btn red" type="submit">Delete selected</button>'
+                f'</div></form>')
+    else:
+        ours = ('<p class="muted">The dashboard has no files of its own on this '
+                'router to delete.</p>')
+    orows = "".join(
+        f'<tr><td>{esc(o["name"])}</td><td class="muted">{size(o["size"])}</td>'
+        f'<td class="muted" style="font-size:12.5px">{esc(o["what"])}</td></tr>'
+        for o in space.get("others") or [])
+    more = int(space.get("others_count") or 0) - len(space.get("others") or [])
+    others = (
+        f'<h3 style="margin:18px 0 6px">Not made by the dashboard</h3>'
+        f'<p class="muted" style="margin:0 0 8px;font-size:13px">'
+        f'{size(int(space.get("others_total") or 0))} in '
+        f'{int(space.get("others_count") or 0)} file(s). The dashboard never '
+        f'deletes these: remove what you do not need in Winbox → Files.</p>'
+        f'<table><tr><th>File</th><th>Size</th><th>What it is</th></tr>'
+        f'{orows}</table>'
+        + (f'<p class="muted" style="font-size:12.5px">…and {more} smaller '
+           f'file(s).</p>' if more > 0 else "")
+    ) if orows else ""
+    logs = space.get("disk_logging") or []
+    tip = (f'<p style="font-size:13px;margin:12px 0 0"><b>Logging writes to '
+           f'disk</b> on this router (action: {esc(", ".join(logs))}), so log '
+           f'files keep refilling it. In a terminal, <code>/system logging set '
+           f'[find action={esc(logs[0])}] action=memory</code> keeps them in '
+           f'memory instead.</p>' if logs else "")
+    # (The free-space line is in the box just above; not repeated here.)
+    return (head + ours + others + tip
+            + f'<div class="actions" style="margin-top:12px">'
+            f'<a class="btn ghost" href="/device?name={q}&tab=backups&scan=1'
+            f'#space">Check again</a></div></div>')
+
+
 def _render_device_backups(name, user, facts, csrf, *, backups=None,
-                           error="", msg="", dry_plan=None) -> str:
-    """The Backups tab — wired to the real config-push engine (admin-only)."""
+                           error="", msg="", dry_plan=None, flash=None,
+                           error_title="", space=None, scan_error="") -> str:
+    """The Backups tab — wired to the real config-push engine (admin-only).
+
+    `error_title` set means the router was reached and refused the action
+    (a full flash, say); unset, the error is that it could not be reached.
+    """
+    from .push.runner import _bytes, _human, made_by_dashboard
     tabbar = _device_tabbar(name, "backups", True, csrf)
     q = quote(name)
     banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
               f'</div>' if msg else "")
-    err = (f'<div class="box" style="border-left:4px solid #dc2626">'
-           f'<b>Could not reach the router:</b> {esc(error)}<br>'
-           f'<span class="muted">Check the host, that the API service is '
-           f'enabled, and the read-write push user/password on the Devices '
-           f'page.</span></div>' if error else "")
+    unreachable = bool(error) and not error_title
+    if error_title and error:
+        err = (f'<div class="box" style="border-left:4px solid #dc2626">'
+               f'<b>{esc(error_title)}</b> {esc(error)}</div>')
+    else:
+        err = (f'<div class="box" style="border-left:4px solid #dc2626">'
+               f'<b>Could not reach the router:</b> {esc(error)}<br>'
+               f'<span class="muted">Check the host, that the API service is '
+               f'enabled, and the read-write push user/password on the Devices '
+               f'page.</span></div>' if error else "")
 
     if dry_plan is not None:
         # Step 2: show the dry-run plan and a confirm button.
-        resolved = dry_plan.ops[0].params.get("name", "") if dry_plan.ops else ""
+        resolved = next((o.params.get("name", "") for o in dry_plan.ops
+                         if o.action == "run"), "")
         action = (f'<div class="box"><h2>Dry run — nothing has been written yet</h2>'
                   f'<pre style="background:var(--surface-2);color:var(--text);border:1px solid var(--border);padding:12px;border-radius:8px;'
                   f'white-space:pre-wrap">{esc(dry_plan.diff_text())}</pre>'
@@ -5467,33 +5585,49 @@ def _render_device_backups(name, user, facts, csrf, *, backups=None,
         rows = ""
         for b in (backups or []):
             bn = b["name"]
+            # Restore is for .backup files only (an .rsc is imported, not
+            # loaded). Delete only on the dashboard's own files: anything
+            # else was put on the router some other way, and is not ours.
             acts = (_bk_btn(bn, "restore", "Restore", "",
                             f"Restore {bn}? This REBOOTS the router and replaces "
                             f"its config with this snapshot.")
-                    + " " + _bk_btn(bn, "delete", "Delete", "ghost",
-                                    f"Delete {bn} from the router?"))
+                    if bn.endswith(".backup") else "")
+            acts += (" " + _bk_btn(bn, "delete", "Delete", "ghost",
+                                   f"Delete {bn} from the router?")
+                     if made_by_dashboard(bn) else
+                     ' <span class="muted" style="font-size:12px">Not made by '
+                     'the dashboard</span>')
+            size = _bytes(b.get("size"))
             rows += (f'<tr><td><b>{esc(bn)}</b></td>'
-                     f'<td class="muted">{esc(str(b.get("size", "")))}</td>'
+                     f'<td class="muted">'
+                     f'{esc(_human(size) if size >= 0 else str(b.get("size", "")))}'
+                     f'</td>'
                      f'<td class="muted">'
                      f'{esc(_fmt_backup_date(bn, b.get("time")))}</td>'
                      f'<td>{acts}</td></tr>')
-        if not rows and not error:
+        if not rows and not unreachable:
             rows = '<tr><td colspan="4" class="muted">No backup files on the router yet.</td></tr>'
         table = (f'<div class="box"><h2>Restore points on the router'
                  f'{_help_dot("backups", "Backups")}</h2>'
+                 f'{_flash_line(flash or {})}'
                  f'<table><tr><th>File</th><th>Size</th><th>Created</th>'
-                 f'<th>Actions</th></tr>{rows}</table></div>') if not error else ""
+                 f'<th>Actions</th></tr>{rows}</table></div>'
+                 ) if not unreachable else ""
         create = (f'<div class="box"><h2>Create a backup</h2>'
                   f'<p class="muted">Creates a <code>.backup</code> file on the '
-                  f'router — a safe, additive write. You will see a dry-run '
-                  f'preview before anything is applied.</p>'
+                  f'router named <code>mikromon-&lt;label&gt;-&lt;date&gt;-'
+                  f'&lt;time&gt;</code> — a safe, additive write. You will see '
+                  f'a dry-run preview before anything is applied.</p>'
                   f'<form method="POST" action="/device/backup" class="actions">'
                   f'<input type="hidden" name="csrf" value="{csrf}">'
                   f'<input type="hidden" name="device" value="{esc(name)}">'
-                  f'<input name="bkname" placeholder="backup name (optional)">'
+                  f'<input name="bkname" placeholder="label (optional)">'
                   f'<button class="btn" type="submit">Preview backup (dry-run)'
                   f'</button></form></div>')
-        action = table + create
+        action = (table
+                  + (_space_box(name, csrf, space, scan_error)
+                     if not unreachable else "")
+                  + create)
 
     inner = (f'<div class="wrap" style="max-width:1100px">'
              f'<h1>{esc(name)} &middot; Backups</h1>{tabbar}'
@@ -6651,10 +6785,14 @@ def _safe_arm(pusher, *, slug, hub_ip, safe, tracker) -> dict:
         reach = _router_reaches_hub(pusher.api, hub_ip)
         mode = "ping" if reach is True else "login"
         token = new_token()
+        # The name RouterOS saved it under: small routers keep it in their
+        # flash/ folder, where the bare name would load nothing.
+        load_name = pusher.find_backup(backup) or backup
         try:
             pusher.apply(pusher.plan_arm_revert(
-                backup, seconds=_SAFE_CHECK_SECONDS, hub_ip=hub_ip, token=token,
-                ping_check=(mode == "ping")), feature=slug + ":arm-revert")
+                load_name, seconds=_SAFE_CHECK_SECONDS, hub_ip=hub_ip,
+                token=token, ping_check=(mode == "ping")),
+                feature=slug + ":arm-revert")
         except PushError as exc:
             raise PushError(f"Could not arm Safe mode on the router ({exc}). "
                             f"Nothing was changed. Untick Safe mode to send it "
@@ -7945,7 +8083,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         if not can_manage:
                             return self._send(403, "forbidden")
                         return self._device_backups_page(
-                            dev, user, msg=q.get("msg", [""])[0])
+                            dev, user, msg=q.get("msg", [""])[0],
+                            scan=q.get("scan", [""])[0] == "1")
                     if tab == "tempaccess":
                         if not can_manage:
                             return self._send(403, "forbidden")
@@ -9286,7 +9425,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 store.close()
 
         def _device_backups_page(self, name, user, dry_plan=None, error="",
-                                 msg=""):
+                                 msg="", error_title="", scan=False):
             raw = self._device_raw(name)
             if raw is None:
                 return self._send(400, "This device is not managed in the "
@@ -9296,7 +9435,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                      .get(name, {}).get("facts", {}))
             sess = self._session()
             csrf = sess["csrf"] if sess else ""
-            backups = []
+            backups, flash, space, scan_error = [], {}, None, ""
             if dry_plan is None:  # live-read the router's restore points
                 from .config import build_device
                 from .device import DeviceError
@@ -9308,14 +9447,24 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 api = PushApi(dev)
                 try:
                     api.connect()
-                    backups = Pusher(cfg, api).list_backups()
+                    pusher = Pusher(cfg, api)
+                    backups = pusher.list_backups()
+                    flash = pusher.flash_info()
+                    if scan:
+                        try:
+                            space = pusher.space_report()
+                        except PushError as exc:
+                            scan_error = f"Could not read the router's files: {exc}"
                 except (DeviceError, PushError) as exc:
-                    error = error or str(exc)
+                    if not error:
+                        error, error_title = str(exc), ""
                 finally:
                     dev.close()
             page = _render_device_backups(name, user, facts, csrf,
                                           backups=backups, error=error, msg=msg,
-                                          dry_plan=dry_plan)
+                                          dry_plan=dry_plan, flash=flash,
+                                          error_title=error_title, space=space,
+                                          scan_error=scan_error)
             return self._send(200, page, "text/html; charset=utf-8")
 
         def _device_provision_page(self, name, user, msg="", script=None,
@@ -9580,7 +9729,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 msg = "Provisioned the user + API over the API."
             return self._device_provision_page(name, user, creds=creds, msg=msg)
 
-        def _device_backup_post(self, flat, user):
+        def _device_backup_post(self, flat, user, multi=None):
             name = flat.get("device", "")
             raw = self._device_raw(name)
             if raw is None:
@@ -9589,11 +9738,20 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             from .device import DeviceError
             from .push import Pusher, PushError, rw_device
             from .push.api import PushApi
+            from .push.runner import (_human, labelled_backup_name,
+                                      made_by_dashboard)
 
             cfg = build_device(raw, defaults)
             bkname = (flat.get("bkname") or "").strip() or None
             action = flat.get("backup_action", "")
-            if action not in ("restore", "delete") and flat.get("apply") != "1":
+            if action not in ("restore", "delete", "cleanup"):
+                # A backup made here is named so the dashboard can tell later
+                # that it is its own -- the only kind it will ever delete.
+                # The preview names it; confirming keeps that name.
+                if bkname and not made_by_dashboard(bkname + ".backup"):
+                    bkname = labelled_backup_name(bkname)
+            if (action not in ("restore", "delete", "cleanup")
+                    and flat.get("apply") != "1"):
                 # Step 1: dry-run preview — connects to nothing.
                 plan = Pusher(cfg, None, dry_run=True).plan_backup(bkname)
                 return self._device_backups_page(name, user, dry_plan=plan)
@@ -9614,13 +9772,37 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     pusher.apply(pusher.plan_delete_backup(bkname or ""),
                                  feature="backup:delete")
                     msg = f"Deleted backup '{bkname}'."
+                elif action == "cleanup":
+                    chosen = [n for n in (multi or {}).get("file", []) if n]
+                    before = pusher.flash_info()
+                    plan = (pusher.plan_free_space(chosen) if chosen
+                            else None)
+                    if plan is None:
+                        msg = "Nothing was ticked, so nothing was deleted."
+                    elif plan.empty:
+                        msg = ("Nothing was deleted: the files chosen are gone "
+                               "already, or are not ones the dashboard made.")
+                    else:
+                        pusher.apply(plan, feature="backup:cleanup")
+                        after = pusher.flash_info()
+                        msg = (f"Deleted {len(plan.ops)} file(s)."
+                               + (f" Flash now {_human(after['free'])} free "
+                                  f"(was {_human(before['free'])})."
+                                  if before and after else ""))
+                    return self._redirect(
+                        f"/device?name={quote(name)}&tab=backups&scan=1&msg="
+                        + quote(msg) + "#space")
                 else:
                     pusher.apply(pusher.plan_backup(bkname), feature="backup")
                     msg = "Backup created on the router."
                 return self._redirect(
                     f"/device?name={quote(name)}&tab=backups&msg=" + quote(msg))
-            except (DeviceError, PushError) as exc:
+            except DeviceError as exc:
                 return self._device_backups_page(name, user, error=str(exc))
+            except PushError as exc:
+                # Reached, and refused: a full flash, a missing file.
+                return self._device_backups_page(
+                    name, user, error=str(exc), error_title="That did not work:")
             finally:
                 dev.close()
                 if audit:
@@ -12344,7 +12526,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if not self._can_manage_device(user, flat.get("device", "")):
                     return self._deny_manage(user, flat.get("device", ""), path)
                 if path == "/device/backup":
-                    return self._device_backup_post(flat, user)
+                    return self._device_backup_post(flat, user, multi)
                 if path == "/device/tempaccess":
                     return self._post_tempaccess(flat, user)
                 if path == "/device/provision":

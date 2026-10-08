@@ -751,6 +751,60 @@ check("a router with nothing to do says so positively, and says when it "
       "was asked",
       _update_cell({"update_checked": _now, "update_check_ok": True,
                     "update_available": False})[0] == "Up to date")
+check("a refusal is blamed on the login only when the router said it "
+      "was a rights problem -- a dropped connection is not one",
+      "lacks the rights" in _update_cell(
+          {"update_checked": _now, "update_check_ok": False,
+           "update_check_error": "no permission (write)"})[2]
+      and "lacks the rights" not in _update_cell(
+          {"update_checked": _now, "update_check_ok": False,
+           "update_check_error": "timed out"})[2])
+
+# The real poll, not just the helper above. It closed the router connection
+# and THEN sent the check, so every router answered "not connected to the
+# router" and the Devices page said "Check refused" for the whole fleet --
+# while every test here passed, because they all called the helper on a
+# fake that never disconnects.
+from mikromon.mock import MockDevice, build_frames, demo_config  # noqa: E402
+
+
+class _StrictMock(MockDevice):
+    """Like a real router: takes a command only while connected."""
+    connected = False
+    sent = None
+
+    def connect(self):
+        self.connected = True
+
+    def close(self):
+        self.connected = False
+
+    def run_command_err(self, path, cmd, **params):
+        if not self.connected:
+            return False, "not connected to the router"
+        self.sent = (path, cmd)
+        return True, ""
+
+
+_pd = tempfile.mkdtemp()
+_pcfg = demo_config(outbox_dir=os.path.join(_pd, "out"))
+_pcfg.state_file = os.path.join(_pd, "state.json")
+_pcfg.metrics_db = os.path.join(_pd, "m.db")
+_pcfg.auth_db = _pcfg.devices_db = _pcfg.push_log_db = None
+_pdev = _StrictMock(_pcfg.devices[0], build_frames(incident=False))
+_peng = _E.Engine(_pcfg, devices=[_pdev], notifiers=[])
+_peng._poll_device(_pdev)
+_pfacts = _peng.state.facts(_pdev.name)
+check("a real poll sends the update check while it still holds the router's "
+      "connection, so it is accepted -- not refused as 'not connected'",
+      _pfacts.get("update_check_ok") is True
+      and _pdev.sent == (("system", "package", "update"), "check-for-updates"))
+check("...and the connection is still closed at the end of the poll",
+      not _pdev.connected)
+_peng._pool.shutdown(wait=False)
+if _peng.metrics is not None:
+    _peng.metrics.close()
+
 check("...and the gap between asking and the router answering is its own "
       "state, not a blank -- RouterOS reports the result a minute or two "
       "after the check, so the first poll after midnight often has neither",

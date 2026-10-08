@@ -9,6 +9,7 @@ Run:  ./.venv/Scripts/python.exe tests/push_test.py
 from __future__ import annotations
 
 import os
+import re
 import sys
 import types
 
@@ -182,14 +183,14 @@ check("rollback removed the first add (state restored)",
 # ---- 5. backups: plan + list ----------------------------------------------
 print("backups:")
 api = FakeApi({("file",): [
-    {".id": "*1", "name": "mikromon-20260101.backup", "size": "100",
+    {".id": "*1", "name": "mikromon-20260101-120000.backup", "size": "100",
      "creation-time": "jan/01/2026"},
     {".id": "*2", "name": "flash/skins", "size": "0"},
 ]})
 p = Pusher(cfg, api, dry_run=True)
 backups = p.list_backups()
 check("list_backups filters to backup files only",
-      [b["name"] for b in backups] == ["mikromon-20260101.backup"])
+      [b["name"] for b in backups] == ["mikromon-20260101-120000.backup"])
 plan = p.plan_backup("nightly")
 check("backup plan is a single run op",
       len(plan.ops) == 1 and plan.ops[0].action == "run")
@@ -213,12 +214,12 @@ check("plan_restore passes password even for an unencrypted backup -- "
       "RouterOS rejects the load without it and the restore does nothing",
       r.ops[0].params.get("password") == "")
 # delete = remove the file by its id; missing file = safe empty plan
-d = p.plan_delete_backup("mikromon-20260101.backup")
+d = p.plan_delete_backup("mikromon-20260101-120000.backup")
 check("plan_delete_backup removes the file by id",
       len(d.ops) == 1 and d.ops[0].action == "remove"
       and d.ops[0].params.get(".id") == "*1")
 check("plan_delete_backup on a missing file is an empty (safe) plan",
-      p.plan_delete_backup("nope.backup").empty)
+      p.plan_delete_backup("mikromon-20990101-000000.backup").empty)
 
 print("backups: pruning keeps only the newest 10 across BOTH prefixes:")
 # On-demand ("mikromon-...") and automatic pre-change safety-net
@@ -247,6 +248,265 @@ check("adding one more prunes exactly the 2 oldest managed backups (11+1-10)",
       {op.params[".id"] for op in prune_ops} == {"*1", "*2"})
 check("the user's custom-named backup is never pruned",
       "*12" not in {op.params[".id"] for op in prune_ops})
+
+print("backups: the router's flash never fills with them:")
+from mikromon.push.runner import (KEEP_BACKUPS, KEEP_BACKUPS_SMALL_FLASH,  # noqa: E402
+                                  _bytes)
+
+MB = 1024 * 1024
+
+
+def flash_router(n_ours, total, free, size=100 * 1024, extra=(), sched=()):
+    files = [{".id": f"*{i}", "name": f"before-wan-202601{i:02d}-000000.backup",
+              "size": str(size)} for i in range(1, n_ours + 1)]
+    files += list(extra)
+    return FakeApi({("file",): files,
+                    ("system", "resource"): [{"total-hdd-space": str(total),
+                                              "free-hdd-space": str(free)}],
+                    ("system", "scheduler"): list(sched)})
+
+
+api = flash_router(5, 128 * MB, 60 * MB)
+plan = Pusher(cfg, api, dry_run=True).plan_backup("x")
+check("old backups are deleted BEFORE the new one is saved -- saved first, a "
+      "full router could never write it, and so never clear its own space",
+      [o.action for o in plan.ops][-1] == "run"
+      and all(o.action == "remove" for o in plan.ops[:-1]))
+check("a router with plenty of flash keeps its newest 10",
+      KEEP_BACKUPS == 10 and len(plan.ops) == 1)
+
+api = flash_router(5, 16 * MB, 3 * MB)
+plan = Pusher(cfg, api, dry_run=True).plan_backup("x")
+gone = {o.params[".id"] for o in plan.ops if o.action == "remove"}
+check("a 16 MB router keeps only 2: the newest old one and the new one",
+      KEEP_BACKUPS_SMALL_FLASH == 2 and gone == {"*1", "*2", "*3", "*4"})
+
+# 150 KB free, 100 KB backups, 256 KB to be left over: the oldest three go
+# (150 + 300 >= 100 + 256), not just the one that keeping 10 would drop.
+api = flash_router(10, 128 * MB, 150 * 1024)
+plan = Pusher(cfg, api, dry_run=True).plan_backup("x")
+gone = {o.params[".id"] for o in plan.ops if o.action == "remove"}
+check("short of room, more of the app's own old backups go, oldest first, "
+      "until the new one fits with room to spare",
+      gone == {"*1", "*2", "*3"})
+
+big = [{".id": "*90", "name": "routeros-7.16-arm.npk", "size": str(9 * MB)},
+       {".id": "*91", "name": "my-own.backup", "size": str(400 * 1024)}]
+api = flash_router(1, 16 * MB, 100 * 1024, extra=big)
+try:
+    Pusher(cfg, api, dry_run=True).plan_backup("x")
+    full = ""
+except PushError as exc:
+    full = str(exc)
+check("with no room even after clearing its own, it refuses -- a router "
+      "with a full flash silently stops saving its settings",
+      "Not enough free flash" in full)
+check("...and names what IS taking the space, biggest first, without "
+      "touching it", "routeros-7.16-arm.npk (9.0 MB)" in full
+      and "my-own.backup" in full
+      and api.executed == [])
+
+pending = [{".id": "*s", "name": "mikromon-autorevert",
+            "on-event": '/system backup load name="before-wan-20260101-000000'
+                        '.backup" password=""'}]
+api = flash_router(3, 16 * MB, 3 * MB, sched=pending)
+plan = Pusher(cfg, api, dry_run=True).plan_backup("x")
+gone = {o.params[".id"] for o in plan.ops if o.action == "remove"}
+check("the backup a waiting Safe mode timer would restore is never deleted",
+      "*1" not in gone and "*2" in gone)
+
+api = FakeApi({("file",): [{".id": "*1", "name": "before-a-20260101-000000"
+                                                ".backup", "size": "1"}]})
+plan = Pusher(cfg, api, dry_run=True).plan_backup("x")
+check("a router that does not report its flash is treated as before: "
+      "the newest 10 are kept, nothing refused", len(plan.ops) == 1)
+check("sizes are read whether RouterOS gives bytes or a printed size",
+      _bytes("123456") == 123456 and _bytes("120.5KiB") == 123392
+      and _bytes("1.5MiB") == 1572864 and _bytes("") == -1)
+info = Pusher(cfg, flash_router(0, 16 * MB, 2 * MB), dry_run=True).flash_info()
+check("the Backups tab can show free flash and how many are kept",
+      info == {"total": 16 * MB, "free": 2 * MB, "keep": 2})
+
+from mikromon.web import _render_device_backups  # noqa: E402
+
+_u = {"email": "o@x.test", "login": "o@x.test", "role": "owner",
+      "org_name": "X", "org_id": 1, "is_superadmin": False}
+page = _render_device_backups("R1", _u, {}, "tok", backups=[
+    {"name": "before-wan-20260101-000000.backup", "size": "153600",
+     "time": ""}], flash=info)
+check("the Backups tab says how much flash is free and that only the newest "
+      "2 are kept", "<b>2.0 MB</b> free of 16.0 MB" in page
+      and "newest 2 automatic backups" in page)
+check("...and shows sizes people can read", "150.0 KB" in page)
+page = _render_device_backups("R1", _u, {}, "tok", backups=[],
+                              error="Not enough free flash ...",
+                              error_title="That did not work:")
+check("a refusal from the router is not called 'could not reach the "
+      "router', and the backup list still shows",
+      "Could not reach the router" not in page and "That did not work:" in page
+      and "Restore points on the router" in page)
+
+print("backups: the dashboard only ever deletes files it made itself:")
+from mikromon.push.runner import (auto_backup, labelled_backup_name,  # noqa: E402
+                                  made_by_dashboard)
+
+check("its own files are known by their whole name, in or out of the flash/ "
+      "folder small routers keep files in",
+      made_by_dashboard("before-wan-20261008-101500.backup")
+      and made_by_dashboard("flash/before-port-forward-20261008-101500.backup")
+      and made_by_dashboard("mikromon-20261008-101500.backup")
+      and made_by_dashboard("mikromon-pre-move-20261008-101500.backup"))
+check("...and a file made by hand is not its own, however alike it looks",
+      not made_by_dashboard("before-upgrade.backup")
+      and not made_by_dashboard("mikromon-mine.backup")
+      and not made_by_dashboard("my-site.backup")
+      and not made_by_dashboard("hotspot/before-wan-20261008-101500.backup")
+      and not made_by_dashboard("before-wan-20261008-101500.backup.txt"))
+check("a backup labelled on the Backups tab is named so it is recognisably "
+      "the dashboard's, but is not one of the automatic ones it prunes",
+      labelled_backup_name("pre move!", __import__("datetime").datetime(
+          2026, 10, 8, 10, 15)) == "mikromon-pre-move-20261008-101500"
+      and not auto_backup("mikromon-pre-move-20261008-101500.backup"))
+
+hand = [{".id": "*h1", "name": "before-upgrade.backup", "size": "100"},
+        {".id": "*h2", "name": "mikromon-mine.backup", "size": "100"},
+        {".id": "*h3", "name": "mikromon-pre-move-20250101-000000.backup",
+         "size": "100"}]
+api = flash_router(4, 16 * MB, 3 * MB, extra=hand)
+gone = {o.params[".id"] for o in
+        Pusher(cfg, api, dry_run=True).plan_backup("x").ops
+        if o.action == "remove"}
+check("pruning never touches a hand-made look-alike, nor a labelled backup",
+      not gone & {"*h1", "*h2", "*h3"} and gone == {"*1", "*2", "*3"})
+
+flash_files = [{".id": f"*f{i}", "size": "100",
+                "name": f"flash/before-wan-202601{i:02d}-000000.backup"}
+               for i in range(1, 5)]
+api = FakeApi({("file",): flash_files,
+               ("system", "resource"): [{"total-hdd-space": str(16 * MB),
+                                         "free-hdd-space": str(3 * MB)}]})
+gone = {o.params[".id"] for o in
+        Pusher(cfg, api, dry_run=True).plan_backup("x").ops
+        if o.action == "remove"}
+check("backups RouterOS saved in its flash/ folder are pruned too -- matched "
+      "by prefix before, they never were, and piled up until the flash was "
+      "full", gone == {"*f1", "*f2", "*f3"})
+
+p = Pusher(cfg, FakeApi({("file",): [{".id": "*1", "name": "site.backup"}]}),
+           dry_run=True)
+try:
+    p.plan_delete_backup("site.backup")
+    refused = ""
+except PushError as exc:
+    refused = str(exc)
+check("deleting a file the dashboard did not make is refused, with where to "
+      "do it instead", "not made by the dashboard" in refused
+      and "Winbox" in refused)
+
+check("Safe mode finds the backup where RouterOS saved it, so its revert "
+      "loads a file that exists",
+      Pusher(cfg, FakeApi({("file",): [
+          {"name": "flash/before-wan-20261008-101500.backup"}]}),
+          dry_run=True).find_backup("before-wan-20261008-101500")
+      == "flash/before-wan-20261008-101500.backup"
+      and Pusher(cfg, FakeApi({("file",): [
+          {"name": "before-wan-20261008-101500.backup"}]}),
+          dry_run=True).find_backup("before-wan-20261008-101500")
+      == "before-wan-20261008-101500.backup")
+
+print("backups: checking for space to free:")
+files = [
+    {".id": "*1", "name": "flash/before-wan-20261001-090000.backup",
+     "size": str(90 * 1024)},
+    {".id": "*2", "name": "flash/before-dns-20261005-090000.backup",
+     "size": str(95 * 1024)},
+    {".id": "*3", "name": "flash/before-wan-20261008-090000.backup",
+     "size": str(96 * 1024)},
+    {".id": "*4", "name": "flash/mikromon-handover-20260901-100000.backup",
+     "size": str(93 * 1024)},
+    {".id": "*5", "name": "flash/routeros-7.16.2-mipsbe.npk",
+     "size": str(11 * MB)},
+    {".id": "*6", "name": "flash/autosupout.rif", "size": str(600 * 1024)},
+    {".id": "*7", "name": "flash/log.0.txt", "size": str(60 * 1024)},
+    {".id": "*8", "name": "flash/site-before-move.backup",
+     "size": str(94 * 1024)},
+    {".id": "*9", "name": "flash", "type": "directory", "size": "0"},
+    {".id": "*10", "name": "flash/hotspot", "type": "directory"},
+]
+pending = [{".id": "*s", "name": "mikromon-autorevert",
+            "on-event": '/system backup load name="flash/before-dns-'
+                        '20261005-090000.backup" password=""'}]
+api = FakeApi({("file",): [dict(f) for f in files],
+               ("system", "resource"): [{"total-hdd-space": str(16 * MB),
+                                         "free-hdd-space": "0"}],
+               ("system", "scheduler"): pending,
+               ("system", "logging", "action"): [
+                   {"name": "memory", "target": "memory"},
+                   {"name": "disk", "target": "disk"}],
+               ("system", "logging"): [
+                   {"topics": "info", "action": "memory"},
+                   {"topics": "critical", "action": "disk"}]})
+rep = Pusher(cfg, api, dry_run=True).space_report()
+by = {i["name"]: i for i in rep["ours"]}
+check("the dashboard's own files are listed, newest first",
+      [i["name"] for i in rep["ours"]] == [
+          "flash/before-wan-20261008-090000.backup",
+          "flash/before-dns-20261005-090000.backup",
+          "flash/before-wan-20261001-090000.backup",
+          "flash/mikromon-handover-20260901-100000.backup"])
+check("old automatic backups come ticked; the newest one does not (it is "
+      "the way back from the last change), nor a labelled one",
+      by["flash/before-wan-20261001-090000.backup"]["tick"]
+      and not by["flash/before-wan-20261008-090000.backup"]["tick"]
+      and not by["flash/mikromon-handover-20260901-100000.backup"]["tick"])
+check("the backup a waiting Safe mode timer would restore is locked",
+      by["flash/before-dns-20261005-090000.backup"]["locked"]
+      and not by["flash/before-dns-20261005-090000.backup"]["tick"])
+others = [o["name"] for o in rep["others"]]
+check("everything else is listed biggest first, folders left out, for "
+      "removing in Winbox",
+      others[:2] == ["flash/routeros-7.16.2-mipsbe.npk",
+                     "flash/autosupout.rif"]
+      and "flash/site-before-move.backup" in others
+      and "flash/hotspot" not in others and rep["others_count"] == 4)
+check("...each with what it probably is",
+      "installed at the next reboot" in rep["others"][0]["what"]
+      and "support case" in rep["others"][1]["what"])
+check("logging to disk is spotted, as the usual reason a flash refills",
+      rep["disk_logging"] == ["disk"])
+
+plan = Pusher(cfg, api, dry_run=True).plan_free_space([
+    "flash/before-wan-20261001-090000.backup",       # ours, old: goes
+    "flash/before-dns-20261005-090000.backup",       # locked: stays
+    "flash/routeros-7.16.2-mipsbe.npk",              # not ours: stays
+    "flash/site-before-move.backup",                 # not ours: stays
+    "../../etc/passwd"])                             # nonsense: ignored
+check("deleting deletes only the dashboard's own, unlocked files -- whatever "
+      "the form sent", [o.params[".id"] for o in plan.ops] == ["*1"])
+
+page = _render_device_backups("R1", _u, {}, "tok", backups=[
+    {"name": "flash/before-wan-20261008-090000.backup", "size": "1", "time": ""},
+    {"name": "flash/site-before-move.backup", "size": "1", "time": ""},
+    {"name": "export.rsc", "size": "1", "time": ""}], flash=info, space=rep)
+check("on the page, only the dashboard's files get a Delete button",
+      page.count('value="delete"') == 1
+      and "Not made by the dashboard" in page)
+check("...and an .rsc export is not offered a Restore that could never work",
+      page.count('value="restore"') == 2)
+boxes = re.findall(r'<input type="checkbox"[^>]*>', page)
+check("the space check shows ticked checkboxes for the dashboard's old "
+      "backups, a locked one disabled, and the rest with no checkbox at all",
+      len(boxes) == 4 and sum(" checked" in b for b in boxes) == 1
+      and sum(" disabled" in b for b in boxes) == 1
+      and 'value="flash/routeros-7.16.2-mipsbe.npk"' not in page
+      and "routeros-7.16.2-mipsbe.npk" in page)
+check("...and how to stop disk logging refilling the flash",
+      "/system logging set [find action=disk] action=memory" in page)
+page = _render_device_backups("R1", _u, {}, "tok", backups=[], flash=info)
+check("before the check runs, the box offers the button and says what it "
+      "will and will not delete",
+      "Check for space to free" in page and "never deletes a file it did "
+      "not make" in page)
 
 # ---- 5b. commit-confirm auto-revert (safe mode) ---------------------------
 print("commit-confirm auto-revert:")

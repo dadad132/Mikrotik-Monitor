@@ -120,7 +120,8 @@ _FEATURES = [
      "within two minutes."),
     ("archive", "Automated router backups",
      "One-click backups saved on the router's own flash, plus an automatic "
-     "one before every change. The last 10 are kept; backups you made "
+     "one before every change. The newest 10 are kept (2 on small 16 MB "
+     "routers, so backups never fill their flash); backups you made "
      "yourself are never touched."),
     ("monitor", "Remote WebFig & Winbox",
      "Open WebFig or Winbox through the encrypted tunnel with one click, even "

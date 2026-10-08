@@ -569,7 +569,6 @@ class Engine:
                 check.run(snap, cfg, ctx)
             except Exception:  # noqa: BLE001
                 log.exception("%s: check '%s' failed", cfg.name, check.name)
-        device.close()
 
         if snap.errors:
             log.debug("%s: datasets unavailable: %s", cfg.name, snap.errors)
@@ -578,7 +577,15 @@ class Engine:
         # can be slow, so everything worth recording is already flushed before
         # it runs. Its result lands in /system/package/update and is picked up
         # by a later poll -- nothing here waits for an answer.
-        self._maybe_check_updates(device, cfg, ctx.now)
+        #
+        # But BEFORE the connection is closed: the check is a command sent
+        # over this same API session. It used to run after close(), with no
+        # session left to send it on, so every router in the fleet answered
+        # "not connected to the router" and showed "Check refused".
+        try:
+            self._maybe_check_updates(device, cfg, ctx.now)
+        finally:
+            device.close()
         return ctx.alerts
 
     # ----- dispatch ---------------------------------------------------------

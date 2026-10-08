@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import datetime
 import logging
+import re
 
 from .api import PushError
 from .plan import Operation, Plan
@@ -68,6 +69,138 @@ def rw_device(cfg):
     return Device(c)
 
 
+# ---- the router's flash ----------------------------------------------------
+# The 16 MB models (hAP lite, hAP ac lite, hEX lite, mAP lite, the older
+# RB750/RB951) often have only 1-3 MB free on RouterOS 7, and ten backups can
+# fill that. On those the app keeps just two of its own.
+SMALL_FLASH_BYTES = 64 * 1024 * 1024
+KEEP_BACKUPS = 10
+KEEP_BACKUPS_SMALL_FLASH = 2
+# Free flash that must be left after a backup is saved. A router with none
+# accepts configuration changes and silently fails to save them, so they are
+# gone at its next reboot -- much worse than one backup fewer.
+FLASH_RESERVE_BYTES = 256 * 1024
+# The size assumed for a backup when the router has none to go by.
+_GUESS_BACKUP_BYTES = 128 * 1024
+
+_UNITS = {"": 1, "b": 1, "kib": 1024, "kb": 1000, "mib": 1024 ** 2,
+          "mb": 1000 ** 2, "gib": 1024 ** 3, "gb": 1000 ** 3}
+
+
+def keep_for(total_flash: int) -> int:
+    """How many of the app's own backups a router with this much flash
+    keeps."""
+    return (KEEP_BACKUPS_SMALL_FLASH if 0 < total_flash <= SMALL_FLASH_BYTES
+            else KEEP_BACKUPS)
+
+
+def _bytes(v) -> int:
+    """A RouterOS size -- "123456" over the API, "120.5KiB" as printed --
+    in bytes; -1 when it cannot be read."""
+    if isinstance(v, (int, float)):
+        return int(v)
+    m = re.match(r"^\s*([0-9.]+)\s*([A-Za-z]*)\s*$", str(v or ""))
+    if not m:
+        return -1
+    unit = _UNITS.get(m.group(2).lower())
+    try:
+        return int(float(m.group(1)) * unit) if unit else -1
+    except ValueError:
+        return -1
+
+
+def _human(n: int) -> str:
+    for unit, size in (("MB", 1024 ** 2), ("KB", 1024)):
+        if n >= size:
+            return f"{n / size:.1f} {unit}"
+    return f"{max(n, 0)} bytes"
+
+
+def _flash_full_message(files, free: int, need: int) -> str:
+    """Why the backup was refused, and what is taking the space."""
+    others = sorted(
+        [f for f in files
+         if not made_by_dashboard(f.get("name"))
+         and _bytes(f.get("size")) > 0
+         and str(f.get("type", "")) != "directory"],
+        key=lambda f: _bytes(f.get("size")), reverse=True)[:3]
+    big = ", ".join(f"{f['name']} ({_human(_bytes(f.get('size')))})"
+                    for f in others)
+    return (f"Not enough free flash on the router for a safety backup: "
+            f"{_human(max(free, 0))} free, and it needs about {_human(need)} "
+            f"(the backup plus room for RouterOS to save its own settings). "
+            f"The dashboard's own older backups are already cleared. "
+            + (f"Largest other files: {big}. " if big else "")
+            + "Remove what is not needed in Winbox → Files (old backups, "
+              ".npk packages, downloads), or set /system logging to memory "
+              "if log files are filling it, then try again. Check for space "
+              "to free on the Backups tab lists them all.")
+
+
+# ---- which files the dashboard made ----------------------------------------
+# The dashboard deletes only files it made itself, and knows them by the names
+# it gives them: an automatic backup is before-<feature>-<date>-<time> or
+# mikromon-<date>-<time>; one labelled on the Backups tab is
+# mikromon-<label>-<date>-<time>. Anything else on a router was put there
+# some other way -- by hand in Winbox, by a script, by RouterOS itself -- and
+# is never deleted, automatically or from the page, however alike it looks.
+_AUTO_BACKUP_RE = re.compile(
+    r"^(?:before-[A-Za-z0-9_.-]+?|mikromon)-\d{8}-\d{6}\.backup$")
+_LABELLED_BACKUP_RE = re.compile(
+    r"^mikromon-[A-Za-z0-9_.-]+-\d{8}-\d{6}\.backup$")
+
+
+def _top_name(name) -> str:
+    """The file's name without RouterOS's "flash/" folder, where small
+    routers keep the files that must survive a reboot; "" for a file deeper
+    in any folder (hotspot pages, user-manager data and the like)."""
+    name = str(name or "")
+    if name.startswith("flash/"):
+        name = name[len("flash/"):]
+    return "" if "/" in name else name
+
+
+def made_by_dashboard(name) -> bool:
+    """Is this one of the dashboard's own files -- the only kind it will
+    ever delete?"""
+    base = _top_name(name)
+    return bool(base and (_AUTO_BACKUP_RE.match(base)
+                          or _LABELLED_BACKUP_RE.match(base)))
+
+
+def auto_backup(name) -> bool:
+    """One of the dashboard's automatic backups: the pool it prunes on its
+    own. A labelled one stays until somebody deletes it."""
+    base = _top_name(name)
+    return bool(base and _AUTO_BACKUP_RE.match(base))
+
+
+def labelled_backup_name(label: str, now=None) -> str:
+    """mikromon-<label>-<date>-<time>: a backup labelled on the Backups tab,
+    named so the dashboard can tell later that it is its own."""
+    clean = re.sub(r"[^A-Za-z0-9_-]+", "-", str(label or "")).strip("-_")[:40]
+    stamp = (now or datetime.datetime.now()).strftime("%Y%m%d-%H%M%S")
+    return f"mikromon-{clean}-{stamp}" if clean else f"mikromon-{stamp}"
+
+
+def _what_is(name: str) -> str:
+    """A plain description of a file the dashboard did not make."""
+    base = str(name).rsplit("/", 1)[-1].lower()
+    if base.endswith(".npk"):
+        return ("RouterOS package. Left in storage, a package is installed at "
+                "the next reboot.")
+    if base.endswith(".rif"):
+        return ("Support file (supout). Only needed for a MikroTik support "
+                "case.")
+    if re.match(r"^[\w.-]*log[\w-]*\.\d+\.txt$", base):
+        return "Log file: /system logging is writing to disk."
+    if base.endswith(".backup"):
+        return "Backup made outside the dashboard."
+    if base.endswith(".rsc"):
+        return "Export or script file."
+    return ""
+
+
 class Pusher:
     def __init__(self, cfg, api, dry_run: bool = True, audit=None, user=""):
         self.cfg = cfg
@@ -89,7 +222,22 @@ class Pusher:
         out.sort(key=lambda x: x.get("time", ""), reverse=True)
         return out
 
-    def plan_backup(self, name: str | None = None, keep: int = 10) -> Plan:
+    def plan_backup(self, name: str | None = None,
+                    keep: int | None = None) -> Plan:
+        """Save a .backup on the router's flash, making room for it first.
+
+        Backups live on flash, not in RAM, because they have to outlive a
+        reboot: Safe mode's timer is stored in the router's config and loads
+        this file after a change has cut the router off -- and if a power cut
+        comes first, a copy in RAM would be gone and the revert with it.
+
+        Flash is small on some routers, though, so the app's own old backups
+        are deleted BEFORE the new one is written (written first, a full
+        router could never save it, and so never clear its own space), only
+        a couple are kept on small-flash models, and the save is refused if
+        it would leave RouterOS too little room to save its own settings.
+        `keep` overrides how many of the app's backups to keep in all.
+        """
         name = name or ("mikromon-" +
                         datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
         # dont-encrypt=yes so the restore (load) works without a password prompt
@@ -98,19 +246,17 @@ class Pusher:
         op = Operation("run", ("system", "backup"),
                        {"_cmd": "save", "name": name, "dont-encrypt": "yes"},
                        desc=f"create backup '{name}.backup' on the router")
-        # Prune old server-created backups in the same plan so the router never
-        # accumulates more than `keep` mikromon backups.  We delete `keep-1`
-        # from the current list because one new backup is about to be added.
-        return Plan(self.cfg.name, [op] + self._prune_backup_ops(keep - 1),
+        # keep-1 of the existing ones survive: the new one makes it `keep`.
+        return Plan(self.cfg.name, self._prune_backup_ops(keep) + [op],
                     summary="backup")
 
-    # Prefixes for backups THIS app creates: on-demand ones from the Backups
-    # tab ("mikromon-YYYYMMDD-HHMMSS") and the automatic pre-change safety net
-    # ("before-<feature>-YYYYMMDD-HHMMSS", written by _device_push_post before
-    # every committed config change). Both are pruned from the SAME pool of
-    # `keep` so the router never accumulates more than that many regardless of
-    # which one made them.
-    _MANAGED_PREFIXES = ("mikromon-", "before-")
+    # Backups THIS app creates automatically -- on-demand ones from the
+    # Backups tab ("mikromon-YYYYMMDD-HHMMSS") and the pre-change safety net
+    # ("before-<feature>-YYYYMMDD-HHMMSS", written before every committed
+    # config change) -- are pruned from the SAME pool of `keep`, so the router
+    # never accumulates more than that many whichever made them. They are
+    # recognised by their whole name (auto_backup), not a prefix: a file
+    # somebody called "before-upgrade.backup" by hand is not ours to delete.
 
     @staticmethod
     def _backup_ts_key(fname: str) -> str:
@@ -118,31 +264,178 @@ class Pusher:
         by it (rather than the whole name) interleaves the two prefixes in
         true chronological order instead of grouping alphabetically by
         prefix ("before-..." < "mikromon-..." for every timestamp)."""
+        fname = _top_name(fname) or fname
         stem = fname[:-len(".backup")] if fname.endswith(".backup") else fname
         parts = stem.split("-")
         return "-".join(parts[-2:]) if len(parts) >= 2 else stem
 
-    def _prune_backup_ops(self, keep: int) -> list:
-        """Return remove ops for mikromon-created backups beyond the newest
-        `keep`, across every prefix this app creates (see _MANAGED_PREFIXES).
-        Backups the user created manually under any other name are never
-        touched."""
+    def _prune_backup_ops(self, keep: int | None = None) -> list:
+        """Remove ops for the app's own backups (see _MANAGED_PREFIXES) so
+        that, with the one about to be saved, `keep` remain -- fewer if the
+        flash needs the room. Backups somebody named themselves are never
+        touched, nor the one a pending Safe mode timer would restore.
+
+        Raises PushError when even with all of the app's old backups gone
+        the new one would leave less than FLASH_RESERVE_BYTES free."""
         try:
             all_files = self.api.fetch(("file",))
         except Exception:
-            return []
+            return []      # a preview with no router: nothing to measure
+        try:
+            res = (self.api.fetch(("system", "resource")) or [{}])[0]
+        except Exception:
+            res = {}
+        total = _bytes(res.get("total-hdd-space"))
+        free = _bytes(res.get("free-hdd-space"))
+        if keep is None:
+            keep = keep_for(total)
         managed = sorted(
-            [r for r in all_files
-             if str(r.get("name", "")).startswith(self._MANAGED_PREFIXES)
-             and str(r.get("name", "")).endswith(".backup")],
+            [r for r in all_files if auto_backup(r.get("name"))],
             key=lambda r: self._backup_ts_key(str(r.get("name", ""))),
             reverse=True,  # newest first
         )
+        protected = self._pending_revert_backups()
+        survivors = managed[:max(0, keep - 1)]
+        doomed = [r for r in managed[max(0, keep - 1):]
+                  if _top_name(r.get("name")) not in protected]
+        if res and free >= 0:
+            # The new backup will be about as big as the last one was.
+            sizes = [_bytes(r.get("size")) for r in managed or all_files
+                     if str(r.get("name", "")).endswith(".backup")]
+            need = max([s for s in sizes if s > 0][:1] or
+                       [_GUESS_BACKUP_BYTES]) + FLASH_RESERVE_BYTES
+            room = free + sum(max(0, _bytes(r.get("size"))) for r in doomed)
+            # Short of room: give up the oldest survivors too, one at a time.
+            for r in reversed(survivors):
+                if room >= need:
+                    break
+                if _top_name(r.get("name")) in protected:
+                    continue
+                doomed.append(r)
+                room += max(0, _bytes(r.get("size")))
+            if room < need:
+                raise PushError(_flash_full_message(all_files, free, need))
         return [
             Operation("remove", ("file",), {".id": r[".id"]},
                       desc=f"prune old backup '{r['name']}'")
-            for r in managed[keep:] if r.get(".id")
+            for r in doomed if r.get(".id")
         ]
+
+    def flash_info(self) -> dict:
+        """{"free", "total", "keep"} for the Backups tab; {} if unknown."""
+        try:
+            res = (self.api.fetch(("system", "resource")) or [{}])[0]
+        except Exception:
+            return {}
+        total = _bytes(res.get("total-hdd-space"))
+        if total <= 0:
+            return {}
+        return {"total": total, "free": _bytes(res.get("free-hdd-space")),
+                "keep": keep_for(total)}
+
+    def _pending_revert_backups(self) -> set:
+        """Backup files a waiting Safe mode timer would restore, by name
+        without the flash/ folder (a timer may name either form)."""
+        try:
+            scheds = self.api.fetch(("system", "scheduler"))
+        except Exception:
+            return set()
+        out = set()
+        for s in scheds:
+            if s.get("name") == _REVERT_SCHED:
+                out.update(_top_name(n) or n for n in re.findall(
+                    r'backup load name="([^"]+)"', str(s.get("on-event") or "")))
+        return out
+
+    def find_backup(self, stem: str) -> str:
+        """The name RouterOS actually saved backup `stem` under -- a small
+        router puts it in its flash/ folder -- or "" when it cannot be seen.
+        Safe mode loads the file by this name: given the bare one on such a
+        router, the load would find nothing and the revert would not happen."""
+        want = stem if stem.endswith(".backup") else stem + ".backup"
+        try:
+            names = [str(f.get("name", "")) for f in self.api.fetch(("file",))]
+        except Exception:
+            return ""
+        if want in names:
+            return want
+        return next((n for n in names if n == "flash/" + want), "")
+
+    # ----- what is using the flash, and freeing it ---------------------------
+    def space_report(self, others_shown: int = 15) -> dict:
+        """What is using the router's storage, for the Backups tab.
+
+        "ours": the dashboard's own files, each marked whether it is ticked
+        for deletion by default (old automatic backups), locked (a pending
+        Safe mode timer would restore it) or kept by default (the newest
+        automatic backup, or one somebody labelled). "others": everything
+        else, biggest first, with what it probably is -- shown so it can be
+        removed in Winbox, never deleted from here.
+        """
+        files = self.api.fetch(("file",))
+        protected = self._pending_revert_backups()
+        ours = sorted([r for r in files if made_by_dashboard(r.get("name"))],
+                      key=lambda r: self._backup_ts_key(str(r.get("name"))),
+                      reverse=True)
+        newest = next((r["name"] for r in ours if auto_backup(r["name"])), "")
+        items = []
+        for r in ours:
+            name = str(r["name"])
+            locked = _top_name(name) in protected
+            labelled = not auto_backup(name)
+            note = ("Safe mode may still need it to undo a change"
+                    if locked else
+                    "The newest automatic backup: the way back from the "
+                    "last change" if name == newest else
+                    "Labelled on the Backups tab" if labelled else "")
+            items.append({"name": name, "size": _bytes(r.get("size")),
+                          "time": str(r.get("creation-time")
+                                      or r.get("last-modified") or ""),
+                          "locked": locked,
+                          "tick": not (locked or labelled or name == newest),
+                          "note": note})
+        others = []
+        for r in files:
+            name = str(r.get("name", ""))
+            size = _bytes(r.get("size"))
+            if (made_by_dashboard(name) or size <= 0
+                    or str(r.get("type", "")) == "directory"):
+                continue
+            others.append({"name": name, "size": size, "what": _what_is(name)})
+        others.sort(key=lambda o: o["size"], reverse=True)
+        return {"ours": items, "others": others[:others_shown],
+                "others_count": len(others),
+                "others_total": sum(o["size"] for o in others),
+                "flash": self.flash_info(),
+                "disk_logging": self._disk_logging()}
+
+    def _disk_logging(self) -> list:
+        """Logging actions that write to disk and are in use: the usual way
+        a router's flash fills up by itself."""
+        try:
+            actions = self.api.fetch(("system", "logging", "action"))
+            rules = self.api.fetch(("system", "logging"))
+        except Exception:
+            return []
+        disk = {a.get("name") for a in actions if a.get("target") == "disk"}
+        return sorted({str(r.get("action")) for r in rules
+                       if r.get("action") in disk
+                       and str(r.get("disabled", "")).lower()
+                       not in ("true", "yes")})
+
+    def plan_free_space(self, names) -> Plan:
+        """Delete the chosen files -- but only ever the dashboard's own, and
+        never the backup a pending Safe mode timer would restore. A name
+        that is neither is skipped, whatever the form sent."""
+        want = {str(n) for n in names}
+        protected = self._pending_revert_backups()
+        ops = [Operation("remove", ("file",), {".id": r[".id"]},
+                         desc=f"delete '{r['name']}' to free space")
+               for r in self.api.fetch(("file",))
+               if r.get("name") in want and r.get(".id")
+               and made_by_dashboard(r.get("name"))
+               and _top_name(r.get("name")) not in protected]
+        return Plan(self.cfg.name, ops, summary="free space")
 
     def plan_tempuser(self, *, username: str, password: str,
                       group: str = "read", allowed_ip: str = "",
@@ -199,7 +492,13 @@ class Pusher:
         return Plan(self.cfg.name, [op], summary=f"restore {name}")
 
     def plan_delete_backup(self, name: str) -> Plan:
-        """Delete a backup file from the router by its name."""
+        """Delete a backup file from the router by its name -- only ever one
+        the dashboard made itself."""
+        if not made_by_dashboard(name):
+            raise PushError(
+                f"'{name}' was not made by the dashboard, so it will not "
+                f"delete it. If it is no longer needed, remove it in Winbox → "
+                f"Files.")
         fid = next((r.get(".id") for r in self.api.fetch(("file",))
                     if str(r.get("name", "")) == name), None)
         if fid is None:

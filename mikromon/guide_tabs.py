@@ -323,18 +323,30 @@ TABS = [
              "shown here; leave its box blank to keep the current key."},
 
     {"slug": "backups", "title": "Backups", "art": None,
-     "what": "Configuration backups of the router. One is taken automatically "
-             "before every change you apply, so there is always a way back "
-             "that you did not have to remember to make.",
-     "steps": ["Take a backup by hand at any time with the button.",
-               "Download one to keep a copy off the router.",
+     "what": "Configuration backups of the router, kept on its own flash. One "
+             "is taken automatically before every change you apply, so there "
+             "is always a way back that you did not have to remember to make.",
+     "steps": ["Take a backup by hand at any time with the button. Give it "
+               "a label if you like: it is saved as "
+               "<code>mikromon-&lt;label&gt;-&lt;time&gt;</code> and kept "
+               "until you delete it.",
                "Automatic ones are named "
                "<code>before-&lt;feature&gt;-&lt;time&gt;</code>, so you can "
                "find the snapshot from just before a change went wrong.",
-               "Once you are happy a change is good, delete its snapshot to "
-               "keep the list readable."],
-     "warn": "Restoring reboots the router, so the site drops for a minute "
-             "or two."},
+               "The dashboard keeps its newest 10 automatic backups (2 on "
+               "routers with 16 MB of flash) and deletes older ones before "
+               "saving a new one. The tab shows how much flash is free.",
+               "<b>Check for space to free</b> lists everything using the "
+               "router's storage. The dashboard's own old backups come "
+               "ticked, to delete in one go; everything else (upgrade "
+               "packages, support files, logs, backups made in Winbox) is "
+               "listed with what it is, for you to remove in Winbox → Files.",
+               "To keep a copy off the router, download it in Winbox → "
+               "Files."],
+     "warn": "The dashboard only ever deletes files it made itself, named "
+             "before-… or mikromon-… with a date and time. Anything put on "
+             "the router another way is never deleted from here. Restoring "
+             "reboots the router, so the site drops for a minute or two."},
 
     {"slug": "tempaccess", "title": "Temp Access", "art": None,
      "what": "A time-limited window for someone else to reach the router "
