@@ -1373,6 +1373,23 @@ class BillingStore:
                          device_limit=FREE_DEVICES, suspended_since=None,
                          funds_hold_until=None, dormant_warned=None)
 
+    def delete_org(self, org_id: int) -> int:
+        """Forget a deleted company's billing: its status, its quote
+        requests and any invoice it never paid. Paid orders stay -- they
+        are the record of money received. Returns how many paid stayed."""
+        org_id = int(org_id)
+        with self._lock:
+            self.db.execute("DELETE FROM billing WHERE org_id = ?", (org_id,))
+            self.db.execute("DELETE FROM quote_requests WHERE org_id = ?",
+                            (org_id,))
+            self.db.execute("DELETE FROM orders WHERE org_id = ? "
+                            "AND status != 'paid'", (org_id,))
+            kept = self.db.execute(
+                "SELECT COUNT(*) FROM orders WHERE org_id = ?",
+                (org_id,)).fetchone()[0]
+            self.db.commit()
+        return int(kept)
+
     def is_suspended(self, org_id: int) -> bool:
         return (self.get(org_id) or {}).get("status") == "suspended"
 

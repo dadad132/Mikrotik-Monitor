@@ -39,7 +39,17 @@ TABS = [
                "Open the router in Winbox or WebFig, go to <b>New Terminal</b>, "
                "paste it and press Enter.",
                "Wait about a minute, then click <b>Test connection</b> here. "
-               "It should go green."],
+               "It should go green.",
+               "<b>A router another company already connected?</b> The script "
+               "checks first. It leaves their connection and their login "
+               "exactly as they are, adds your own login, and shares the "
+               "connection. They get an email naming your company, and "
+               "neither of you can remove the other's login or the "
+               "connection. If they remove the router from their account, "
+               "the connection passes to yours. Both of you can then change "
+               "its settings, so agree who changes what &mdash; and for "
+               "someone who only needs to watch a router, use "
+               "<b>Share</b> instead."],
      "warn": "If the test fails, the usual cause is the paste being cut short. "
              "Paste it again in one go — a half-run script leaves the router "
              "with a login but no tunnel."},

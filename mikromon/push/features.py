@@ -3437,17 +3437,26 @@ TAB_SLUGS = {"Routes": "routes", "WAN": "wan", "Security": "security",
 # device is deleted from the dashboard so the router stops dialling home.
 # ===========================================================================
 
-def device_offboard(api, cfg):
+def device_offboard(api, cfg, keep_tunnel: bool = False):
     """Remove the hub WireGuard tunnel and monitoring user from the router.
 
     Called automatically when a device is deleted from the dashboard.
     Each step is independent — one failure does not abort the rest.
     Returns a list of step dicts: {"level": "ok"|"warn"|"error", "msg": str}
+
+    `keep_tunnel`: another company's device still uses this router's
+    connection, so only this company's own login goes. One company must
+    never be able to take another's connection away.
     """
     steps = []
 
     def note(level, msg):
         steps.append({"level": level, "msg": msg})
+
+    if keep_tunnel:
+        note("ok", "Left the router's connection in place: another account's "
+                   "device still uses it")
+        return steps + _offboard_user(api, cfg)
 
     # 1. Hub tunnel WireGuard peer (comment tagged "mikromon:tunnel:")
     try:
@@ -3497,6 +3506,16 @@ def device_offboard(api, cfg):
         note("error", f"Could not remove WireGuard interface: {exc}")
 
     # 4. Monitoring user
+    return steps + _offboard_user(api, cfg)
+
+
+def _offboard_user(api, cfg) -> list:
+    """Remove this device's own monitoring login -- and only that one."""
+    steps = []
+
+    def note(level, msg):
+        steps.append({"level": level, "msg": msg})
+
     username = cfg.username
     if username:
         try:

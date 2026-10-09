@@ -475,6 +475,27 @@ class AuthStore:
             (email,)).fetchall()
         return {r[0]: bool(r[1]) for r in rows}
 
+    def delete_org(self, org_id: int) -> list:
+        """Remove a company and every login in it, and any router shared
+        with those logins. Returns the emails that were removed. Their
+        sessions stop working at once: a session names a login, and the
+        login is gone."""
+        self._ensure_shares()
+        org_id = int(org_id)
+        with self._lock:
+            emails = [r[0] for r in self.db.execute(
+                "SELECT email FROM users WHERE org_id = ? AND email IS NOT NULL",
+                (org_id,)).fetchall()]
+            for e in emails:
+                self.db.execute("DELETE FROM device_shares WHERE email = ?",
+                                (e,))
+            self.db.execute("DELETE FROM device_shares WHERE owner_org = ?",
+                            (org_id,))
+            self.db.execute("DELETE FROM users WHERE org_id = ?", (org_id,))
+            self.db.execute("DELETE FROM orgs WHERE id = ?", (org_id,))
+            self.db.commit()
+        return emails
+
     def drop_shares_for_device(self, device: str) -> int:
         """Forget every share of a router. Called when it is deleted, so a
         name later reused by another company cannot inherit its guests."""
@@ -535,6 +556,12 @@ class AuthStore:
             d["login"] = d["email"] or d["username"]
             out.append(d)
         return out
+
+    def superadmin_emails(self) -> list:
+        """Where platform-level notices go."""
+        return [r[0] for r in self.db.execute(
+            "SELECT email FROM users WHERE is_superadmin = 1 "
+            "AND email IS NOT NULL AND email != ''").fetchall()]
 
     def org_has_superadmin(self, org_id: int) -> bool:
         """Whether a company holds any platform-staff account.

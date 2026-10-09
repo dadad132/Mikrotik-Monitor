@@ -946,8 +946,21 @@ def _build_diagnostics_report(auth, devices_db, state_file, metrics_db,
             if ident:
                 by_identity.setdefault(ident, []).append(dev_name)
         out = []
+        # Two companies on one router on purpose: one rides on the other's
+        # connection (hub "joined"), each with its own login. Not a mistake.
+        try:
+            joined = (_hub_load(_hub_path(devices_db)).get("joined") or {}
+                      if devices_db else {})
+        except Exception:  # noqa: BLE001 - a report must still render
+            joined = {}
         for serial, names in sorted(by_serial.items()):
             if len(names) > 1:
+                owners = {joined.get(n, n) for n in names}
+                if len(owners) == 1:
+                    out.append(f"  shared on purpose, serial {serial}: "
+                               + ", ".join(sorted(names))
+                               + f" (riding on {owners.pop()}'s connection)")
+                    continue
                 out.append(f"  SAME SERIAL {serial}: " + ", ".join(sorted(names)))
         for ident, names in sorted(by_identity.items()):
             if len(names) > 1 and not any(
@@ -3591,6 +3604,89 @@ def _upgrade_email(org_name, plan, amount, currency, days, link,
             f"{plan['label']}", text)
 
 
+def _email_router_shared(auth, smtp_cfg, owner_org, owner_dev, joiner_name,
+                         owner_name, joiner_dev, login, when) -> None:
+    """The emails that say a second company's login is on a router: to the
+    first company's owners and admins (naming the second), and to the
+    platform's superadmins (naming both)."""
+    from email.message import EmailMessage
+
+    from .notify.org_email import _smtp_send, effective_smtp
+    smtp = effective_smtp(auth, smtp_cfg)
+    if not (smtp and getattr(smtp, "host", "")) or auth is None:
+        log.warning("router %s is now shared, but no mail server is set up",
+                    owner_dev)
+        return
+    staff = [u["email"] for u in auth.list_users(owner_org)
+             if u.get("email") and u.get("role") in ("owner", "admin")]
+    if staff:
+        msg = EmailMessage()
+        msg["Subject"] = (f"{smtp.subject_prefix} {joiner_name} added its "
+                          f"login to your router {owner_dev}").strip()
+        msg["From"] = smtp.from_addr
+        msg["To"] = ", ".join(staff)
+        msg.set_content(
+            f"Hello,\n\n"
+            f"{joiner_name} added its {_BRAND} login ({login}) to your router "
+            f"{owner_dev} on {when}.\n\n"
+            f"It shares the router's existing connection. Your own login and "
+            f"your settings were left as they were, and neither account can "
+            f"remove the other's login or the connection.\n\n"
+            f"Someone with full admin access to the router pasted {joiner_name}'s "
+            f"setup script on it. If you did not expect that, check who has "
+            f"admin logins on the router (System > Users) and change those "
+            f"passwords, then remove the login {login}.\n\n"
+            f"Both accounts can now change this router's settings, so a "
+            f"change made by one can overwrite a change made by the other.\n\n"
+            f"{_BRAND}\n")
+        _smtp_send(smtp, msg)
+    admins = auth.superadmin_emails()
+    if admins:
+        msg = EmailMessage()
+        msg["Subject"] = (f"{smtp.subject_prefix} Router shared by two "
+                          f"companies: {owner_dev}").strip()
+        msg["From"] = smtp.from_addr
+        msg["To"] = ", ".join(admins)
+        msg.set_content(
+            f"{joiner_name} added its login ({login}) to a router that "
+            f"{owner_name} already had connected, on {when}.\n\n"
+            f"  {owner_name}: device {owner_dev} (holds the connection)\n"
+            f"  {joiner_name}: device {joiner_dev} (rides on it)\n\n"
+            f"{owner_name} has been told by email.\n")
+        _smtp_send(smtp, msg)
+
+
+def _router_tunnel_pub(api) -> str:
+    """The public key of the router's `mikromon` WireGuard interface, or ""."""
+    try:
+        for w in api.fetch(("interface", "wireguard")):
+            if w.get("name") == "mikromon":
+                return str(w.get("public-key") or "")
+    except Exception:  # noqa: BLE001 - no WireGuard (RouterOS 6) is "none"
+        pass
+    return ""
+
+
+# A device on another account's connection cannot change that connection.
+_RIDING_MSG = ("This router shares another account's connection, which is "
+               "theirs to set up and repair. Your own login on it works as "
+               "normal; if they remove the router from their account, the "
+               "connection passes to yours.")
+
+# Why the automatic setup stops on a router it must not change.
+_CLAIM_REFUSED = {
+    "unknown": ("This router already has a WireGuard connection called "
+                "'mikromon' that this server does not know (another "
+                "EasyMikroTik server's, or one left from a removed router). "
+                "Nothing was changed. Use 'Give me a script to paste', which "
+                "can replace a leftover, or remove it on the router first."),
+    "samelogin": ("This router already has this login, belonging to another "
+                  "account's device on it, so nothing was changed. This "
+                  "device now uses its own login name instead: press Set it "
+                  "up again."),
+}
+
+
 def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
                    period_end, due_days, link, kind="renewal",
                    days=0) -> list:
@@ -3794,7 +3890,99 @@ def _migrate_device_name(hub, old: str, new: str) -> bool:
     if old in meta and new not in meta:
         meta[new] = meta.pop(old)
         moved = True
+    joined = hub.get("joined") or {}
+    if old in joined and new not in joined:
+        joined[new] = joined.pop(old)
+        moved = True
+    for j, o in list(joined.items()):
+        if o == old:
+            joined[j] = new
+            moved = True
+    for tok in (hub.get("prov_tokens") or {}).values():
+        if (tok or {}).get("name") == old:
+            tok["name"] = new
+            moved = True
     return moved
+
+
+# ---- one router, two companies ---------------------------------------------
+# A router has ONE tunnel to this hub, whoever set it up first. A second
+# company that sets the same router up does not get a second tunnel -- two
+# tunnels to one hub on one router send replies out of the wrong one -- and
+# must not replace the first company's: it adds its own login and rides on
+# the tunnel that is there. hub["joined"] records that: {device: the device
+# whose tunnel record it rides on}. A device that rides on another has no
+# lease of its own; its host is the owner's tunnel address.
+
+def _default_login(org_id) -> str:
+    """The login a company's routers get: one per company, so two companies
+    on one router never share -- or reset -- each other's."""
+    return f"mkm-{int(org_id or 0)}"
+
+
+def _tunnel_owner(hub, name) -> str:
+    """The device whose tunnel record `name` uses (itself, if its own)."""
+    return (hub.get("joined") or {}).get(name) or name
+
+
+def _lease_by_pubkey(hub, pub) -> str:
+    """The device holding the tunnel record with this public key, or ""."""
+    if not pub:
+        return ""
+    for n, m in sorted((hub.get("leases_meta") or {}).items()):
+        if (m or {}).get("pubkey") == pub:
+            return n
+    return ""
+
+
+def _join_tunnel(hub, joiner, owner) -> str:
+    """Make `joiner` ride on `owner`'s tunnel. Returns the tunnel address.
+    Whatever record `joiner` had of its own goes: its keys never reached
+    the router, and a second record for one router is how two entries end
+    up fighting over one key."""
+    joined = hub.setdefault("joined", {})
+    joined[joiner] = owner
+    (hub.get("leases") or {}).pop(joiner, None)
+    (hub.get("leases_meta") or {}).pop(joiner, None)
+    for j, o in list(joined.items()):
+        if o == joiner:
+            joined[j] = owner
+    meta = (hub.get("leases_meta") or {}).get(owner) or {}
+    return meta.get("ip") or (hub.get("leases") or {}).get(owner, "")
+
+
+def _release_shared(hub, name) -> bool:
+    """A device is being deleted. Returns True when the router's tunnel must
+    stay, because another device -- usually another company's -- still uses
+    it. If the deleted device held the tunnel record, it passes to the
+    first device riding on it, so that one keeps working."""
+    joined = hub.get("joined") or {}
+    if name in joined:
+        joined.pop(name)
+        return True
+    riders = sorted(j for j, o in joined.items() if o == name)
+    if not riders:
+        return False
+    heir = riders[0]
+    joined.pop(heir)
+    _migrate_device_name(hub, name, heir)
+    return True
+
+
+_PROV_TOKEN_TTL = 7 * 86400
+
+
+def _new_prov_token(hub, name) -> str:
+    """A token for one generated script, so the router can ask this server
+    about the connection it already has. Expires; never names a device."""
+    toks = hub.setdefault("prov_tokens", {})
+    now = time.time()
+    for t, v in list(toks.items()):
+        if float((v or {}).get("expires") or 0) < now:
+            toks.pop(t, None)
+    tok = secrets.token_urlsafe(18)
+    toks[tok] = {"name": name, "expires": now + _PROV_TOKEN_TTL}
+    return tok
 
 
 def _alloc_tunnel_ip(hub, name) -> str:
@@ -4996,15 +5184,73 @@ def _hub_peers_status(peers_path: str) -> dict:
 _WG_TUNNEL_MTU = 1280
 
 
+def _shared_outcome(a, login, join_url) -> None:
+    """What the router says when its connection was not this company's to set
+    up. Inside the decision block, so $mmmode is in scope."""
+    host = join_url.split("/")[2] if join_url.count("/") >= 2 else "the server"
+    a(':if ($mmmode = "joined") do={')
+    a('  :put ""')
+    a('  :put "mikromon: this router was already connected to EasyMikroTik '
+      'through another account."')
+    a('  :put "  This account\'s own login (' + login + ') was added alongside '
+      'it. The existing"')
+    a('  :put "  connection and the other account\'s login were left exactly '
+      'as they were."')
+    a("}")
+    a(':if ($mmmode = "unknown") do={')
+    a('  :put ""')
+    a('  :put "mikromon: STOP - this router has a WireGuard interface called '
+      'mikromon that"')
+    a('  :put "  this server does not know: another EasyMikroTik server\'s, or '
+      'left over from"')
+    a('  :put "  a router removed earlier. Nothing was changed. If it is a '
+      'leftover, remove it"')
+    a('  :put "  (/interface wireguard remove [find name=mikromon]) and paste '
+      'the script again."')
+    a("}")
+    a(':if ($mmmode = "samelogin") do={')
+    a('  :put ""')
+    a('  :put "mikromon: STOP - this router already has a login called '
+      + login + ' that belongs"')
+    a('  :put "  to another account, so nothing was changed. This account '
+      'uses its own"')
+    a('  :put "  login name from now on: generate a new script on the '
+      'Provision page and"')
+    a('  :put "  paste that one."')
+    a("}")
+    a(':if ($mmmode = "expired") do={')
+    a('  :put ""')
+    a('  :put "mikromon: STOP - this script has expired. Generate a new one on '
+      'the Provision page."')
+    a("}")
+    a(':if ($mmmode != "own" && $mmmode != "joined" && $mmmode != "unknown" '
+      '&& $mmmode != "samelogin" && $mmmode != "expired") do={')
+    a('  :put ""')
+    a('  :put "mikromon: STOP - this router already has an EasyMikroTik '
+      'connection, and"')
+    a('  :put "  ' + host + ' could not be asked whose it is, so nothing was '
+      'changed. Check"')
+    a('  :put "  the router can reach the internet (DNS and HTTPS), then paste '
+      'the script again."')
+    a("}")
+
+
 def _provision_script(name, raw, pwuser, pwd, *,
                       hub_ip="", hub_port="51820", hub_pubkey="", wg_priv="",
                       wg_pub="", tunnel_ip="", subnet="", harden=True,
-                      enable_api=True, lock_api=True) -> str:
+                      enable_api=True, lock_api=True, join_url="",
+                      prev_pub="") -> str:
     """A one-paste RouterOS bootstrap script that is SAFE on an already-configured
     router: every step is guarded so it only ADDS what is missing and never
-    resets existing config. The WireGuard dial-home tunnel needs RouterOS 7.1+."""
+    resets existing config. The WireGuard dial-home tunnel needs RouterOS 7.1+.
+
+    It is also safe on a router another company already connected: before
+    touching the tunnel it checks whose it is (`prev_pub` is this device's
+    own previous key; anything else is asked of `join_url`), and on another
+    company's router it only adds this company's own login."""
     u = pwuser
     L = []
+    tunnel = bool(hub_ip and hub_pubkey and wg_priv and tunnel_ip)
 
     def a(s=""):
         L.append(s)
@@ -5024,9 +5270,13 @@ def _provision_script(name, raw, pwuser, pwd, *,
     a("# what is missing and never resets your existing config. The WireGuard")
     a("# tunnel block needs RouterOS 7.1+.")
     a("")
-    a("# 1) the mikromon management user (full access - used for both monitoring")
-    a("#    and config-push; one login keeps things simple)")
-    user_block(u, pwd, "full")
+    if tunnel:
+        a("# 1) the mikromon management login is added in step 5, once it is")
+        a("#    known whose EasyMikroTik connection this router already has")
+    else:
+        a("# 1) the mikromon management user (full access - used for both")
+        a("#    monitoring and config-push; one login keeps things simple)")
+        user_block(u, pwd, "full")
     if enable_api:
         a("")
         a("# 2) make sure the API is reachable for mikromon (idempotent)")
@@ -5076,7 +5326,29 @@ def _provision_script(name, raw, pwuser, pwd, *,
         a('  :put ("mikromon: flash OK, " . $mmfree . " bytes free")')
         a("}")
         a("}")
-        a("# 5) WireGuard dial-home tunnel (RouterOS 7.1+)")
+        a("# 5) Whose EasyMikroTik connection does this router already have?")
+        a("#    None, or this device's own: set it up. Another company's: leave")
+        a("#    it exactly as it is and only add this company's own login.")
+        a("{")
+        a(':local mmmode "own"')
+        a(':local mmpub ""')
+        a(":do { :set mmpub [/interface wireguard get [find name=mikromon] "
+          "public-key] } on-error={}")
+        a(':if ($mmpub != "" && $mmpub != "' + (prev_pub or wg_pub) + '" '
+          '&& $mmpub != "' + wg_pub + '") do={')
+        a('  :put "mikromon: this router already has an EasyMikroTik '
+          'connection - asking whose it is..."')
+        a("  :do {")
+        a('    :local mmr [/tool fetch url="' + join_url + '" http-method=post '
+          'http-header-field=("x-mm-pub: " . $mmpub) output=user as-value]')
+        a('    :set mmmode ($mmr->"data")')
+        a('  } on-error={ :set mmmode "unreachable" }')
+        a("}")
+        a(':if ($mmmode = "own" || $mmmode = "joined") do={')
+        user_block(u, pwd, "full")
+        a("}")
+        a(':if ($mmmode = "own") do={')
+        a("# WireGuard dial-home tunnel (RouterOS 7.1+)")
         a("# Add interface if absent, then always sync settings so re-running")
         a("# this script picks up a new key (generated each time you provision).")
         a(":if ([:len [/interface wireguard find name=mikromon]] = 0) do={")
@@ -5209,7 +5481,8 @@ def _provision_script(name, raw, pwuser, pwd, *,
         a(':put "    Try: /ping ' + hub_ip + ' count=4   and if that works but"')
         a(':put "    the handshake stays blank, it is UDP filtering, not routing."')
         a(':put ""')
-        a("")
+        a("}")
+        a(':if ($mmmode = "own" || $mmmode = "joined") do={')
         a("# 5b) make sure WebFig + Winbox are on, so you can manage this router")
         a("#     remotely over the tunnel (from the dashboard's Remote access)")
         a("/ip service set www disabled=no")
@@ -5273,6 +5546,9 @@ def _provision_script(name, raw, pwuser, pwd, *,
               'changes and saves none."')
             a("}")
             a("}")
+        a("}")
+        _shared_outcome(a, u, join_url)
+        a("}")
     a("")
     a('/log info "mikromon provisioning done"')
     return "\n".join(L)
@@ -5342,15 +5618,15 @@ def _provision_actions(provisioned: bool, online: bool) -> str:
 
 def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
                              creds=None, msg="", error="", provisioned=False,
-                             online=False) -> str:
+                             online=False, login="", shared=False) -> str:
     tabbar = _device_tabbar(name, "provision", True, csrf)
     q = quote(name)
     banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
               f'</div>' if msg else "")
     err = (f'<div class="box" style="border-left:4px solid #dc2626">{esc(error)}'
            f'</div>' if error else "")
-    pwuser = ((raw or {}).get("push_username") or (raw or {}).get("username")
-              or "mkmonitor")
+    pwuser = (login or (raw or {}).get("push_username")
+              or (raw or {}).get("username") or "mkmonitor")
     # This page reads completely differently depending on whether the router
     # has been set up, and it used to look identical either way. Both buttons
     # mint a NEW password and a NEW tunnel key and store them at once -- right
@@ -5375,12 +5651,28 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
                  '<h2 style="margin-top:0">This router is already set up</h2>'
                  '<p>It is <b>' + _state + '</b>. You should not need this '
                  'page again unless it has stopped connecting.</p>'
-                 '<p style="margin-bottom:0"><b>Both buttons below give it a '
-                 'brand-new password and a brand-new key</b>, saved here '
-                 'straight away. The router keeps its old ones until the new '
-                 'setup actually finishes on it &mdash; so pressing a button '
-                 'and not seeing it through is what stops a router '
-                 'connecting.</p></div>')
+                 + ('<p style="margin-bottom:0"><b>Both buttons below give '
+                    'your login on it a brand-new password</b>, saved here '
+                    'straight away; its connection is not touched. Until the '
+                    'new setup finishes on the router, your old password is '
+                    'the one it knows.</p></div>' if shared else
+                    '<p style="margin-bottom:0"><b>Both buttons below give it a '
+                    'brand-new password and a brand-new key</b>, saved here '
+                    'straight away. The router keeps its old ones until the new '
+                    'setup actually finishes on it &mdash; so pressing a button '
+                    'and not seeing it through is what stops a router '
+                    'connecting.</p></div>'))
+    if shared:
+        intro += ('<div class="box" style="border-left:4px solid var(--accent)">'
+                  '<h2 style="margin-top:0">This router is shared with another '
+                  'account</h2><p style="margin-bottom:0">It was already '
+                  'connected to ' + esc(_BRAND) + ' through another account '
+                  'when you added it, so it uses that connection. You have '
+                  'your own login on it (<code>' + esc(pwuser) + '</code>); '
+                  'the connection itself is theirs, so setting this up again '
+                  'only re-creates your login. Neither account can remove the '
+                  "other's. If they remove the router from their account, "
+                  'the connection passes to yours.</p></div>')
     form = (
         f'<div class="box"><h2>Generate provisioning script</h2>'
         f'<form method="POST" action="/device/provision">'
@@ -7883,6 +8175,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             user = auth.get_user(s["login"])
             if user:
                 user["org_name"] = auth.org_name(user.get("org_id"))
+            else:
+                # The login was deleted (its company removed, or taken off
+                # the team) while this session was open. End the session:
+                # left alive, /login saw a session and sent the browser to
+                # /dashboard, which saw no user and sent it back -- for ever.
+                sessions.destroy(self._token())
             return user
 
         def _form(self):
@@ -8612,6 +8910,87 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                      org_id, name or "?", when, user.get("email", "?"))
             return self._redirect("/superadmin?ok=" + quote(
                 f"{name or f'Company {org_id}'} is now paid up to {when}."))
+
+        def _post_superadmin_delete_org(self, user):
+            """Superadmin-only: delete a company for good. Only one that is
+            suspended, has no router that ever reported in, holds no
+            platform admin and is not the superadmin's own -- all checked
+            here, whatever the page offered. Its logins, its devices that
+            never connected, its Personal VPN peers and its billing status
+            go; paid invoices stay as the record of money received."""
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            try:
+                org_id = int(flat.get("org_id", "0"))
+            except (ValueError, TypeError):
+                org_id = 0
+            name = (auth.org_name(org_id) if auth and org_id else "") or ""
+
+            def refuse(why):
+                return self._redirect("/superadmin?error=" + quote(why))
+
+            if not org_id or not name:
+                return refuse("Unknown company.")
+            if org_id == user.get("org_id") or auth.org_has_superadmin(org_id):
+                return refuse("That company holds a platform admin account "
+                              "and cannot be deleted.")
+            if billing is None or not billing.is_suspended(org_id):
+                return refuse(f"{name} is not suspended. Only a suspended "
+                              f"company can be deleted.")
+            ds = self._devstore()
+            try:
+                names = list(ds.names_for_org(org_id)) if ds else []
+                ms = self._store()
+                try:
+                    known = set(_known_devices(ms, _load_state(state_file)))
+                finally:
+                    if ms:
+                        ms.close()
+                active = [n for n in names if n in known]
+                if active:
+                    return refuse(
+                        f"{name} still has {len(active)} device(s) that have "
+                        f"reported in ({', '.join(sorted(active)[:3])}). "
+                        f"Only a company with no active devices can be "
+                        f"deleted.")
+                for n in names:
+                    self._shared_release(n)
+                    ds.delete(n)
+                    self._purge_device_data(n)
+                    auth.drop_shares_for_device(n)
+            finally:
+                if ds:
+                    ds.close()
+            # Personal VPN peers of its people: tunnels into the hub that
+            # nobody should still hold once their logins are gone.
+            if devices_db:
+                hub_file = _hub_path(devices_db)
+                hub = _hub_load(hub_file)
+                rws = hub.get("roadwarriors") or {}
+                gone = [k for k, rw in rws.items()
+                        if int((rw or {}).get("org_id") or 0) == org_id]
+                if gone:
+                    for k in gone:
+                        rws.pop(k, None)
+                    _hub_save(hub_file, hub)
+                    _write_wg_peers(hub.get("wg_peers") or _WG_PEERS_DEFAULT,
+                                    _hub_wg_leases(hub))
+            emails = auth.delete_org(org_id)
+            kept = billing.delete_org(org_id)
+            log.info("org %s (%s) DELETED by superadmin %s: %d login(s), %d "
+                     "never-connected device(s); %d paid order(s) kept",
+                     org_id, name, user.get("email", "?"), len(emails),
+                     len(names), kept)
+            return self._redirect("/superadmin?ok=" + quote(
+                f"Deleted {name}: {len(emails)} login(s)"
+                + (f" and {len(names)} device(s) that never connected"
+                   if names else "")
+                + " removed."
+                + (f" Its {kept} paid invoice(s) are kept." if kept else "")))
 
         def _post_superadmin_suspend(self, user, restore: bool = False):
             """Superadmin-only: cut a company off for non-payment, or let them
@@ -9486,7 +9865,30 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 except Exception:  # noqa: BLE001
                     log.exception("could not purge state for %s", name)
 
-        def _try_offboard(self, raw, name, uname):
+        def _riding(self, name) -> str:
+            """The device whose connection `name` rides on, or ""."""
+            if not devices_db:
+                return ""
+            return (_hub_load(_hub_path(devices_db)).get("joined")
+                    or {}).get(name, "")
+
+        def _shared_release(self, name) -> bool:
+            """A device is going: if another device -- usually another
+            company's -- still uses its router's connection, keep that
+            connection (handing its record over if this device held it).
+            Returns whether the router's tunnel must be left in place."""
+            if not devices_db:
+                return False
+            hub_file = _hub_path(devices_db)
+            hub = _hub_load(hub_file)
+            keep = _release_shared(hub, name)
+            if keep:
+                _hub_save(hub_file, hub)
+                _write_wg_peers(hub.get("wg_peers") or _WG_PEERS_DEFAULT,
+                                _hub_wg_leases(hub))
+            return keep
+
+        def _try_offboard(self, raw, name, uname, keep_tunnel=False):
             """Best-effort: connect to the router and run device_offboard().
 
             Always returns a result dict — never raises. If the router cannot
@@ -9515,7 +9917,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 api = PushApi(dev)
                 try:
                     api.connect()
-                    steps = device_offboard(api, cfg)
+                    steps = device_offboard(api, cfg,
+                                            keep_tunnel=keep_tunnel)
                 finally:
                     dev.close()
             except (DeviceError, PushError) as exc:
@@ -9600,7 +10003,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # last poll actually reached it. The page reads very differently in
             # those two states, because pressing Generate means "set this up"
             # in one and "break this and start again" in the other.
-            provisioned = bool((hub.get("leases_meta") or {}).get(name, {})
+            riding = (hub.get("joined") or {}).get(name, "")
+            provisioned = bool((hub.get("leases_meta") or {})
+                               .get(_tunnel_owner(hub, name), {})
                                .get("pubkey"))
             st = _load_state(state_file) if state_file else {}
             cond = ((st.get("devices", {}).get(name, {}) or {})
@@ -9608,10 +10013,18 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             online = (cond.get("reachability", {}).get("status") == "ok"
                       and bool((st.get("devices", {}).get(name, {}) or {})
                                .get("facts")))
+            ds = self._devstore()
+            try:
+                login = (self._mgmt_login(ds, name, raw) if ds and raw
+                         else "mkmonitor")
+            finally:
+                if ds:
+                    ds.close()
             page = _render_device_provision(name, user, raw, csrf, hub_ip=hub_ip,
                                             script=script, creds=creds, msg=msg,
                                             error=error, provisioned=provisioned,
-                                            online=online)
+                                            online=online, login=login,
+                                            shared=bool(riding))
             return self._send(200, page, "text/html; charset=utf-8")
 
         def _device_provision_post(self, flat, user):
@@ -9637,12 +10050,23 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             hub_pubkey = hub.get("hub_pubkey", "")
             hub_port = hub.get("listen_port", _WG_PORT_DEFAULT)
             peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
-            uname = flat.get("pwuser", "").strip() or "mkmonitor"
+            uname = ((flat.get("pwuser") or "").strip()
+                     or self._mgmt_login(store, name, raw))
+            clash = self._login_clash(store, name, raw, uname)
+            if clash:
+                store.close()
+                return self._device_provision_page(name, user, error=clash)
             pwd = _gen_password()
             want_tunnel = flat.get("transport", "wg").strip() == "wg"
             lock_api = flat.get("lock_api") == "1"
             tunnel_ip = dev_pub = wg_priv = ""
+            join_url = prev_pub = ""
             reg_ok, reg_err = True, ""
+            # Riding on another account's connection: that connection is
+            # theirs, so this script only (re)creates this company's login.
+            riding = (hub.get("joined") or {}).get(name)
+            if riding:
+                want_tunnel = False
             if want_tunnel and hub_pubkey:
                 wg_priv, dev_pub = _wg_keypair()
                 if wg_priv is None:
@@ -9650,8 +10074,16 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     dev_pub = ""
                 else:
                     tunnel_ip = _alloc_tunnel_ip(hub, name)
+                    old = (hub.get("leases_meta") or {}).get(name) or {}
+                    prev_pub = old.get("pubkey", "")
                     hub.setdefault("leases_meta", {})[name] = {
-                        "ip": tunnel_ip, "pubkey": dev_pub}
+                        "ip": tunnel_ip, "pubkey": dev_pub,
+                        "prev_pubkey": prev_pub,
+                        "had_tunnel": bool(prev_pub or old.get("had_tunnel"))}
+                    # The router asks here whose connection it already has.
+                    join_url = (f"{(_public_base(auth) or self._request_base())}"
+                                f"/provision/join?t="
+                                f"{_new_prov_token(hub, name)}")
                     # rebuild the hub peers file from every device's pubkey+ip
                     reg_ok, reg_err = _write_wg_peers(peers_path, _hub_wg_leases(hub))
             _hub_save(hub_file, hub)
@@ -9680,12 +10112,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 hub_pubkey=hub_pubkey if tunnel_ip else "", wg_priv=wg_priv,
                 wg_pub=dev_pub, tunnel_ip=tunnel_ip, subnet=hub.get("subnet"),
                 harden=True,
-                enable_api=flat.get("enable_api") == "1", lock_api=lock_api)
+                enable_api=flat.get("enable_api") == "1", lock_api=lock_api,
+                join_url=join_url, prev_pub=prev_pub)
             creds = {"user": uname, "pwd": pwd, "ip": tunnel_ip, "hub": hub_ip,
                      "pubkey": dev_pub, "reg_ok": reg_ok, "reg_err": reg_err,
                      "peers_path": peers_path,
                      "no_hub_key": want_tunnel and not hub_pubkey}
-            if tunnel_ip and reg_ok:
+            if riding:
+                msg = ("This router shares another account's connection, so "
+                       "this script only re-creates this account's own login "
+                       "on it. The connection itself is left alone.")
+            elif tunnel_ip and reg_ok:
                 msg = (f"Generated keys, registered the WireGuard peer on this "
                        f"server, and filled the script with the server's IP "
                        f"({hub_ip}). The device will be reachable at {tunnel_ip}.")
@@ -9700,6 +10137,165 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 msg = "Generated a strong password and script for this device."
             return self._device_provision_page(name, user, script=script,
                                                 creds=creds, msg=msg)
+
+        # ---- one router, two companies -------------------------------------
+        def _mgmt_login(self, store, name, raw) -> str:
+            """The login this device uses on its router: the one it already
+            has, or its company's own. Decided here, never by the form."""
+            return ((raw or {}).get("push_username")
+                    or (raw or {}).get("username")
+                    or _default_login(store.org_of(name))).strip()
+
+        def _own_login(self, store, name, raw) -> None:
+            """Two companies' devices on one router with the same login --
+            left over from before routers could be shared -- cannot both
+            keep it. This one takes its company's own name from now on, so
+            the next script adds a login of its own instead of resetting
+            theirs."""
+            raw["username"] = _default_login(store.org_of(name))
+            raw["push_username"] = ""
+            store.upsert(raw, defaults, original_name=name)
+
+        def _login_clash(self, store, name, raw, login) -> str:
+            """Why `login` cannot be used, or "": a login another company's
+            devices use would be reset on any router the two share."""
+            # It goes into the script as a bare word: nothing that could
+            # end the command and start another.
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{1,32}", login or ""):
+                return ("A login name can use letters, digits, '.', '-' and "
+                        "'_' only.")
+            mine = ((raw or {}).get("push_username")
+                    or (raw or {}).get("username") or "")
+            if login == mine:
+                return ""
+            org = store.org_of(name)
+            for other in store.names():
+                if other == name or store.org_of(other) == org:
+                    continue
+                r = store.raw(other) or {}
+                if login in (r.get("username"), r.get("push_username")):
+                    return (f"The login '{login}' is used by another "
+                            f"account's routers. On a router you both "
+                            f"manage it would be reset, so this one uses "
+                            f"its own instead.")
+            return ""
+
+        def _tunnel_claim(self, hub, store, name, pub, login,
+                          for_script=True) -> tuple:
+            """Whose connection does a router already have, given the public
+            key of its `mikromon` WireGuard interface ("" when it has none)?
+
+            ("own", "")        none, this device's own, or a leftover to take
+            ("join", owner)    another device's -- ride on it, add a login
+            ("unknown", "")    a connection this server does not know
+            ("samelogin", o)   another device's, and the same login name
+            """
+            meta = (hub.get("leases_meta") or {}).get(name) or {}
+            if not pub or pub in (meta.get("pubkey"), meta.get("prev_pubkey")):
+                return "own", ""
+            holder = _lease_by_pubkey(hub, pub)
+            if holder and holder != name and store.raw(holder) is not None:
+                owner = _tunnel_owner(hub, holder)
+                theirs = store.raw(owner) or {}
+                if login in (theirs.get("username"),
+                             theirs.get("push_username")):
+                    return "samelogin", owner
+                return "join", owner
+            if holder and holder != name:
+                # A record left by a deleted device. The script replaces the
+                # key and address itself; the automatic setup keeps whatever
+                # address is on the router, which would not be ours.
+                return ("own" if for_script else "unknown"), ""
+            return ("own" if meta.get("had_tunnel") or holder == name
+                    else "unknown"), ""
+
+        def _post_provision_join(self):
+            """The provisioning script, on a router that already has an
+            EasyMikroTik connection, asks whose it is. Public: the router has
+            no session -- the script's own token is the authority, and it
+            only ever answers about the device that script was made for.
+            Plain one-word answers, which the script reads as they are."""
+            q = parse_qs(urlparse(self.path).query)
+            tok = (q.get("t") or [""])[0]
+            pub = (self.headers.get("x-mm-pub") or "").strip()
+            try:
+                answer = self._provision_join(tok, pub)
+            except Exception:  # noqa: BLE001 - the script stops on anything odd
+                log.exception("provision join failed")
+                answer = "error"
+            return self._send(200, answer)
+
+        def _provision_join(self, tok, pub) -> str:
+            if not devices_db:
+                return "unknown"
+            hub_file = _hub_path(devices_db)
+            hub = _hub_load(hub_file)
+            entry = (hub.get("prov_tokens") or {}).get(tok) or {}
+            if not entry or float(entry.get("expires") or 0) < time.time():
+                return "expired"
+            name = entry.get("name", "")
+            store = self._devstore()
+            try:
+                raw = store.raw(name)
+                if raw is None:
+                    return "expired"
+                login = self._mgmt_login(store, name, raw)
+                claim, owner = self._tunnel_claim(hub, store, name, pub, login)
+                if claim == "samelogin":
+                    self._own_login(store, name, raw)
+                if claim != "join":
+                    return claim
+                if (hub.get("joined") or {}).get(name) == owner:
+                    return "joined"     # the same script pasted again
+                ip = _join_tunnel(hub, name, owner)
+                _hub_save(hub_file, hub)
+                _write_wg_peers(hub.get("wg_peers") or _WG_PEERS_DEFAULT,
+                                _hub_wg_leases(hub))
+                raw["host"] = ip
+                raw["use_ssl"] = False
+                raw["api_port"] = 8728
+                store.upsert(raw, defaults, original_name=name)
+            finally:
+                store.close()
+            self._router_shared(owner, name, login)
+            return "joined"
+
+        def _router_shared(self, owner, joiner, login) -> None:
+            """Tell the router's first company, and the platform, that a second
+            company's login is on it now. Logged on both devices; emailed on
+            a background thread, because the router is waiting for its answer."""
+            ds = self._devstore()
+            try:
+                owner_org = ds.org_of(owner) if ds else None
+                joiner_org = ds.org_of(joiner) if ds else None
+            finally:
+                if ds:
+                    ds.close()
+            jname = (auth.org_name(joiner_org) if auth and joiner_org
+                     else "") or "Another company"
+            oname = (auth.org_name(owner_org) if auth and owner_org
+                     else "") or "a company"
+            when = time.strftime("%d %b %Y %H:%M")
+            audit = self._auditlog()
+            if audit:
+                audit.append(owner, "system", "shared", "apply", "ok",
+                             f"{jname} added its {_BRAND} login '{login}' to "
+                             f"this router; it shares this router's connection")
+                audit.append(joiner, "system", "shared", "apply", "ok",
+                             "this router was already connected through another "
+                             "account; this account's own login was added")
+                audit.close()
+
+            def send():
+                try:
+                    _email_router_shared(auth, smtp_cfg, owner_org, owner,
+                                         jname, oname, joiner, login, when)
+                except Exception:  # noqa: BLE001
+                    log.exception("could not email about shared router %s",
+                                  owner)
+            import threading
+            threading.Thread(target=send, name="mikromon-shared-mail",
+                             daemon=True).start()
 
         def _device_provision_apply(self, flat, user):
             """Zero-touch: connect to the router over the API and apply everything
@@ -9726,32 +10322,58 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             hub_pubkey = hub.get("hub_pubkey", "")
             hub_port = hub.get("listen_port", _WG_PORT_DEFAULT)
             peers_path = hub.get("wg_peers") or _WG_PEERS_DEFAULT
-            uname = flat.get("pwuser", "").strip() or "mkmonitor"
+            uname = ((flat.get("pwuser") or "").strip()
+                     or self._mgmt_login(store, name, raw))
+            clash = self._login_clash(store, name, raw, uname)
+            if clash:
+                store.close()
+                return self._device_provision_page(name, user, error=clash)
             pwd = _gen_password()
             want_tunnel = flat.get("transport", "wg").strip() == "wg"
             lock_api = flat.get("lock_api") == "1"
-            tunnel_ip = _alloc_tunnel_ip(hub, name) if (want_tunnel and hub_pubkey) \
-                else ""
+            riding = (hub.get("joined") or {}).get(name)
+            tunnel_ip = (_alloc_tunnel_ip(hub, name)
+                         if (want_tunnel and hub_pubkey and not riding) else "")
             cfg = build_device(raw, defaults)
             audit = self._auditlog()
             actor = (user or {}).get("login", "")
             dev = rw_device(cfg)
             api = PushApi(dev)
             result, err = None, None
+            claim, owner, refused = "own", "", ""
             try:
                 api.connect()
-                result = provision_apply(
-                    api, name, uname, pwd,
-                    harden=True,
-                    enable_api=flat.get("enable_api") == "1",
-                    lock_api=lock_api,
-                    hub_pubkey=hub_pubkey,
-                    hub_ip=hub_ip, port=hub_port, subnet=hub.get("subnet"),
-                    tunnel_ip=tunnel_ip)
+                if tunnel_ip:
+                    # Whose connection does this router already have? Only
+                    # its own (or none) is set up; another company's is left
+                    # exactly as it is and this company's login added.
+                    claim, owner = self._tunnel_claim(
+                        hub, store, name, _router_tunnel_pub(api), uname,
+                        for_script=False)
+                    refused = _CLAIM_REFUSED.get(claim, "")
+                    if claim == "samelogin":
+                        self._own_login(store, name, raw)
+                if not refused:
+                    joining = claim == "join"
+                    result = provision_apply(
+                        api, name, uname, pwd,
+                        harden=True,
+                        enable_api=flat.get("enable_api") == "1",
+                        lock_api=lock_api and not joining,
+                        hub_pubkey="" if joining else hub_pubkey,
+                        hub_ip=hub_ip, port=hub_port, subnet=hub.get("subnet"),
+                        tunnel_ip="" if joining else tunnel_ip)
             except (DeviceError, PushError) as exc:
                 err = str(exc)
             finally:
                 dev.close()
+            if refused:
+                if audit:
+                    audit.append(name, actor, "provision", "apply", "error",
+                                 refused, refused)
+                    audit.close()
+                store.close()
+                return self._device_provision_page(name, user, error=refused)
             if err is not None:
                 if audit:
                     audit.append(name, actor, "provision", "apply", "error",
@@ -9811,6 +10433,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 audit.close()
             # register the router's WireGuard peer on the hub
             reg_ok, reg_err, router_pub = True, "", result.get("router_pubkey", "")
+            if claim == "join":
+                tunnel_ip = _join_tunnel(hub, name, owner)
+                reg_ok, reg_err = _write_wg_peers(peers_path, _hub_wg_leases(hub))
+                router_pub = ""
             if tunnel_ip and router_pub:
                 hub.setdefault("leases_meta", {})[name] = {
                     "ip": tunnel_ip, "pubkey": router_pub}
@@ -9822,6 +10448,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             raw["password"] = pwd
             raw["push_username"] = ""   # no separate push user; falls back
             raw["push_password"] = ""
+            if claim == "join":
+                raw["host"] = tunnel_ip
+                raw["use_ssl"] = False
+                raw["api_port"] = 8728
             if tunnel_ip and router_pub:
                 raw["host"] = tunnel_ip
                 # plain API (8728) over the encrypted tunnel — no API-SSL
@@ -9837,7 +10467,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                      "hub": hub_ip, "pubkey": router_pub, "reg_ok": reg_ok,
                      "reg_err": reg_err, "peers_path": peers_path,
                      "no_hub_key": want_tunnel and not hub_pubkey, "applied": True}
-            if tunnel_ip and router_pub and reg_ok:
+            if claim == "join":
+                self._router_shared(owner, name, uname)
+                msg = ("This router was already connected to " + _BRAND
+                       + " through another account, so it now shares that "
+                         "connection: this account's own login was added and "
+                         "nothing of theirs was changed. Their account has "
+                         "been told.")
+            elif riding:
+                msg = ("This router shares another account's connection; "
+                       "this account's own login was re-created on it.")
+            elif tunnel_ip and router_pub and reg_ok:
                 msg = (f"✓ Provisioned over the API and registered the WireGuard "
                        f"peer. The device is reachable at {tunnel_ip}.")
             elif want_tunnel and not hub_pubkey:
@@ -10967,7 +11607,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     store.delete(name)
                 finally:
                     store.close()
-            result = self._try_offboard(raw, name, uname)
+            result = self._try_offboard(
+                raw, name, uname, keep_tunnel=self._shared_release(name))
             self._purge_device_data(name)
             # Otherwise a name later reused by another company would inherit
             # the guests of the router that used to hold it.
@@ -11177,6 +11818,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             raw = self._device_raw(name)
             if raw is None:
                 return self._send(404, "no such device")
+            if self._riding(name):
+                # (The Hub tunnel tab this used to render went in June; the
+                # Provision page is where a shared router is explained.)
+                return self._device_provision_page(name, user,
+                                                   error=_RIDING_MSG)
             cfg = build_device(raw, defaults)
             actor = (user or {}).get("login", "")
             dev = rw_device(cfg)
@@ -12310,7 +12956,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     name = flat.get("name", "")
                     raw = store.raw(name)
                     uname = (user or {}).get("login", "system")
-                    result = self._try_offboard(raw, name, uname)
+                    result = self._try_offboard(
+                        raw, name, uname, keep_tunnel=self._shared_release(name))
                     store.delete(name)
                     self._purge_device_data(name)
                     page = _render_offboard_page(name, result, "/devices", user)
@@ -12357,10 +13004,16 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                  org_id=user["org_id"])
                     if orig and orig != raw.get("name"):
                         self._carry_identity(orig, raw["name"])
+                    renamed = flat.get("_renamed_from")
+                    note = (f"Another company already has a device called "
+                            f"\"{renamed}\", so this one is saved as "
+                            f"\"{raw['name']}\". You can rename it any time."
+                            if renamed else "")
                     if provision_mode:
                         # Straight to the provisioning script to paste & sync.
                         return self._redirect(
-                            f"/device?name={quote(raw['name'])}&tab=provision")
+                            f"/device?name={quote(raw['name'])}&tab=provision"
+                            + (f"&msg={quote(note)}" if note else ""))
                     return self._redirect("/devices")
                 return self._send(404, "not found")
             except Exception as exc:  # noqa: BLE001 — surface validation errors
@@ -12546,6 +13199,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # so no emailed invoice could be paid by card.
             if path == "/pay":
                 return self._post_pay()
+            # A provisioning script asking whose connection a router already
+            # has. The router has no session; the script's token is the key.
+            if path == "/provision/join":
+                return self._post_provision_join()
             if path == "/signup":
                 return self._post_signup()
             if path == "/signup/verify":
@@ -12585,6 +13242,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_smtp(user)
             if path == "/superadmin/ai":
                 return self._post_superadmin_ai(user)
+            if path == "/superadmin/delete-org":
+                return self._post_superadmin_delete_org(user)
             if path == "/superadmin/suspend":
                 return self._post_superadmin_suspend(user)
             if path == "/superadmin/restore":
@@ -12722,6 +13381,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_billing_quote(flat, user)
             if path == "/billing/checkout":
                 return self._post_billing_checkout(flat, user)
+            # A new device named like another company's gets that name with
+            # its own company's after it, rather than a bare "forbidden":
+            # twenty shops can all have a router called "Shop".
+            if path == "/devices/save" and not flat.get("original_name"):
+                given = (flat.get("name") or "").strip()
+                free = self._free_device_name(given, user)
+                if free != given:
+                    flat["name"] = free
+                    flat["_renamed_from"] = given
             # Org isolation: an owner may only touch devices their company owns.
             if not self._owns_target(flat, user):
                 return self._send(403, "forbidden")
@@ -12836,6 +13504,28 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if AuthStore.shared_with(user, name) is not None:
                 return AuthStore.can_manage_device(user, name, org)
             return AuthStore.can_see(user, name, org)
+
+        def _free_device_name(self, name, user) -> str:
+            """`name`, or -- when another company already has a device by
+            that name -- "name (Company)", numbered if that is taken too."""
+            if not name or not devices_db:
+                return name
+            ds = self._devstore()
+            try:
+                org = ds.org_of(name)
+                if org is None or org == user.get("org_id"):
+                    return name
+                company = ((auth.org_name(user.get("org_id")) if auth else "")
+                           or f"company {user.get('org_id')}").strip()
+                n = 1
+                while True:
+                    cand = (f"{name} ({company})" if n == 1
+                            else f"{name} ({company} {n})")
+                    if ds.org_of(cand) is None:
+                        return cand
+                    n += 1
+            finally:
+                ds.close()
 
         def _owns_target(self, flat, user) -> bool:
             """For device-targeted POSTs, every *existing* device the request
@@ -14108,6 +14798,11 @@ def _register_hub_peer(device_name: str, api, flat: dict, devices_db: str) -> No
         from .push.features import _HUB_WG, _HUB_NAME
         tunnel_ip = flat.get("tunnel_ip", "").strip().split("/")[0]
         if not tunnel_ip:
+            return
+        # A device riding on another account's connection has no record of
+        # its own to register -- that key belongs to the other device.
+        if device_name in (_hub_load(_hub_path(devices_db)).get("joined")
+                           or {}):
             return
         ifaces = api.fetch(_HUB_WG)
         router_pub = next(

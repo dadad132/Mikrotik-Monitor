@@ -1655,6 +1655,32 @@ def _suspend_button(org_id, status: str, csrf: str,
             f'{"Restore access" if suspended else "Suspend"}</button></form>')
 
 
+def _delete_org_button(row, status: str, csrf: str, viewer_org) -> str:
+    """Delete a company for good: only one that is suspended and has no
+    router that ever reported in, and never the platform's own. The server
+    checks all of it again; this only decides whether to offer it."""
+    org_id = int(row.get("id") or 0)
+    if (status != "suspended" or row.get("active_count", 0)
+            or row.get("has_superadmin") or org_id == viewer_org):
+        return ""
+    users = int(row.get("user_count") or 0)
+    devs = int(row.get("device_count") or 0)
+    what = (f"{users} login{'' if users == 1 else 's'}"
+            + (f" and {devs} device{'' if devs == 1 else 's'} that never "
+               f"connected" if devs else ""))
+    ask = (f"Delete {row.get('name') or 'this company'} for good? Its {what} "
+           f"will be removed, and this cannot be undone. Paid invoices are "
+           f"kept.").replace("'", "&#39;").replace('"', "&quot;")
+    return (f'<form method="POST" action="/superadmin/delete-org" '
+            f'style="margin-top:6px">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="org_id" value="{org_id}">'
+            f'<button class="btn red" type="submit" '
+            f'style="padding:5px 12px;width:100%" '
+            f'onclick="return confirm(this.dataset.ask)" '
+            f'data-ask="{ask}">Delete company</button></form>')
+
+
 def _dormant_box(rows, names, csrf: str) -> str:
     """Accounts suspended long enough to be at risk, and what to do with them.
 
@@ -1701,8 +1727,10 @@ def _dormant_box(rows, names, csrf: str) -> str:
             f'<p class="muted" style="margin:0 0 8px">Their owners are asked '
             f'by email, and asked again every month until something changes. '
             f'<b>Nothing is deleted automatically</b> &mdash; removing a '
-            f'company and its history is a decision to make here, with this '
-            f'list in front of you. If one replies that they are waiting on '
+            f'company is a decision to make here, with this list in front '
+            f'of you: <b>Delete company</b> appears beside a suspended '
+            f'company in the companies table above once none of its devices is '
+            f'active. If one replies that they are waiting on '
             f'funds, press the button and they are left alone for '
             f'{int(FUNDS_HOLD_DAYS)} days.</p>'
             f'<table><thead><tr><th>Company</th><th>Suspended</th>'
@@ -2651,7 +2679,8 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
             + (f'<td>{_plan_select(r.get("id"), plan, csrf)}'
                f'{_paid_to_select(r.get("id"), bill, csrf)}'
                f'{_quoted_plan_form(r.get("id"), bill, csrf)}'
-               f'{_suspend_button(r.get("id"), status, csrf, r.get("has_superadmin", False))}</td>'
+               f'{_suspend_button(r.get("id"), status, csrf, r.get("has_superadmin", False))}'
+               f'{_delete_org_button(r, status, csrf, (user or {}).get("org_id"))}</td>'
                if billing_on else "")
             + '</tr>'
         )
