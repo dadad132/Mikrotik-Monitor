@@ -380,7 +380,15 @@ TABS = [
                "Share. They see this one router on their own dashboard, "
                "and none of your others, your team or your billing.",
                "Stop sharing whenever you like — only you can, and it "
-               "takes effect immediately."],
+               "takes effect immediately.",
+               "<b>Handing the router over for good?</b> Use <b>Transfer to "
+               "another company</b> below the sharing list. Enter the email "
+               "of an owner of that company: they accept it on their "
+               "Devices page, because it then counts towards their packet. "
+               "It moves with its history and settings; anyone you shared "
+               "it with, and any team member it was allocated to, loses "
+               "access. Until they accept, it stays yours, and you can "
+               "cancel the offer."],
      "warn": "Sharing with management lets somebody outside your company "
              "change a live router. Start with view-only; it is easy to "
              "grant more later and awkward to explain afterwards."},

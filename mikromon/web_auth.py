@@ -2317,6 +2317,84 @@ def _share_box(device: str, shares, csrf: str, org_name: str = "") -> str:
         f'</p></div>')
 
 
+def _transfer_box(device: str, offer, csrf: str, to_company: str = "") -> str:
+    """Hand this router to another company for good -- the alternative to
+    sharing it. An offer the other company's owner accepts, because the
+    router then counts against their packet."""
+    if offer:
+        when = time.strftime("%d %b %Y", time.localtime(offer["created"]))
+        until = time.strftime("%d %b", time.localtime(offer["expires"]))
+        return (
+            f'<div class="box" style="border-left:4px solid #d97706">'
+            f'<h2>Transfer to another company</h2>'
+            f'<p style="margin:0 0 10px">Offered to '
+            f'<b>{esc(offer["to_email"])}</b>'
+            + (f' ({esc(to_company)})' if to_company else "")
+            + f' on {esc(when)}. It moves when they accept, on their Devices '
+            f'page; until then it stays yours and keeps working. The offer '
+            f'lapses on {esc(until)}.</p>'
+            f'<form method="POST" action="/device/transfer">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="device" value="{esc(device)}">'
+            f'<input type="hidden" name="action" value="cancel">'
+            f'<button class="btn ghost" type="submit">Cancel the transfer'
+            f'</button></form></div>')
+    ask = (f"Offer {device} to another company? When they accept, it leaves "
+           f"your account for good, with its history, and anyone you shared "
+           f"it with loses access.").replace("'", "&#39;").replace('"', "&quot;")
+    return (
+        f'<div class="box"><h2>Transfer to another company</h2>'
+        f'<p class="muted" style="font-size:13px;margin:0 0 10px">'
+        f'Instead of sharing it, hand this router over for good: it moves to '
+        f'their account with its history and settings, and leaves yours. '
+        f'Enter the email of an <b>owner</b> of that company; they accept it '
+        f'on their Devices page, since it then counts towards their packet. '
+        f'Until they do, nothing changes.</p>'
+        f'<form method="POST" action="/device/transfer" '
+        f'style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<input type="hidden" name="device" value="{esc(device)}">'
+        f'<input type="hidden" name="action" value="offer">'
+        f'<label style="flex:1;min-width:240px">Their owner\'s email'
+        f'<br><input name="email" type="email" required style="width:100%" '
+        f'placeholder="owner@theircompany.co.za"></label>'
+        f'<button class="btn" type="submit" data-ask="{ask}" '
+        f'onclick="return confirm(this.dataset.ask)">Offer to transfer'
+        f'</button></form></div>')
+
+
+def _incoming_transfers_box(offers, csrf: str, names=None) -> str:
+    """Routers another company is offering to this one."""
+    if not offers:
+        return ""
+    names = names or {}
+    rows = ""
+    for o in offers:
+        frm = names.get(o["from_org"]) or "Another company"
+        rows += (
+            f'<tr><td><b>{esc(o["device"])}</b></td>'
+            f'<td>{esc(frm)}<div class="muted" style="font-size:12px">'
+            f'offered by {esc(o["offered_by"])}</div></td>'
+            f'<td style="white-space:nowrap">'
+            f'<form method="POST" action="/transfer/answer" '
+            f'style="display:inline">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="unit" value="{esc(o["device"])}">'
+            f'<button class="btn" name="answer" value="accept" type="submit" '
+            f'style="padding:4px 12px">Accept</button> '
+            f'<button class="btn ghost" name="answer" value="decline" '
+            f'type="submit" style="padding:4px 12px">Decline</button>'
+            f'</form></td></tr>')
+    return (f'<div class="box" style="border-left:4px solid var(--accent)">'
+            f'<h2>Routers offered to you</h2>'
+            f'<p class="muted" style="font-size:13px;margin:0 0 8px">Another '
+            f'company wants to hand these over. Accept one and it moves into '
+            f'your account with its history and settings, and counts towards '
+            f'your packet.</p>'
+            f'<table><thead><tr><th>Router</th><th>From</th><th></th></tr>'
+            f'</thead><tbody>{rows}</tbody></table></div>')
+
+
 def _selfcheck_box(findings) -> str:
     """What is wrong with this server, and the command that fixes it.
 

@@ -475,6 +475,76 @@ class AuthStore:
             (email,)).fetchall()
         return {r[0]: bool(r[1]) for r in rows}
 
+    # ----- transferring a router to another company -------------------------
+    # An offer, not a move: the router lands in the other company's count
+    # and on its bill, so its owner accepts it first. Until then it stays
+    # where it is and keeps working.
+    TRANSFER_TTL = 14 * 86400
+
+    def _ensure_transfers(self) -> None:
+        with self._lock:
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS device_transfers ("
+                "device TEXT PRIMARY KEY, from_org INTEGER NOT NULL, "
+                "to_org INTEGER NOT NULL, to_email TEXT NOT NULL, "
+                "offered_by TEXT NOT NULL, created REAL NOT NULL, "
+                "expires REAL NOT NULL)")
+            self.db.commit()
+
+    def offer_transfer(self, device: str, from_org: int, to_org: int,
+                       to_email: str, offered_by: str,
+                       now: float | None = None) -> None:
+        self._ensure_transfers()
+        now = now if now is not None else time.time()
+        with self._lock:
+            self.db.execute(
+                "INSERT OR REPLACE INTO device_transfers VALUES (?,?,?,?,?,?,?)",
+                (device, int(from_org), int(to_org), _norm_email(to_email),
+                 offered_by, now, now + self.TRANSFER_TTL))
+            self.db.commit()
+
+    _TRANSFER_COLS = ("device", "from_org", "to_org", "to_email",
+                      "offered_by", "created", "expires")
+
+    def transfer_offer(self, device: str, now: float | None = None):
+        """The open offer to transfer this router, or None."""
+        self._ensure_transfers()
+        now = now if now is not None else time.time()
+        row = self.db.execute(
+            "SELECT * FROM device_transfers WHERE device = ? AND expires > ?",
+            (device, now)).fetchone()
+        return dict(zip(self._TRANSFER_COLS, row)) if row else None
+
+    def transfers_to(self, org_id: int, now: float | None = None) -> list:
+        """Open offers of routers to this company, newest first."""
+        self._ensure_transfers()
+        now = now if now is not None else time.time()
+        rows = self.db.execute(
+            "SELECT * FROM device_transfers WHERE to_org = ? AND expires > ? "
+            "ORDER BY created DESC", (int(org_id), now)).fetchall()
+        return [dict(zip(self._TRANSFER_COLS, r)) for r in rows]
+
+    def drop_transfer(self, device: str) -> None:
+        self._ensure_transfers()
+        with self._lock:
+            self.db.execute("DELETE FROM device_transfers WHERE device = ?",
+                            (device,))
+            self.db.commit()
+
+    def unallocate_device(self, org_id: int, device: str) -> None:
+        """Take a router off the lists of the company's members it was
+        allocated to -- it is not theirs to see once it has gone."""
+        with self._lock:
+            for uid, raw in self.db.execute(
+                    "SELECT id, devices FROM users WHERE org_id = ?",
+                    (int(org_id),)).fetchall():
+                devs = _load_devices(raw)
+                if isinstance(devs, list) and device in devs:
+                    self.db.execute(
+                        "UPDATE users SET devices = ? WHERE id = ?",
+                        (_dump_devices([d for d in devs if d != device]), uid))
+            self.db.commit()
+
     def delete_org(self, org_id: int) -> list:
         """Remove a company and every login in it, and any router shared
         with those logins. Returns the emails that were removed. Their

@@ -45,7 +45,7 @@ from .web_shared import (
 )
 from . import invoice_template as _invoice_tpl
 from .web_auth import (
-    _first_visit_tip, _welcome_tip,
+    _first_visit_tip, _welcome_tip, _transfer_box, _incoming_transfers_box,
     _render_login, _render_signup, _render_account,
     _render_admin, _render_guide,
     _render_billing, _render_locked, _grace_banner_html,
@@ -7567,7 +7567,8 @@ def _render_upgrade_wall(user, used: int, limit: int) -> str:
 
 def _render_devices(store, csrf, user, edit_name=None, msg="",
                     all_devs=None, org_count: int = 0, org_total: int = 0,
-                    device_limit: int = 0) -> str:
+                    device_limit: int = 0, error: str = "",
+                    extra_html: str = "") -> str:
     """The Devices page. `device_limit` is the company's packet cap, 0 for
     none; at the cap, the Add button becomes the way to a bigger packet."""
     if store is None:
@@ -7694,7 +7695,7 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
                 f'<div class="chips">{src_boxes}</div>', full=True)
         + field("Enabled checks", f'<div class="chips">{chk_boxes}</div>', full=True))
 
-    msg_html = _flash(msg)
+    msg_html = _flash(msg, error) + extra_html
 
     def _device_modal(modal_id, title, form_action, original_name, submit_lbl,
                       form_fields, intro=""):
@@ -9783,12 +9784,21 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 active_count = (sum(1 for n in (org_scope or []) if n in known_all)
                                 if org_scope is not None else len(known_all))
                 org_count = len(org_scope) if org_scope is not None else active_count
+                q = parse_qs(url.query)
+                offers = auth.transfers_to(user["org_id"]) if auth else []
+                incoming = _incoming_transfers_box(
+                    offers, self._session()["csrf"],
+                    {o["from_org"]: auth.org_name(o["from_org"])
+                     for o in offers})
                 page = _render_devices(store, self._session()["csrf"], user,
                                        edit_name=edit,
                                        all_devs=all_devs,
                                        org_count=active_count,
                                        org_total=org_count,
-                                       device_limit=self._device_cap(user))
+                                       device_limit=self._device_cap(user),
+                                       msg=q.get("ok", [""])[0],
+                                       error=q.get("error", [""])[0],
+                                       extra_html=incoming)
             finally:
                 if store:
                     store.close()
@@ -10166,7 +10176,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         "'_' only.")
             mine = ((raw or {}).get("push_username")
                     or (raw or {}).get("username") or "")
-            if login == mine:
+            if login in (mine, _default_login(store.org_of(name))):
                 return ""
             org = store.org_of(name)
             for other in store.names():
@@ -11504,7 +11514,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                               "text/html; charset=utf-8")
 
         def _device_share_page(self, name, user, msg="", error=""):
-            """The Share tab: who this router is shared with, and with what."""
+            """The Share tab: who this router is shared with, and with what
+            -- and handing it to another company for good."""
+            offer = auth.transfer_offer(name) if auth else None
+            to_company = (auth.org_name(offer["to_org"])
+                          if offer and auth else "")
             shares = []
             try:
                 shares = auth.shares_for_device(name) if auth else []
@@ -11516,12 +11530,172 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                      f'{_device_tabbar(name, "share", True, csrf)}'
                      f'{_flash(msg, error)}'
                      f'{_share_box(name, shares, csrf, user.get("org_name", ""))}'
+                     f'{_transfer_box(name, offer, csrf, to_company)}'
                      f'<p><a href="/device?name={quote(name)}">&larr; overview'
                      f'</a></p></div>')
             return self._send(
                 200, _page(esc(name) + " · Share",
                            _header(user, "/dashboard") + inner),
                 "text/html; charset=utf-8")
+
+        def _device_transfer_post(self, flat, user):
+            """Offer this router to another company, or withdraw the offer.
+            Owner-only, and only for a router their own company holds."""
+            if auth is None or not AuthStore.is_owner(user or {}):
+                return self._send(403, "forbidden")
+            name = (flat.get("device") or "").strip()
+            back = f"/device?name={quote(name)}&tab=share"
+            ds = self._devstore()
+            try:
+                org = ds.org_of(name) if ds else None
+            finally:
+                if ds:
+                    ds.close()
+            if org is None or org != user.get("org_id"):
+                return self._send(403, "forbidden")
+            if flat.get("action") == "cancel":
+                auth.drop_transfer(name)
+                self._note(name, user, "transfer",
+                           "withdrew the offer to transfer this router")
+                return self._redirect(back + "&ok=" + quote(
+                    "Transfer cancelled. The router stays yours."))
+            email = (flat.get("email") or "").strip().lower()
+            target = auth.get_user(email) if email else None
+            if not target:
+                return self._redirect(back + "&error=" + quote(
+                    f"No account signs in as {email}. The company you are "
+                    f"transferring to needs an account first."))
+            if target.get("org_id") == org:
+                return self._redirect(back + "&error=" + quote(
+                    "That person is in your own company already."))
+            if target.get("role") != "owner":
+                return self._redirect(back + "&error=" + quote(
+                    f"{email} is not an owner of their company. A router can "
+                    f"only be offered to an owner, since it goes on their "
+                    f"bill."))
+            if devices_db:
+                kind, _g = _vpn_group_info(_hub_load(_hub_path(devices_db)),
+                                           name)
+                if kind:
+                    return self._redirect(back + "&error=" + quote(
+                        "This router is part of a VPN group with your other "
+                        "sites. Take it out of the group on the VPN tab "
+                        "first: a group cannot span two companies."))
+            auth.offer_transfer(name, org, int(target["org_id"]), email,
+                                user.get("login", "?"))
+            frm = auth.org_name(org) or "A company"
+            self._note(name, user, "transfer",
+                       f"offered this router to {email} "
+                       f"({auth.org_name(target['org_id'])})")
+            self._mail_bg(
+                [email], f"{frm} wants to transfer a router to you",
+                f"Hello,\n\n{frm} wants to transfer the router {name} to "
+                f"your {_BRAND} account. Accepting it moves the router into "
+                f"your account with its history and settings, and it counts "
+                f"towards your packet.\n\nSign in and open Devices to accept "
+                f"or decline it. The offer lapses in 14 days.\n\n{_BRAND}\n")
+            return self._redirect(back + "&ok=" + quote(
+                f"Offered to {email}. It moves when they accept it; until "
+                f"then nothing changes."))
+
+        def _transfer_answer_post(self, flat, user):
+            """The receiving company's owner accepts or declines a router."""
+            if auth is None or not AuthStore.is_owner(user or {}):
+                return self._send(403, "forbidden")
+            name = (flat.get("unit") or "").strip()
+            offer = auth.transfer_offer(name)
+            if not offer or offer["to_org"] != user.get("org_id"):
+                return self._redirect("/devices?error=" + quote(
+                    "That offer is no longer open."))
+            frm, to = int(offer["from_org"]), int(offer["to_org"])
+            owners = [u["email"] for u in auth.list_users(frm)
+                      if u.get("role") == "owner" and u.get("email")]
+            mine = auth.org_name(to) or "The other company"
+            if flat.get("answer") != "accept":
+                auth.drop_transfer(name)
+                self._mail_bg(owners, f"{mine} declined the router {name}",
+                              f"{mine} declined your offer to transfer the "
+                              f"router {name}. It stays in your account.\n")
+                return self._redirect("/devices?ok=" + quote(
+                    f"Declined. {name} stays with the company that offered "
+                    f"it."))
+            ds = self._devstore()
+            try:
+                raw = ds.raw(name) if ds else None
+                if raw is None or ds.org_of(name) != frm:
+                    auth.drop_transfer(name)
+                    return self._redirect("/devices?error=" + quote(
+                        "That router is no longer theirs to give."))
+                limit = self._device_cap(user)
+                used = self._org_device_count(to)
+                if limit and used >= limit:
+                    return self._redirect("/devices?error=" + quote(
+                        f"{_device_cap_text(used, limit)} Choose a bigger "
+                        f"packet on the Billing tab, then accept it."))
+                ds.upsert(raw, defaults, original_name=name, org_id=to)
+            finally:
+                if ds:
+                    ds.close()
+            # Access granted by the old company is theirs to have given, not
+            # the new one's: shares, members' allocations, open remote access.
+            auth.drop_transfer(name)
+            auth.drop_shares_for_device(name)
+            auth.unallocate_device(frm, name)
+            try:
+                acc = self._access_store()
+                if acc is not None:
+                    for g in acc.active():
+                        if g.get("device") == name:
+                            acc.close(name, g.get("kind"))
+            except Exception:  # noqa: BLE001
+                log.exception("could not close remote access for %s", name)
+            self._note(name, user, "transfer",
+                       f"transferred from {auth.org_name(frm)} to {mine} "
+                       f"(offered by {offer['offered_by']}, accepted by "
+                       f"{user.get('login', '?')})")
+            log.info("router %r transferred from org %s to org %s", name,
+                     frm, to)
+            self._mail_bg(owners, f"{mine} accepted the router {name}",
+                          f"{mine} accepted your offer: the router {name} has "
+                          f"moved to their account and is no longer in "
+                          f"yours.\n")
+            return self._redirect("/devices?ok=" + quote(
+                f"{name} is yours now, with its history and settings."))
+
+        def _note(self, name, user, feature, summary) -> None:
+            """One line in a router's activity log."""
+            audit = self._auditlog()
+            if audit:
+                audit.append(name, (user or {}).get("login", "system"),
+                             feature, "apply", "ok", summary)
+                audit.close()
+
+        def _mail_bg(self, to, subject, text) -> None:
+            """Send a short notice without holding up the page."""
+            to = [t for t in (to or []) if t]
+            if not to or auth is None:
+                return
+
+            def send():
+                from email.message import EmailMessage
+
+                from .notify.org_email import _smtp_send, effective_smtp
+                smtp = effective_smtp(auth, smtp_cfg)
+                if not (smtp and getattr(smtp, "host", "")):
+                    log.warning("no mail server: not sent: %s", subject)
+                    return
+                msg = EmailMessage()
+                msg["Subject"] = f"{smtp.subject_prefix} {subject}".strip()
+                msg["From"] = smtp.from_addr
+                msg["To"] = ", ".join(to)
+                msg.set_content(text)
+                try:
+                    _smtp_send(smtp, msg)
+                except Exception:  # noqa: BLE001
+                    log.exception("could not send: %s", subject)
+            import threading
+            threading.Thread(target=send, name="mikromon-notice",
+                             daemon=True).start()
 
         def _device_share_post(self, flat, user):
             """Give one person at another company access to one router.
@@ -13381,6 +13555,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_billing_quote(flat, user)
             if path == "/billing/checkout":
                 return self._post_billing_checkout(flat, user)
+            # Accepting a router another company offers: it is still theirs
+            # until this runs, so it comes before the ownership check below.
+            if path == "/transfer/answer":
+                return self._transfer_answer_post(flat, user)
             # A new device named like another company's gets that name with
             # its own company's after it, rather than a bare "forbidden":
             # twenty shops can all have a router called "Shop".
@@ -13397,6 +13575,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._devices_post(path, flat, multi, user)
             if path == "/device/forget":
                 return self._device_forget_post(flat, user)
+            if path == "/device/transfer":
+                return self._device_transfer_post(flat, user)
             if path == "/device/share":
                 return self._device_share_post(flat, user)
             if path == "/device/unshare":
