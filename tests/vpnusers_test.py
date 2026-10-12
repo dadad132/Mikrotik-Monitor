@@ -198,7 +198,7 @@ ds.upsert({"name": "R1", "host": "10.10.3.7", "username": "u",
 ds.close()
 srv = ThreadingHTTPServer(("127.0.0.1", 0), web.make_handler(
     mdb, sfile, AuthStore(adb), web.SessionManager(), secure_cookies=False,
-    devices_db=ddb, defaults=dict(DEFAULT_THRESHOLDS)))
+    devices_db=ddb, defaults=dict(DEFAULT_THRESHOLDS), admin_2fa=False))
 BASE = f"http://127.0.0.1:{srv.server_address[1]}"
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 op = urllib.request.build_opener(

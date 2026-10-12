@@ -166,18 +166,55 @@ import time as _tm
 # A grant is a row in a JSON file. Between it and a link that works sit
 # nginx, a systemd path unit, a rendered server block and a certificate --
 # and when any of them is missing the browser only says "connection refused".
-_g = {"webfig": {"port": 1, "expires": _tm.time() + 900}, "winbox": None}
-_html = _w._access_box("B1", "TOK", "38.54.63.107", "10.10.1.1",
-                       {"user": "u", "pwd": "p"}, _g)
-check("a granted port with nothing listening is called out instead of being "
-      "offered as a link that can only fail",
-      "not listening on port 1" in _html
+_now = _tm.time()
+
+
+def _box(opened, status, staff=True):
+    g = {"webfig": {"port": 1, "opened": opened, "expires": _now + 900},
+         "winbox": None}
+    return _w._access_box("B1", "TOK", "38.54.63.107", "10.10.1.1",
+                          {"user": "u", "pwd": "p"}, g, status=status,
+                          staff=staff)
+
+
+# Just opened, and the hub has not run since: it is on its way, not broken.
+_html = _box(_now - 5, {"ran": _now - 40, "ok": True})
+check("a port opened seconds ago that the hub has not applied yet says "
+      "'opening' and checks again by itself -- not an error",
+      "opening" in _html and "data-access-pending" in _html
+      and "not listening" not in _html
       and "https://38.54.63.107:1" not in _html)
-check("...with the command that fixes it, since the failure is on the hub "
-      "and not on the router",
-      "easymikrotik-access-reload.service" in _html)
+
+_html = _box(_now - 300, {"ran": _now - 20, "ok": False, "ports": [1],
+                          "error": "nginx refused the configuration: "
+                                   "cannot load certificate \"/x.pem\"",
+                          "detail": "nginx: [emerg] cannot load certificate"})
+check("when the hub tried and failed, the platform admin is told what nginx "
+      "said, not handed the same two commands for every cause",
+      "not listening on port 1" in _html
+      and "cannot load certificate" in _html and "sudo nginx -t" in _html
+      and "https://38.54.63.107:1" not in _html)
 check("...and Close is still offered, so a broken grant can be cleared",
       'value="close"' in _html)
+
+_html = _box(_now - 300, {"ran": _now - 900, "ok": True})
+check("a hub that has not run since the port was opened is called out as "
+      "its watcher and timer having stopped, with the command that starts "
+      "them", "last ran at" in _html
+      and "enable --now easymikrotik-access-reload.path" in _html)
+
+_html = _box(_now - 300, {})
+check("a hub that has never recorded a run says so, and points at the "
+      "installer", "never recorded" in _html
+      and "deploy/install.sh" in _html)
+
+_html = _box(_now - 300, {"ran": _now - 20, "ok": False, "error": "x",
+                          "detail": "/etc/nginx/conf.d/secret-path"},
+             staff=False)
+check("a customer is told it is a fault on our server and to tell support "
+      "-- no shell commands or nginx internals they can do nothing with",
+      "fault on our server" in _html and "sudo" not in _html
+      and "/etc/nginx" not in _html and 'value="close"' in _html)
 
 # A port that IS listening must still produce the ordinary link.
 _srv = _sk.socket()

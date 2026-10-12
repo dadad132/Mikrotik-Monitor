@@ -104,6 +104,48 @@ def _unit_state(unit):
     return out2 or "inactive"
 
 
+def check_access_apply(access_cfg):
+    """Did the last attempt to open remote-access ports work?
+
+    The reload unit records its outcome in access-status.json (see
+    cli._cmd_access_apply): what nginx refused, or which port it would not
+    open. Without this the only sign was a customer's "connection refused".
+    """
+    acc = access_cfg or {}
+    if not (acc.get("hub_host") and acc.get("grants_file")):
+        return []
+    from . import access
+    st = access.read_status(acc["grants_file"])
+    if not st:
+        return [_finding(
+            "access:apply", False,
+            "Remote access has never recorded opening a port",
+            "The root service that turns WebFig/Winbox grants into nginx "
+            "config has not run since this version was installed, so a "
+            "grant may never become a working link.",
+            "sudo bash deploy/install.sh", warn=True)]
+    when = time.strftime("%d %b %H:%M", time.localtime(st.get("ran") or 0))
+    if not st.get("ok"):
+        return [_finding(
+            "access:apply", False,
+            f"Remote access could not open its ports ({when})",
+            (st.get("error") or "") + (
+                "\n" + st["detail"] if st.get("detail") else ""),
+            "sudo nginx -t && sudo systemctl start "
+            "easymikrotik-access-reload.service")]
+    if time.time() - float(st.get("ran") or 0) > 10 * 60:
+        return [_finding(
+            "access:apply", False,
+            f"Remote access has not been applied since {when}",
+            "Its once-a-minute timer and file watcher have stopped, so a "
+            "new WebFig/Winbox grant is never turned into an open port, and "
+            "an expired one is never closed.",
+            "sudo systemctl enable --now easymikrotik-access-reload.path "
+            "easymikrotik-access-reload.timer")]
+    return [_finding("access:apply", True,
+                     "Remote access is opening and closing its ports")]
+
+
 def check_units():
     """The units that do the work nobody watches.
 
@@ -1089,6 +1131,7 @@ def run_all(*, peers_path="", expected_peers=0, access_cfg=None,
     domain = _web_domain(config_path)
     for fn in (lambda: check_deployed_version(app_dir),
                lambda: check_units(),
+               lambda: check_access_apply(access_cfg),
                lambda: check_wg_readable(),
                lambda: check_peers_dir(peers_path),
                lambda: check_peers_file(peers_path, expected_peers),

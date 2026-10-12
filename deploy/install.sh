@@ -1254,6 +1254,71 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Off-site backups: every night, encrypted, uploaded off this server.
+# Set up in Platform admin > Off-site backups; until then the job records
+# that it is switched off and does nothing. Runs as the service user -- root
+# opening the databases would leave files the service cannot write -- and
+# systemd hands it a read-only copy of the hub's WireGuard key, which has to
+# be in the backup: every router dials home to it.
+# ---------------------------------------------------------------------------
+step "Arming nightly off-site backups (mikromon-offsite.timer)"
+OFFSITE_CRED=""
+if [[ -f /etc/wireguard/wg0.key ]]; then
+  OFFSITE_CRED="LoadCredential=hub-wg-key:/etc/wireguard/wg0.key"
+fi
+cat > /etc/systemd/system/mikromon-offsite.service <<UNIT
+[Unit]
+Description=EasyMikroTik off-site backup (encrypted, uploaded off this server)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
+WorkingDirectory=${APP_DIR}
+${OFFSITE_CRED}
+ExecStartPre=/bin/rm -f ${APP_DIR}/offsite-run-now
+ExecStart=${APP_DIR}/.venv/bin/python -m mikromon offsite-backup -c ${APP_DIR}/config.yaml
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=${APP_DIR}
+UNIT
+cat > /etc/systemd/system/mikromon-offsite.timer <<UNIT
+[Unit]
+Description=Nightly EasyMikroTik off-site backup
+[Timer]
+OnCalendar=*-*-* 02:30:00
+RandomizedDelaySec=1800
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+# "Back up now" in Platform admin drops this file; the service removes it.
+cat > /etc/systemd/system/mikromon-offsite.path <<UNIT
+[Unit]
+Description=Run the off-site backup when Platform admin asks
+[Path]
+PathExists=${APP_DIR}/offsite-run-now
+Unit=mikromon-offsite.service
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+if systemctl enable --now mikromon-offsite.timer mikromon-offsite.path; then
+  log "Off-site backups armed: nightly around 02:30 (set the storage in"
+  log "Platform admin > Off-site backups)."
+else
+  log "WARN: could not arm mikromon-offsite.timer -- off-site backups will"
+  log "      not run until this is fixed."
+fi
+[[ -n "${OFFSITE_CRED}" ]] || log "WARN: /etc/wireguard/wg0.key not found --" \
+  "off-site backups will not include the hub's WireGuard key."
+
+# ---------------------------------------------------------------------------
 # Enable and start both services — always, not just on upgrade.
 # mikromon first (monitor daemon), then mikromon-web (dashboard).
 # ---------------------------------------------------------------------------

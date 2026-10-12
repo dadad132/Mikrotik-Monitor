@@ -83,7 +83,7 @@ bs.db.close()
 
 srv = ThreadingHTTPServer(("127.0.0.1", 0), web.make_handler(
     mdb, sfile, auth, web.SessionManager(), secure_cookies=False,
-    devices_db=ddb, defaults=DEF, billing_cfg={"db": bdb}))
+    devices_db=ddb, defaults=DEF, billing_cfg={"db": bdb}, admin_2fa=False))
 BASE = f"http://127.0.0.1:{srv.server_address[1]}"
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 

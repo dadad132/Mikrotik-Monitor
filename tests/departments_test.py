@@ -325,7 +325,7 @@ with open(_sfile, "w", encoding="utf-8") as _f:
 _PORT = 8813
 threading.Thread(target=_web.serve, kwargs=dict(
     metrics_db=os.path.join(_d, "m.db"), state_file=_sfile, auth_db=_adb,
-    devices_db=_wdb, host="127.0.0.1", port=_PORT), daemon=True).start()
+    devices_db=_wdb, host="127.0.0.1", port=_PORT, admin_2fa=False), daemon=True).start()
 time.sleep(2.0)
 _B = f"http://127.0.0.1:{_PORT}"
 _cj = http.cookiejar.CookieJar()

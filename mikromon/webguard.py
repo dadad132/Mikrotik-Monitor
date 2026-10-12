@@ -34,12 +34,14 @@ log = logging.getLogger(__name__)
 # (refill per second, burst). A person clicking around, with a page that
 # polls every few seconds, never comes near the first.
 GENERAL = (10.0, 120)
-# POST /login and /signup/verify: a password or a code checked per try.
+# POST /login, /login/2fa, /account/2fa and /signup/verify: a password or
+# a code checked per try.
 LOGIN = (20 / 60, 20)
 # POST /signup and /signup/resend: each one can send an email.
 SIGNUP = (1 / 120, 8)
 
-_LOGIN_PATHS = frozenset({"/login", "/signup/verify"})
+_LOGIN_PATHS = frozenset({"/login", "/login/2fa", "/account/2fa",
+                          "/signup/verify"})
 _SIGNUP_PATHS = frozenset({"/signup", "/signup/resend"})
 
 

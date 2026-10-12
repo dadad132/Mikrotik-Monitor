@@ -127,7 +127,7 @@ push_pkg.rw_device = lambda cfg: _Dev()
 push_api.PushApi = _Api
 srv = ThreadingHTTPServer(("127.0.0.1", 0), web.make_handler(
     mdb, sfile, auth, web.SessionManager(), secure_cookies=False,
-    devices_db=ddb, defaults=DEF, push_log_db=pdb))
+    devices_db=ddb, defaults=DEF, push_log_db=pdb, admin_2fa=False))
 BASE = f"http://127.0.0.1:{srv.server_address[1]}"
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 

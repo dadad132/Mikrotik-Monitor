@@ -962,7 +962,7 @@ DevicesStore(wdb).close()
 
 srv = ThreadingHTTPServer(("127.0.0.1", 8096), web.make_handler(
     mdb, sfile, AuthStore(adb), web.SessionManager(), devices_db=wdb, defaults=DEF,
-    push_log_db=pldb, alert_log_db=aldb))
+    push_log_db=pldb, alert_log_db=aldb, admin_2fa=False))
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 B = "http://127.0.0.1:8096"
 

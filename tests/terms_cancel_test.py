@@ -164,7 +164,7 @@ with open(sfile, "w") as fh:
 bdb = os.path.join(tmp, "web-billing.db")
 srv = ThreadingHTTPServer(("127.0.0.1", 0), web.make_handler(
     mdb, sfile, AuthStore(adb), web.SessionManager(), secure_cookies=False,
-    defaults=dict(DEFAULT_THRESHOLDS), billing_cfg={"db": bdb}))
+    defaults=dict(DEFAULT_THRESHOLDS), billing_cfg={"db": bdb}, admin_2fa=False))
 BASE = f"http://127.0.0.1:{srv.server_address[1]}"
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 

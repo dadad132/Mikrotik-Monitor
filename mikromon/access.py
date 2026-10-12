@@ -141,6 +141,9 @@ class AccessStore:
                      "tunnel_ip": tunnel_ip, "scheme": KINDS[kind]["scheme"],
                      "router_port": KINDS[kind]["router_port"],
                      "created": (existing or {}).get("created", now),
+                     # When this open was asked for: the device page waits
+                     # for the hub to apply THIS, not an earlier open.
+                     "opened": now,
                      "expires": now + ttl}
             data["grants"][gid] = grant
             self._save(data)
@@ -399,3 +402,110 @@ def apply_hub_config(grants_file: str, cert: str, key: str,
     _write(stream_conf, "# easymikrotik Winbox access — generated, do not edit\n"
            + render_nginx_stream(grants))
     return grant_ports(grants)
+
+
+# ===== what the last apply actually did =====================================
+# The reload unit runs as root and nobody watches it. It leaves this note
+# beside the grants file, so the device page can say WHY a port did not open
+# instead of offering the same two shell commands for every cause.
+STATUS_NAME = "access-status.json"
+NGINX_ERROR_LOG = "/var/log/nginx/error.log"
+
+
+def status_path(grants_file: str) -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(grants_file)),
+                        STATUS_NAME)
+
+
+def read_status(grants_file: str) -> dict:
+    try:
+        with open(status_path(grants_file), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_status(grants_file: str, data: dict) -> None:
+    path = status_path(grants_file)
+    tmp = f"{path}.tmp"
+    # Written by root, read by the web service: 0644. It holds port numbers
+    # and nginx's complaint, nothing secret.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+    os.chmod(tmp, 0o644)                  # whatever the umask said
+    os.replace(tmp, path)
+
+
+def is_listening(port: int, timeout: float = 0.5) -> bool:
+    """Does something on this machine accept connections on `port`?"""
+    import socket
+    for family, addr in ((socket.AF_INET, "127.0.0.1"),
+                         (socket.AF_INET6, "::1")):
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as sk:
+                sk.settimeout(timeout)
+                if sk.connect_ex((addr, int(port))) == 0:
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def ports_not_open(ports, wait: float = 8.0, probe=is_listening,
+                   clock=time.monotonic, sleep=time.sleep) -> list:
+    """Of `ports`, the ones still not listening after up to `wait` seconds.
+    A reload hands the new config to fresh worker processes; the port opens
+    a moment later, not at once."""
+    left = list(ports)
+    deadline = clock() + wait
+    while left:
+        left = [p for p in left if not probe(p)]
+        if not left or clock() >= deadline:
+            break
+        sleep(0.3)
+    return left
+
+
+def nginx_complaints(ports=(), since: float = 0.0, path: str = "",
+                     limit: int = 6) -> list:
+    """nginx's own words from the end of its error log since `since`: its
+    emerg/alert/crit lines, and anything naming one of `ports`. A reload
+    that nginx accepts can still fail to open a port (in use, a
+    certificate it cannot load), and the reload command says nothing."""
+    import re
+    try:
+        with open(path or NGINX_ERROR_LOG, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 65536))
+            lines = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return []
+    keys = [f":{p}" for p in ports]
+    out = []
+    for line in lines:
+        m = re.match(r"(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d)", line)
+        if since and m:
+            try:
+                when = time.mktime(time.strptime(m.group(1),
+                                                 "%Y/%m/%d %H:%M:%S"))
+            except ValueError:
+                when = 0
+            if when < since - 2:
+                continue
+        if (any(k in line for k in keys)
+                or any(t in line for t in ("[emerg]", "[alert]", "[crit]"))):
+            out.append(line.strip())
+    return out[-limit:]
+
+
+def first_complaint(text: str) -> str:
+    """The line of nginx output that says what is wrong."""
+    import re
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    for ln in lines:
+        if "[emerg]" in ln or "[alert]" in ln or "[crit]" in ln:
+            said = ln.split("] ", 1)[-1] if "] " in ln else ln
+            return re.sub(r"^\d+#\d+: ", "", said)    # nginx's pid#tid
+    return lines[0] if lines else "no reason given"

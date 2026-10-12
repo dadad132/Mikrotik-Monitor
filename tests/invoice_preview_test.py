@@ -96,7 +96,7 @@ PORT = 8798
 threading.Thread(target=web.serve, kwargs=dict(
     metrics_db=os.path.join(d, "m.db"), state_file=os.path.join(d, "s.json"),
     auth_db=adb, billing_cfg={"db": bdb},
-    host="127.0.0.1", port=PORT),
+    host="127.0.0.1", port=PORT, admin_2fa=False),
     daemon=True).start()
 time.sleep(2.0)
 BASE = f"http://127.0.0.1:{PORT}"

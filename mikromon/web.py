@@ -46,6 +46,9 @@ from .web_shared import (
 from . import invoice_template as _invoice_tpl
 from .web_auth import (
     _first_visit_tip, _welcome_tip, _transfer_box, _incoming_transfers_box,
+    _render_offsite_key,
+    _render_login_2fa, _render_2fa_setup, _render_recovery_codes,
+    _two_factor_why,
     _render_login, _render_signup, _render_account,
     _render_admin, _render_guide,
     _render_billing, _render_locked, _grace_banner_html,
@@ -61,6 +64,10 @@ log = logging.getLogger(__name__)
 _PROM_SAFE = re.compile(r"[^a-zA-Z0-9_]")
 _COOKIE = "mikromon_session"
 _SESSION_TTL = 12 * 3600
+# Between the password and the code from the phone: long enough to find the
+# phone, short enough that a half-finished sign-in does not linger.
+_TWOFA_TTL = 5 * 60
+_TWOFA_TRIES = 5
 
 
 # ============================ data assembly ================================
@@ -2903,8 +2910,73 @@ def _webfig_link_state(access_cfg, resolved_host: str = "") -> tuple:
         return host, ""
 
 
+# The reload timer runs once a minute; the file watcher usually beats it.
+_ACCESS_APPLY_GRACE = 75
+
+
+def _access_not_open(label, grant, status, close_html, staff=False,
+                     now=None) -> str:
+    """Why a granted port is not open yet, from what the hub's reload unit
+    last recorded (access-status.json) -- not the same two shell commands
+    for every cause. Customers are told it is the hub's fault and to tell
+    support; the platform admin also gets nginx's words and the fix."""
+    now = time.time() if now is None else now
+    status = status or {}
+    port = grant["port"]
+    opened = float(grant.get("opened") or grant.get("created") or 0)
+    ran = float(status.get("ran") or 0)
+
+    def hhmm(ts):
+        return time.strftime("%H:%M:%S", time.localtime(ts))
+
+    if ran < opened and now - opened < _ACCESS_APPLY_GRACE:
+        return (f'<div class="linkrow" style="display:block" '
+                f'data-access-pending="1"><b>{label}</b> '
+                f'<span class="muted">opening &mdash; the hub is setting up '
+                f'port {port}. This takes up to a minute; the page checks '
+                f'again by itself.</span> &nbsp;{close_html}</div>')
+    fix, detail = "", ""
+    if ran < opened and not ran:
+        why = ("the hub has never recorded applying remote access: the "
+               "service that opens the ports is not running, or this server "
+               "was updated without re-running the installer.")
+        fix = "sudo bash deploy/install.sh"
+    elif ran < opened:
+        why = (f"the service that opens the ports last ran at {hhmm(ran)}, "
+               f"before this was opened. Its file watcher and once-a-minute "
+               f"timer have stopped.")
+        fix = ("sudo systemctl enable --now easymikrotik-access-reload.path "
+               "easymikrotik-access-reload.timer")
+    elif status.get("error"):
+        why = f"the hub tried at {hhmm(ran)} and failed: {status['error']}."
+        detail = status.get("detail") or ""
+        fix = ("sudo nginx -t && sudo systemctl start "
+               "easymikrotik-access-reload.service")
+    else:
+        why = (f"the hub opened it at {hhmm(ran)}, but nothing is listening "
+               f"on port {port} now: nginx has stopped or restarted since.")
+        fix = "sudo systemctl status nginx --no-pager"
+    if not staff:
+        return (f'<div class="linkrow" style="display:block">'
+                f'<b>{label}</b> <span style="color:#b91c1c">&#9888; could '
+                f'not be opened</span><br><span class="muted">This is a fault '
+                f'on our server, not on your router. Please let support '
+                f'know; Close and try again later.</span> &nbsp;{close_html}'
+                f'</div>')
+    return (f'<div class="linkrow" style="display:block">'
+            f'<b>{label}</b> <span style="color:#b91c1c">&#9888; the hub is '
+            f'not listening on port {port}</span><br>'
+            f'<span class="muted">{esc(why[0].upper() + why[1:])}</span>'
+            + (f'<pre style="white-space:pre-wrap;font-size:11px;margin:6px 0;'
+               f'max-height:140px;overflow:auto">{esc(detail[-800:])}</pre>'
+               if detail else "")
+            + f'<span class="muted">On the server: <code>{esc(fix)}</code>'
+            f'</span> &nbsp;{close_html}</div>')
+
+
 def _access_box(name, csrf, hub_host, tunnel_ip, creds, grants,
-                link_host_override="", cert_note="") -> str:
+                link_host_override="", cert_note="", status=None,
+                staff=False) -> str:
     """On-demand remote access through the hub. `grants` maps kind -> active
     grant dict (or None). Each kind shows either an Open button or the live
     connection details + a countdown + Close while a grant is active."""
@@ -2941,19 +3013,8 @@ def _access_box(name, csrf, hub_host, tunnel_ip, creds, grants,
             # and when any of them is missing the browser just says
             # ERR_CONNECTION_REFUSED with nothing to point at.
             if not _port_is_listening(port):
-                return (
-                    f'<div class="linkrow" style="display:block">'
-                    f'<b>{label}</b> '
-                    f'<span style="color:#b91c1c">&#9888; the hub is not '
-                    f'listening on port {port}</span><br>'
-                    f'<span class="muted">The access was granted but nginx '
-                    f'never opened the port, so the link would only give you '
-                    f'"connection refused". On the server:<br>'
-                    f'<code>sudo systemctl start '
-                    f'easymikrotik-access-reload.service</code><br>'
-                    f'<code>sudo nginx -t &amp;&amp; sudo systemctl status '
-                    f'easymikrotik-access-reload.service</code></span>'
-                    f' &nbsp;{close_btn(kind)}</div>')
+                return _access_not_open(label, g, status, close_btn(kind),
+                                        staff=staff)
             if kind == "webfig":
                 _lh = link_host_override or hub_host
                 target = (f'<a href="https://{esc(_lh)}:{port}" '
@@ -3005,6 +3066,10 @@ _ACCESS_JS = """
    });
  }
  mmTickAccess(); setInterval(mmTickAccess, 1000);
+ // A port the hub is still opening: look again shortly, rather than leave
+ // an "opening" note on screen that never changes.
+ if (document.querySelector('[data-access-pending]'))
+   setTimeout(function(){ location.reload(); }, 6000);
 </script>"""
 
 
@@ -7937,6 +8002,7 @@ def _render_prometheus(store, allowed=None) -> str:
 class SessionManager:
     def __init__(self):
         self._s: dict[str, dict] = {}
+        self._p: dict[str, dict] = {}     # password right, code still to come
 
     def create(self, login: str) -> str:
         token = secrets.token_urlsafe(32)
@@ -7957,6 +8023,26 @@ class SessionManager:
     def destroy(self, token: str) -> None:
         self._s.pop(token or "", None)
 
+    # Signed in with the password, waiting for the code from the phone.
+    # Not a session: only POST /login/2fa takes one of these.
+    def begin_2fa(self, login: str) -> str:
+        now = time.time()
+        self._p = {k: v for k, v in self._p.items() if v["expires"] > now}
+        token = secrets.token_urlsafe(32)
+        self._p[token] = {"login": login, "expires": now + _TWOFA_TTL,
+                          "tries": 0}
+        return token
+
+    def get_2fa(self, token: str):
+        p = self._p.get(token or "")
+        if p and p["expires"] < time.time():
+            self._p.pop(token, None)
+            return None
+        return p
+
+    def end_2fa(self, token: str) -> None:
+        self._p.pop(token or "", None)
+
 
 # ============================ HTTP handler =================================
 # A form post is a few KB; only these two take a file. Anything bigger is
@@ -7972,7 +8058,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                  metrics_token=None, devices_db=None, defaults=None,
                  push_log_db=None, access_cfg=None, billing_cfg=None,
                  smtp_cfg=None, config_path=None, alert_log_db=None,
-                 rate_limit=True):
+                 rate_limit=True, admin_2fa=True):
+    """`admin_2fa=False` lets the tests sign in as the platform admin
+    without first setting up two-factor sign-in, which the website
+    otherwise insists on for that account."""
     from .webguard import WebGuard
     # Requests per second per visitor (see webguard.py). The server's own
     # requests -- local tools, the tests -- are never limited.
@@ -8303,7 +8392,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if path == "/login":
                 if self._session():
                     return self._redirect("/dashboard")
-                err = {"1": "Invalid email or password."}.get(
+                err = {"1": "Invalid email or password.",
+                       "2": "That sign-in took too long. Enter your password "
+                            "again.",
+                       "3": "Too many wrong codes. Enter your password "
+                            "again."}.get(
                     parse_qs(url.query).get("error", [""])[0], "")
                 return self._send(200, _render_login(
                     err, has_regions=bool(auth.get_regions())),
@@ -8320,6 +8413,19 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._send(401, '{"error":"unauthorized"}',
                                       "application/json")
                 return self._redirect("/login")
+
+            # Two-factor sign-in: platform admins, and everyone in a company
+            # that asks for it, set it up before anything else opens. Ahead
+            # of the billing guard, which would otherwise send a locked
+            # company's member from the set-up page to /billing and back.
+            if path == "/account/2fa":
+                return self._account_2fa_page(user)
+            if self._needs_2fa_setup(user):
+                if path.startswith("/api/"):
+                    return self._send(
+                        403, '{"error":"two_factor_setup_required"}',
+                        "application/json")
+                return self._redirect("/account/2fa")
 
             # Billing guard: inject grace banner or redirect locked orgs.
             if billing:
@@ -8381,7 +8487,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                           if billing and _own else None),
                     device_count=(self._org_device_count(user["org_id"])
                                   if _own else 0),
-                    yoco_on=self._yoco_live()),
+                    yoco_on=self._yoco_live(),
+                    twofa=self._twofa_view(user)),
                     "text/html; charset=utf-8")
             if path == "/guide":
                 return self._send(200, _render_guide(user),
@@ -8524,7 +8631,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     others_down = sum(
                         1 for dd in _all_devices(store, state, allowed)
                         if dd.get("device") != dev and not dd.get("up", True))
-                    access_html = (self._access_box_html(dev, csrf)
+                    access_html = (self._access_box_html(
+                        dev, csrf, staff=bool(user.get("is_superadmin")))
                                   if can_manage else "")
                     notice = (_safemode_notice(safemode.status(dev))
                               if safemode is not None and can_manage else "")
@@ -8789,6 +8897,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 yoco=auth.get_yoco() if auth else {},
                 public_base=_pay_base,
                 dormant=(billing.all_dormant() if billing else []),
+                offsite=self._offsite_view(),
                 invoice_template_on=bool(_invoice_tpl.load()),
                 invoice_template_warnings=_invoice_tpl.check(
                     _invoice_tpl.load()) if _invoice_tpl.load() else (),
@@ -8992,6 +9101,81 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                    if names else "")
                 + " removed."
                 + (f" Its {kept} paid invoice(s) are kept." if kept else "")))
+
+        def _offsite_view(self):
+            """Off-site backup settings and the last run, for Platform admin."""
+            if auth is None:
+                return None
+            from . import offsite
+            return {"settings": auth.get_setting("offsite") or {},
+                    "status": offsite.read_status(os.path.dirname(
+                        os.path.abspath(devices_db or auth.path)))}
+
+        def _post_superadmin_offsite(self, user):
+            """Platform admin -> Off-site backups: save, test the upload,
+            make a key pair, or back up now."""
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            from . import offsite
+            back = "/superadmin"
+            s = dict(auth.get_setting("offsite") or {})
+            for k in ("bucket", "region", "prefix", "access_key", "endpoint",
+                      "recipient"):
+                if k in flat:
+                    s[k] = (flat.get(k) or "").strip()
+            if (flat.get("secret_key") or "").strip():
+                s["secret_key"] = flat["secret_key"].strip()
+            s["enabled"] = flat.get("enabled") == "1"
+            action = flat.get("action") or "save"
+            if s.get("recipient"):
+                try:
+                    offsite.parse_recipient(s["recipient"])
+                except ValueError as exc:
+                    return self._redirect(back + "?error=" + quote(
+                        f"The encryption key is not valid: {exc}.")
+                        + "#offsite")
+            if action == "genkey":
+                identity, recipient = offsite.generate_identity()
+                s["recipient"] = recipient
+                auth.set_setting("offsite", s)
+                log.info("off-site backup key pair made by %s",
+                         user.get("email", "?"))
+                return self._send(200, _page("Backup key", _header(
+                    user, "/superadmin") + '<div class="wrap">'
+                    + _render_offsite_key(identity, recipient, sess["csrf"])
+                    + '</div>'), "text/html; charset=utf-8",
+                    {"Cache-Control": "no-store"})
+            auth.set_setting("offsite", s)
+            if action == "test":
+                problem = offsite.test_upload(s)
+                if problem:
+                    return self._redirect(back + "?error=" + quote(
+                        f"Saved, but the test upload failed: {problem}")
+                        + "#offsite")
+                return self._redirect(back + "?ok=" + quote(
+                    "Saved, and a test file reached the storage.")
+                    + "#offsite")
+            if action == "runnow":
+                problem = offsite.settings_problem(s)
+                if problem or not s.get("enabled"):
+                    return self._redirect(back + "?error=" + quote(
+                        problem or "Switch on Back up every night first.")
+                        + "#offsite")
+                try:
+                    offsite.request_run(os.path.dirname(os.path.abspath(
+                        devices_db or auth.path)))
+                except OSError as exc:
+                    return self._redirect(back + "?error=" + quote(
+                        f"Could not start it: {exc}") + "#offsite")
+                return self._redirect(back + "?ok=" + quote(
+                    "Backup started. The result shows here in a minute or "
+                    "two (refresh).") + "#offsite")
+            return self._redirect(back + "?ok=" + quote(
+                "Off-site backup settings saved.") + "#offsite")
 
         def _post_superadmin_suspend(self, user, restore: bool = False):
             """Superadmin-only: cut a company off for non-payment, or let them
@@ -9831,7 +10015,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             """
             return _access_link_host(access_cfg, self.headers.get("Host", ""))
 
-        def _access_box_html(self, name, csrf):
+        def _access_box_html(self, name, csrf, staff=False):
             store = self._access_store()
             if store is None:
                 return ""
@@ -9845,10 +10029,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             grants = {k: store.grant_for(name, k) for k in ("webfig", "winbox")}
             _resolved = self._link_host()
             _lh, _note = _webfig_link_state(access_cfg, _resolved)
+            from .access import read_status
             return _access_box(name, csrf, _resolved,
                                _device_tunnel_ip(name, devices_db), creds,
                                grants, link_host_override=_lh,
-                               cert_note=_note)
+                               cert_note=_note,
+                               status=read_status(store.path),
+                               staff=staff)
 
         @staticmethod
         def _purge_device_data(name):
@@ -13385,9 +13572,18 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_signup_resend()
             if path == "/login":
                 return self._post_login()
+            if path == "/login/2fa":
+                return self._post_login_2fa()
             if path == "/logout":
                 sessions.destroy(self._token())
                 return self._redirect("/login", self._cookie_header("", clear=True))
+            if path == "/account/2fa":
+                return self._post_account_2fa()
+            user = self._user()
+            # Nothing else is done for someone who still has to set up the
+            # two-factor sign-in they are required to use.
+            if self._needs_2fa_setup(user):
+                return self._redirect("/account/2fa")
             # /account: any logged-in user edits their own email/password.
             if path == "/account":
                 return self._post_account()
@@ -13395,7 +13591,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_test_email()
             if path == "/tips/seen":
                 return self._post_tips_seen()
-            user = self._user()
             # Superadmin server-backup actions: dispatched before the
             # generic is_admin (org-owner) gate below, since a platform
             # superadmin need not be an owner of their own company.
@@ -13416,6 +13611,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_smtp(user)
             if path == "/superadmin/ai":
                 return self._post_superadmin_ai(user)
+            if path == "/superadmin/offsite":
+                return self._post_superadmin_offsite(user)
+            if path == "/superadmin/reset-2fa":
+                return self._post_superadmin_reset_2fa(user)
             if path == "/superadmin/delete-org":
                 return self._post_superadmin_delete_org(user)
             if path == "/superadmin/suspend":
@@ -13608,6 +13807,24 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     if acct == user["login"]:
                         return self._send(400, "cannot delete yourself")
                     auth.delete_user(acct)
+                elif path == "/admin/reset-2fa":
+                    acct = flat.get("account", "")
+                    if not self._same_org(acct, user):
+                        return self._send(403, "forbidden")
+                    if acct == user["login"]:
+                        return self._send(400, "Your own two-factor sign-in "
+                                               "is on My account.")
+                    target = auth.get_user(acct)
+                    if target.get("is_superadmin"):
+                        # A co-owner could otherwise strip the platform
+                        # admin's second factor with one click.
+                        return self._send(403, "Only another platform admin "
+                                               "can reset a platform admin's "
+                                               "two-factor sign-in.")
+                    auth.totp_disable(acct)
+                    log.warning("two-factor sign-in reset for %s by owner %s",
+                                acct, user["login"])
+                    self._notify_2fa_off(target, user)
                 else:
                     return self._send(404, "not found")
             except Exception as exc:  # noqa: BLE001 — surface as a simple message
@@ -14548,8 +14765,158 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if not user:
                 time.sleep(0.5)  # mild brute-force friction
                 return self._redirect("/login?error=1")
+            if user.get("totp_on"):
+                # Password right; the code from the phone comes next.
+                pending = sessions.begin_2fa(user["login"])
+                return self._send(200, _render_login_2fa(pending),
+                                  "text/html; charset=utf-8",
+                                  {"Cache-Control": "no-store"})
             token = sessions.create(user["login"])
             return self._redirect("/dashboard", self._cookie_header(token))
+
+        def _post_login_2fa(self):
+            """Second step of signing in. Five wrong codes and it is back to
+            the password, so a stolen password buys only five guesses at a
+            time (and the rate limit on top)."""
+            from .auth import AuthError
+            flat, _ = self._form()
+            pending = flat.get("pending", "")
+            p = sessions.get_2fa(pending)
+            if not p:
+                return self._redirect("/login?error=2")
+            login = p["login"]
+            try:
+                before = auth.totp_recovery_left(login)
+                ok = auth.totp_check(login, flat.get("code", ""))
+            except AuthError:           # the login was deleted meanwhile
+                sessions.end_2fa(pending)
+                return self._redirect("/login?error=1")
+            if not ok:
+                time.sleep(0.5)
+                p["tries"] += 1
+                if p["tries"] >= _TWOFA_TRIES:
+                    sessions.end_2fa(pending)
+                    log.warning("two-factor sign-in: too many wrong codes "
+                                "for %s", login)
+                    return self._redirect("/login?error=3")
+                return self._send(200, _render_login_2fa(
+                    pending, "That code is not right. Type the code the app "
+                             "shows now."),
+                    "text/html; charset=utf-8", {"Cache-Control": "no-store"})
+            sessions.end_2fa(pending)
+            token = sessions.create(login)
+            left = auth.totp_recovery_left(login)
+            if left < before:
+                return self._redirect("/account?ok=" + quote(
+                    f"Signed in with a recovery code. {left} left: if the "
+                    f"phone is gone for good, turn two-factor sign-in off "
+                    f"and set it up again on the new phone, or make new "
+                    f"recovery codes.") + "#twofa",
+                    self._cookie_header(token))
+            return self._redirect("/dashboard", self._cookie_header(token))
+
+        def _needs_2fa_setup(self, user) -> bool:
+            if auth is None or not user or user.get("totp_on"):
+                return False
+            if user.get("is_superadmin") and admin_2fa:
+                return True
+            return auth.org_requires_2fa(user.get("org_id"))
+
+        def _twofa_view(self, user):
+            org_req = auth.org_requires_2fa(user.get("org_id"))
+            on = bool(user.get("totp_on"))
+            return {"on": on, "org_required": org_req,
+                    "why": _two_factor_why(user, org_req, admin_2fa),
+                    "left": auth.totp_recovery_left(user["login"]) if on else 0}
+
+        def _account_2fa_page(self, user, error: str = ""):
+            from . import totp
+            if user.get("totp_on"):
+                return self._redirect("/account#twofa")
+            secret = auth.totp_begin(user["login"])
+            account = user.get("email") or user.get("username") or "account"
+            qr = totp.qr_svg(totp.uri(secret, account, _BRAND))
+            why = _two_factor_why(
+                user, auth.org_requires_2fa(user.get("org_id")), admin_2fa)
+            body = _render_2fa_setup(self._session()["csrf"], secret, qr,
+                                     why=why, error=error)
+            return self._send(200, _page("Two-factor sign-in", _header(
+                user, "/account") + body), "text/html; charset=utf-8",
+                {"Cache-Control": "no-store"})
+
+        def _post_account_2fa(self):
+            """Turn two-factor sign-in on with the first code from the app."""
+            user = self._user()
+            if not user:
+                return self._redirect("/login")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            if user.get("totp_on"):
+                return self._redirect("/account#twofa")
+            codes = auth.totp_confirm(user["login"], flat.get("code", ""))
+            if not codes:
+                time.sleep(0.5)
+                return self._account_2fa_page(
+                    user, error="That code is not right. Type the 6-digit "
+                                "code the app shows now.")
+            log.info("two-factor sign-in turned on for %s", user["login"])
+            return self._send(200, _page("Recovery codes", _header(
+                user, "/account") + _render_recovery_codes(codes, first=True)),
+                "text/html; charset=utf-8", {"Cache-Control": "no-store"})
+
+        def _notify_2fa_off(self, target, by) -> None:
+            """Tell the person their second factor went: if it was not them,
+            this is how they find out."""
+            if not target or not target.get("email"):
+                return
+            who = ("you" if by and by.get("login") == target.get("login")
+                   else (by or {}).get("email") or "an administrator")
+            self._mail_bg(
+                [target["email"]], "Two-factor sign-in was turned off",
+                f"Two-factor sign-in on your {_BRAND} account "
+                f"({target['email']}) was turned off by {who} on "
+                f"{time.strftime('%d %b %Y at %H:%M')}.\n\n"
+                f"Your password alone now signs you in. If your company or "
+                f"your role requires two-factor sign-in, you will be asked "
+                f"to set it up again the next time you sign in; otherwise "
+                f"set it up again under My account.\n\n"
+                f"If you did not expect this, change your password now and "
+                f"tell your company owner.\n")
+
+        def _post_superadmin_reset_2fa(self, user):
+            """Platform admin: reset somebody's two-factor sign-in (lost
+            phone and recovery codes)."""
+            if not (user and user.get("is_superadmin")):
+                return self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return self._send(400, "bad csrf token")
+            back = "/superadmin"
+            who = (flat.get("email") or "").strip()
+            target = auth.get_user(who) if who else None
+            if not target:
+                return self._redirect(back + "?error=" + quote(
+                    "No account with that email or username.") + "#twofa-reset")
+            if target["login"] == user["login"]:
+                return self._redirect(back + "?error=" + quote(
+                    "That is your own account. Another platform admin can "
+                    "reset it, or run 'python -m mikromon reset-2fa' on the "
+                    "server.") + "#twofa-reset")
+            if not target.get("totp_on"):
+                return self._redirect(back + "?ok=" + quote(
+                    f"{who} does not have two-factor sign-in on; nothing to "
+                    f"reset.") + "#twofa-reset")
+            auth.totp_disable(target["login"])
+            log.warning("two-factor sign-in reset for %s by platform admin %s",
+                        target["login"], user["login"])
+            self._notify_2fa_off(target, user)
+            return self._redirect(back + "?ok=" + quote(
+                f"Two-factor sign-in reset for {who}. They have been "
+                f"emailed; their password alone signs them in until they set "
+                f"it up again.") + "#twofa-reset")
 
         def _post_tips_seen(self):
             """Dismiss a first-visit tip, or all of them.
@@ -14609,6 +14976,56 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         "yet — add one above or nothing can be sent."))
                 return self._redirect("/account?ok=" + quote(
                     "Alert emails on." if on else "Alert emails off."))
+            if action == "2fa_off":
+                why = self._twofa_view(user)["why"]
+                if why:
+                    return self._redirect("/account?error=" + quote(
+                        f"Two-factor sign-in cannot be turned off. {why}")
+                        + "#twofa")
+                if not (auth.verify(user["login"], flat.get("password", ""))
+                        and auth.totp_check(user["login"],
+                                            flat.get("code", ""))):
+                    time.sleep(0.5)
+                    return self._redirect("/account?error=" + quote(
+                        "Password or code not right: two-factor sign-in is "
+                        "still on.") + "#twofa")
+                auth.totp_disable(user["login"])
+                log.warning("two-factor sign-in turned off by %s",
+                            user["login"])
+                self._notify_2fa_off(user, user)
+                return self._redirect("/account?ok=" + quote(
+                    "Two-factor sign-in is off.") + "#twofa")
+            if action == "2fa_codes":
+                if not user.get("totp_on"):
+                    return self._redirect("/account/2fa")
+                if not auth.totp_check(user["login"], flat.get("code", "")):
+                    time.sleep(0.5)
+                    return self._redirect("/account?error=" + quote(
+                        "That code is not right; the recovery codes are "
+                        "unchanged.") + "#twofa")
+                codes = auth.totp_new_recovery(user["login"])
+                log.info("new recovery codes made by %s", user["login"])
+                return self._send(200, _page("Recovery codes", _header(
+                    user, "/account") + _render_recovery_codes(codes)),
+                    "text/html; charset=utf-8", {"Cache-Control": "no-store"})
+            if action == "2fa_require":
+                if not AuthStore.is_owner(user):
+                    return self._send(403, "forbidden")
+                on = flat.get("require_2fa") == "1"
+                if on and not user.get("totp_on"):
+                    return self._redirect("/account?error=" + quote(
+                        "Set up two-factor sign-in for yourself first, then "
+                        "require it for everyone.") + "#twofa")
+                auth.set_require_2fa(user["org_id"], on)
+                log.info("company %s: two-factor sign-in %s by %s",
+                         user["org_id"], "required" if on else "optional",
+                         user["login"])
+                return self._redirect("/account?ok=" + quote(
+                    "Two-factor sign-in is now required for everyone in the "
+                    "company. Anyone without it is asked to set it up the "
+                    "next time they open a page." if on else
+                    "Two-factor sign-in is now optional in this company.")
+                    + "#twofa")
             # personal details
             new_email = flat.get("email", "").strip().lower()
             new_pw = flat.get("password", "")
@@ -15005,7 +15422,8 @@ def _register_hub_peer(device_name: str, api, flat: dict, devices_db: str) -> No
 def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,
           secure_cookies=False, metrics_token=None, devices_db=None,
           defaults=None, push_log_db=None, access_cfg=None, billing_cfg=None,
-          smtp_cfg=None, config_path=None, alert_log_db=None):
+          smtp_cfg=None, config_path=None, alert_log_db=None,
+          admin_2fa=True):
     if metrics_db and not os.path.exists(metrics_db):
         log.warning("metrics DB %s not found yet — start the monitor first",
                     metrics_db)
@@ -15020,7 +15438,7 @@ def serve(metrics_db, state_file, host="127.0.0.1", port=8080, auth_db=None,
                                    secure_cookies, metrics_token, devices_db,
                                    defaults, push_log_db, access_cfg,
                                    billing_cfg, smtp_cfg, config_path,
-                                   alert_log_db))
+                                   alert_log_db, admin_2fa=admin_2fa))
     scheme = "auth ON" if auth else "auth OFF (open)"
     billing_note = "  billing ON" if (billing_cfg or {}).get("db") else ""
     log.info("Dashboard at http://%s:%d  [%s]%s  Prometheus: /metrics",

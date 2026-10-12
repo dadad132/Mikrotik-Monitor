@@ -69,7 +69,7 @@ srv = ThreadingHTTPServer(("127.0.0.1", 0), web.make_handler(
     mdb, sfile, auth, web.SessionManager(), secure_cookies=False,
     defaults=dict(DEFAULT_THRESHOLDS), billing_cfg={"db": bdb},
     devices_db=os.path.join(tmp, "d.db"),   # keeps its rate cache in tmp
-    smtp_cfg=SmtpConfig(host="smtp.test", from_addr="billing@eca.test")))
+    smtp_cfg=SmtpConfig(host="smtp.test", from_addr="billing@eca.test"), admin_2fa=False))
 BASE = f"http://127.0.0.1:{srv.server_address[1]}"
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 op = urllib.request.build_opener(

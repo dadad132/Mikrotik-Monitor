@@ -38,12 +38,14 @@ def build_parser() -> argparse.ArgumentParser:
                             "useradd", "userlist", "userdel", "passwd",
                             "set-devices", "set-superadmin", "backup-list",
                             "backup-now", "backup-server", "restore-server",
-                            "access-apply"],
+                            "access-apply", "offsite-backup",
+                            "reset-2fa"],
                    help="run | once | demo | dashboard | test-connection | "
                         "test-email | list-checks | useradd | userlist | "
                         "userdel | passwd | set-devices | set-superadmin | "
                         "backup-list | backup-now | backup-server | "
-                        "restore-server | access-apply")
+                        "restore-server | access-apply | offsite-backup | "
+                        "reset-2fa")
     p.add_argument("-c", "--config", default="config.yaml",
                    help="path to config file (default: config.yaml)")
     p.add_argument("--dry-run", action="store_true",
@@ -78,6 +80,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--name", help="backup file name (backup-now)")
     p.add_argument("-o", "--out", help="output file path (backup-server)")
     p.add_argument("--archive", help="backup archive to read (restore-server)")
+    p.add_argument("--identity",
+                   help="file holding the private key (AGE-SECRET-KEY-1...) "
+                        "that opens an encrypted off-site backup "
+                        "(restore-server)")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="enable DEBUG logging")
     p.add_argument("--version", action="version", version=f"mikromon {__version__}")
@@ -108,7 +114,7 @@ def main(argv=None) -> int:
     _setup_logging("DEBUG" if args.verbose else config.log_level)
 
     if args.command in ("useradd", "userlist", "userdel", "passwd",
-                        "set-devices", "set-superadmin"):
+                        "set-devices", "set-superadmin", "reset-2fa"):
         return _cmd_users(args, config)
 
     if args.command in ("backup-list", "backup-now"):
@@ -119,6 +125,21 @@ def main(argv=None) -> int:
 
     if args.command == "restore-server":
         return _cmd_restore_server(args, config)
+
+    if args.command == "offsite-backup":
+        # Run nightly by mikromon-offsite.timer (deploy/install.sh).
+        from . import offsite
+        status = offsite.run(config, args.config)
+        if status.get("ok"):
+            print(f"Uploaded {status.get('object')} "
+                  f"({status.get('size', 0):,} bytes)"
+                  + ("" if status.get("wireguard") else
+                     " -- WITHOUT the hub's WireGuard key, which this run "
+                     "could not read"))
+            return 0
+        print(f"Off-site backup not made: {status.get('error')}",
+              file=sys.stderr)
+        return 1
 
     if args.command == "access-apply":
         return _cmd_access_apply(config)
@@ -262,6 +283,14 @@ def _cmd_users(args, config) -> int:
         elif args.command == "userdel":
             store.delete_user(args.user)
             print(f"Deleted '{args.user}'.")
+        elif args.command == "reset-2fa":
+            # For the platform admin who lost both the phone and the
+            # recovery codes: nobody else on the website can reset theirs.
+            if not store.get_user(args.user):
+                raise AuthError(f"No such user: {args.user!r}")
+            store.totp_disable(args.user)
+            print(f"Two-factor sign-in reset for '{args.user}'. They set it "
+                  f"up again when they next sign in.")
         return 0
     except AuthError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -339,6 +368,8 @@ def _cmd_restore_server(args, config) -> int:
     if not os.path.isfile(args.archive):
         print(f"No such file: {args.archive}", file=sys.stderr)
         return 2
+    if args.archive.endswith(".age"):
+        return _restore_encrypted(args, config)
     paths = backup_paths(
         config_path=args.config, auth_db=config.auth_db,
         devices_db=config.devices_db, metrics_db=config.metrics_db,
@@ -367,10 +398,89 @@ def _cmd_restore_server(args, config) -> int:
     return 0
 
 
+def _restore_encrypted(args, config) -> int:
+    """Rebuild from an off-site backup: open it with the private key, put
+    back the data files, the secrets key(s) and -- run as root -- the hub's
+    WireGuard key, so every router keeps dialing home to this server."""
+    import tarfile
+    import tempfile
+
+    from . import offsite
+    from .backup import _restore_from_tar
+
+    if not args.identity or not os.path.isfile(args.identity):
+        print("An encrypted backup needs --identity: the file with the "
+              "private key (AGE-SECRET-KEY-1...) shown when the key was "
+              "made.", file=sys.stderr)
+        return 2
+    paths = offsite.archive_paths(config, args.config, cred_dir="/nonexistent")
+    paths.pop("system/wireguard/wg0.key", None)
+    if not args.apply:
+        print("DRY RUN -- would overwrite (stop the services, then re-run "
+              "with --apply):")
+        for name, dest in paths.items():
+            print(f"  {name} -> {dest}")
+        print(f"  system/wireguard/wg0.key -> {offsite.WG_KEY_PATH} "
+              f"(as root)")
+        return 0
+    with open(args.identity, encoding="utf-8") as fh:
+        identity = fh.read()
+    work = tempfile.mkdtemp(prefix="mikromon-restore-")
+    plain = os.path.join(work, "backup.tar.gz")
+    try:
+        offsite.decrypt_file(args.archive, plain, identity)
+        with tarfile.open(plain, mode="r:gz") as tar:
+            written = _restore_from_tar(tar, paths)
+            wg = None
+            if "system/wireguard/wg0.key" in tar.getnames():
+                wg = tar.extractfile("system/wireguard/wg0.key").read()
+    except ValueError as exc:
+        print(f"Could not open the backup: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        for p in (plain,):
+            if os.path.exists(p):
+                os.unlink(p)
+        os.rmdir(work)
+    as_root = hasattr(os, "geteuid") and os.geteuid() == 0
+    if as_root:
+        # Written as root, the files would be root's -- and the service,
+        # which runs as its own user, could not open its own databases.
+        for dest in written:
+            st = os.stat(os.path.dirname(os.path.abspath(dest)))
+            os.chown(dest, st.st_uid, st.st_gid)
+        if wg:
+            os.makedirs(os.path.dirname(offsite.WG_KEY_PATH), exist_ok=True)
+            fd = os.open(offsite.WG_KEY_PATH,
+                         os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(wg)
+            written.append(offsite.WG_KEY_PATH)
+    print(f"Restored {len(written)} file(s): {', '.join(written)}")
+    if wg and not as_root:
+        print("NOT restored: the hub's WireGuard key -- run this as root "
+              "(sudo) so it goes back into /etc/wireguard.", file=sys.stderr)
+    elif not wg:
+        print("This backup has no WireGuard key in it; routers will need "
+              "setting up again unless /etc/wireguard/wg0.key is the old "
+              "server's.", file=sys.stderr)
+    print("Now re-run 'sudo bash deploy/install.sh': it rebuilds wg0.conf "
+          "from the restored key and starts the services.")
+    return 0
+
+
 def _cmd_access_apply(config) -> int:
-    """Hub-side: render the active WebFig/Winbox access grants into nginx config
-    and reload nginx. Invoked (as root) by easymikrotik-access-reload.{path,timer}."""
+    """Hub-side: render the active WebFig/Winbox access grants into nginx
+    config, reload nginx, and check the ports really opened. Invoked (as
+    root) by easymikrotik-access-reload.{path,timer}.
+
+    It used to write the files, ask for a reload and report success whatever
+    happened -- a config nginx refused, or a port it could not open, left
+    the grant recorded, the unit green and the browser with "connection
+    refused". Each step is now checked, and the outcome is written to
+    access-status.json for the device page and the Platform self-check."""
     import subprocess
+    import time as _time
 
     from . import access
 
@@ -381,23 +491,84 @@ def _cmd_access_apply(config) -> int:
         print(f"access config incomplete (missing: {', '.join(missing)}).",
               file=sys.stderr)
         return 2
+
+    def run(cmd):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=60)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            return None, str(exc)
+        return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
+
+    started = _time.time()
+    conf_files = (acc["nginx_http_conf"], acc["nginx_stream_conf"])
+    before = {}
+    for path in conf_files:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                before[path] = fh.read()
+        except OSError:
+            before[path] = None
     ports = access.apply_hub_config(
         acc["grants_file"], acc.get("tls_cert", ""), acc.get("tls_key", ""),
         acc["nginx_http_conf"], acc["nginx_stream_conf"],
         host=acc.get("hub_host", ""))
-    # Reload nginx so the new listen ports take effect (and closed ones drop).
-    for cmd in (["systemctl", "reload", "nginx"], ["nginx", "-s", "reload"]):
+    status = {"ran": started, "ports": ports, "ok": True, "error": "",
+              "detail": ""}
+
+    def finish(rc):
+        status["took"] = round(_time.time() - started, 1)
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            access.write_status(acc["grants_file"], status)
+        except OSError as exc:
+            print(f"could not record the outcome: {exc}", file=sys.stderr)
+        if status["error"]:
+            print(status["error"], file=sys.stderr)
+            if status["detail"]:
+                print(status["detail"], file=sys.stderr)
+        else:
+            print(f"Applied {len(ports)} active access port(s): "
+                  f"{', '.join(map(str, ports)) or '(none)'}")
+        return rc
+
+    rc, out = run(["nginx", "-t"])
+    if rc is not None and rc != 0:
+        # Put back what nginx last accepted. A config it refuses also stops
+        # it starting again -- and the dashboard sits behind the same nginx.
+        for path, text in before.items():
+            try:
+                if text is None:
+                    os.remove(path)
+                else:
+                    access._write(path, text)
+            except OSError:
+                pass
+        status.update(ok=False, detail=out[-1500:], error=(
+            "nginx refused the configuration: " + access.first_complaint(out)))
+        return finish(1)
+
+    reload_out = ""
+    for cmd in (["systemctl", "reload", "nginx"], ["nginx", "-s", "reload"]):
+        rc, out = run(cmd)
+        if rc == 0:
             break
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            continue
+        reload_out = out or reload_out
     else:
-        print("WARNING: could not reload nginx — reload it manually.",
-              file=sys.stderr)
-    print(f"Applied {len(ports)} active access port(s): "
-          f"{', '.join(map(str, ports)) or '(none)'}")
-    return 0
+        status.update(ok=False, detail=reload_out[-1500:], error=(
+            "nginx could not be reloaded (is it running? "
+            "sudo systemctl status nginx)"))
+        return finish(1)
+
+    closed = access.ports_not_open(ports)
+    if closed:
+        said = access.nginx_complaints(closed, since=started)
+        status.update(ok=False, detail="\n".join(said), error=(
+            f"nginx reloaded but did not open port"
+            f"{'' if len(closed) == 1 else 's'} "
+            f"{', '.join(map(str, closed))}"
+            + (": " + access.first_complaint(said[-1]) if said else "")))
+        return finish(1)
+    return finish(0)
 
 
 def _cmd_push(args, config) -> int:

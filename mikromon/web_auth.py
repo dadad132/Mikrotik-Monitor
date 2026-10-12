@@ -84,6 +84,203 @@ def _render_login(error: str = "", has_regions: bool = False) -> str:
             f'New here? <a href="/signup">Create a company account</a></p>')
 
 
+def _render_login_2fa(pending: str, error: str = "") -> str:
+    """Second step of signing in: the code from the phone."""
+    msg = (f'<p style="color:#dc2626;margin-top:0">{esc(error)}</p>'
+           if error else "")
+    return _auth_page("Sign in",
+            f'<h2 style="margin-top:0">Enter your code</h2>{msg}'
+            f'<p class="muted" style="margin-top:0">Open the authenticator '
+            f'app on your phone and type the 6-digit code it shows for '
+            f'{esc(_BRAND)}.</p>'
+            f'<form method="POST" action="/login/2fa">'
+            f'<input type="hidden" name="pending" value="{esc(pending)}">'
+            f'<p><input name="code" autocomplete="one-time-code" '
+            f'maxlength="20" placeholder="123456" autofocus '
+            f'style="width:100%;font-size:20px;letter-spacing:3px;'
+            f'text-align:center"></p>'
+            f'<button class="btn" type="submit" style="width:100%">'
+            f'Sign in</button></form>'
+            f'<p class="muted" style="margin:14px 0 0;font-size:12px">'
+            f'Lost your phone? Type one of your recovery codes instead '
+            f'(they look like <code>abcd-efgh</code>). No recovery codes '
+            f'either? Ask your company owner, or the platform admin, to reset '
+            f'two-factor sign-in for you.</p>'
+            f'<p class="muted" style="margin:10px 0 0;text-align:center">'
+            f'<a href="/login">Start again</a></p>')
+
+
+def _two_factor_why(user, org_required: bool, admin_rule: bool = True) -> str:
+    """Why this person has to use two-factor sign-in ("" if they need not)."""
+    if user.get("is_superadmin") and admin_rule:
+        return "Platform admins must use two-factor sign-in."
+    if org_required:
+        return "Your company asks everyone to use two-factor sign-in."
+    return ""
+
+
+_QR_CSS = ('<style>.mm-qr{background:#fff;display:inline-block;padding:6px;'
+           'border-radius:8px;width:220px;max-width:100%}'
+           '.mm-qr svg{width:100%;height:auto;display:block}</style>')
+
+
+def _render_2fa_setup(csrf: str, secret: str, qr: str, why: str = "",
+                      error: str = "") -> str:
+    """Turning two-factor sign-in on: scan, then type the code to prove it
+    worked. Nothing changes until that code is right."""
+    grouped = " ".join(secret[i:i + 4] for i in range(0, len(secret), 4))
+    must = (f'<p style="color:#b45309;margin:0 0 12px"><b>{esc(why)}</b> '
+            f'Set it up below to carry on &mdash; it takes about a minute.</p>'
+            if why else "")
+    qr_html = (f'<div class="mm-qr">{qr}</div>' if qr else
+               '<p class="muted">(The square code cannot be drawn on this '
+               'server; use the setup key below.)</p>')
+    leave = ('<a href="/logout">Log out</a>' if why
+             else '<a href="/account">Back to My account</a>')
+    return (
+        f'{_QR_CSS}<div class="wrap" style="max-width:640px">'
+        f'<h1>Two-factor sign-in</h1>{must}{_flash("", error)}'
+        f'<div class="box">'
+        f'<p style="margin-top:0">After your password, signing in will also '
+        f'ask for a 6-digit code from your phone. Someone who learns your '
+        f'password still cannot get in without the phone.</p>'
+        f'<h3>1. Get an authenticator app</h3>'
+        f'<p class="muted" style="margin-top:0">Any of these, free on the App '
+        f'Store and Google Play: Google Authenticator, Microsoft '
+        f'Authenticator, Authy, 1Password, Bitwarden.</p>'
+        f'<h3>2. Scan this square with the app</h3>{qr_html}'
+        f'<p class="muted">Cannot scan? In the app choose <i>Enter a setup '
+        f'key</i>, pick <i>Time based</i>, and type:<br>'
+        f'<code style="font-size:15px;letter-spacing:1px;user-select:all">'
+        f'{esc(grouped)}</code></p>'
+        f'<h3>3. Type the code the app now shows</h3>'
+        f'<form method="POST" action="/account/2fa">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<div class="actions" style="flex-wrap:wrap">'
+        f'<input name="code" inputmode="numeric" autocomplete="one-time-code" '
+        f'maxlength="8" placeholder="123456" autofocus '
+        f'style="font-size:18px;letter-spacing:3px;width:140px">'
+        f'<button class="btn" type="submit">Turn on two-factor sign-in'
+        f'</button></div></form>'
+        f'<p class="muted" style="margin-bottom:0;font-size:13px">Code not '
+        f'accepted? The phone\'s clock must be right: set its date and time '
+        f'to automatic.</p></div>'
+        f'<p class="muted">{leave}</p></div>')
+
+
+def _render_recovery_codes(codes, first: bool = False) -> str:
+    """The recovery codes, shown once. Only their hashes are kept."""
+    import urllib.parse
+    text = (f"{_BRAND} recovery codes\n"
+            "Each one signs you in once, in place of the code from your "
+            "phone.\n\n" + "\n".join(codes) + "\n")
+    href = "data:text/plain;charset=utf-8," + urllib.parse.quote(text)
+    head = ('<p style="color:#15803d;margin-top:0"><b>Two-factor sign-in is '
+            'on.</b> From now on, signing in asks for the code from your '
+            'phone after your password.</p>' if first else
+            '<p style="margin-top:0"><b>New recovery codes made.</b> The old '
+            'ones no longer work.</p>')
+    return (
+        f'<div class="wrap" style="max-width:640px"><h1>Recovery codes</h1>'
+        f'<div class="box">{head}'
+        f'<p>If your phone is lost or broken, each of these signs you in '
+        f'<b>once</b> in place of the 6-digit code. <b>Save them now: they '
+        f'are not shown again.</b> Print them, or keep them in a password '
+        f'manager &mdash; not only on the phone.</p>'
+        f'<pre style="font-size:17px;line-height:1.7;columns:2;'
+        f'max-width:360px;user-select:all">{esc(chr(10).join(codes))}</pre>'
+        f'<p><a href="{esc(href)}" download="{esc(_BRAND)}-recovery-codes.txt">'
+        f'Download them as a file</a></p>'
+        f'<p style="margin-bottom:0"><a class="btn" href="/dashboard">I have '
+        f'saved them &mdash; carry on</a></p></div></div>')
+
+
+def _two_factor_box(user, csrf: str, tf) -> str:
+    """My account -> Two-factor sign-in."""
+    if tf is None:
+        return ""
+    hidden = (f'<input type="hidden" name="csrf" value="{esc(csrf)}">')
+    code_in = ('<input name="code" autocomplete="one-time-code" '
+               'maxlength="20" placeholder="code from the app" '
+               'style="width:170px">')
+    if tf.get("on"):
+        left = int(tf.get("left") or 0)
+        low = left <= 3
+        state = (f'<p style="color:#15803d;margin:0 0 6px"><b>On.</b> Signing '
+                 f'in takes your password and the 6-digit code from your '
+                 f'phone.</p>'
+                 f'<p class="muted" style="margin:0 0 12px;'
+                 f'{"color:#b45309" if low else ""}">{left} recovery '
+                 f'code{"" if left == 1 else "s"} left'
+                 + (' &mdash; make new ones soon.' if low else '.') + '</p>')
+        codes = (f'<form method="POST" action="/account" '
+                 f'style="margin:0 0 12px">{hidden}'
+                 f'<input type="hidden" name="action" value="2fa_codes">'
+                 f'<div class="actions" style="flex-wrap:wrap">{code_in}'
+                 f'<button class="btn" type="submit">Make new recovery codes'
+                 f'</button></div></form>')
+        if tf.get("why"):
+            off = (f'<p class="muted" style="margin:0;font-size:13px">'
+                   f'It cannot be turned off: {esc(tf["why"][0].lower() + tf["why"][1:])}</p>')
+        else:
+            off = (f'<form method="POST" action="/account" style="margin:0">'
+                   f'{hidden}<input type="hidden" name="action" value="2fa_off">'
+                   f'<div class="actions" style="flex-wrap:wrap">'
+                   f'<input name="password" type="password" '
+                   f'placeholder="your password" style="width:170px">'
+                   f'{code_in}<button class="btn red" type="submit">Turn off'
+                   f'</button></div></form>')
+        body = state + codes + off
+    else:
+        body = (f'<p style="margin:0 0 12px"><b>Off.</b> Anyone who learns '
+                f'your password can sign in as you. Two-factor sign-in also '
+                f'asks for a 6-digit code from an app on your phone.</p>'
+                f'<a class="btn" href="/account/2fa">Set up two-factor '
+                f'sign-in</a>')
+    company = ""
+    if AuthStore.is_owner(user):
+        req = bool(tf.get("org_required"))
+        company = (
+            f'<form method="POST" action="/account" style="margin:16px 0 0;'
+            f'padding-top:12px;border-top:1px solid var(--border)">{hidden}'
+            f'<input type="hidden" name="action" value="2fa_require">'
+            f'<label class="chk" style="display:block;margin:0 0 8px">'
+            f'<input type="checkbox" name="require_2fa" value="1"'
+            f'{" checked" if req else ""}> Require two-factor sign-in for '
+            f'everyone in {esc(user.get("org_name") or "this company")}</label>'
+            f'<p class="muted" style="margin:0 0 10px;font-size:13px">Anyone '
+            f'without it is taken to the set-up page the next time they open '
+            f'a page. If someone loses their phone and their recovery codes, '
+            f'reset it for them on the <a href="/admin">Team</a> page.</p>'
+            f'<button class="btn" type="submit">Save</button></form>')
+    return (f'<div class="box" id="twofa"><h2 style="margin-top:0">Two-factor '
+            f'sign-in</h2>{body}{company}</div>')
+
+
+def _twofa_reset_box(csrf: str) -> str:
+    """Platform admin -> reset someone's two-factor sign-in."""
+    return (
+        f'<div class="box" id="twofa-reset"><h2 style="margin-top:0">Reset '
+        f'two-factor sign-in</h2>'
+        f'<p class="muted" style="margin-top:0">For somebody who lost both '
+        f'their phone and their recovery codes. Make sure it really is them '
+        f'first &mdash; call them on a number you already had &mdash; '
+        f'because after this their password alone signs them in until they '
+        f'set it up again. They are emailed that it was reset. A company '
+        f'owner can do this for their own team on the Team page; your own '
+        f'is reset from the server with '
+        f'<code>python -m mikromon reset-2fa --user EMAIL</code>.</p>'
+        f'<form method="POST" action="/superadmin/reset-2fa" '
+        f'onsubmit="return confirm(\'Reset two-factor sign-in for \' + '
+        f'this.email.value + \'?\')">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<div class="actions" style="flex-wrap:wrap">'
+        f'<input name="email" placeholder="email or username" '
+        f'style="width:260px">'
+        f'<button class="btn red" type="submit">Reset</button></div></form>'
+        f'</div>')
+
+
 def _render_signup(error: str = "", values=None, has_regions: bool = False,
                    confirm_email: bool = True) -> str:
     v = values or {}
@@ -233,7 +430,7 @@ def _plan_upgrade_box(csrf: str, bill, device_count: int = 0,
 def _render_account(user, csrf: str, msg: str = "", error: str = "",
                     org: dict | None = None, bill=None,
                     device_count: int = 0,
-                    yoco_on: bool = False) -> str:
+                    yoco_on: bool = False, twofa=None) -> str:
     note = _flash(msg, error)
     org_name = user.get("org_name", "")
     uname_row = (f'<p>Username <span class="muted">(your existing login — you can '
@@ -369,7 +566,8 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
         f'<p class="muted" style="margin-top:-8px">'
         f'Company: <b>{esc(org_name)}</b> &middot; Role: <b>{esc(user["role"])}</b></p>'
         f'{note}'
-        f'{plan_box}{personal_box}{alerts_box}'
+        f'{plan_box}{personal_box}{_two_factor_box(user, csrf, twofa)}'
+        f'{alerts_box}'
         f'{company_box}'
         f'</div>')
     return _page("My account", _header(user, "/account") + inner)
@@ -456,8 +654,17 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user,
         selected = set() if is_all else set(u["devices"])
         acct = u["login"]
         is_self = acct == user["login"]
+        reset_2fa = ""
+        if u.get("totp_on") and not is_self and not u.get("is_superadmin"):
+            reset_2fa = f'''
+            <form method="POST" action="/admin/reset-2fa" style="margin-top:6px"
+              onsubmit="return confirm('Reset two-factor sign-in for {esc(_who(u))}? Their password alone will sign them in until they set it up again.')">
+              <input type="hidden" name="csrf" value="{csrf}">
+              <input type="hidden" name="account" value="{esc(acct)}">
+              <button class="btn" type="submit">Reset two-factor</button>
+            </form>'''
         rows.append(f"""<tr>
-          <td><b>{esc(_who(u))}</b></td>
+          <td><b>{esc(_who(u))}</b><div class="muted" style="font-size:12px">two-factor {"on" if u.get("totp_on") else "off"}</div></td>
           <td><span class="pill {esc(u['role'])}">{esc(u['role'])}</span></td>
           <td>
             <form method="POST" action="/admin/update">
@@ -479,7 +686,7 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user,
               <input type="hidden" name="csrf" value="{csrf}">
               <input type="hidden" name="account" value="{esc(acct)}">
               <button class="btn red" type="submit">Delete</button>
-            </form>'''}
+            </form>'''}{reset_2fa}
           </td></tr>""")
     note = _flash(msg, error)
     inner = (
@@ -2691,6 +2898,156 @@ def _quote_inbox(quotes, org_names: dict | None = None, csrf: str = "") -> str:
             f'<tbody>{rows}</tbody></table></div>')
 
 
+def _offsite_box(data, csrf: str) -> str:
+    """Platform admin -> Off-site backups: where they go, the encryption
+    key, and how the last one went."""
+    s = (data or {}).get("settings") or {}
+    st = (data or {}).get("status") or {}
+
+    def when(ts):
+        return time.strftime("%d %b %Y %H:%M", time.localtime(ts))
+
+    if st.get("last_run") and st.get("ok"):
+        mb = (st.get("size") or 0) / 1024 / 1024
+        state = (f'<p style="color:#15803d;margin:0 0 10px"><b>Last backup '
+                 f'{esc(when(st["last_run"]))}: uploaded</b>, {mb:,.1f} MB'
+                 + ('' if st.get("wireguard") else
+                    ' &mdash; <span style="color:#dc2626">without the hub\'s '
+                    'WireGuard key</span> (re-run deploy/install.sh)')
+                 + '</p>')
+    elif st.get("last_run") and st.get("error") and s.get("enabled"):
+        ok = (f' The last one that worked was {esc(when(st["last_ok"]))}.'
+              if st.get("last_ok") else " None has worked yet.")
+        state = (f'<p style="color:#dc2626;margin:0 0 10px"><b>Last backup '
+                 f'{esc(when(st["last_run"]))} FAILED:</b> '
+                 f'{esc(st["error"])}.{ok}</p>')
+    elif s.get("enabled"):
+        state = ('<p class="muted" style="margin:0 0 10px">Switched on; the '
+                 'first one runs tonight around 02:30, or press Back up now.'
+                 '</p>')
+    else:
+        state = ('<p style="color:#d97706;margin:0 0 10px"><b>Off.</b> If '
+                 'this server were lost tonight, so would every backup of it.'
+                 '</p>')
+    secret = s.get("secret_key") or ""
+    hint = f"saved ...{esc(secret[-4:])} (blank keeps it)" if secret else ""
+    bucket = s.get("bucket") or "YOUR-BUCKET"
+    prefix = (s.get("prefix") or "easymikrotik").strip("/")
+    policy = ('{"Version": "2012-10-17", "Statement": [{"Effect": "Allow", '
+              '"Action": "s3:PutObject", "Resource": '
+              f'"arn:aws:s3:::{bucket}/{prefix}/*"}}]}}')
+
+    def field(name, label, value="", placeholder="", kind="text"):
+        return (f'<div class="f"><label class="f">{label}</label>'
+                f'<input name="{name}" type="{kind}" value="{esc(value)}" '
+                f'placeholder="{esc(placeholder)}" autocomplete="off"></div>')
+
+    return (
+        f'<div class="card" style="margin-bottom:16px" id="offsite">'
+        f'<h3 style="margin:0 0 6px">Off-site backups</h3>'
+        f'<p class="muted" style="margin:0 0 10px">Every night around 02:30 '
+        f'this server\'s data &mdash; every database and setting, the key '
+        f'that unlocks the stored router passwords, and the hub\'s WireGuard '
+        f'key every router dials home to &mdash; is encrypted and uploaded to '
+        f'your own storage: Amazon S3, or Backblaze B2 / Cloudflare R2 with '
+        f'an endpoint. Only you can open them: the private key is shown once, '
+        f'when you make it, and is never kept on this server.</p>'
+        f'{state}'
+        f'<form method="POST" action="/superadmin/offsite">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<label class="chk" style="margin-bottom:8px"><input type="checkbox" '
+        f'name="enabled" value="1" class="switch"'
+        f'{" checked" if s.get("enabled") else ""}> Back up every night'
+        f'</label>'
+        f'<div class="fields">'
+        + field("bucket", "Bucket", s.get("bucket", ""),
+                "e.g. easymikrotik-backups")
+        + field("region", "Region", s.get("region", ""),
+                "af-south-1 (Cape Town), eu-west-1 ...")
+        + field("prefix", "Folder", s.get("prefix", ""), "easymikrotik")
+        + field("access_key", "Access key ID", s.get("access_key", ""),
+                "AKIA...")
+        + field("secret_key", "Secret access key", "", hint or "", "password")
+        + field("endpoint", "Endpoint (B2 / R2 only)", s.get("endpoint", ""),
+                "leave blank for Amazon")
+        + f'<div class="f full"><label class="f">Encryption public key '
+          f'<span class="muted">(age1&hellip;; make one below)</span></label>'
+          f'<input name="recipient" value="{esc(s.get("recipient", ""))}" '
+          f'placeholder="age1..." autocomplete="off"></div>'
+        + f'</div>'
+        f'<div class="actions" style="margin-top:10px">'
+        f'<button class="btn" name="action" value="save">Save</button> '
+        f'<button class="btn ghost" name="action" value="test">Save and test '
+        f'the upload</button> '
+        f'<button class="btn ghost" name="action" value="genkey" '
+        f'onclick="return confirm(\'Make a new key pair? Backups made from '
+        f'now on can only be opened with the NEW private key, which is shown '
+        f'once. Keep any old key for older backups.\')">Make a new key pair'
+        f'</button> '
+        f'<button class="btn ghost" name="action" value="runnow">Back up now'
+        f'</button></div></form>'
+        f'<details style="margin-top:12px"><summary><b>Setting up Amazon S3'
+        f'</b> (about ten minutes)</summary><ol style="font-size:13.5px">'
+        f'<li>In the AWS console, create a bucket (S3 &rarr; Create bucket), '
+        f'in a region near you. Leave public access blocked.</li>'
+        f'<li>In the bucket\'s <b>Properties</b>, turn on <b>Bucket '
+        f'Versioning</b>. In <b>Management</b>, add a lifecycle rule that '
+        f'expires objects after 180 days and deletes noncurrent versions '
+        f'after 30.</li>'
+        f'<li>In <b>IAM</b>, create a user for this server and give it only '
+        f'this policy, so it can add backups but never read, change or '
+        f'delete them:<pre style="white-space:pre-wrap;font-size:12px">'
+        f'{esc(policy)}</pre></li>'
+        f'<li>Create an access key for that user (&ldquo;Application running '
+        f'outside AWS&rdquo;) and paste both parts above.</li>'
+        f'<li>Press <b>Make a new key pair</b>, save the private key it shows '
+        f'somewhere safe off this server, then <b>Save and test</b>.</li>'
+        f'</ol></details>'
+        f'<details style="margin-top:6px"><summary><b>Rebuilding a server from '
+        f'one of these</b></summary><ol style="font-size:13.5px">'
+        f'<li>On the new server: clone the code and run '
+        f'<code>sudo bash deploy/install.sh</code>.</li>'
+        f'<li>Download the newest backup from the bucket and copy it, with '
+        f'your private key file, to the server.</li>'
+        f'<li><code>sudo systemctl stop mikromon mikromon-web</code>, then '
+        f'<code>sudo /opt/mikromon/.venv/bin/python -m mikromon '
+        f'restore-server -c /opt/mikromon/config.yaml --archive '
+        f'BACKUP.tar.gz.age --identity KEY.txt --apply</code></li>'
+        f'<li>Run <code>sudo bash deploy/install.sh</code> again: it rebuilds '
+        f'the hub from the restored WireGuard key and starts everything. '
+        f'Routers dial home to it as before.</li>'
+        f'<li>Without this server, <code>age -d -i KEY.txt BACKUP.tar.gz.age '
+        f'&gt; backup.tar.gz</code> opens one anywhere (age is free).</li>'
+        f'</ol></details></div>')
+
+
+def _render_offsite_key(identity: str, recipient: str, csrf: str) -> str:
+    """The new private key, shown this once and never again."""
+    import base64
+    body = (f"# EasyMikroTik off-site backup key -- made "
+            f"{time.strftime('%Y-%m-%d %H:%M')}\n"
+            f"# public key: {recipient}\n{identity}\n")
+    href = ("data:text/plain;base64,"
+            + base64.b64encode(body.encode()).decode())
+    return (
+        f'<div class="card" style="max-width:760px;margin:30px auto">'
+        f'<h2 style="margin-top:0">Save your backup key now</h2>'
+        f'<p>This private key is the <b>only</b> way to open your off-site '
+        f'backups. It is shown once and is <b>not</b> kept on this server '
+        f'&mdash; if it is lost, so are the backups.</p>'
+        f'<pre style="font-size:15px;padding:14px;border:1px solid '
+        f'var(--border);border-radius:8px;white-space:pre-wrap;'
+        f'word-break:break-all">{esc(identity)}</pre>'
+        f'<p><a class="btn" href="{href}" download="easymikrotik-backup-key.txt"'
+        f'>Download the key file</a></p>'
+        f'<p class="muted" style="font-size:13px">Keep it in two places off '
+        f'this server: a password manager, and a USB stick or your own PC. '
+        f'Nightly backups are encrypted to its public half:<br>'
+        f'<code>{esc(recipient)}</code></p>'
+        f'<p><a class="btn ghost" href="/superadmin#offsite">I have saved it '
+        f'&mdash; back to Platform admin</a></p></div>')
+
+
 def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        msg: str = "", error: str = "", smtp=None,
                        billing_on: bool = False, billing_contact=None,
@@ -2703,7 +3060,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
                        invoice_template_warnings=(),
                        dormant=None,
                        upcoming=None, runner_status=None,
-                       outstanding=None,
+                       outstanding=None, offsite=None,
                        tunnel_rows=None,
                        tunnel_err: str = "",
                        selfcheck=None, ai_html: str = "") -> str:
@@ -2837,11 +3194,11 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
         f'billing/metrics, and the tunnel-IP registry into one archive — for '
         f'moving this install to a new server.</p>'
         f'<p class="muted" style="border-left:3px solid #d97706;padding-left:8px">'
-        f'⚠ This does <b>not</b> include the hub\'s WireGuard identity '
-        f'(<code>/etc/wireguard/</code> on this server) — copy that '
-        f'separately (as root) so already-provisioned routers keep dialing '
-        f'home without changes. Full restore steps: '
-        f'<code>deploy/SERVER-MIGRATION.md</code>.</p>'
+        f'⚠ These stay on this server, and do <b>not</b> include the hub\'s '
+        f'WireGuard identity or the secrets key that unlocks the stored '
+        f'router passwords &mdash; so restored onto another server, every '
+        f'router would need setting up again. For a rebuild, use the '
+        f'<a href="#offsite">off-site backups</a>, which carry both.</p>'
         f'<div style="overflow-x:auto">{backup_table}</div>'
         f'<div style="margin-top:12px">'
         + _post("/superadmin/backup/create", "Create new backup", cls="btn")
@@ -2895,7 +3252,10 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
              f'{_hub_endpoint_box(hub_ip, hub_port, router_count, csrf, hub_pubkey)}'
              f'{_regions_box(regions or [], csrf)}'
              f'{_nextdns_settings_box(nextdns or {}, csrf)}'
-             f'{diagnostics_box}{backup_box}</div>')
+             f'{diagnostics_box}'
+             f'{_offsite_box(offsite, csrf) if offsite is not None else ""}'
+             f'{_twofa_reset_box(csrf)}'
+             f'{backup_box}</div>')
     return _page("Platform Admin", _header(user, "/superadmin") + inner)
 
 
@@ -3035,6 +3395,7 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
         ("activity", "Activity log"),
         ("linemon", "When a line drops: the AI monitor"),
         ("alerts", "Who gets emailed, and about what"),
+        ("twofa", "Two-factor sign-in"),
         ("tips", "The tips that appear once"),
         ("glossary", "Glossary — what do these words mean?"),
     ]
@@ -3368,6 +3729,27 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
         'green). A new level that lasts for three days is taken as the new '
         'normal, so a site that grew stops being flagged by itself.</p>'))
 
+    twofa = _guide_section("twofa", "Two-factor sign-in", (
+        '<p>Two-factor sign-in asks for a 6-digit code from an app on your '
+        'phone (Google Authenticator, Microsoft Authenticator, Authy, '
+        '1Password, Bitwarden ...) after your password. Somebody who learns '
+        'or guesses your password still cannot get in without your phone. '
+        'The code changes every 30 seconds and each one works once.</p>'
+        '<p><b>Turning it on:</b> <a href="/account#twofa">My account</a> '
+        '&rarr; Two-factor sign-in &rarr; Set up. Scan the square with the '
+        'app, type the code it shows, and save the ten recovery codes you '
+        'are given. Each recovery code signs you in once if the phone is '
+        'lost. They are shown once only.</p>'
+        '<p><b>Making it compulsory:</b> a company owner can tick '
+        '<i>Require two-factor sign-in for everyone</i> on My account. '
+        'Anyone in the company without it is taken to the set-up page the '
+        'next time they open a page. Platform admins always have to use '
+        'it.</p>'
+        '<p><b>Lost the phone and the recovery codes:</b> a company owner '
+        'resets it for their team on the <a href="/admin">Team</a> page, and '
+        'the platform admin can reset anyone\'s. The person is emailed that '
+        'it happened (when the server can send email).</p>'))
+
     tips = _guide_section("tips", "The tips that appear once", (
         '<p>The first time you open a tab, a short panel explains what that '
         'tab is for and the first few things to do on it. It appears once per '
@@ -3461,7 +3843,7 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
              f'glossary of the networking terms it uses.</p>'
              f'{toc}{overview}{dashboard}{devices}{provision}{tabs}{vpn}'
              f'{safety}{devicemode}{billing}{activity}{linemon}{alerts}'
-             f'{tips}'
+             f'{twofa}{tips}'
              f'{glossary}</div>')
     return _page("Guide", _header(user, "/guide") + inner)
 

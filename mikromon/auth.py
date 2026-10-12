@@ -25,11 +25,14 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 import sqlite3
 import threading
 import time
+
+from . import vault
 
 _ITERATIONS = 200_000
 
@@ -122,8 +125,13 @@ class AuthError(Exception):
 
 
 class AuthStore:
+    # Settings holding a password or a key: sealed at rest (vault.py).
+    _SEALED_SETTINGS = frozenset({"smtp", "yoco", "ai", "nextdns",
+                                  "paylink_secret", "offsite"})
+
     def __init__(self, path: str):
         self.path = path
+        self._dir = os.path.dirname(os.path.abspath(path))
         self._lock = threading.Lock()
         self._login_fails: dict = {}
         self.db = sqlite3.connect(path, check_same_thread=False)
@@ -186,6 +194,17 @@ class AuthStore:
         # send the follow-up "possible cause" email once it has looked online.
         self._add_col_if_missing("orgs", "backup_reminder_hours", "INTEGER")
         self._add_col_if_missing("orgs", "cause_emails", "INTEGER")
+        # Two-factor sign-in (totp.py). The secret is sealed at rest; the
+        # last step used stops a code being replayed; recovery codes are
+        # kept only as hashes.
+        self._add_col_if_missing("users", "totp_secret", "TEXT")
+        self._add_col_if_missing("users", "totp_on",
+                                 "INTEGER NOT NULL DEFAULT 0")
+        self._add_col_if_missing("users", "totp_step",
+                                 "INTEGER NOT NULL DEFAULT 0")
+        self._add_col_if_missing("users", "totp_recovery", "TEXT")
+        self._add_col_if_missing("orgs", "require_2fa",
+                                 "INTEGER NOT NULL DEFAULT 0")
         # Platform-wide key/value settings (e.g. the SMTP relay the superadmin
         # configures from the dashboard instead of editing config.yaml).
         self.db.execute(
@@ -193,6 +212,22 @@ class AuthStore:
             "key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self._pending_tables()
         self.db.commit()
+        self._seal_settings()
+
+    def _seal_settings(self) -> None:
+        """Seal any secret setting still stored in plain text."""
+        for key in self._SEALED_SETTINGS:
+            row = self.db.execute(
+                "SELECT value FROM platform_settings WHERE key = ?",
+                (key,)).fetchone()
+            if not row:
+                continue
+            try:
+                stored = json.loads(row[0])
+            except (ValueError, TypeError):
+                continue
+            if not vault.is_sealed(stored):
+                self.set_setting(key, stored)
 
     def _add_col_if_missing(self, table: str, col: str, col_def: str) -> None:
         try:
@@ -475,6 +510,96 @@ class AuthStore:
             (email,)).fetchall()
         return {r[0]: bool(r[1]) for r in rows}
 
+    # ----- two-factor sign-in --------------------------------------------------
+    def _totp_row(self, identifier: str):
+        user = self.get_user(identifier)
+        if not user:
+            raise AuthError(f"No such user: {identifier!r}")
+        row = self.db.execute(
+            "SELECT totp_secret, totp_on, totp_step, totp_recovery FROM users "
+            "WHERE id = ?", (user["id"],)).fetchone()
+        return user, row
+
+    def totp_begin(self, identifier: str) -> str:
+        """The secret to show for setting up two-factor: the one already
+        waiting, or a new one. Two-factor stays off until a code from it
+        is confirmed."""
+        from . import totp
+        user, row = self._totp_row(identifier)
+        if row[1]:
+            raise AuthError("Two-factor sign-in is already on.")
+        secret = vault.unseal(row[0], self._dir) if row[0] else ""
+        if not secret:
+            secret = totp.new_secret()
+            self._update(user["id"], totp_secret=vault.seal(secret, self._dir),
+                         totp_step=0)
+        return secret
+
+    def totp_confirm(self, identifier: str, code: str,
+                     now: float | None = None):
+        """Turn two-factor on with a code from the waiting secret. Returns
+        the recovery codes (shown once), or None if the code is wrong."""
+        from . import totp
+        user, row = self._totp_row(identifier)
+        secret = vault.unseal(row[0], self._dir) if row[0] else ""
+        step = totp.verify(secret, code, 0, now=now) if secret else 0
+        if not step:
+            return None
+        codes = totp.recovery_codes()
+        self._update(user["id"], totp_on=1, totp_step=step,
+                     totp_recovery=json.dumps(
+                         [totp.hash_code(c) for c in codes]))
+        return codes
+
+    def totp_check(self, identifier: str, code: str,
+                   now: float | None = None) -> bool:
+        """A code from the app, or one of the recovery codes (used up)."""
+        from . import totp
+        user, row = self._totp_row(identifier)
+        if not row[1]:
+            return False
+        secret = vault.unseal(row[0], self._dir) if row[0] else ""
+        step = totp.verify(secret, code, int(row[2] or 0), now=now)
+        if step:
+            self._update(user["id"], totp_step=step)
+            return True
+        hashes = json.loads(row[3] or "[]")
+        h = totp.hash_code(code)
+        if h in hashes:
+            hashes.remove(h)
+            self._update(user["id"], totp_recovery=json.dumps(hashes))
+            return True
+        return False
+
+    def totp_new_recovery(self, identifier: str) -> list:
+        from . import totp
+        user, _row = self._totp_row(identifier)
+        codes = totp.recovery_codes()
+        self._update(user["id"], totp_recovery=json.dumps(
+            [totp.hash_code(c) for c in codes]))
+        return codes
+
+    def totp_recovery_left(self, identifier: str) -> int:
+        _user, row = self._totp_row(identifier)
+        return len(json.loads(row[3] or "[]"))
+
+    def totp_disable(self, identifier: str) -> None:
+        user = self.get_user(identifier)
+        if user:
+            self._update(user["id"], totp_secret=None, totp_on=0,
+                         totp_step=0, totp_recovery=None)
+
+    def set_require_2fa(self, org_id: int, on: bool) -> None:
+        with self._lock:
+            self.db.execute("UPDATE orgs SET require_2fa = ? WHERE id = ?",
+                            (int(bool(on)), int(org_id)))
+            self.db.commit()
+
+    def org_requires_2fa(self, org_id) -> bool:
+        row = self.db.execute("SELECT require_2fa FROM orgs WHERE id = ?",
+                              (int(org_id or 0),)).fetchone()
+        return bool(row and row[0])
+
     # ----- transferring a router to another company -------------------------
     # An offer, not a move: the router lands in the other company's count
     # and on its bill, so its owner accepts it first. Until then it stays
@@ -585,7 +710,8 @@ class AuthStore:
             return None
         cur = self.db.execute(
             "SELECT id, username, email, pw_hash, salt, iterations, role, "
-            "org_id, devices, created, is_superadmin, alert_optin FROM users "
+            "org_id, devices, created, is_superadmin, alert_optin, totp_on "
+            "FROM users "
             "WHERE lower(email) = ? OR lower(username) = ? LIMIT 1",
             (ident, ident))
         row = cur.fetchone()
@@ -608,11 +734,12 @@ class AuthStore:
                 "login": row[2] or row[1],
                 "is_superadmin": bool(row[10]),
                 "alert_optin": bool(row[11]),
+                "totp_on": bool(row[12]),
                 "shared": shared}
 
     def list_users(self, org_id: int | None = None) -> list:
         sql = ("SELECT id, username, email, role, org_id, devices, created, "
-               "alert_optin FROM users")
+               "alert_optin, totp_on, is_superadmin FROM users")
         args: tuple = ()
         if org_id is not None:
             sql += " WHERE org_id = ?"
@@ -622,7 +749,8 @@ class AuthStore:
         for r in self.db.execute(sql, args).fetchall():
             d = {"id": r[0], "username": r[1], "email": r[2], "role": r[3],
                  "org_id": r[4], "devices": _load_devices(r[5]), "created": r[6],
-                 "alert_optin": bool(r[7])}
+                 "alert_optin": bool(r[7]), "totp_on": bool(r[8]),
+                 "is_superadmin": bool(r[9])}
             d["login"] = d["email"] or d["username"]
             out.append(d)
         return out
@@ -861,16 +989,23 @@ class AuthStore:
         if not row:
             return default
         try:
-            return json.loads(row[0])
+            value = json.loads(row[0])
+            if vault.is_sealed(value):
+                opened = vault.unseal(value, self._dir)
+                return json.loads(opened) if opened else default
+            return value
         except (json.JSONDecodeError, TypeError):
             return default
 
     def set_setting(self, key: str, value) -> None:
+        payload = json.dumps(value)
+        if key in self._SEALED_SETTINGS:
+            payload = json.dumps(vault.seal(payload, self._dir))
         with self._lock:
             self.db.execute(
                 "INSERT INTO platform_settings (key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (key, json.dumps(value)))
+                (key, payload))
             self.db.commit()
 
     def get_smtp(self) -> dict | None:

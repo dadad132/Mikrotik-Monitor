@@ -220,7 +220,7 @@ with open(cfg_path, "w") as fh:
     fh.write("poll_interval: 60\n")
 srv0 = ThreadingHTTPServer(("127.0.0.1", 8097), web.make_handler(
     mdb, sfile, AuthStore(adb_empty), web.SessionManager(),
-    config_path=cfg_path))
+    config_path=cfg_path, admin_2fa=False))
 threading.Thread(target=srv0.serve_forever, daemon=True).start()
 B0 = "http://127.0.0.1:8097"
 try:
@@ -470,7 +470,7 @@ a_sec = AuthStore(adb_sec)
 a_sec.signup("owner@sec.test", "sekret12", "SecCo")
 a_sec.close()
 srv_sec = ThreadingHTTPServer(("127.0.0.1", 8100), web.make_handler(
-    mdb, sfile, AuthStore(adb_sec), web.SessionManager(), secure_cookies=True))
+    mdb, sfile, AuthStore(adb_sec), web.SessionManager(), secure_cookies=True, admin_2fa=False))
 threading.Thread(target=srv_sec.serve_forever, daemon=True).start()
 B_SEC = "http://127.0.0.1:8100"
 try:
@@ -508,7 +508,7 @@ a_nosec = AuthStore(adb_nosec)
 a_nosec.signup("owner@nosec.test", "sekret12", "NoSecCo")
 a_nosec.close()
 srv_nosec = ThreadingHTTPServer(("127.0.0.1", 8101), web.make_handler(
-    mdb, sfile, AuthStore(adb_nosec), web.SessionManager(), secure_cookies=False))
+    mdb, sfile, AuthStore(adb_nosec), web.SessionManager(), secure_cookies=False, admin_2fa=False))
 threading.Thread(target=srv_nosec.serve_forever, daemon=True).start()
 try:
     body = urllib.parse.urlencode(
@@ -536,7 +536,7 @@ QBASE = "http://127.0.0.1:8102"
 srv_q = ThreadingHTTPServer(("127.0.0.1", 8102), web.make_handler(
     mdb, sfile, AuthStore(adb), web.SessionManager(),
     secure_cookies=False, devices_db=wdb, defaults=DEF,
-    billing_cfg={"db": _bdb}))
+    billing_cfg={"db": _bdb}, admin_2fa=False))
 threading.Thread(target=srv_q.serve_forever, daemon=True).start()
 try:
     print("Requesting a quote above the last packet:")
@@ -1022,7 +1022,7 @@ finally:
 # ---- live server (with the devices DB so org isolation is real) ------------
 srv = ThreadingHTTPServer(("127.0.0.1", 8098), web.make_handler(
     mdb, sfile, AuthStore(adb), web.SessionManager(),
-    secure_cookies=False, metrics_token="promtok", devices_db=wdb, defaults=DEF))
+    secure_cookies=False, metrics_token="promtok", devices_db=wdb, defaults=DEF, admin_2fa=False))
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 try:
     print("Unauthenticated:")

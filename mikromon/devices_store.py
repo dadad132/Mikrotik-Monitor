@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
 
+from . import vault
 from .config import ConfigError, DEFAULT_CHECKS, build_device, device_to_dict
 
 log = logging.getLogger(__name__)
@@ -33,8 +35,13 @@ CREATE TABLE IF NOT EXISTS devices (
 
 
 class DevicesStore:
+    # The router logins: full admin on a customer's router. Sealed at rest
+    # (vault.py) and opened only when a device is read back.
+    _SECRET_FIELDS = ("password", "push_password")
+
     def __init__(self, path: str):
         self.path = path
+        self._dir = os.path.dirname(os.path.abspath(path))
         self._lock = threading.Lock()
         self.db = sqlite3.connect(path, check_same_thread=False)
         # WAL lets the engine thread read while the web thread writes without
@@ -68,6 +75,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS ix_dept_name ON departments(device, name);
 """)
         self.db.commit()
         self._migrate_checks()
+        self._seal_existing()
+
+    def _seal(self, raw: dict) -> dict:
+        raw = dict(raw)
+        for k in self._SECRET_FIELDS:
+            if raw.get(k):
+                raw[k] = vault.seal(str(raw[k]), self._dir)
+        return raw
+
+    def _open(self, raw: dict) -> dict:
+        for k in self._SECRET_FIELDS:
+            if vault.is_sealed(raw.get(k)):
+                raw[k] = vault.unseal(raw[k], self._dir)
+        return raw
+
+    def _seal_existing(self) -> None:
+        """Seal any login still stored in plain text (from before sealing
+        existed). Cheap when there is nothing to do."""
+        with self._lock:
+            changed = False
+            for name, blob in self.db.execute(
+                    "SELECT name, config FROM devices").fetchall():
+                raw = json.loads(blob)
+                if any(raw.get(k) and not vault.is_sealed(raw.get(k))
+                       for k in self._SECRET_FIELDS):
+                    self.db.execute(
+                        "UPDATE devices SET config = ? WHERE name = ?",
+                        (json.dumps(self._seal(raw)), name))
+                    changed = True
+            if changed:
+                self.db.commit()
 
     def _migrate_checks(self) -> None:
         """Strip stored check values that are redundant with the current default,
@@ -110,7 +148,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ix_dept_name ON departments(device, name);
         owner is kept (new devices default to org 1).
         """
         dev = build_device(raw, defaults)            # validates required fields
-        blob = json.dumps(device_to_dict(dev))
+        blob = json.dumps(self._seal(device_to_dict(dev)))
         with self._lock:
             if org_id is None:
                 row = self.db.execute(
@@ -156,7 +194,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ix_dept_name ON departments(device, name);
     def raw(self, name: str) -> dict | None:
         row = self.db.execute("SELECT config FROM devices WHERE name = ?",
                               (name,)).fetchone()
-        return json.loads(row[0]) if row else None
+        return self._open(json.loads(row[0])) if row else None
 
     def names(self) -> list:
         return [r[0] for r in self.db.execute(
@@ -177,7 +215,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS ix_dept_name ON departments(device, name);
         out = []
         for r in self.db.execute("SELECT name, config FROM devices ORDER BY name"):
             try:
-                out.append(build_device(json.loads(r[1]), defaults))
+                out.append(build_device(self._open(json.loads(r[1])),
+                                        defaults))
             except (ConfigError, json.JSONDecodeError) as exc:
                 log.warning("device %r has an invalid stored config and is "
                             "NOT being monitored: %s", r[0], exc)
