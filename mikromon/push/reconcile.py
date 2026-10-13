@@ -50,9 +50,12 @@ def reconcile_list(path, key, desired, current, *, manage_tag=None,
     # could stack several identical managed rows (same comment / public-key /
     # address); keep the FIRST ("the open one") and remove the rest so every
     # apply converges on a single rule instead of letting duplicates pile up.
+    # Keys are compared as text: librouteros hands a name like "2024" back as
+    # an int, which never matched the "2024" asked for, so the row was added
+    # again (refused, the name is taken) and the old one removed.
     cur_by_key = {}
     for r in cur_owned:
-        k = r.get(key)
+        k = _norm(r.get(key))
         if k in cur_by_key:
             ops.append(Operation(
                 "remove", path, {".id": r[".id"]},
@@ -68,7 +71,7 @@ def reconcile_list(path, key, desired, current, *, manage_tag=None,
         d = dict(raw)
         if manage_tag is not None:
             d.setdefault("comment", manage_tag)
-        k = d.get(key)
+        k = _norm(d.get(key))
         desired_keys.add(k)
         cur = cur_by_key.get(k)
         if cur is None:

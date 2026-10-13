@@ -1859,13 +1859,22 @@ try:
     check("...and it names which port answered, so the finding is checkable "
           "rather than asserted", f"Winbox:{_open_port}" in joined)
 
-    # Nothing answering anywhere: genuinely off, or the tunnel is down.
-    orig_ports = web._REACH_PORTS
+    # Nothing answering anywhere: genuinely off, or the tunnel is down. A
+    # closed port on 127.0.0.1 is no stand-in for that: Linux and macOS refuse
+    # it at once, which rightly reads as "host is up", and only Windows lets it
+    # time out. So every connect times out here, as it does to a router that is off.
+    orig_ports, orig_connect = web._REACH_PORTS, _sock.create_connection
     web._REACH_PORTS = [(9, "discard")]
+
+    def _no_reply(*_a, **_k):
+        raise TimeoutError("timed out")
+
+    _sock.create_connection = _no_reply
     try:
         silent = "\n".join(web._why_unreachable("127.0.0.1", 9, timeout=0.4))
     finally:
         web._REACH_PORTS = orig_ports
+        _sock.create_connection = orig_connect
     check("nothing answering anywhere gives the opposite verdict — off, or "
           "the tunnel is down",
           "either off, or its WireGuard tunnel" in silent)

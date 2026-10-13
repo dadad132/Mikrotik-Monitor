@@ -6287,6 +6287,10 @@ def _field_html(desc) -> str:
             f'{esc(lbl)}</option>' for v, lbl in desc["options"])
         return (f'<div class="f"><label class="f">{esc(label)}</label>'
                 f'<select name="{desc["name"]}">{opts}</select>{hint}</div>')
+    if t == "time":
+        return (f'<div class="f"><label class="f">{esc(label)}</label>'
+                f'<input type="time" name="{desc["name"]}" '
+                f'value="{esc(desc.get("value",""))}">{hint}</div>')
     if t == "static":
         return (f'<div class="f full"><label class="f">{esc(label)}</label>'
                 f'<div>{esc(desc.get("value",""))}</div>{hint}</div>')
@@ -6575,10 +6579,60 @@ def _queue_script_box(name, csrf, facts=None) -> str:
     )
 
 
-def _scripts_box(name, csrf, scripts) -> str:
-    """List mikromon-managed /system scripts with Run and Remove buttons.
+_SCHED_DAY_TOGGLE = ("this.form.sched_day.style.display="
+                     "this.value==='week'?'':'none'")
 
-    Both actions POST to /device/push (so they get the dry-run -> confirm ->
+
+def _script_timer_cell(hidden, sch) -> str:
+    """A saved script's timer: what it is now, and a form to change it."""
+    from .push.features import SCHEDULE_DAYS, describe_schedule
+    every = sch["every"] if sch else "off"
+    choices = [("off", "Not scheduled"), ("day", "Every day"),
+               ("week", "Every week")]
+    if every == "other":
+        # Timed by hand on the router (every 12h, say): kept unless changed.
+        choices.insert(0, ("keep", "As set on the router"))
+        every = "keep"
+    opts = "".join(f'<option value="{v}"{" selected" if v == every else ""}>'
+                   f'{lbl}</option>' for v, lbl in choices)
+    day = (sch or {}).get("day") or "mon"
+    days = "".join(f'<option value="{v}"{" selected" if v == day else ""}>'
+                   f'{lbl}</option>' for v, lbl in SCHEDULE_DAYS)
+    at = (sch or {}).get("at", "")
+    at = at if re.fullmatch(r"\d\d:\d\d", at) else "03:00"
+    nxt = (f'<div class="muted">next run {esc(sch["next"])}</div>'
+           if sch and sch.get("next") else "")
+    hide = "" if every == "week" else ' style="display:none"'
+    return (f'<div>{esc(describe_schedule(sch))}</div>{nxt}'
+            f'<form method="POST" action="/device/push" class="inline" '
+            f'style="margin-top:6px">{hidden("schedule")}'
+            f'<select name="sched_every" onchange="{_SCHED_DAY_TOGGLE}">'
+            f'{opts}</select> <select name="sched_day"{hide}>{days}</select> '
+            f'<input type="time" name="sched_time" value="{at}"> '
+            f'<button class="btn ghost" type="submit">Save timer</button></form>')
+
+
+def _script_clock_line(clock) -> str:
+    """What the timers go by: the router's own clock, not this server's."""
+    if not clock:
+        return ('<p class="muted">Timers run by the router\'s own clock and '
+                'time zone.</p>')
+    if clock.get("unset"):
+        return (f'<div class="fwarn" style="margin:0 0 12px">&#9888; The '
+                f'router\'s clock has never been set (it says '
+                f'{esc(clock["date"])}), so a timer will not run when you '
+                f'expect. Set its time first: System &rarr; Clock, or switch on '
+                f'its NTP client.</div>')
+    tz = f" ({esc(clock['tz'])})" if clock.get("tz") else ""
+    return (f'<p class="muted">Timers run by the router\'s own clock, which '
+            f'says {esc(clock["time"])} on {esc(clock["date"])}{tz}.</p>')
+
+
+def _scripts_box(name, csrf, scripts, clock=None) -> str:
+    """List mikromon-managed /system scripts with Run and Remove buttons and
+    each one's timer.
+
+    Every action POSTs to /device/push (so it gets the dry-run -> confirm ->
     apply -> log pipeline) with a script_action + script_name."""
     q = esc(name)
     rows = ""
@@ -6588,25 +6642,31 @@ def _scripts_box(name, csrf, scripts) -> str:
         last = s.get("last-started", "")
         meta = (f'<span class="muted"> · last run {esc(last)}</span>' if last else "")
 
-        def act(action, label, cls):
-            return (f'<form method="POST" action="/device/push" class="inline">'
-                    f'<input type="hidden" name="csrf" value="{csrf}">'
+        def hidden(action):
+            return (f'<input type="hidden" name="csrf" value="{csrf}">'
                     f'<input type="hidden" name="device" value="{q}">'
                     f'<input type="hidden" name="feature" value="scripts">'
                     f'<input type="hidden" name="script_action" value="{action}">'
-                    f'<input type="hidden" name="script_name" value="{sn}">'
+                    f'<input type="hidden" name="script_name" value="{sn}">')
+
+        def act(action, label, cls):
+            return (f'<form method="POST" action="/device/push" class="inline">'
+                    f'{hidden(action)}'
                     f'<button class="btn {cls}" type="submit">{label}</button></form>')
         rows += (f'<tr><td><b>{sn}</b>{meta}'
                  f'<details><summary class="muted">source</summary>'
                  f'<pre style="white-space:pre-wrap;background:var(--surface-2);color:var(--text);padding:8px;'
                  f'border-radius:6px">{esc(src)}</pre></details></td>'
+                 f'<td>{_script_timer_cell(hidden, s.get("_schedule"))}</td>'
                  f'<td style="white-space:nowrap">{act("run", "Run", "ghost")} '
                  f'{act("remove", "Remove", "ghost")}</td></tr>')
     if not rows:
         return ""
     return (f'<div class="box"><h2>Saved scripts on the router'
             f'{_help_dot("scripts", "Custom scripts")}</h2>'
-            f'<table><tr><th>Script</th><th></th></tr>{rows}</table></div>')
+            f'{_script_clock_line(clock)}'
+            f'<table><tr><th>Script</th><th>Timer</th><th></th></tr>{rows}'
+            f'</table></div>')
 
 
 _PRE = ('white-space:pre-wrap;background:var(--surface-2);color:var(--text);'
@@ -7537,17 +7597,26 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
     elif preview is not None:
         # Safe mode (commit-confirm): offered for changes that could lock you
         # out. Not for 'update' (its reboot is intentional and would fight the
-        # revert).
+        # revert), and left unticked for a script that restarts the router:
+        # the timer can fire while it boots and restore the backup, a second
+        # restart.
+        restarts = getattr(preview, "restarts", False)
+        why_off = ('<div class="muted" style="margin:-4px 0 10px">Left off '
+                   'because this script restarts the router: Safe mode could '
+                   'find it still starting up and put the previous settings '
+                   'back, which restarts it a second time.</div>'
+                   if restarts else "")
         safe = ("" if slug == "update" else
                 f'<label class="chk" style="display:block;margin:10px 0">'
-                f'<input type="checkbox" name="safe_revert" value="1" checked> '
+                f'<input type="checkbox" name="safe_revert" value="1"'
+                f'{"" if restarts else " checked"}> '
                 f'<b>Safe mode</b> — a backup is taken and a safety timer is '
                 f'set on the router <i>before</i> the change is sent. About '
                 f'{_SAFE_CHECK_SECONDS} seconds later the router checks it can '
                 f'still reach the hub and the server checks it can still log '
                 f'in. If either fails, the router <b>puts its previous settings '
                 f'back by itself</b> and restarts. Protects against locking '
-                f'yourself out.</label>')
+                f'yourself out.</label>{why_off}')
         body = (f'<div class="box"><h2>Dry run — nothing has been written yet</h2>'
                 f'<pre style="background:var(--surface-2);color:var(--text);border:1px solid var(--border);padding:12px;border-radius:8px;'
                 f'white-space:pre-wrap">{esc(preview.diff_text())}</pre>'
@@ -11188,7 +11257,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     api.connect()
                     pusher = Pusher(cfg, api)
                     current = feature["read"](pusher, cfg)  # guarded above
-                    wan_failover_on = bool((current or {}).get("failover_routes"))
+                    # Only the WAN read is a dict with this key. Scripts,
+                    # Queues, Port forwarding and Restrict access read a plain
+                    # list, and .get on one died with no response: a 502 on
+                    # every visit once the list had anything in it.
+                    wan_failover_on = (isinstance(current, dict) and
+                                       bool(current.get("failover_routes")))
                     if slug == "tunnel" and devices_db:
                         hub = _hub_load(_hub_path(devices_db))
                         role, info = _vpn_group_info(hub, name)
@@ -11222,7 +11296,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     if "unmanaged" in feature:
                         unmanaged = feature["unmanaged"](pusher, cfg)
                     if slug == "scripts":
-                        extra_html = _scripts_box(name, csrf, current)
+                        from .push.features import script_clock
+                        extra_html = _scripts_box(name, csrf, current,
+                                                  clock=script_clock(pusher.api))
                     elif slug == "qos":
                         extra_html = _queue_script_box(name, csrf, facts)
                     elif slug == "hubtunnel":

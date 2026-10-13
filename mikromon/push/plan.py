@@ -40,6 +40,10 @@ class Plan:
     device: str
     ops: list = field(default_factory=list)
     summary: str = ""
+    # The change restarts the router (a script that reboots it). Safe mode
+    # works against that: it can see the router missing while it boots and
+    # restore the backup, a second restart nobody asked for.
+    restarts: bool = False
 
     @property
     def empty(self) -> bool:

@@ -16,15 +16,18 @@ see what a real router accepted or rejected.
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import ipaddress
 import re
 
+from ..util import uptime_to_seconds
 from . import vpnusers as _vu
 from . import wgextra as _wgx
-from .api import PushError
+from .api import PlanRefused, PushError
 from .plan import Operation, Plan
 from .reconcile import _norm, reconcile_list
+from .runner import _ROS_MONTHS
 
 DNS_BYPASS_LIST = "mikromon-dns-bypass"
 
@@ -1631,9 +1634,12 @@ def portfwd_summary(current, cfg):
 
 
 def portfwd_form(current, cfg):
+    # Ports come back from librouteros as ints, which the form cannot print.
     rows = [{"name": r.get("comment", "")[len(_PF_TAG):],
-             "proto": r.get("protocol", "tcp"), "dport": r.get("dst-port", ""),
-             "toaddr": r.get("to-addresses", ""), "toport": r.get("to-ports", "")}
+             "proto": _ros_text(r.get("protocol", "tcp")),
+             "dport": _ros_text(r.get("dst-port", "")),
+             "toaddr": _ros_text(r.get("to-addresses", "")),
+             "toport": _ros_text(r.get("to-ports", ""))}
             for r in current]
     return [{"type": "rows", "name": "pf", "label": "Port forwards",
              "cols": [("name", "name", "web"), ("proto", "tcp/udp", "tcp"),
@@ -1972,7 +1978,7 @@ def nextdns_snapshot(api) -> dict:
     if not rows:
         return {}
     cur = rows[0]
-    snap = {"dns": {f: str(cur.get(f, "") or "") for f in _SNAPSHOT_DNS_FIELDS}}
+    snap: dict = {"dns": {f: str(cur.get(f, "") or "") for f in _SNAPSHOT_DNS_FIELDS}}
     # Whether the client-forcing redirect was already there. Restoring means
     # removing rules mikromon added, while leaving alone any the customer had
     # before (they would have had the same tag only if mikromon put them
@@ -2728,14 +2734,107 @@ _SCRIPT_TAG = "mikromon:script:"
 # Full RouterOS policy set so a Run actually has rights to change config.
 _SCRIPT_POLICY = ("ftp,reboot,read,write,policy,test,password,sniff,"
                   "sensitive,romon")
+# A script's timer: one /system/scheduler entry, tagged with the script's
+# name, that runs it every day or every week at a set time. It lives on the
+# router, so it keeps to its times when this server cannot reach it.
+_SCRIPT_SCHED_TAG = "mikromon:scriptsched:"
+_SCRIPT_SCHED_PREFIX = "mikromon-script-"
+# The fields a timer is added with; the rest of a scheduler row (next-run,
+# run-count, owner) is the router's own and is refused on an add.
+_SCHED_FIELDS = ("name", "start-date", "start-time", "interval", "on-event",
+                 "policy", "comment", "disabled")
+_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+                  "Saturday", "Sunday")
+SCHEDULE_DAYS = tuple(zip(_WEEKDAYS, _WEEKDAY_NAMES))
+_DAY, _WEEK = 86400, 7 * 86400
+
+
+def _ros_text(v) -> str:
+    """A value as the router holds it. librouteros hands "2026" back as an
+    int and "yes" as True; an int script name broke the page that lists it."""
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    return "" if v is None else str(v)
+
+
+def _ros_date(value):
+    """A RouterOS date -- "2026-10-12" from 7.10 on, "oct/12/2026" before --
+    as a date, or None."""
+    s = _ros_text(value).strip().lower()
+    try:
+        if "-" in s:
+            return datetime.date.fromisoformat(s)
+        mon, day, year = s.split("/")
+        return datetime.date(int(year), _ROS_MONTHS.index(mon) + 1, int(day))
+    except ValueError:
+        return None
+
+
+def _script_schedule(scheds, script):
+    """The script's timer as the tab shows it, or None when it has none."""
+    rows = [s for s in scheds
+            if _ros_text(s.get("comment")) == _SCRIPT_SCHED_TAG + script]
+    if not rows:
+        return None
+    s = rows[0]
+    secs = uptime_to_seconds(_ros_text(s.get("interval"))) or 0
+    start = _ros_date(s.get("start-date"))
+    at = _ros_text(s.get("start-time"))
+    return {"every": {_DAY: "day", _WEEK: "week"}.get(secs, "other"),
+            "interval": _ros_text(s.get("interval")),
+            "day": _WEEKDAYS[start.weekday()] if start else "",
+            "at": at[:5] if re.match(r"\d\d:\d\d", at) else at,
+            "next": _ros_text(s.get("next-run")),
+            "disabled": _ros_text(s.get("disabled")) in ("yes", "true")}
+
+
+def describe_schedule(sch) -> str:
+    """"Every Monday at 03:00" -- or "Not scheduled"."""
+    if not sch:
+        return "Not scheduled"
+    if sch["every"] == "day":
+        text = f"Every day at {sch['at']}"
+    elif sch["every"] == "week" and sch["day"]:
+        text = (f"Every {_WEEKDAY_NAMES[_WEEKDAYS.index(sch['day'])]} "
+                f"at {sch['at']}")
+    else:
+        text = f"Every {sch['interval']} from {sch['at']} (set on the router)"
+    return text + (" -- switched off on the router" if sch["disabled"] else "")
+
+
+def script_clock(api) -> dict:
+    """The router's own date, time and time zone: what its timers go by.
+    {} when the clock cannot be read."""
+    rows = _safe_fetch(api, ("system", "clock"))
+    if not rows:
+        return {}
+    c = rows[0]
+    day = _ros_date(c.get("date"))
+    return {"date": _ros_text(c.get("date")),
+            "time": _ros_text(c.get("time"))[:5],
+            "tz": _ros_text(c.get("time-zone-name")),
+            # A router that has never been given the time starts in 1970.
+            "unset": day is not None and day.year < 2020}
 
 
 def scripts_read(pusher, cfg):
-    return [r for r in pusher.api.fetch(_SCRIPT) if _prefix_owner(_SCRIPT_TAG)(r)]
+    scheds = pusher.api.fetch(_SCHEDULER)
+    out = []
+    for r in pusher.api.fetch(_SCRIPT):
+        if not _prefix_owner(_SCRIPT_TAG)(r):
+            continue
+        r = {**r, "name": _ros_text(r.get("name")),
+             "source": _ros_text(r.get("source"))}
+        r["_schedule"] = _script_schedule(scheds, r["name"])
+        out.append(r)
+    return out
 
 
 def scripts_summary(current, cfg):
     return [f"{r.get('name')} — {len((r.get('source') or ''))} chars"
+            + (f" · {describe_schedule(r['_schedule'])}"
+               if r.get("_schedule") else "")
             + (f" · last run {r['last-started']}" if r.get("last-started") else "")
             for r in current] or ["No mikromon-managed scripts on the router yet."]
 
@@ -2746,7 +2845,116 @@ def scripts_form(current, cfg):
          "placeholder": "block-badnet"},
         {"type": "textarea", "name": "new_source",
          "label": "Script source (RouterOS commands)", "value": ""},
+        {"type": "select", "name": "sched_every", "label": "Run it on a timer",
+         "value": "off", "options": [("off", "No, only when Run is pressed"),
+                                     ("day", "Every day"),
+                                     ("week", "Every week")]},
+        {"type": "select", "name": "sched_day", "label": "Day (weekly only)",
+         "value": "mon", "options": SCHEDULE_DAYS},
+        {"type": "time", "name": "sched_time",
+         "label": "Time (the router's own clock)", "value": "03:00"},
     ]
+
+
+def _same_sched_field(f, old, new) -> bool:
+    if f == "interval":                      # RouterOS shows 7d back as 1w
+        return uptime_to_seconds(_ros_text(old)) == uptime_to_seconds(new)
+    if f == "disabled":
+        return (_ros_text(old) in ("yes", "true")) == (new == "yes")
+    return _ros_text(old) == new
+
+
+def _week_start(api, day) -> str:
+    """The latest `day` on or before today, written the way this router
+    reads dates. Any such date would do: the timer repeats every 7 days from
+    it, so the weekday is all it sets."""
+    major, minor = _ros_version(api)[:2]
+    today = datetime.date.today()
+    d = today - datetime.timedelta(
+        days=(today.weekday() - _WEEKDAYS.index(day)) % 7)
+    if (major, minor) >= (7, 10):
+        return d.isoformat()
+    return f"{_ROS_MONTHS[d.month - 1]}/{d.day:02d}/{d.year}"
+
+
+def _schedule_ops(pusher, script, flat) -> list:
+    """Make `script`'s timer what was asked: sched_every "off", "day" or
+    "week" ("keep" leaves a timing set by hand on the router alone), with
+    sched_day for weekly and sched_time as HH:MM on the router's clock."""
+    every = (flat.get("sched_every") or "off").strip()
+    if every == "keep":
+        return []
+    tag = _SCRIPT_SCHED_TAG + script
+    mine = [s for s in pusher.api.fetch(_SCHEDULER)
+            if _ros_text(s.get("comment")) == tag]
+
+    def drop(s, what):
+        return Operation(
+            "remove", _SCHEDULER, {".id": s[".id"]},
+            desc=f"{what} for script '{script}'",
+            inverse=Operation("add", _SCHEDULER,
+                              {f: s[f] for f in _SCHED_FIELDS if f in s},
+                              desc=f"put back the timer for script '{script}'"))
+
+    if every not in ("day", "week"):
+        return [drop(s, "remove the timer") for s in mine]
+    at = (flat.get("sched_time") or "").strip()
+    if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", at):
+        raise PlanRefused("Nothing was sent to the router.\nThe time has to "
+                          "be hours and minutes on a 24-hour clock, like "
+                          "03:00.")
+    day = (flat.get("sched_day") or "").strip().lower()
+    if every == "week" and day not in _WEEKDAYS:
+        raise PlanRefused("Nothing was sent to the router.\nPick the day of "
+                          "the week it should run on.")
+    when = (f"every day at {at}" if every == "day" else
+            f"every {_WEEKDAY_NAMES[_WEEKDAYS.index(day)]} at {at}")
+    want = {"name": _SCRIPT_SCHED_PREFIX + script,
+            "interval": "1d" if every == "day" else "7d",
+            "start-time": at + ":00",
+            "on-event": f'/system script run "{script}"',
+            "disabled": "no"}
+    cur = mine[0] if mine else None
+    ops = [drop(s, "remove a second timer") for s in mine[1:]]
+    if every == "week":
+        start = _ros_date(cur.get("start-date")) if cur else None
+        if start is None or _WEEKDAYS[start.weekday()] != day:
+            want["start-date"] = _week_start(pusher.api, day)
+    desc = f"run script '{script}' {when}, by the router's own clock"
+    if cur is None:
+        ops.append(Operation(
+            "add", _SCHEDULER, {**want, "policy": _SCRIPT_POLICY, "comment": tag},
+            desc=desc,
+            inverse=Operation("remove", _SCHEDULER, {},
+                              desc=f"remove the timer for script '{script}'")))
+        return ops
+    changed = {f: v for f, v in want.items()
+               if not _same_sched_field(f, cur.get(f), v)}
+    if changed:
+        ops.append(Operation(
+            "set", _SCHEDULER, {".id": cur[".id"], **changed},
+            desc=desc,
+            inverse=Operation(
+                "set", _SCHEDULER,
+                {".id": cur[".id"], **{f: _ros_text(cur.get(f)) for f in changed}},
+                desc=f"put back the previous timer for script '{script}'")))
+    return ops
+
+
+def _restarts_router(source) -> bool:
+    """Whether a script reboots the router -- /system reboot, /system/reboot,
+    or a bare reboot inside a /system block."""
+    return bool(re.search(r"(^|[\s;{\[/])reboot\b", source or "", re.M))
+
+
+def _reads_back_as_name(name) -> bool:
+    """librouteros turns an all-digit word into a number and yes/no into
+    True/False, so a script called that could not be found by name again."""
+    try:
+        int(name)
+        return False
+    except ValueError:
+        return name not in ("yes", "no", "true", "false")
 
 
 def _managed_desired(existing):
@@ -2768,17 +2976,34 @@ def scripts_plan(pusher, cfg, flat, multi):
         op = Operation("run", _SCRIPT, {"_cmd": "run", ".id": row[".id"]},
                        desc=f"run script '{target}' on the router (background)",
                        detach=True)
-        return Plan(cfg.name, [op], summary=f"run script {target}")
+        return Plan(cfg.name, [op], summary=f"run script {target}",
+                    restarts=_restarts_router(row.get("source")))
 
     if action == "remove":
         desired = [d for d in _managed_desired(existing) if d["name"] != target]
-        return pusher.plan_managed_list(_SCRIPT, "name", desired,
+        plan = pusher.plan_managed_list(_SCRIPT, "name", desired,
                                         owns=_prefix_owner(_SCRIPT_TAG),
                                         label="script")
+        # Its timer goes first, so nothing is left trying to run a script
+        # that is not there.
+        plan.ops[:0] = _schedule_ops(pusher, target, {"sched_every": "off"})
+        return plan
+
+    if action == "schedule":
+        if not any(r["name"] == target for r in existing):
+            return Plan(cfg.name, [], summary="schedule script (not found)")
+        return Plan(cfg.name, _schedule_ops(pusher, target, flat),
+                    summary=f"schedule script {target}")
 
     # default: add / update from the form
     nm = _slug(flat.get("new_name", ""), "")
     src = flat.get("new_source", "")
+    if nm and not _reads_back_as_name(nm):
+        raise PlanRefused(
+            f"Nothing was sent to the router.\nGive the script a name with a "
+            f"letter in it: the router hands '{nm}' back as a number or a "
+            f"yes/no, not as a name, so it could not be run or removed by "
+            f"name afterwards.")
     is_new = nm not in {d["name"] for d in _managed_desired(existing)}
     desired = [d for d in _managed_desired(existing) if d["name"] != nm]
     if nm and src.strip():
@@ -2793,8 +3018,13 @@ def scripts_plan(pusher, cfg, flat, multi):
             row["policy"] = _SCRIPT_POLICY
             row["dont-require-permissions"] = "yes"
         desired.append(row)
-    return pusher.plan_managed_list(_SCRIPT, "name", desired,
+    plan = pusher.plan_managed_list(_SCRIPT, "name", desired,
                                     owns=_prefix_owner(_SCRIPT_TAG), label="script")
+    # A timer picked on the add form goes on with the script. "No" here leaves
+    # any timer the script already has alone: that is changed on its own row.
+    if nm and src.strip() and flat.get("sched_every") in ("day", "week"):
+        plan.ops += _schedule_ops(pusher, nm, flat)
+    return plan
 
 
 # ===========================================================================

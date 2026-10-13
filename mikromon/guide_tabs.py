@@ -246,11 +246,17 @@ TABS = [
      "what": "For anything the other tabs do not cover: paste RouterOS "
              "commands and run them. <b>Save</b> stores the script on the "
              "router tagged as ours, <b>Run</b> executes it, <b>Remove</b> "
-             "deletes it. Everything is previewed first and logged.",
+             "deletes it, and a <b>timer</b> runs it by itself every day or "
+             "every week at a set time — a nightly reboot, say. "
+             "Everything is previewed first and logged.",
      "steps": ["Paste the script.",
                "<b>Preview</b> to see exactly what will be sent.",
                "<b>Save</b> stores it on the router — <b>it does not run it</b>.",
-               "Use <b>Run</b> on a saved script to actually execute it."],
+               "Use <b>Run</b> on a saved script to actually execute it.",
+               "To run it on a timer, pick <b>Every day</b> or <b>Every "
+               "week</b>, the day and the time beside the script, and "
+               "<b>Save timer</b>. The router keeps the timer itself, by its "
+               "own clock, so it runs even when this site cannot reach it."],
      "warn": "Removing a saved script does <b>not</b> undo whatever it "
              "already did to the router — write an undo script for that, or "
              "use the typed tabs, whose changes are reversible. Nothing here "
