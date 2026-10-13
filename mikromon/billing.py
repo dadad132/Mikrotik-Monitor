@@ -272,6 +272,23 @@ def prorata(amount: float, period_end: float,
             "fraction": fraction}
 
 
+# An upgrade asked for and not paid within this many days lapses: its
+# invoice is withdrawn and the company stays on the packet it last paid for,
+# free to ask again. Without it an unpaid upgrade invoice sat there for ever
+# and nothing the customer could do would clear it.
+UPGRADE_HOLD_DAYS = 3
+
+# Invoices nobody owes any more: withdrawn by the customer, lapsed unpaid,
+# or replaced by one at a new price. Paid ones are closed too, differently.
+WITHDRAWN = ("cancelled", "lapsed", "replaced")
+_CLOSED = "('paid', 'cancelled', 'lapsed', 'replaced')"
+
+
+def upgrade_lapses_at(order: dict) -> float:
+    """When an unpaid upgrade invoice lapses."""
+    return float(order.get("created") or 0.0) + UPGRADE_HOLD_DAYS * 86400
+
+
 def upgrade_quote(old_plan: dict | None, new_plan: dict,
                   period_end: float, now: float | None = None) -> dict:
     """What changing packet costs, and when it takes effect.
@@ -475,7 +492,7 @@ CREATE TABLE IF NOT EXISTS orders (
     months       INTEGER NOT NULL DEFAULT 1,
     amount_cents INTEGER NOT NULL,     -- minor units; money is never a float
     currency     TEXT NOT NULL DEFAULT 'ZAR',
-    status       TEXT NOT NULL DEFAULT 'pending',   -- pending|paid|cancelled
+    status       TEXT NOT NULL DEFAULT 'pending',   -- pending|paid|cancelled|lapsed|replaced
     checkout_id  TEXT,                 -- Yoco's id for the hosted page
     payment_id   TEXT,                 -- Yoco's id for the settled payment
     created      REAL NOT NULL,
@@ -993,13 +1010,16 @@ class BillingStore:
                      pending_plan=None, pending_from=None)
         return plan["name"]
 
-    def apply_upgrade(self, org_id: int, plan_name: str) -> None:
+    def apply_upgrade(self, org_id: int, plan_name: str) -> list:
         """A paid mid-period upgrade: bigger packet, same renewal date.
 
         The date deliberately does not move. They already paid for these
         days on the old packet and have just paid the difference; extending
         the period as well would be giving away a month for the price of a
         fortnight.
+
+        Returns the renewal invoices it re-priced (see reprice_renewals),
+        for the caller to send out.
         """
         plan = plan_by_name(plan_name)
         if plan is None:
@@ -1008,6 +1028,46 @@ class BillingStore:
                      device_limit=plan["devices"], grace_period_end=None,
                      pending_plan=None, pending_from=None,
                      cancel_requested=None)
+        return self.reprice_renewals(org_id)
+
+    def _open_renewals(self, org_id: int, period_end: float) -> list:
+        rows = self.db.execute(
+            f"SELECT {', '.join(self._ORDER_COLS)} FROM orders "
+            f"WHERE org_id = ? AND status NOT IN {_CLOSED} "
+            f"AND COALESCE(NULLIF(kind, ''), 'renewal') = 'renewal' "
+            f"AND due IS NOT NULL AND ABS(due - ?) < 86400",
+            (int(org_id), float(period_end))).fetchall()
+        return [dict(zip(self._ORDER_COLS, r)) for r in rows]
+
+    def reprice_renewals(self, org_id: int) -> list:
+        """Replace the month's unpaid renewal invoice with one at the price
+        of the packet the company is on now. Returns [(old order, new id)].
+
+        Renewal invoices go out a week before the 28th, for the packet the
+        company is on at that moment. One that upgraded in that week was left
+        holding an invoice for the OLD packet -- and paying it put them
+        straight back on that packet, undoing the upgrade they had just paid
+        for.
+        """
+        row = self.get(org_id) or {}
+        plan = plan_for(row)
+        period_end = float(row.get("current_period_end") or 0.0)
+        if plan is None or not period_end:
+            return []
+        cents = int(round(float(plan["price"]) * 100))
+        currency = str(plan.get("currency") or BILLING_CURRENCY)
+        out = []
+        for old in self._open_renewals(org_id, period_end):
+            if old["plan"] == plan["name"] and int(old["amount_cents"]) == cents:
+                continue
+            if not self.withdraw_order(int(old["id"]), "replaced"):
+                continue
+            new_id = self.create_order(
+                org_id, plan["name"], cents,
+                months=int(old.get("months") or 1), currency=currency,
+                provider=old.get("provider") or "yoco", due=old["due"])
+            out.append((old, new_id))
+        return out
 
     # --- orders (a packet somebody is paying for) --------------------------
 
@@ -1117,7 +1177,8 @@ class BillingStore:
         # where an order with no id there is nothing to ask about. An
         # invoice raised here is outstanding from the moment it exists,
         # whether or not a customer has opened the checkout yet.
-        sql = f"SELECT {', '.join(self._ORDER_COLS)} FROM orders WHERE status != 'paid'"
+        sql = (f"SELECT {', '.join(self._ORDER_COLS)} FROM orders "
+               f"WHERE status NOT IN {_CLOSED}")
         if require_external:
             sql += " AND external_id IS NOT NULL AND external_id != ''"
         args: list = []
@@ -1140,7 +1201,8 @@ class BillingStore:
         # Renewal invoices only. An unpaid upgrade (or any other kind of
         # order) due near the 28th is not the month's invoice, and counting
         # it would stop the real one from ever being raised.
-        sql = ("SELECT 1 FROM orders WHERE org_id = ? AND status != 'paid' "
+        sql = (f"SELECT 1 FROM orders WHERE org_id = ? "
+               f"AND status NOT IN {_CLOSED} "
                "AND COALESCE(NULLIF(kind, ''), 'renewal') = 'renewal' "
                "AND due IS NOT NULL AND ABS(due - ?) < 86400")
         args: list = [int(org_id), float(period_end or 0.0)]
@@ -1169,6 +1231,43 @@ class BillingStore:
         return [{"org_id": r[0], "plan": r[1], "device_limit": r[2],
                  "current_period_end": r[3], "status": r[4],
                  "custom_cents": r[5], "custom_label": r[6]} for r in rows]
+
+    def withdraw_order(self, order_id: int, status: str = "cancelled") -> bool:
+        """Take back an invoice nobody paid: "cancelled" when the customer
+        withdrew it, "lapsed" when its time ran out, "replaced" when a new
+        one at another price took its place. True if it changed.
+
+        A payment that still arrives afterwards is honoured -- mark_order_paid
+        accepts anything not already paid -- because money received is
+        money received, whatever this row said a minute earlier.
+        """
+        if status not in WITHDRAWN:
+            raise ValueError(status)
+        with self._lock:
+            cur = self.db.execute(
+                f"UPDATE orders SET status = ? WHERE id = ? "
+                f"AND status NOT IN {_CLOSED}",
+                (status, int(order_id)))
+            self.db.commit()
+            return cur.rowcount > 0
+
+    def lapse_upgrades(self, now: float | None = None) -> list:
+        """Withdraw every upgrade invoice not paid within UPGRADE_HOLD_DAYS.
+        Returns the orders that lapsed just now."""
+        now = now if now is not None else time.time()
+        cutoff = now - UPGRADE_HOLD_DAYS * 86400
+        rows = self.db.execute(
+            f"SELECT {', '.join(self._ORDER_COLS)} FROM orders "
+            f"WHERE kind = 'upgrade' "
+            f"AND status NOT IN {_CLOSED} "
+            f"AND created <= ?", (cutoff,)).fetchall()
+        gone = []
+        for r in rows:
+            order = dict(zip(self._ORDER_COLS, r))
+            if self.withdraw_order(int(order["id"]), "lapsed"):
+                order["status"] = "lapsed"
+                gone.append(order)
+        return gone
 
     def mark_order_paid(self, order_id: int, payment_id: str = "") -> bool:
         """Mark an order paid. True only the FIRST time.
@@ -1219,11 +1318,28 @@ class BillingStore:
         # renewal date stays exactly where it was. Extending it as well
         # would hand over a month for the price of a fortnight.
         if str(order.get("kind") or "") == "upgrade":
-            self.apply_upgrade(int(order["org_id"]), order["plan"])
-            return
+            return self.apply_upgrade(int(order["org_id"]), order["plan"])
         now = now if now is not None else time.time()
         current = float(row.get("current_period_end") or 0.0)
         months = max(1, int(order.get("months") or 1))
+        if str(order.get("status") or "") == "replaced" and current > now:
+            # The old-price invoice an upgrade replaced, paid anyway (a
+            # checkout opened before the upgrade went through). The money is
+            # honoured -- the month is theirs -- but it must not shrink the
+            # packet they have just paid more for, and the invoice that
+            # replaced it is withdrawn: this month is now paid. What the
+            # two prices differ by is left to a person, and logged for one.
+            for other in self._open_renewals(org_id, current):
+                self.withdraw_order(int(other["id"]), "cancelled")
+            self._upsert(org_id, status="active",
+                         current_period_end=add_billing_months(current, months),
+                         grace_period_end=None, cancel_requested=None)
+            log.warning("org %s paid renewal %s at the price from before its "
+                        "upgrade (it had been replaced); the month is "
+                        "extended on the packet it is on (%s), and the "
+                        "difference is owed", org_id, order.get("id"),
+                        row.get("plan"))
+            return []
         if current > now:
             end = add_billing_months(current, months)
         else:
@@ -1237,6 +1353,7 @@ class BillingStore:
                      device_limit=plan["devices"],
                      current_period_end=end,
                      grace_period_end=None, cancel_requested=None)
+        return []
 
     # --- quote requests (companies past the last tier) --------------------
 

@@ -10,7 +10,7 @@ import time
 from urllib.parse import quote
 
 from .aimonitor import (MAX_RUNS, VERDICTS, backup_bytes_used, evidence_lines,
-                        provider_name, search_link,
+                        provider_name, search_link, searched_label,
                         for_how_long, human_bytes)
 from .web_shared import esc
 
@@ -39,9 +39,10 @@ def _search_suggestions(inc: dict) -> str:
     queries = list(inc.get("search_queries") or [])[:5]
     if not queries:
         return ""
-    return ('<div style="font-size:12.5px;margin-top:4px">Searched Google '
-            'for: ' + " · ".join(
-                f'<a href="{esc(search_link(q))}" target="_blank" '
+    searched, qlink = searched_label(inc)
+    return (f'<div style="font-size:12.5px;margin-top:4px">{esc(searched)}: '
+            + " · ".join(
+                f'<a href="{esc(qlink(q))}" target="_blank" '
                 f'rel="noopener noreferrer">{esc(q)}</a>' for q in queries)
             + '</div>')
 
@@ -215,7 +216,7 @@ def ai_settings_box(settings: dict, usage: dict, csrf: str,
                 else "not set yet")
 
     on = bool(settings.get("enabled"))
-    prov = settings.get("provider") or "gemini"
+    prov = settings.get("provider") or "news"
     last_err = ""
     if usage.get("last_error"):
         when = time.strftime("%d %b %H:%M",
@@ -236,18 +237,23 @@ def ai_settings_box(settings: dict, usage: dict, csrf: str,
         f'<div class="box" id="ai"><h2>AI monitor</h2>'
         f'<p class="muted" style="margin:0 0 10px">When a site loses its '
         f'main line, the monitor works out the likely cause from what the '
-        f'router shows and from the rest of the fleet straight away. With '
-        f'this switched on it also asks an AI to search online for outages, '
-        f'maintenance and load-shedding reported for that ISP in the site\'s '
-        f'area, and emails what it found with its sources. Only the ISP\'s '
-        f'name, the site\'s area, the time and what the router showed are '
-        f'sent, never a company\'s or a router\'s name. Sites that drop '
-        f'together share one check.</p>'
+        f'router shows and from the rest of the fleet straight away, and '
+        f'keeps reminding while a site is on its backup line &mdash; no key '
+        f'and no cost. With this switched on it also looks online for '
+        f'outages, maintenance and load-shedding reported for that ISP in '
+        f'the site\'s area, and emails what it found with its sources. Only '
+        f'the ISP\'s name, the site\'s area, the time and what the router '
+        f'showed are sent, never a company\'s or a router\'s name. Sites '
+        f'that drop together share one check.</p>'
         f'<p class="muted" style="margin:0 0 10px;font-size:12.5px">'
-        f'<b>Gemini</b> (Google, recommended for cost): Gemini 2.5 Flash '
-        f'comes with a free daily allowance of Google searches before any '
-        f'per-search charge, and its tokens cost cents &mdash; current '
-        f'figures at ai.google.dev/pricing. Get a key at aistudio.google.com. '
+        f'<b>News headlines</b> (free, no key, no AI): reads the last two '
+        f'days of Google News for the ISP\'s outages and power cuts in the '
+        f'area, and reports the headlines that match. It lists what it '
+        f'finds rather than reasoning about it. '
+        f'<b>Gemini</b> (Google): an AI searches and explains; Gemini 2.5 '
+        f'Flash comes with a free daily allowance of Google searches before '
+        f'any per-search charge &mdash; current figures at '
+        f'ai.google.dev/pricing. Get a key at aistudio.google.com. '
         f'<b>Claude</b> (Anthropic): Claude Opus 5.5, $10 per 1,000 '
         f'searches plus tokens.</p>'
         f'{msg}{sdk_note}'
@@ -259,7 +265,9 @@ def ai_settings_box(settings: dict, usage: dict, csrf: str,
         f'</label>'
         f'<div style="display:grid;grid-template-columns:repeat(auto-fit,'
         f'minmax(200px,1fr));gap:10px">'
-        f'<label>AI to use<br><select name="provider" style="width:100%">'
+        f'<label>Look online with<br><select name="provider" '
+        f'style="width:100%">'
+        f'{opt("news", "News headlines (free, no key)")}'
         f'{opt("gemini", "Gemini (Google)")}{opt("claude", "Claude (Anthropic)")}'
         f'</select></label>'
         f'<label>Gemini API key<br><input name="gemini_api_key" '
@@ -293,7 +301,7 @@ def ai_settings_box(settings: dict, usage: dict, csrf: str,
         f'<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">'
         f'<button class="btn" type="submit">Save AI settings</button>'
         f'<button class="btn ghost" type="submit" name="test" value="1">'
-        f'Save and test the key</button></div></form>'
+        f'Save and test</button></div></form>'
         f'<p class="muted" style="margin:12px 0 0;font-size:12.5px">Last 24 '
         f'hours: {usage.get("calls", 0)} check'
         f'{"" if usage.get("calls", 0) == 1 else "s"}, '

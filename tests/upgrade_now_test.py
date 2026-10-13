@@ -117,7 +117,8 @@ try:
           "day" in sent[0].get_content()
           and "renewal date does not change" in sent[0].get_content())
     check("the page says it was emailed and how to pay",
-          "emailed to jp@eca.test" in page and "Pay it below" in page)
+          "emailed to jp@eca.test" in page
+          and "Pay it within 3 days, below or from the email" in page)
     check("...and the Billing page offers to pay it there and then, at "
           "the top as well as in the payments list",
           "waiting for payment" in page and "Pay now</a>" in page

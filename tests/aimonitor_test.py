@@ -584,13 +584,17 @@ try:
 finally:
     _ur.urlopen = _orig_urlopen
 
-check("Gemini is the default; an older setup with only a Claude key stays "
-      "on Claude", am.analyze.__name__ == "analyze")
+check("the news headlines are the default; an older setup with only a "
+      "Claude or Gemini key stays on it", am.analyze.__name__ == "analyze")
 _a = AuthStore(os.path.join(tmp, "prov.db"))
-check("a fresh server defaults to Gemini", _a.get_ai()["provider"] == "gemini")
+check("a fresh server defaults to the news headlines -- no key, no cost",
+      _a.get_ai()["provider"] == "news")
 _a.set_setting("ai", {"enabled": True, "api_key": "sk-ant-old"})
 check("...a server saved with only a Claude key keeps Claude",
       _a.get_ai()["provider"] == "claude")
+_a.set_setting("ai", {"enabled": True, "gemini_api_key": "AIza-old"})
+check("...and one saved with only a Gemini key keeps Gemini",
+      _a.get_ai()["provider"] == "gemini")
 _a.close()
 body = am.cause_email(dict(mon.store.open_for("R1"),
                            search_queries=["Vumatel outage Umhlanga today"]),

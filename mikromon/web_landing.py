@@ -861,6 +861,13 @@ _AI_DEMO_STEP = r"""{d:3600, cap:'A minute later: what is reported online for th
          ['Vumatel reports a fibre outage in Umhlanga since 09:30; repairs are under way.',
           'Source: Vumatel status — Umhlanga fibre outage']); }},"""
 
+# The same step when the online check reads the news instead of asking an
+# AI: a headline quoted, not an explanation -- what that email really says.
+_NEWS_DEMO_STEP = r"""{d:3600, cap:'A minute later: what the news reports for that ISP and area, with the sources.',
+       f:function(){ mail('', '09:42', '[EasyMikrotik] Branch · Durban: possible cause — Outage at the ISP',
+         ['1 news report from the last 2 days mentions trouble on Vumatel’s network, most recently “Fibre outage in Umhlanga” (local news, today).',
+          'Source: Fibre outage in Umhlanga — local news']); }},"""
+
 _DEMO_JS = r"""
 <script>
 (function(){
@@ -1179,7 +1186,7 @@ def _tier_rows() -> str:
 # Public render function
 # ---------------------------------------------------------------------------
 
-def render_landing(ai_on: bool = False) -> str:
+def render_landing(ai_on: bool = False, ai_news: bool = False) -> str:
     """The public page. `ai_on` is whether this server has the AI monitor's
     online check switched on: the page only claims the search when it is
     true -- a claim the product does not back is one a customer catches."""
@@ -1412,6 +1419,6 @@ def render_landing(ai_on: bool = False) -> str:
 </footer>
 
 {_THEME_TOGGLE_JS}
-{_DEMO_JS.replace("/*AI_STEP*/", _AI_DEMO_STEP if ai_on else "")}
+{_DEMO_JS.replace("/*AI_STEP*/", (_NEWS_DEMO_STEP if ai_news else _AI_DEMO_STEP) if ai_on else "")}
 </body>
 </html>"""

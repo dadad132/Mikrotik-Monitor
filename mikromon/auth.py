@@ -85,9 +85,10 @@ BACKUP_REMINDER_DEFAULT_HOURS = 2
 # is stored like the SMTP password: this database is the server's secrets.
 AI_DEFAULTS = {
     "enabled": False,
-    # Which AI looks online: "gemini" (Google; cheap, with a free daily
-    # allowance of searches) or "claude" (Anthropic).
-    "provider": "gemini",
+    # What looks online: "news" (Google News headlines; no AI, no key, no
+    # cost), "gemini" (Google; cheap, with a free daily allowance of
+    # searches) or "claude" (Anthropic).
+    "provider": "news",
     "gemini_api_key": "",
     "gemini_model": "gemini-2.5-flash",
     "api_key": "",          # the Claude (Anthropic) key
@@ -1281,9 +1282,12 @@ class AuthStore:
         if isinstance(d, dict):
             out.update({k: v for k, v in d.items() if k in AI_DEFAULTS})
             # Saved before there was a choice: a Claude key and no provider
-            # means it was set up for Claude, and stays that way.
+            # means it was set up for Claude, and stays that way -- and a
+            # Gemini key, for Gemini, from before the news was an option.
             if "provider" not in d and d.get("api_key"):
                 out["provider"] = "claude"
+            elif "provider" not in d and d.get("gemini_api_key"):
+                out["provider"] = "gemini"
         return out
 
     def set_ai(self, cfg: dict) -> None:

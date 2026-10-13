@@ -15,7 +15,7 @@ from __future__ import annotations
 from .web_shared import (_BRAND, _THEME_INIT_JS, _THEME_TOGGLE_JS, _THEME_VARS,
                          _theme_toggle_btn, esc)
 
-TERMS_VERSION = "2026-10-07"
+TERMS_VERSION = "2026-10-13"
 
 
 def terms_checkbox(note: str = "") -> str:
@@ -35,7 +35,8 @@ def terms_checkbox(note: str = "") -> str:
 
 
 def _sections(provider: str, email: str) -> list:
-    from .billing import BILLING_DAY, GRACE_DAYS, TRIAL_DEVICES
+    from .billing import (BILLING_DAY, GRACE_DAYS, TRIAL_DEVICES,
+                          UPGRADE_HOLD_DAYS)
     from .billing_runner import _DEFAULT_DUE_DAYS
     contact = (f"by email at {email}" if email else
                "through the contact details in your dashboard")
@@ -86,7 +87,10 @@ def _sections(provider: str, email: str) -> list:
           f"We send each renewal invoice before the {BILLING_DAY}th, payable "
           f"within {_DEFAULT_DUE_DAYS} days.",
           "Moving to a bigger packet in the middle of a month is charged for "
-          "the difference over the days left in that month. Moving to a "
+          "the difference over the days left in that month, and the bigger "
+          "packet starts when that invoice is paid. An upgrade invoice not "
+          f"paid within {UPGRADE_HOLD_DAYS} days lapses: you stay on your "
+          "current packet and can ask for the upgrade again. Moving to a "
           f"smaller packet takes effect on the next {BILLING_DAY}th."]),
         ("7. Late payment and suspension",
          [f"If a renewal is not paid by the {BILLING_DAY}th, you have "

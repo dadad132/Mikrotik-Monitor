@@ -199,7 +199,7 @@ def raise_due_invoices(billing, auth, now: float | None = None,
 # Recording a payment that did not come through the card
 # ---------------------------------------------------------------------------
 
-def mark_paid(billing, auth, order_id: int) -> str:
+def mark_paid(billing, auth, order_id: int, on_replaced=None) -> str:
     """Record a bank transfer against an invoice. "" when it worked.
 
     The card path never needs this -- Yoco's webhook records itself. This is
@@ -213,7 +213,13 @@ def mark_paid(billing, auth, order_id: int) -> str:
         return "That invoice was already marked paid."
     if not billing.mark_order_paid(int(order_id), f"eft:{order_id}"):
         return "That invoice was already marked paid."
-    billing.apply_paid_order(order)
+    replaced = billing.apply_paid_order(order) or []
+    if replaced and on_replaced:
+        try:
+            on_replaced(replaced)
+        except Exception:  # noqa: BLE001 - the payment is recorded either way
+            log.exception("could not send the re-priced renewal for order %s",
+                          order_id)
     log.info("payment recorded by hand for order %s", order_id)
     return ""
 
@@ -286,15 +292,30 @@ def outstanding(billing, auth, limit: int = 50) -> list:
 # ---------------------------------------------------------------------------
 
 def run_once(billing, auth, now: float | None = None,
-             force_raise: bool = False, send=None) -> tuple:
+             force_raise: bool = False, send=None, lapsed_upgrade=None) -> tuple:
     """One pass. Returns (invoices_raised, accounts_lapsed).
 
     Lapsing and invoicing both happen once a day; nothing else needs a
-    poll, because a card payment announces itself.
+    poll, because a card payment announces itself. Upgrade invoices that
+    ran past their three days are withdrawn on every pass, so one lapses
+    within a quarter of an hour rather than at tomorrow's run.
     """
     if billing is None:
         return (0, 0)
     raised = lapsed = 0
+    try:
+        for order in billing.lapse_upgrades(now):
+            log.info("billing: upgrade invoice %s for org %s lapsed unpaid; "
+                     "the company stays on its packet", order.get("id"),
+                     order.get("org_id"))
+            if lapsed_upgrade:
+                try:
+                    lapsed_upgrade(order)
+                except Exception:  # noqa: BLE001 - the lapse stands
+                    log.exception("could not tell org %s its upgrade lapsed",
+                                  order.get("org_id"))
+    except Exception:  # noqa: BLE001
+        log.exception("the upgrade lapse pass failed")
     if force_raise or raise_is_due(auth, now):
         # Lapse BEFORE invoicing: an account suspended this morning should
         # not also be invoiced for next month in the same pass.
@@ -318,7 +339,8 @@ def run_once(billing, auth, now: float | None = None,
     return (raised, lapsed)
 
 
-def start(billing, auth, stop: threading.Event | None = None, send=None):
+def start(billing, auth, stop: threading.Event | None = None, send=None,
+          lapsed_upgrade=None):
     """Run the billing pass on a timer for the life of the process.
 
     A daemon thread rather than cron: it needs the same billing database the
@@ -333,7 +355,8 @@ def start(billing, auth, stop: threading.Event | None = None, send=None):
         # before anybody has seen the server come up.
         while not stop.wait(_TICK_SECONDS):
             try:
-                raised, lapsed = run_once(billing, auth, send=send)
+                raised, lapsed = run_once(billing, auth, send=send,
+                                          lapsed_upgrade=lapsed_upgrade)
                 _last.update({"ran": time.time(), "raised": raised,
                               "applied": lapsed, "error": ""})
                 if raised or lapsed:

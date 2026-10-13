@@ -10,12 +10,14 @@ Three layers, cheapest first, so it is useful even with no AI key at all:
   2. The rest of the fleet: other sites on the same ISP, or in the same area,
      dropping within twenty minutes is an outage, not a fault on site. And a
      configuration change sent minutes before is the first suspect.
-  3. A search online. Claude (with Anthropic's server-side web search) looks
-     for outages and maintenance reported by that ISP or fibre network in the
-     site's area, and for load-shedding or power cuts there, and answers in
-     a fixed format with its sources. Only runs when the superadmin has
-     switched it on with a key (Platform admin -> AI monitor), within a daily
-     limit, and one search is shared by every site that dropped together.
+  3. A search online for outages and maintenance reported by that ISP or
+     fibre network, and for load-shedding or power cuts in the site's area.
+     Either the news headlines, read with no AI and no key (Google News's
+     public feed), or an AI with web search (Gemini or Claude, with a key)
+     answering in a fixed format with its sources. Only runs when the
+     superadmin has switched it on (Platform admin -> AI monitor), within a
+     daily limit, and one search is shared by every site that dropped
+     together.
 
 Layers 1-2 go straight into the alert email ("Likely cause: ..."). Layer 3
 arrives a minute later as a follow-up email, and from then on in the
@@ -602,29 +604,282 @@ def gemini_test_key(settings: dict, post=None) -> str:
     return ""
 
 
+# ---- the same question with no AI at all: the news ----------------------------
+# No key, no bill, no model. Google News publishes any search as an RSS feed;
+# this reads the last two days' headlines about the provider's network and
+# about power cuts in the site's area, and keeps only those that name the
+# provider (or the power cut) AND say something is wrong. It reports what
+# the headlines say and does not reason past them, so it never claims more
+# than a headline does -- and it is weighed against what the router itself
+# showed, never in place of it.
+NEWS_RSS = ("https://news.google.com/rss/search?q={q}&hl=en-{gl}&gl={gl}"
+            "&ceid={gl}:en")
+NEWS_DAYS = 2
+_NET_WORDS = ("outage", "outages", "down", "offline", "disruption",
+              "disruptions", "disrupted", "interruption", "interrupted",
+              "fault", "faults", "maintenance", "not working", "no internet",
+              "connectivity issues", "service issues", "cable cut",
+              "fibre cut", "fiber cut", "fibre break", "vandalism")
+_POWER_WORDS = ("load shedding", "loadshedding", "load reduction",
+                "power outage", "power outages", "power cut", "power cuts",
+                "power failure", "blackout", "blackouts", "powerless",
+                "no power", "without power", "no electricity",
+                "without electricity", "electricity outage",
+                "unplanned outage", "planned outage", "outage", "outages")
+# A provider's name that is also an everyday word would match every
+# headline; the first word of a longer name is used only if it is not one.
+_COMMON = {"fibre", "fiber", "internet", "wireless", "telecom", "network",
+           "networks", "connect", "online", "home", "business", "the",
+           "net", "link", "air", "cell", "mobile", "power"}
+
+
+def _norm_words(text: str) -> str:
+    return " " + re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip() + " "
+
+
+def _mentions(text: str, words) -> bool:
+    """Whole-word match, so "down" is not found in "countdown"."""
+    t = _norm_words(text)
+    return any(_norm_words(w) in t for w in words if (w or "").strip())
+
+
+def _isp_names(isp: str) -> list:
+    names = [isp]
+    first = (isp or "").split()[0] if (isp or "").split() else ""
+    if first and first.lower() not in _COMMON and len(first) >= 4 \
+            and first.lower() != (isp or "").lower():
+        names.append(first)
+    return names
+
+
+def _news_get(url: str, timeout: float = 20.0) -> bytes:
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; easymikrotik-monitor)"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read(2_000_000)
+    except urllib.error.HTTPError as exc:
+        raise AIError(f"Google News answered {exc.code}; it is tried again "
+                      f"later.") from exc
+    except (urllib.error.URLError, OSError) as exc:
+        raise AIError(f"Could not reach Google News from this server: "
+                      f"{getattr(exc, 'reason', exc)}.") from exc
+
+
+def parse_news(data: bytes) -> list:
+    """[{"title", "url", "source", "ts"}] from a Google News RSS feed."""
+    import xml.etree.ElementTree as ET
+    from email.utils import parsedate_to_datetime
+    head = (data or b"")[:4096]
+    if b"<!DOCTYPE" in head or b"<!ENTITY" in (data or b""):
+        # A news feed has no need of either; entity tricks are how XML is
+        # made to eat memory.
+        raise AIError("Google News sent something that is not a news feed.")
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as exc:
+        raise AIError("Google News sent something that is not a news "
+                      "feed.") from exc
+    out = []
+    for item in root.iter("item"):
+        title = (item.findtext("title") or "").strip()
+        src = (item.findtext("source") or "").strip()
+        if src and title.endswith(" - " + src):
+            title = title[:-len(src) - 3].strip()
+        try:
+            ts = parsedate_to_datetime(item.findtext("pubDate") or "").timestamp()
+        except (TypeError, ValueError, IndexError):
+            ts = 0.0
+        url = (item.findtext("link") or "").strip()
+        if title and url.startswith("https://"):
+            out.append({"title": title, "url": url, "source": src, "ts": ts})
+    return out
+
+
+def news_link(query: str) -> str:
+    from urllib.parse import quote_plus
+    return "https://news.google.com/search?q=" + quote_plus(query)
+
+
+def news_analyze(inc: dict, settings: dict, now: float | None = None,
+                 fetch=None) -> dict:
+    """The online check without an AI: what the news says.
+
+    Returns what claude_analyze returns, with provider "news". `fetch` is
+    injectable for tests.
+    """
+    from urllib.parse import quote_plus
+    now = now if now is not None else time.time()
+    isp = (inc.get("isp") or "").strip()
+    city = city_of(inc.get("area") or "")
+    if not isp and not city:
+        raise AIError("Nothing to look up in the news: the main line is not "
+                      "named after its provider, and the site has no area "
+                      "set. Name the line (e.g. 'Vumatel') and set the "
+                      "site's area on the router's page.")
+    gl = str(settings.get("country") or "ZA").upper()[:2]
+    gl = gl if re.fullmatch(r"[A-Z]{2}", gl) else "ZA"
+    queries = []
+    if isp:
+        queries.append(("net", f'"{isp}" outage OR down OR disruption OR '
+                               f'maintenance when:{NEWS_DAYS}d'))
+    if city:
+        queries.append(("power", f'"{city}" "load shedding" OR "power outage" '
+                                 f'OR "power cut" when:{NEWS_DAYS}d'))
+    queries = queries[:max(1, int(settings.get("max_searches") or 3))]
+    since = min(float(inc.get("started") or now), now) - NEWS_DAYS * 86400
+    found = {"net": [], "power": []}
+    seen = set()
+    for kind, q in queries:
+        for it in parse_news((fetch or _news_get)(
+                NEWS_RSS.format(q=quote_plus(q), gl=gl))):
+            if it["ts"] and it["ts"] < since:
+                continue
+            key = it["title"].lower()
+            if key in seen:
+                continue
+            if kind == "net" and _mentions(it["title"], _isp_names(isp)) \
+                    and _mentions(it["title"], _NET_WORDS):
+                found["net"].append(it)
+                seen.add(key)
+            elif kind == "power" and _mentions(it["title"], _POWER_WORDS):
+                found["power"].append(it)
+                seen.add(key)
+    for lst in found.values():
+        lst.sort(key=lambda i: i["ts"], reverse=True)
+
+    def cite(it):
+        when = (time.strftime("%d %b", time.localtime(it["ts"]))
+                if it["ts"] else "")
+        tail = ", ".join(x for x in (it["source"], when) if x)
+        return f'"{it["title"]}"' + (f" ({tail})" if tail else "")
+
+    ev = inc.get("evidence") or {}
+    fleet = ev.get("fleet") or {}
+    rules = rule_diagnosis(inc.get("kind") or "wan_failover", ev, fleet,
+                           ev.get("change_min"),
+                           link=inc.get("primary_link") or "", isp=isp,
+                           area=inc.get("area") or "")
+    net, power = found["net"], found["power"]
+    net_local = bool(city) and any(_mentions(i["title"], [city]) for i in net)
+    power_local = bool(city) and any(_mentions(i["title"], [city])
+                                     for i in power)
+    # Which finding fits what the router showed. A port that lost its link
+    # is power or cabling at the box, which load-shedding explains and an
+    # ISP's network outage does not; a line that is up but carries nothing
+    # is the ISP's network.
+    pick = ""
+    if rules["verdict"] != "change":
+        if net and power:
+            pick = "power" if rules["verdict"] == "local_power" else "net"
+        elif net and rules["verdict"] != "local_power":
+            pick = "net"
+        elif power:
+            pick = "power"
+    n_net = len(net)
+    net_line = (f"{n_net} news report{'' if n_net == 1 else 's'} from the "
+                f"last {NEWS_DAYS} days mention{'s' if n_net == 1 else ''} "
+                f"trouble on {isp}'s network, most recently "
+                f"{cite(net[0])}." if net else "")
+    if net and city and not net_local:
+        net_line += f" None of them names {city}, so it may be elsewhere."
+    power_line = (f"News from the last {NEWS_DAYS} days mentions power cuts "
+                  f"or load-shedding" + (f" in {city}" if power_local else "")
+                  + f": {cite(power[0])}." if power else "")
+    if pick == "net":
+        out = {"verdict": "isp_outage",
+               "confidence": ("medium" if net_local or fleet.get("same_isp")
+                              else "low"),
+               "summary": net_line,
+               "action": (f"Check {isp}'s status page or call them before "
+                          f"sending anyone to site.")}
+        hits = net
+    elif pick == "power":
+        out = {"verdict": "area_power",
+               "confidence": "medium" if power_local else "low",
+               "summary": (power_line + " If the site's area is affected, "
+                           "the line should come back with the power."),
+               "action": ("Check the area's load-shedding schedule or the "
+                          "municipality's outage notices.")}
+        hits = power
+    elif net or power:
+        # Found something, but it does not fit what the router showed: say
+        # what was found, and keep the router's reading as the verdict.
+        out = dict(rules)
+        out["summary"] = (rules["summary"] + " The news also mentions: "
+                          + " ".join(x for x in (net_line, power_line) if x))
+        hits = net + power
+    else:
+        out = {"verdict": "unknown", "confidence": "low", "summary": "",
+               "action": ""}
+        hits = []
+    out.update(sources=[{"url": i["url"],
+                         "title": i["title"] + (f" — {i['source']}"
+                                                if i["source"] else "")}
+                        for i in hits[:5]],
+               searches=len(queries),
+               search_queries=[q for _k, q in queries],
+               search_html="", provider="news")
+    return out
+
+
+def news_test(settings: dict, fetch=None) -> str:
+    """"" if Google News can be read from this server, else why not."""
+    gl = str(settings.get("country") or "ZA").upper()[:2]
+    gl = gl if re.fullmatch(r"[A-Z]{2}", gl) else "ZA"
+    try:
+        parse_news((fetch or _news_get)(
+            NEWS_RSS.format(q="internet+outage", gl=gl)))
+    except AIError as exc:
+        return str(exc)
+    return ""
+
+
+def _provider(settings: dict) -> str:
+    p = settings.get("provider") or "news"
+    return p if p in ("news", "gemini", "claude") else "news"
+
+
 def analyze(inc: dict, settings: dict, now: float | None = None) -> dict:
     """The online check, with whichever provider this server uses."""
-    if (settings.get("provider") or "gemini") == "claude":
+    p = _provider(settings)
+    if p == "claude":
         out = claude_analyze(inc, settings, now)
         out.setdefault("provider", "claude")
         return out
-    return gemini_analyze(inc, settings, now)
+    if p == "gemini":
+        return gemini_analyze(inc, settings, now)
+    return news_analyze(inc, settings, now)
 
 
 def test_ai(settings: dict) -> str:
-    """"" if the chosen provider's key works, else what is wrong."""
-    if (settings.get("provider") or "gemini") == "claude":
+    """"" if the chosen provider works (its key, or the news feed), else
+    what is wrong."""
+    p = _provider(settings)
+    if p == "claude":
         return test_key(settings)
-    return gemini_test_key(settings)
+    if p == "gemini":
+        return gemini_test_key(settings)
+    return news_test(settings)
 
 
 def provider_name(provider: str) -> str:
-    return "Claude" if provider == "claude" else "Gemini"
+    return {"claude": "Claude", "gemini": "Gemini",
+            "news": "the news headlines"}.get(provider, "Gemini")
 
 
 def search_link(query: str) -> str:
     from urllib.parse import quote_plus
     return "https://www.google.com/search?q=" + quote_plus(query)
+
+
+def searched_label(inc: dict) -> tuple:
+    """("Searched Google News for", link function) or the Google one."""
+    if inc.get("ai_provider") == "news":
+        return "Searched Google News for", news_link
+    return "Searched Google for", search_link
 
 
 # ---- emails ------------------------------------------------------------------
@@ -648,6 +903,7 @@ def cause_email(inc: dict, prefix: str, every_hours: int) -> tuple:
     # shown with it; an email cannot carry its rendered suggestions, so it
     # carries the searches themselves, as links.
     queries = list(inc.get("search_queries") or [])[:5]
+    searched, qlink = searched_label(inc)
     ev = evidence_lines(inc.get("evidence") or {})
     subject = f"{prefix} {dev}: possible cause — {verdict}"
     remind = (f"You will be reminded every {every_hours} hour"
@@ -661,8 +917,8 @@ def cause_email(inc: dict, prefix: str, every_hours: int) -> tuple:
         + (f"What to do: {inc['action']}\n\n" if inc.get("action") else "")
         + ("Sources:\n" + "".join(f"  - {s['title']} — {s['url']}\n"
                                   for s in sources) + "\n" if sources else "")
-        + ("Searched Google for:\n" + "".join(
-            f"  - {q} — {search_link(q)}\n" for q in queries) + "\n"
+        + (f"{searched}:\n" + "".join(
+            f"  - {q} — {qlink(q)}\n" for q in queries) + "\n"
            if queries else "")
         + ("What the router showed:\n" + "".join(f"  - {line}\n" for line in ev)
            + "\n" if ev else "")
@@ -684,9 +940,9 @@ def cause_email(inc: dict, prefix: str, every_hours: int) -> tuple:
            if inc.get("action") else "")
         + (f'<p style="margin:0">Sources:</p><ul style="margin:4px 0 12px">'
            f'{src_html}</ul>' if sources else "")
-        + (f'<p style="margin:0">Searched Google for:</p>'
+        + (f'<p style="margin:0">{render.esc(searched)}:</p>'
            f'<ul style="margin:4px 0 12px">'
-           + "".join(f'<li><a href="{render.esc(search_link(q))}">'
+           + "".join(f'<li><a href="{render.esc(qlink(q))}">'
                      f'{render.esc(q)}</a></li>' for q in queries)
            + '</ul>' if queries else "")
         + (f'<p style="margin:0">What the router showed:</p>'

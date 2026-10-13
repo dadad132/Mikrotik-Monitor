@@ -3566,7 +3566,7 @@ def _sample_order(plan, now=None) -> dict:
 
 
 def _renewal_email(org_name, plan, amount, currency, period_end, due_days,
-                   link, ref) -> tuple:
+                   link, ref, replaces: str = "") -> tuple:
     """(subject, body) for a renewal invoice. Builds it; does not send it.
 
     Separated so the preview in Platform admin shows the message that will
@@ -3581,7 +3581,11 @@ def _renewal_email(org_name, plan, amount, currency, period_end, due_days,
            "To pay, sign in to your account and open Billing.")
     text = (
         f"Hello,\n\n"
-        f"Your EasyMikroTik packet for {org_name} renews on {when}.\n\n"
+        + (f"This invoice replaces the one sent earlier for {replaces}: "
+           f"you have since moved to {plan['label']}, so next month is "
+           f"billed at its price. The earlier invoice is withdrawn; please "
+           f"pay this one instead.\n\n" if replaces else "")
+        + f"Your EasyMikroTik packet for {org_name} renews on {when}.\n\n"
         f"  Router monitoring, up to {plan['devices']} devices\n"
         f"  {total} for the month\n"
         f"  Payable within {due_days} days\n\n"
@@ -3646,7 +3650,7 @@ def _upgrade_email(org_name, plan, amount, currency, days, link,
                    ref) -> tuple:
     """(subject, body) for the invoice a mid-month upgrade raises: the
     difference between the packets for the days left, and nothing else."""
-    from .billing import money
+    from .billing import UPGRADE_HOLD_DAYS, money
 
     total = money(amount, currency)
     pay = (f"Pay now: {link}" if link else
@@ -3657,16 +3661,60 @@ def _upgrade_email(org_name, plan, amount, currency, days, link,
         f"  Router monitoring, up to {plan['devices']} devices, for the "
         f"{days} day{'' if days == 1 else 's'} left of this month\n"
         f"  {total}: the difference between your packets for those days\n"
-        f"  Payable within 7 days\n\n"
+        f"  Payable within {UPGRADE_HOLD_DAYS} days\n\n"
         f"{pay}\n\n"
         f"The bigger packet arrives the moment this is paid. Your renewal "
         f"date does not change; from then on each month's invoice is the "
         f"new packet's price.\n\n"
+        f"Not paid within {UPGRADE_HOLD_DAYS} days, this request lapses: "
+        f"you stay on the packet you have, and can ask for the upgrade "
+        f"again from Billing.\n\n"
         f"Paying by bank transfer instead? Quote {ref} so the payment can "
         f"be matched to your account.\n\n"
         f"Thank you,\nEasyMikroTik\n")
     return (f"EasyMikroTik invoice \u2014 {total}, upgrade to "
             f"{plan['label']}", text)
+
+
+def _email_upgrade_lapsed(auth, smtp_cfg, order) -> list:
+    """Tell a company its upgrade request lapsed unpaid, and that nothing
+    else changed. Sent to whoever the invoice went to."""
+    from email.message import EmailMessage
+
+    from .billing import UPGRADE_HOLD_DAYS, plan_by_name
+    from .notify.org_email import _smtp_send
+    org_id = int(order.get("org_id") or 0)
+    if not (smtp_cfg and getattr(smtp_cfg, "host", "")) or auth is None:
+        return []
+    to = [u["email"] for u in (auth.list_users(org_id) or [])
+          if u.get("role") == "owner" and u.get("email")]
+    to += [e for e in ((auth.org(org_id) or {}).get("alert_emails") or [])
+           if e not in to]
+    if not to:
+        return []
+    plan = plan_by_name(order.get("plan", "")) or {}
+    name = (auth.org(org_id) or {}).get("name") or f"Company {org_id}"
+    label = plan.get("label") or order.get("plan") or "the bigger packet"
+    msg = EmailMessage()
+    msg["Subject"] = f"EasyMikroTik: your upgrade to {label} lapsed"
+    msg["From"] = smtp_cfg.from_addr
+    msg["To"] = ", ".join(to)
+    msg.set_content(
+        f"Hello,\n\n"
+        f"The invoice for moving {name} up to {label} was not paid within "
+        f"{UPGRADE_HOLD_DAYS} days, so the request has lapsed and the "
+        f"invoice is withdrawn. Nothing is owed for it.\n\n"
+        f"Your packet has not changed, and nothing else has. If you still "
+        f"want the bigger packet, ask for it again from Billing: a new "
+        f"invoice is raised for the days left in the month at that time.\n\n"
+        f"Thank you,\nEasyMikroTik\n")
+    try:
+        _smtp_send(smtp_cfg, msg)
+        return to
+    except Exception:  # noqa: BLE001
+        log.exception("could not email org %s that its upgrade lapsed",
+                      org_id)
+        return []
 
 
 def _email_router_shared(auth, smtp_cfg, owner_org, owner_dev, joiner_name,
@@ -3754,7 +3802,7 @@ _CLAIM_REFUSED = {
 
 def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
                    period_end, due_days, link, kind="renewal",
-                   days=0) -> list:
+                   days=0, replaces: str = "") -> list:
     """The renewal invoice, as an email somebody can act on.
 
     Sent to the owner. The pay link is the point of the message, so it is
@@ -3796,7 +3844,8 @@ def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
                                        link, ref)
     else:
         subject, text = _renewal_email(name, plan, amount, currency,
-                                       period_end, due_days, link, ref)
+                                       period_end, due_days, link, ref,
+                                       replaces=replaces)
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -8107,7 +8156,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                    org_id, order_id, plan, amount, currency,
                                    period_end, due_days, link)
 
-                billing_runner.start(billing, auth, send=_send_invoice)
+                def _send_lapsed(order):
+                    from .notify.org_email import effective_smtp
+                    _email_upgrade_lapsed(
+                        auth, effective_smtp(auth, smtp_cfg), order)
+
+                billing_runner.start(billing, auth, send=_send_invoice,
+                                     lapsed_upgrade=_send_lapsed)
             except Exception:  # noqa: BLE001 - dashboard still starts
                 log.exception("could not start the billing runner")
     # Safe mode's server half (push/safemode.py): logs back in after a change
@@ -8335,7 +8390,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # isolation — the real entry point is "/" below.
             if path == "/landing":
                 from .web_landing import render_landing
-                return self._send(200, render_landing(self._ai_on()),
+                return self._send(200, render_landing(self._ai_on(), self._ai_news()),
                                   "text/html; charset=utf-8")
 
             # "/" is the public marketing page (SaaS mode only — self-hosted/
@@ -8346,7 +8401,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if self._session():
                     return self._redirect("/dashboard")
                 from .web_landing import render_landing
-                return self._send(200, render_landing(self._ai_on()),
+                return self._send(200, render_landing(self._ai_on(), self._ai_news()),
                                   "text/html; charset=utf-8")
 
             # No auth configured -> open dashboard (back-compat / demo without auth).
@@ -8778,6 +8833,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # could charge a customer and never hear that they paid,
             # which is worse than not offering the button at all.
             yoco_on = self._yoco_live()
+            if billing:
+                # The runner withdraws them every quarter hour; doing it here
+                # as well means this page is never the one that is behind.
+                try:
+                    billing.lapse_upgrades()
+                except Exception:  # noqa: BLE001
+                    log.exception("could not lapse old upgrade invoices")
             orders = billing.orders_for_org(user["org_id"]) if billing else []
             # An unpaid upgrade invoice is paid from here as well as from its
             # email -- whoever pressed Change now is looking at this page.
@@ -8785,7 +8847,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 from . import billing_runner
                 base = _public_base(auth) or self._request_base()
                 for o in orders:
-                    if o.get("kind") == "upgrade" and o.get("status") != "paid":
+                    if o.get("kind") == "upgrade" and o.get("status") not in (
+                            "paid", "cancelled", "lapsed", "replaced"):
                         o["pay_link"] = billing_runner.pay_link(
                             auth, int(o["id"]), base)
             return self._send(200, _render_billing(
@@ -9278,8 +9341,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     f"'{model}' is not a Gemini model name.") + "#ai")
             cfg = {
                 "enabled": flat.get("enabled") == "1",
-                "provider": ("claude" if flat.get("provider") == "claude"
-                             else "gemini"),
+                "provider": (flat.get("provider")
+                             if flat.get("provider") in ("news", "gemini",
+                                                         "claude")
+                             else "news"),
                 "gemini_api_key": (flat.get("gemini_api_key") or "").strip()
                                   or old.get("gemini_api_key", ""),
                 "gemini_model": model,
@@ -9300,9 +9365,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         "AI settings saved, but the test failed: " + problem)
                         + "#ai")
                 return self._redirect("/superadmin?ok=" + quote(
+                    "AI settings saved, and Google News can be read from "
+                    "this server." if cfg["provider"] == "news" else
                     "AI settings saved, and the key works.") + "#ai")
-            has_key = bool(cfg["api_key"] if cfg["provider"] == "claude"
-                           else cfg["gemini_api_key"])
+            has_key = (cfg["provider"] == "news"
+                       or bool(cfg["api_key"] if cfg["provider"] == "claude"
+                               else cfg["gemini_api_key"]))
             return self._redirect("/superadmin?ok=" + quote(
                 "AI settings saved." + ("" if cfg["enabled"] or not has_key
                                         else " The online check is still "
@@ -9371,7 +9439,27 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             org_id = int(user.get("org_id") or 0)
 
             from .billing import (plan_by_name, upgrade_quote, money,
-                                  BILLING_DAY, BILLING_CURRENCY)
+                                  BILLING_DAY, BILLING_CURRENCY,
+                                  UPGRADE_HOLD_DAYS)
+
+            if flat.get("withdraw"):
+                try:
+                    oid = int(flat.get("withdraw") or 0)
+                except (TypeError, ValueError):
+                    oid = 0
+                o = billing.order(oid) if oid else None
+                if (not o or int(o.get("org_id") or 0) != org_id
+                        or o.get("kind") != "upgrade"):
+                    return self._redirect("/billing?error=" + quote(
+                        "That upgrade request was not found."))
+                if o.get("status") == "paid":
+                    return self._redirect("/billing?error=" + quote(
+                        "That upgrade is already paid, so it stays."))
+                billing.withdraw_order(oid, "cancelled")
+                log.info("org %s withdrew upgrade invoice %s", org_id, oid)
+                return self._redirect("/billing?ok=" + quote(
+                    "Upgrade request cancelled. Nothing is owed for it, and "
+                    "your packet has not changed."))
 
             if flat.get("cancel"):
                 billing.cancel_plan_change(org_id)
@@ -9389,6 +9477,16 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._redirect("/billing?error=" + quote(
                     "This company has no renewal date yet, so there is "
                     "nothing to pro-rate against. Ask us to set the packet."))
+            # A paid month that has already run out leaves no days to
+            # charge the difference for -- and so priced every upgrade at
+            # nothing and switched it on, setting the account Active again
+            # on the way. The renewal comes first.
+            if period_end <= time.time():
+                return self._redirect("/billing?error=" + quote(
+                    "Your paid month ended on " + time.strftime(
+                        "%d %B %Y", time.localtime(period_end))
+                    + ". Pay the renewal invoice first; then you can change "
+                      "packet."))
 
             # A packet smaller than what is in use would lock devices the
             # customer is actively monitoring, and they would find out by
@@ -9425,7 +9523,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             amount = float(quote_["due_now"])
             cur = str(quote_.get("currency") or BILLING_CURRENCY)
             if amount <= 0:
-                billing.apply_upgrade(org_id, plan["name"])
+                self._send_repriced(billing.apply_upgrade(org_id, plan["name"]))
                 return self._redirect("/billing?ok=" + quote(
                     f"Moved to {plan['label']}. There was nothing left in "
                     f"this month to charge for."))
@@ -9434,20 +9532,27 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             from .notify.org_email import effective_smtp
             days = int(round(quote_["days_left"]))
             # Pressed twice, the second press finds the first invoice rather
-            # than raising another one to be paid twice.
+            # than raising another one to be paid twice. A request for a
+            # DIFFERENT packet replaces the one waiting: one upgrade at a
+            # time, so a change of mind never leaves two invoices to pay.
             order_id = self._open_upgrade_order(org_id, plan["name"])
+            for o in billing.orders_for_org(org_id, limit=10):
+                if (o.get("kind") == "upgrade" and int(o["id"]) != (order_id or 0)
+                        and o.get("status") not in ("paid", "cancelled",
+                                                    "lapsed")):
+                    billing.withdraw_order(int(o["id"]), "cancelled")
             if order_id is None:
                 order_id = billing.create_order(
                     org_id, plan["name"], int(round(amount * 100)), months=1,
                     currency=cur, provider="yoco", kind="upgrade",
-                    due=time.time() + 7 * 86400)
+                    due=time.time() + UPGRADE_HOLD_DAYS * 86400)
             link = billing_runner.pay_link(
                 auth, order_id, _public_base(auth) or self._request_base())
             try:
                 sent = _email_renewal(
                     auth, effective_smtp(auth, smtp_cfg), org_id, order_id,
-                    plan, amount, cur, period_end, 7, link, kind="upgrade",
-                    days=days)
+                    plan, amount, cur, period_end, UPGRADE_HOLD_DAYS, link,
+                    kind="upgrade", days=days)
             except Exception:  # noqa: BLE001 - the invoice exists either way
                 log.exception("upgrade: could not email org %s", org_id)
                 sent = []
@@ -9455,19 +9560,62 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._redirect("/billing?ok=" + quote(
                 f"Invoice for {money(amount, cur)} raised"
                 + (f" and emailed to {', '.join(sent)}" if sent else "")
-                + f". Pay it below{' or from the email' if sent else ''}: "
-                f"you move to {plan['label']} the moment it is paid, and "
-                f"your renewal date does not change. By bank transfer, quote "
-                f"{payment_reference(org_id, org_name)}."))
+                + f". Pay it within {UPGRADE_HOLD_DAYS} days"
+                f"{', below or from the email' if sent else ''}: you move to "
+                f"{plan['label']} the moment it is paid, and your renewal "
+                f"date does not change. By bank transfer, quote "
+                f"{payment_reference(org_id, org_name)}. Not paid in time, "
+                f"the request lapses and you stay on your packet."))
+
+        def _send_repriced(self, replaced) -> None:
+            """Email the renewal invoices an upgrade re-priced, each saying
+            which one it replaces. On a background thread: the caller may be
+            a payment webhook, whose acknowledgement must not wait on a mail
+            server."""
+            if not replaced or auth is None:
+                return
+            import threading
+
+            from . import billing_runner
+            from .billing import plan_by_name
+            from .billing_runner import _DEFAULT_DUE_DAYS
+            from .notify.org_email import effective_smtp
+            base = _public_base(auth) or self._request_base()
+
+            def send():
+                smtp = effective_smtp(auth, smtp_cfg)
+                for old, new_id in replaced:
+                    new = billing.order(int(new_id)) or {}
+                    plan = plan_by_name(new.get("plan") or "")
+                    was = plan_by_name(old.get("plan") or "")
+                    if plan is None:
+                        log.warning("re-priced renewal %s is not on a listed "
+                                    "packet; not emailed", new_id)
+                        continue
+                    try:
+                        _email_renewal(
+                            auth, smtp, int(new["org_id"]), int(new_id), plan,
+                            (new.get("amount_cents") or 0) / 100,
+                            new.get("currency") or "USD",
+                            float(new.get("due") or 0), _DEFAULT_DUE_DAYS,
+                            billing_runner.pay_link(auth, int(new_id), base),
+                            replaces=(was or {}).get("label")
+                            or old.get("plan") or "your old packet")
+                    except Exception:  # noqa: BLE001
+                        log.exception("could not email re-priced renewal %s",
+                                      new_id)
+            threading.Thread(target=send, daemon=True).start()
 
         def _open_upgrade_order(self, org_id, plan_name):
-            """An unpaid upgrade invoice for this packet raised today, if
-            there is one."""
+            """The upgrade invoice for this packet still waiting to be paid,
+            if there is one."""
+            from .billing import upgrade_lapses_at
             for o in billing.orders_for_org(org_id, limit=10):
-                if (o.get("kind") == "upgrade" and o.get("status") != "paid"
+                if (o.get("kind") == "upgrade"
+                        and o.get("status") not in ("paid", "cancelled",
+                                                    "lapsed")
                         and o.get("plan") == plan_name
-                        and time.time() - float(o.get("created") or 0)
-                        < 86400):
+                        and time.time() < upgrade_lapses_at(o)):
                     return int(o["id"])
             return None
 
@@ -9649,7 +9797,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                       quote("Billing is not enabled."))
             from .billing_runner import BillingError, mark_paid
             try:
-                note = mark_paid(billing, auth, int(flat.get("order") or 0))
+                note = mark_paid(billing, auth, int(flat.get("order") or 0),
+                                 on_replaced=self._send_repriced)
             except (BillingError, ValueError, TypeError) as exc:
                 return self._redirect("/superadmin?error=" + quote(str(exc)))
             if note:
@@ -10766,18 +10915,26 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
         # ---- generic feature tabs (SD-WAN/Security/DNS/QoS/…) ----
         def _ai_on(self) -> bool:
-            """Is the AI monitor's online check switched on, with a key to
-            use? The public page only claims the search when it is."""
+            """Is the AI monitor's online check switched on, with what it
+            needs (the news needs no key)? The public page only claims the
+            search when it is."""
             if auth is None:
                 return False
             ai = auth.get_ai()
             if not ai.get("enabled"):
                 return False
+            if ai.get("provider") == "news":
+                return True
             if ai.get("provider") == "claude":
                 return bool(ai.get("api_key")
                             or os.environ.get("ANTHROPIC_API_KEY"))
             from .aimonitor import gemini_key
             return bool(gemini_key(ai))
+
+        def _ai_news(self) -> bool:
+            """The online check reads news headlines rather than asking an
+            AI: the landing page's demo then shows what that looks like."""
+            return bool(auth) and auth.get_ai().get("provider") == "news"
 
         def _incidents(self):
             """The AI monitor's incident store (written by the engine), or
@@ -14196,6 +14353,25 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return None, "That payment link is not valid."
             if order.get("paid"):
                 return order, "PAID"
+            if order.get("status") == "replaced":
+                return None, ("This invoice was replaced by a newer one for "
+                              "the packet you are on now; it has been "
+                              "emailed. Sign in and open Billing to pay it.")
+            if order.get("kind") == "upgrade":
+                from .billing import UPGRADE_HOLD_DAYS, upgrade_lapses_at
+                if (order.get("status") not in ("cancelled", "lapsed")
+                        and time.time() >= upgrade_lapses_at(order)):
+                    billing.withdraw_order(int(order["id"]), "lapsed")
+                    order = billing.order(int(order["id"]))
+                if order.get("status") == "lapsed":
+                    return None, (
+                        f"This upgrade was not paid within {UPGRADE_HOLD_DAYS} "
+                        f"days, so the request lapsed and nothing is owed. "
+                        f"To upgrade, sign in and ask again from Billing.")
+                if order.get("status") == "cancelled":
+                    return None, ("This upgrade request was cancelled, so "
+                                  "nothing is owed. To upgrade, sign in and "
+                                  "ask again from Billing.")
             return order, ""
 
         def _serve_pay(self, url):
@@ -14438,7 +14614,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 log.info("Yoco webhook for order %s replayed - already "
                          "applied", order_id)
                 return self._send(200, "ok")
-            billing.apply_paid_order(order)
+            replaced = billing.apply_paid_order(order) or []
+            self._send_repriced(replaced)
             # (A call here once told Zoho about the payment. Zoho went with
             # b8fe333 and the call stayed, failing with an ImportError on
             # every card payment; Yoco is now the only rail, so there is no

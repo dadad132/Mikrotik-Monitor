@@ -750,7 +750,7 @@ def _change_packet_box(csrf, current_plan, device_count, period_end,
     and they cannot make that decision from a list of monthly prices alone.
     """
     from .billing import (PLANS, plan_by_name, upgrade_quote, money,
-                          BILLING_DAY)
+                          BILLING_DAY, UPGRADE_HOLD_DAYS)
     cur = plan_by_name(current_plan) if current_plan else None
     when = (time.strftime("%d %B %Y", time.localtime(period_end))
             if period_end else f"the {BILLING_DAY}th")
@@ -816,7 +816,8 @@ def _change_packet_box(csrf, current_plan, device_count, period_end,
         f'between the two packets for the days left in this month, and '
         f'nothing else. Your renewal date does not move, so you never pay '
         f'twice for the same days. The bigger packet arrives when that '
-        f'invoice is paid.</p></div></div>')
+        f'invoice is paid; not paid within {UPGRADE_HOLD_DAYS} days, the '
+        f'request lapses and you can ask again.</p></div></div>')
 
 
 def _fitting_tier(device_count: int):
@@ -898,23 +899,46 @@ def _order_usd(order: dict, plan: dict | None) -> str:
     return money(amount, cur)
 
 
-def _waiting_box(orders) -> str:
-    """An invoice raised on this page and not yet paid, with its Pay button,
-    at the top -- where whoever pressed Change now is looking, rather than
-    under the whole packet list."""
+def _waiting_box(orders, csrf: str = "", reference: str = "",
+                 current_label: str = "") -> str:
+    """An upgrade asked for and not yet paid, at the top -- where whoever
+    pressed Change now is looking: how to pay it (card, or a transfer with
+    the reference), the day it lapses, and a way to withdraw it. It used to
+    appear only when card payment was on, so on an EFT-only server the
+    request vanished from view with nothing anybody could do about it."""
+    from .billing import upgrade_lapses_at
     for o in orders:
-        if o.get("status") == "paid" or not o.get("pay_link"):
+        if o.get("kind") != "upgrade" or o.get("status") in (
+                "paid", "cancelled", "lapsed", "replaced"):
             continue
         plan = plan_by_name(o.get("plan", ""))
         what = (f'Upgrade to {plan["devices"]} devices' if plan
-                else "Invoice")
+                else "Upgrade")
+        until = time.strftime("%d %B %H:%M",
+                              time.localtime(upgrade_lapses_at(o)))
+        how = ("" if o.get("pay_link") else
+               f' Pay by bank transfer quoting <b>{esc(reference)}</b>.'
+               if reference else "")
+        pay = (f'<a class="btn" href="{esc(o["pay_link"])}">Pay now</a>'
+               if o.get("pay_link") else "")
+        withdraw = (
+            f'<form method="POST" action="/billing/change-plan" '
+            f'style="display:inline">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="withdraw" value="{int(o["id"])}">'
+            f'<button class="btn ghost" type="submit">Cancel this upgrade'
+            f'</button></form>' if csrf else "")
+        stay = f" on {esc(current_label)}" if current_label else ""
         return (f'<div class="box" style="border-left:4px solid #d97706;'
                 f'display:flex;align-items:center;justify-content:space-between;'
                 f'gap:12px;flex-wrap:wrap"><div><b>{esc(what)}</b> &middot; '
                 f'{_order_usd(o, plan)} waiting for payment'
                 f'<div class="muted" style="font-size:13px">The bigger '
-                f'packet arrives the moment it is paid.</div></div>'
-                f'<a class="btn" href="{esc(o["pay_link"])}">Pay now</a></div>')
+                f'packet arrives the moment it is paid.{how} Not paid by '
+                f'<b>{esc(until)}</b>, the request lapses and you stay'
+                f'{stay}; you can ask again.</div></div>'
+                f'<div style="display:flex;gap:8px;flex-wrap:wrap">{pay}'
+                f'{withdraw}</div></div>')
     return ""
 
 
@@ -942,6 +966,18 @@ def _orders_box(orders) -> str:
             state = '<span class="badge ok">Paid</span>'
             act = (f'<a class="btn ghost" style="padding:4px 12px" '
                    f'href="/billing/invoice?id={int(o["id"])}">Invoice</a>')
+        elif o.get("status") == "lapsed":
+            from .billing import UPGRADE_HOLD_DAYS
+            state = (f'<span class="muted">Lapsed &mdash; not paid within '
+                     f'{UPGRADE_HOLD_DAYS} days</span>')
+            act = ""
+        elif o.get("status") == "cancelled":
+            state = '<span class="muted">Cancelled</span>'
+            act = ""
+        elif o.get("status") == "replaced":
+            state = ('<span class="muted">Replaced by the invoice for your '
+                     'new packet</span>')
+            act = ""
         elif o.get("pay_link"):
             state = '<span style="color:#d97706">Waiting for payment</span>'
             act = (f'<a class="btn" style="padding:4px 12px" '
@@ -1506,8 +1542,15 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
     plans_html += _orders_box(orders or [])
     plans_html += _quote_request_box(csrf, device_count)
 
+    from .billing import payment_reference
+    _cur = plan_by_name(plan_name)
+    waiting = _waiting_box(
+        orders or [], csrf,
+        payment_reference(user.get("org_id") or 0,
+                          user.get("org_name") or ""),
+        (_cur or {}).get("label", ""))
     inner = (f'<div class="wrap"><h1>Billing</h1>{note}'
-             f'{_waiting_box(orders or [])}{status_box}{plans_html}</div>')
+             f'{waiting}{status_box}{plans_html}</div>')
     return _page("Billing", _header(user, "/billing") + inner)
 
 
@@ -3703,7 +3746,9 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
         '<li><b>A search online</b>, when it is switched on (Platform admin '
         '→ AI monitor): outages and maintenance that ISP or its fibre '
         'network has reported for the site\'s area, and load-shedding or '
-        'power cuts there, with the sources it found.</li></ul>'
+        'power cuts there, with the sources it found. Either the news '
+        'headlines of the last two days, quoted as they are (free, no AI), '
+        'or an AI that searches and explains what it found.</li></ul>'
         '<p>The first two go into the alert email itself. The online search '
         'follows a minute later as a "possible cause" email, and is repeated '
         'every couple of hours while the outage lasts in case the ISP has '
