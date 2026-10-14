@@ -1,0 +1,7 @@
+# EasyMikroTik antivirus agent -- installed on each PC, not on the server.
+psutil>=5.9      # process list, network card of the PC's address
+requests>=2.28   # reporting to EasyMikroTik
+watchdog>=3.0    # real-time folder watching
+# Optional: the YARA pattern rules (reverse shells, hidden PowerShell). Without
+# it the agent still checks known-bad hashes and packed programs.
+# yara-python>=4.3

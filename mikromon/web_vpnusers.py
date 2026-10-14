@@ -9,7 +9,7 @@ import base64
 import json
 from urllib.parse import quote
 
-from .web_shared import _BRAND, esc
+from .web_shared import _BRAND, confirm_attr, esc
 
 DEVICE_TYPES = [("windows", "Windows laptop"), ("mac", "Mac"),
                 ("iphone", "iPhone / iPad"), ("android", "Android phone"),
@@ -52,9 +52,9 @@ def users_box(name: str, csrf: str, cur: dict, reach: dict, port: int,
         frm = str(p.get("current-endpoint-address") or "")
         rm = ""
         if can_manage:
+            ask = f"Remove {p['label']}? It will stop connecting straight away."
             rm = (f'<form method="POST" action="/device/push" class="inline" '
-                  f'onsubmit="return confirm(\'Remove {esc(p["label"])}? It '
-                  f'will stop connecting straight away.\')">'
+                  f'onsubmit="{confirm_attr(ask)}">'
                   f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
                   f'<input type="hidden" name="device" value="{esc(name)}">'
                   f'<input type="hidden" name="feature" value="vpnusers">'
@@ -92,9 +92,10 @@ def users_box(name: str, csrf: str, cur: dict, reach: dict, port: int,
            if cur.get("router_dns") else "")
     off = ""
     if cur.get("iface") is not None:
+        ask = ("Switch remote users off on this router? Every remote device "
+               "stops connecting.")
         off = (f'<form method="POST" action="/device/push" style="margin-top:12px" '
-               f'onsubmit="return confirm(\'Switch remote users off on this '
-               f'router? Every remote device stops connecting.\')">'
+               f'onsubmit="{confirm_attr(ask)}">'
                f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
                f'<input type="hidden" name="device" value="{esc(name)}">'
                f'<input type="hidden" name="feature" value="vpnusers">'

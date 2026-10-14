@@ -40,9 +40,11 @@ paths = backup.backup_paths(
     state_file=os.path.join(tmp, "state.json"), access_grants_file=None)
 check("only configured paths are included",
       set(paths) == {"config.yaml", "auth.db", "devices.db", "hub.json",
-                     "state.json"})
+                     "edr.db", "state.json"})
 check("hub.json is derived alongside devices.db",
       paths["hub.json"] == os.path.join(tmp, "sub", "hub.json"))
+check("so is edr.db, which holds the antivirus agents' company keys",
+      paths["edr.db"] == os.path.join(tmp, "sub", "edr.db"))
 
 # alert_log_db (scheduled status reports' alert history) — confirmed missing
 # from backup_paths() entirely, meaning it silently never traveled to a new

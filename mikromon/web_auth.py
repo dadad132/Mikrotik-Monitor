@@ -22,7 +22,7 @@ from .billing import (payment_reference, PLANS, GRACE_DAYS,
                       money, plan_by_name)
 from .util import human_bytes
 from .web_shared import (
-    _BRAND, _PAGE_CSS, esc, _flash, _header, _page, _who,
+    _BRAND, _PAGE_CSS, esc, confirm_attr, _flash, _header, _page, _who,
     _THEME_VARS, _THEME_INIT_JS, _THEME_TOGGLE_JS, _theme_toggle_btn,
 )
 
@@ -271,8 +271,9 @@ def _twofa_reset_box(csrf: str) -> str:
         f'is reset from the server with '
         f'<code>python -m mikromon reset-2fa --user EMAIL</code>.</p>'
         f'<form method="POST" action="/superadmin/reset-2fa" '
-        f'onsubmit="return confirm(\'Reset two-factor sign-in for \' + '
-        f'this.email.value + \'?\')">'
+        f'onsubmit="return confirm('
+        f'{esc(json.dumps("Reset two-factor sign-in for "))} + '
+        f'this.email.value + {esc(json.dumps("?"))})">'
         f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
         f'<div class="actions" style="flex-wrap:wrap">'
         f'<input name="email" placeholder="email or username" '
@@ -658,7 +659,7 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user,
         if u.get("totp_on") and not is_self and not u.get("is_superadmin"):
             reset_2fa = f'''
             <form method="POST" action="/admin/reset-2fa" style="margin-top:6px"
-              onsubmit="return confirm('Reset two-factor sign-in for {esc(_who(u))}? Their password alone will sign them in until they set it up again.')">
+              onsubmit="{confirm_attr(f"Reset two-factor sign-in for {_who(u)}? Their password alone will sign them in until they set it up again.")}">
               <input type="hidden" name="csrf" value="{csrf}">
               <input type="hidden" name="account" value="{esc(acct)}">
               <button class="btn" type="submit">Reset two-factor</button>
@@ -682,7 +683,7 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user,
           </td>
           <td>{'' if is_self else f'''
             <form method="POST" action="/admin/delete"
-              onsubmit="return confirm('Delete user {esc(_who(u))}?')">
+              onsubmit="{confirm_attr(f"Delete user {_who(u)}?")}">
               <input type="hidden" name="csrf" value="{csrf}">
               <input type="hidden" name="account" value="{esc(acct)}">
               <button class="btn red" type="submit">Delete</button>
@@ -1401,7 +1402,7 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
     if pf_token and status in ("active", "trialing"):
         cancel_btn = (f'<form method="POST" action="/billing/cancel-sub" '
                       f'style="display:inline" '
-                      f'onsubmit="return confirm(\'Cancel your subscription? You will keep access until the end of the grace period.\');">'
+                      f'onsubmit="{confirm_attr("Cancel your subscription? You will keep access until the end of the grace period.")}">'
                       f'<input type="hidden" name="csrf" value="{csrf}">'
                       f'<button class="btn ghost" type="submit" '
                       f'style="color:#dc2626;border-color:#dc2626">Cancel subscription</button>'
@@ -1695,8 +1696,8 @@ def _invoice_template_box(csrf: str, have: bool, warnings=()) -> str:
                  'receipt is rendered from it. The preview above shows it '
                  'with real figures.</p>'
                  f'<form method="POST" action="/superadmin/invoice-template" '
-                 f'style="display:inline" onsubmit="return confirm(\'Go back '
-                 f'to the built-in invoice?\')">'
+                 f'style="display:inline" '
+                 f'onsubmit="{confirm_attr("Go back to the built-in invoice?")}">'
                  f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
                  f'<input type="hidden" name="remove" value="1">'
                  f'<button class="btn ghost" type="submit">Use the built-in '
@@ -1892,9 +1893,9 @@ def _suspend_button(org_id, status: str, csrf: str,
                 'Platform admin &mdash; exempt from lockout</div>')
     action = "restore" if suspended else "suspend"
     confirm = ("" if suspended else
-               ' onclick="return confirm('
-               "'Suspend this company? They lose access to the site and stop "
-               "receiving alert emails until you restore them.')\"")
+               ' onclick="' + confirm_attr(
+                   "Suspend this company? They lose access to the site and "
+                   "stop receiving alert emails until you restore them.") + '"')
     style = ("padding:5px 12px;margin-top:6px;width:100%"
              + ("" if suspended else ";color:#dc2626;border-color:#dc2626"))
     return (f'<form method="POST" action="/superadmin/{action}" '
@@ -2049,10 +2050,11 @@ def _paid_to_select(org_id, bill: dict | None, csrf: str) -> str:
         opts = (f'<option value="" selected>'
                 f'{time.strftime("%d %b %Y", time.localtime(float(cpe)))}'
                 f'</option>' + opts)
+    paid_ask = ("Change this company's paid-up date? Their renewal moves "
+                "with it.")
     return (f'<form method="POST" action="/superadmin/paid-until" '
             f'style="display:flex;gap:4px;align-items:center;margin-top:4px" '
-            f'onsubmit="return confirm(\'Change this company\\\'s paid-up '
-            f'date? Their renewal moves with it.\')">'
+            f'onsubmit="{confirm_attr(paid_ask)}">'
             f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
             f'<input type="hidden" name="org_id" value="{esc(str(org_id))}">'
             f'<span class="muted" style="font-size:11px">Paid to</span>'
@@ -2225,8 +2227,7 @@ def _yoco_box(cfg, csrf: str, webhook_url: str = "") -> str:
     _warn = ("Register again? The signing secret is replaced, and Yoco keeps "
              "delivering to the old registration too until you remove it. "
              "Only do this if payments have stopped arriving.")
-    _confirm = (f''' onsubmit="return confirm('{_warn}')"'''
-                if has_hook else "")
+    _confirm = (f' onsubmit="{confirm_attr(_warn)}"' if has_hook else "")
     if not webhook_url:
         hook = ''
     elif not has_secret:
@@ -2284,9 +2285,8 @@ def _yoco_clear_form(csrf: str) -> str:
     """Turning card payment off again. Separate form so it cannot be hit by
     tabbing past Save, and confirmed, because it stops customers paying."""
     return (
-        f'<form method="POST" action="/superadmin/yoco" '
-        f'style="margin-top:8px" onsubmit="return confirm(\'Remove the Yoco '
-        f'keys? Companies will go back to paying by EFT.\')">'
+        f'<form method="POST" action="/superadmin/yoco" style="margin-top:8px" '
+        f'onsubmit="{confirm_attr("Remove the Yoco keys? Companies will go back to paying by EFT.")}">'
         f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
         f'<input type="hidden" name="clear" value="1">'
         f'<button class="btn ghost" type="submit">Turn card payment off'
@@ -2309,6 +2309,11 @@ def _outstanding_box(rows, csrf: str) -> str:
     """
     if not rows:
         return ""
+
+    def paid_ask(r):
+        return (f"Record {_money(r['amount'], r['currency'])} received from "
+                f"{r['name']}? This marks the invoice paid and switches their "
+                f"account on.")
     trs = []
     for r in rows:
         raised = (time.strftime("%d %b", time.localtime(r["raised"]))
@@ -2331,10 +2336,7 @@ def _outstanding_box(rows, csrf: str) -> str:
             f'{esc(_money(r["amount"], r["currency"]))}</b></td>'
             f'<td style="text-align:right">'
             f'<form method="POST" action="/superadmin/mark-paid" '
-            f'onsubmit="return confirm(&#39;Record '
-            f'{esc(_money(r["amount"], r["currency"]))} received from '
-            f'{esc(r["name"])}? This marks the invoice paid and switches '
-            f'their account on.&#39;)">'
+            f'onsubmit="{confirm_attr(paid_ask(r))}">'
             f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
             f'<input type="hidden" name="order" value="{r["order_id"]}">'
             f'<button class="btn" type="submit">Paid</button>'
@@ -2519,13 +2521,14 @@ def _share_box(device: str, shares, csrf: str, org_name: str = "") -> str:
         rights = ('<span class="badge warn">can change it</span>'
                   if sh.get("can_manage") else
                   '<span class="badge ok">view only</span>')
+        unshare_ask = (f"Stop sharing this router with {sh.get('email', '')}? "
+                       f"They lose access immediately.")
         rows += (
             f'<tr><td>{esc(sh.get("email", ""))}</td>'
             f'<td>{rights}</td>'
             f'<td class="muted" style="white-space:nowrap">{esc(when)}</td>'
             f'<td><form method="POST" action="/device/unshare" '
-            f'onsubmit="return confirm(\'Stop sharing this router with '
-            f'{esc(sh.get("email", ""))}? They lose access immediately.\')">'
+            f'onsubmit="{confirm_attr(unshare_ask)}">'
             f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
             f'<input type="hidden" name="device" value="{esc(device)}">'
             f'<input type="hidden" name="email" value="{esc(sh.get("email", ""))}">'
@@ -2941,6 +2944,11 @@ def _quote_inbox(quotes, org_names: dict | None = None, csrf: str = "") -> str:
             f'<tbody>{rows}</tbody></table></div>')
 
 
+_NEW_KEY_ASK = ("Make a new key pair? Backups made from now on can only be "
+                "opened with the NEW private key, which is shown once. Keep "
+                "any old key for older backups.")
+
+
 def _offsite_box(data, csrf: str) -> str:
     """Platform admin -> Off-site backups: where they go, the encryption
     key, and how the last one went."""
@@ -3023,9 +3031,7 @@ def _offsite_box(data, csrf: str) -> str:
         f'<button class="btn ghost" name="action" value="test">Save and test '
         f'the upload</button> '
         f'<button class="btn ghost" name="action" value="genkey" '
-        f'onclick="return confirm(\'Make a new key pair? Backups made from '
-        f'now on can only be opened with the NEW private key, which is shown '
-        f'once. Keep any old key for older backups.\')">Make a new key pair'
+        f'onclick="{confirm_attr(_NEW_KEY_ASK)}">Make a new key pair'
         f'</button> '
         f'<button class="btn ghost" name="action" value="runnow">Back up now'
         f'</button></div></form>'
@@ -3089,6 +3095,12 @@ def _render_offsite_key(identity: str, recipient: str, csrf: str) -> str:
         f'<code>{esc(recipient)}</code></p>'
         f'<p><a class="btn ghost" href="/superadmin#offsite">I have saved it '
         f'&mdash; back to Platform admin</a></p></div>')
+
+
+_RESTORE_UPLOAD_ASK = ("Restore from this file? This OVERWRITES every "
+                       "company's current data on this server. You must "
+                       "restart the service afterward for it to take effect. "
+                       "Continue?")
 
 
 def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
@@ -3196,7 +3208,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
     )
 
     def _post(action, label, cls="btn ghost", extra="", confirm=""):
-        oc = f' onclick="return confirm(\'{confirm}\')"' if confirm else ""
+        oc = f' onclick="{confirm_attr(confirm)}"' if confirm else ""
         return (f'<form method="POST" action="{action}" style="display:inline">'
                 f'<input type="hidden" name="csrf" value="{esc(csrf)}">{extra}'
                 f'<button class="{cls}" type="submit"{oc}>{label}</button></form>')
@@ -3251,9 +3263,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
         f'downloaded from this or another mikromon server.</p>'
         f'<form method="POST" action="/superadmin/backup/restore-upload" '
         f'enctype="multipart/form-data" '
-        f'onsubmit="return confirm(\'Restore from this file? This OVERWRITES '
-        f'every company\\\'s current data on this server. You must restart '
-        f'the service afterward for it to take effect. Continue?\')">'
+        f'onsubmit="{confirm_attr(_RESTORE_UPLOAD_ASK)}">'
         f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
         f'<input type="file" name="archive" accept=".gz,.tar.gz" required> '
         f'<button class="btn ghost" type="submit">Restore uploaded file</button>'

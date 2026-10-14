@@ -14,6 +14,7 @@ Endpoints:
   GET  /api/series?...   JSON time-series (device must be permitted)
   GET  /metrics          Prometheus (admin session, or ?token=/Bearer metrics_token)
   GET  /health           "ok"
+  POST /api/v1/edr/alerts  antivirus agent reports (Bearer: the company's agent key)
 """
 from __future__ import annotations
 
@@ -39,8 +40,8 @@ from .config import DEFAULT_CHECKS
 from .metrics import MetricsStore
 from .util import human_bps, human_duration
 from .web_shared import (
-    esc, _flash, _BRAND, _SAFE_CHECK_SECONDS, _PAGE_CSS, _SHELL_CSS, _AI_CSS,
-    _header, _page, parse_multipart_form,
+    esc, confirm_attr, _flash, _BRAND, _SAFE_CHECK_SECONDS, _PAGE_CSS,
+    _SHELL_CSS, _AI_CSS, _header, _page, parse_multipart_form,
     _THEME_VARS, _THEME_INIT_JS, _THEME_TOGGLE_JS,
 )
 from . import invoice_template as _invoice_tpl
@@ -2301,8 +2302,8 @@ def _maintenance_menu(name, active, csrf) -> str:
         f'href="/device?name={q}&tab={slug}">{esc(label)}</a>'
         for label, slug in _MAINT_ITEMS)
     reboot = (
-        f'<form method="POST" action="/device/reboot" onsubmit="return confirm('
-        f"'Reboot {esc(name)} now? It will go offline for ~1–2 minutes.')\">"
+        f'<form method="POST" action="/device/reboot" onsubmit="'
+        f'{confirm_attr(f"Reboot {name} now? It will go offline for ~1–2 minutes.")}">'
         f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
         f'<input type="hidden" name="device" value="{esc(name)}">'
         f'<button type="submit" class="reboot">Reboot</button></form>'
@@ -3088,9 +3089,8 @@ def _device_forget_box(name, csrf) -> str:
             f'to the router and <b>remove the WireGuard hub tunnel and monitoring '
             f'user</b> so it stops dialling home. This requires the push/admin '
             f'credentials to be set on the Devices page.</p>'
-            f'<form method="POST" action="/device/forget" '
-            f'onsubmit="return confirm(\'Remove {q} from the dashboard and '
-            f'decommission its router config?\')">'
+            f'<form method="POST" action="/device/forget" onsubmit="'
+            f'{confirm_attr(f"Remove {name} from the dashboard and decommission its router config?")}">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="device" value="{q}">'
             f'<div class="actions"><button class="btn red" type="submit">'
@@ -4420,13 +4420,15 @@ def _roadwarrior_box(devices_db, hub, org_id, csrf) -> str:
         return ""
     mine = [(key, rw) for key, rw in (hub.get("roadwarriors") or {}).items()
            if rw.get("org_id") == org_id]
+
+    def revoke_ask(rw):
+        return (f"Revoke {rw.get('label', 'this peer')}'s VPN access? "
+                f"Their client will stop connecting immediately.")
     rows = "".join(
         f'<tr><td>{esc(rw.get("label", ""))}</td>'
         f'<td><code>{esc(rw.get("ip", ""))}</code></td>'
         f'<td><form method="POST" action="/admin/roadwarrior-revoke" '
-        f'class="inline" onsubmit="return confirm('
-        f'\'Revoke {esc(rw.get("label", "this peer"))}\\\'s VPN access? '
-        f'Their client will stop connecting immediately.\')">'
+        f'class="inline" onsubmit="{confirm_attr(revoke_ask(rw))}">'
         f'<input type="hidden" name="csrf" value="{csrf}">'
         f'<input type="hidden" name="key" value="{esc(key)}">'
         f'<button class="btn ghost" type="submit">Revoke</button>'
@@ -4855,8 +4857,7 @@ def _departments_box(name, csrf, departments, ports=(), problems=(),
             f'<td>{port_cell}</td>'
             f'<td>{prof}</td><td style="font-size:12px">{dns}</td>'
             f'<td><form method="POST" action="/device/departments" '
-            f'onsubmit="return confirm(\'Remove {esc(d["name"])}? The VLAN '
-            f'stays on the router until you push again.\')">'
+            f'onsubmit="{confirm_attr("Remove " + d["name"] + "? The VLAN stays on the router until you push again.")}">'
             f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
             f'<input type="hidden" name="device" value="{q}">'
             f'<input type="hidden" name="action" value="delete">'
@@ -5715,10 +5716,7 @@ def _provision_actions(provisioned: bool, online: bool) -> str:
              "key. It will STOP connecting until the new setup has finished "
              "on the router itself. Only do this if it is not connecting and "
              "you are fixing it. Continue?")
-    # Single quotes around the message, so it sits inside the double-quoted
-    # onclick attribute without escaping gymnastics. The text is ours, not a
-    # router's, so there is nothing in it that needs quoting.
-    js = ' onclick="return confirm(\'' + ask + '\')"'
+    js = f' onclick="{confirm_attr(ask)}"'
     return (
         '<div class="actions" style="margin-top:12px">'
         '<button class="btn ghost" type="submit" name="auto" value="1"'
@@ -5987,8 +5985,7 @@ def _space_box(name, csrf, space=None, scan_error="") -> str:
     if rows:
         ours = (f'<h3 style="margin:14px 0 6px">Made by the dashboard</h3>'
                 f'<form method="POST" action="/device/backup" '
-                f'onsubmit="return confirm(\'Delete the ticked files from the '
-                f'router? This cannot be undone.\')">'
+                f'onsubmit="{confirm_attr("Delete the ticked files from the router? This cannot be undone.")}">'
                 f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
                 f'<input type="hidden" name="device" value="{esc(name)}">'
                 f'<input type="hidden" name="backup_action" value="cleanup">'
@@ -6079,7 +6076,7 @@ def _render_device_backups(name, user, facts, csrf, *, backups=None,
         # Step 1: list existing backups + a create form (which previews first).
         def _bk_btn(bname, action, label, cls, confirm):
             return (f'<form method="POST" action="/device/backup" class="inline" '
-                    f'onsubmit="return confirm(\'{confirm}\')">'
+                    f'onsubmit="{confirm_attr(confirm)}">'
                     f'<input type="hidden" name="csrf" value="{csrf}">'
                     f'<input type="hidden" name="device" value="{esc(name)}">'
                     f'<input type="hidden" name="bkname" value="{esc(bname)}">'
@@ -6952,7 +6949,7 @@ def _update_box(name, csrf, current):
     q = esc(name)
 
     def act(action, label, cls, confirm=""):
-        oc = (f' onclick="return confirm(\'{confirm}\')"' if confirm else "")
+        oc = (f' onclick="{confirm_attr(confirm)}"' if confirm else "")
         return (f'<form method="POST" action="/device/push" class="inline">'
                 f'<input type="hidden" name="csrf" value="{csrf}">'
                 f'<input type="hidden" name="device" value="{q}">'
@@ -8094,7 +8091,7 @@ _WAN_JS = """
 
 
 def _mini_form(action, csrf, name, label, cls, confirm=None) -> str:
-    onsub = (f' onsubmit="return confirm(\'Delete {esc(confirm)}?\')"'
+    onsub = (f' onsubmit="{confirm_attr(f"Delete {confirm}?")}"'
              if confirm else "")
     return (f'<form class="inline" method="POST" action="{action}"{onsub}>'
             f'<input type="hidden" name="csrf" value="{csrf}">'
@@ -8288,6 +8285,20 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
     # to confirm it, and notices when a router had to put itself back.
     safemode = _start_safemode(devices_db, defaults, auth, smtp_cfg,
                                push_log_db)
+    # The antivirus agents on customers' PCs (edr.py): their keys and what
+    # they report. Beside devices.db; absent on a server without one.
+    edr_store = None
+    from . import edr as _edr
+    if _edr.ENABLED and devices_db and auth is not None:
+        try:
+            from .edr import EdrStore, edr_path
+            edr_store = EdrStore(edr_path(devices_db))
+        except Exception:  # noqa: BLE001 - the dashboard still starts
+            log.exception("could not open the antivirus store")
+    # Reports per company: two a second, bursts of 200. Generous for any real
+    # office, and a ceiling on what a leaked key can write.
+    from .webguard import TokenBuckets
+    edr_limit = TokenBuckets(2.0, 200)
     _pf_merchant_id = billing_cfg.get("payfast_merchant_id", "")
     _pf_merchant_key = billing_cfg.get("payfast_merchant_key", "")
     _pf_passphrase = billing_cfg.get("payfast_passphrase", "")
@@ -8632,6 +8643,18 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         billing.days_left_in_grace(org_id),
                         auth.get_billing_contact() if auth else None)
 
+            # Antivirus is in the sidebar of a company that uses the agent,
+            # and nowhere else: a link to an empty page would be offering a
+            # feature the company does not have. Platform admins have their
+            # own page for every company's PCs.
+            if (edr_store is not None and AuthStore.is_owner(user)
+                    and not user.get("is_superadmin")
+                    and edr_store.in_use(user.get("org_id"))):
+                user = dict(user)
+                user["_show_antivirus"] = True
+            if path == "/antivirus":
+                return self._serve_company_antivirus(user)
+
             if path == "/superadmin/invoice-template":
                 return self._serve_invoice_template(url, user)
             if path == "/superadmin/test-invoice":
@@ -8642,6 +8665,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._serve_billing(url, user)
             if path == "/superadmin":
                 return self._serve_superadmin(url, user)
+            if path == "/superadmin/antivirus":
+                return self._serve_antivirus(url, user)
+            if path == "/superadmin/antivirus/isolate":
+                return self._serve_isolate(url, user)
             if path == "/superadmin/backup/download":
                 name = parse_qs(url.query).get("name", [""])[0]
                 return self._serve_superadmin_backup_download(user, name)
@@ -9273,6 +9300,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                     _hub_wg_leases(hub))
             emails = auth.delete_org(org_id)
             kept = billing.delete_org(org_id)
+            # Its antivirus key would otherwise go on letting PCs report for
+            # a company that no longer exists.
+            if edr_store is not None:
+                edr_store.purge_org(org_id)
             log.info("org %s (%s) DELETED by superadmin %s: %d login(s), %d "
                      "never-connected device(s); %d paid order(s) kept",
                      org_id, name, user.get("email", "?"), len(emails),
@@ -9292,6 +9323,344 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return {"settings": auth.get_setting("offsite") or {},
                     "status": offsite.read_status(os.path.dirname(
                         os.path.abspath(devices_db or auth.path)))}
+
+        # ---- the antivirus agents on customers' PCs (edr.py) ----------------
+        def _post_edr_alert(self):
+            """An antivirus agent reporting what it found on a PC.
+
+            Public, like /provision/join: the PC has no session. The bearer
+            key is the authority, and it only ever speaks for its own
+            company. Answers JSON the agent acts on: 200 taken; 401 key not
+            known and 429 slow down (it keeps the report and tries again);
+            400 unreadable and 413 too big (it drops it)."""
+            from .edr import MAX_BODY, EventError, parse_event
+
+            def answer(code, data, headers=None):
+                return self._send(code, json.dumps(data), "application/json",
+                                  headers)
+
+            if edr_store is None:
+                return answer(404, {"error": "antivirus_not_enabled"})
+            # The key is checked before the body is read, so a caller without
+            # one cannot make the server read anything.
+            authz = self.headers.get("Authorization", "")
+            key = authz[7:].strip() if authz[:7].lower() == "bearer " else ""
+            org_id = edr_store.org_for_key(key) if key else None
+            if org_id is None or auth.org(org_id) is None:
+                return answer(401, {"error": "unknown_key"})
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            if length > MAX_BODY:
+                return answer(413, {"error": "too_large"})
+            wait = edr_limit.take(str(org_id))
+            if wait:
+                return answer(429, {"error": "slow_down"},
+                              {"Retry-After": str(max(1, int(wait + 0.999)))})
+            raw = self.rfile.read(length) if length else b""
+            try:
+                ev = parse_event(json.loads(raw.decode("utf-8") or "null"))
+            except (ValueError, EventError) as exc:
+                return answer(400, {"error": "bad_event", "detail": str(exc)})
+            from .webguard import WebGuard
+            public_ip = WebGuard.client_ip(self.client_address[0],
+                                           self.headers) or ""
+            out = edr_store.record(org_id, ev, public_ip)
+            if out["email"]:
+                self._edr_email(out["id"], out["held"])
+            return answer(200, {"ok": True})
+
+        def _edr_email(self, event_id, held) -> None:
+            """Email the support team on a background thread: the agent is
+            waiting for its answer, and a slow mail server must not make it
+            give up and send the same report again."""
+            from .edr import send_alert_email
+            page = _public_base(auth)
+            page = page.rstrip("/") + "/superadmin/antivirus" if page else ""
+
+            def send():
+                try:
+                    send_alert_email(auth, smtp_cfg, edr_store, event_id, held,
+                                     page)
+                except Exception:  # noqa: BLE001
+                    log.exception("antivirus alert %s: email failed", event_id)
+            import threading
+            threading.Thread(target=send, name="mikromon-edr-mail",
+                             daemon=True).start()
+
+        def _serve_antivirus(self, url, user):
+            """Platform -> Antivirus: what the agents reported, who is told,
+            and each company's key. Platform admins only: it shows every
+            company's PCs."""
+            if not user.get("is_superadmin"):
+                return self._send(403, "forbidden")
+            if edr_store is None:
+                return self._send(404, "The antivirus store is not enabled "
+                                       "on this server (no devices_db).")
+            from .edr import saved_recipients
+            from .web_edr import render_antivirus
+            q = parse_qs(url.query)
+            return self._send(200, render_antivirus(
+                user, self._session()["csrf"],
+                orgs=auth.list_orgs_summary(), keys=edr_store.keys(),
+                agents=edr_store.agents(), events=edr_store.recent(100),
+                saved=saved_recipients(auth),
+                fallback=auth.superadmin_emails(),
+                isolations=edr_store.isolations(),
+                msg=q.get("ok", [""])[0], error=q.get("error", [""])[0]),
+                "text/html; charset=utf-8")
+
+        def _serve_company_antivirus(self, user):
+            """A company's own antivirus page: what the agents on its PCs
+            reported. Read-only -- the support team holds the keys and acts
+            on the alerts -- and only ever the owner's own company."""
+            if edr_store is None:
+                return self._send(404, "not found")
+            if not AuthStore.is_owner(user):
+                return self._send(403, "forbidden")
+            from .web_edr import render_company_antivirus
+            org_id = user.get("org_id")
+            return self._send(200, render_company_antivirus(
+                user, org_name=user.get("org_name", ""),
+                agents=edr_store.agents(org_id),
+                events=edr_store.recent(100, org_id),
+                isolations=edr_store.isolations(org_id)),
+                "text/html; charset=utf-8")
+
+        def _org_routers(self, org_id) -> list:
+            """The company's routers, by name: where one of its PCs can be
+            isolated."""
+            ds = self._devstore()
+            if ds is None:
+                return []
+            try:
+                return list(ds.names_for_org(org_id))
+            finally:
+                ds.close()
+
+        def _edr_pc(self, org_raw, agent_id):
+            """(org_id, the PC's row or None) from a form or a link."""
+            try:
+                org_id = int(org_raw or 0)
+            except (TypeError, ValueError):
+                org_id = 0
+            return org_id, edr_store.agent(org_id, agent_id or "")
+
+        def _serve_isolate(self, url, user):
+            """Platform -> Antivirus -> Isolate: choose the router."""
+            if not user.get("is_superadmin"):
+                return self._send(403, "forbidden")
+            if edr_store is None:
+                return self._send(404, "not found")
+            q = parse_qs(url.query)
+            org_id, agent = self._edr_pc(q.get("org", [""])[0],
+                                         q.get("agent", [""])[0])
+            if agent is None:
+                return self._redirect("/superadmin/antivirus?error=" + quote(
+                    "That PC has not reported here, or is no longer listed."))
+            return self._isolate_form(user, org_id, agent)
+
+        def _isolate_form(self, user, org_id, agent, *, ip="", device="",
+                          error=""):
+            from .web_edr import render_isolate_form
+            return self._send(200, render_isolate_form(
+                user, self._session()["csrf"], org_id=org_id,
+                org_name=auth.org_name(org_id) or "", agent=agent,
+                routers=self._org_routers(org_id), ip=ip, device=device,
+                error=error), "text/html; charset=utf-8")
+
+        def _post_isolate(self, user):
+            """Cut a PC off the network at its router: a preview of exactly
+            what is sent first, and only on the second step is it sent."""
+            flat, refused = self._antivirus_form(user)
+            if flat is None:
+                return refused
+            from .config import build_device
+            from .device import DeviceError
+            from .push import Pusher, PushError, rw_device
+            from .push.api import PushApi
+            from .push.isolate import (IsolateError, check_ip,
+                                       clear_connections, connection_ids,
+                                       isolate_plan, on_router_network)
+            from .web_edr import render_isolate_preview
+            org_id, agent = self._edr_pc(flat.get("org"), flat.get("agent"))
+            if agent is None:
+                return self._redirect("/superadmin/antivirus?error=" + quote(
+                    "That PC has not reported here, or is no longer listed."))
+            device = flat.get("device", "")
+            ip = flat.get("ip", "")
+
+            def again(error):
+                return self._isolate_form(user, org_id, agent, ip=ip,
+                                          device=device, error=error)
+            if device not in self._org_routers(org_id):
+                return again("Choose one of the company's routers.")
+            try:
+                ip = check_ip(ip)
+            except IsolateError as exc:
+                return again(str(exc))
+            raw = self._device_raw(device)
+            if raw is None:
+                return again(f"{device} is not in EasyMikroTik any more.")
+            cfg = build_device(raw, defaults)
+            pc = agent.get("hostname") or agent["agent_id"]
+            hub_host = urlparse(_public_base(auth)).hostname or ""
+            uname = user.get("login", "")
+            apply = flat.get("step") == "apply"
+            audit = self._auditlog()
+            dev = rw_device(cfg)
+            api = PushApi(dev)
+            try:
+                api.connect()
+                plan = isolate_plan(cfg.name, api, ip=ip,
+                                    agent_id=agent["agent_id"], label=pc,
+                                    hub_host=hub_host)
+                Pusher(cfg, api, dry_run=not apply, audit=audit,
+                       user=uname).apply(plan, feature="isolate")
+                if not apply:
+                    try:
+                        open_now = len(connection_ids(api, ip))
+                    except PushError:
+                        open_now = 0
+                    return self._send(200, render_isolate_preview(
+                        user, self._session()["csrf"], org_id=org_id,
+                        org_name=auth.org_name(org_id) or "", agent=agent,
+                        device=device, ip=ip, diff=plan.diff_text(),
+                        on_network=on_router_network(api, ip),
+                        connections=open_now, hub_host=hub_host),
+                        "text/html; charset=utf-8")
+                cleared = clear_connections(api, ip)
+            except (DeviceError, PushError, IsolateError) as exc:
+                return again(f"{exc}" if apply else
+                             f"Could not read {device}, so nothing was sent: "
+                             f"{exc}")
+            finally:
+                dev.close()
+                if audit:
+                    audit.close()
+            edr_store.set_isolated(org_id, agent["agent_id"], device, ip,
+                                   uname)
+            log.info("antivirus: %s (%s) at org %s isolated on %s by %s", pc,
+                     ip, org_id, device, uname)
+            return self._redirect("/superadmin/antivirus?ok=" + quote(
+                f"{pc} is cut off the network at {device}"
+                + (f", and its {cleared} open connection"
+                   f"{'' if cleared == 1 else 's'} cleared." if cleared
+                   else ".")))
+
+        def _post_release(self, user):
+            """Let an isolated PC back on: remove what isolating added."""
+            flat, refused = self._antivirus_form(user)
+            if flat is None:
+                return refused
+            from .config import build_device
+            from .device import DeviceError
+            from .push import Pusher, PushError, rw_device
+            from .push.api import PushApi
+            from .push.isolate import LIST, release_plan
+            back = "/superadmin/antivirus"
+            org_id, agent = self._edr_pc(flat.get("org"), flat.get("agent"))
+            agent_id = flat.get("agent", "")
+            pc = (agent or {}).get("hostname") or agent_id
+            iso = edr_store.isolations(org_id).get((org_id, agent_id))
+            if iso is None:
+                return self._redirect(back + "?ok=" + quote(
+                    f"{pc} was not isolated."))
+            raw = self._device_raw(iso["device"])
+            if raw is None:
+                edr_store.clear_isolated(org_id, agent_id)
+                return self._redirect(back + "?error=" + quote(
+                    f"{iso['device']} is no longer in EasyMikroTik, so nothing "
+                    f"could be sent to it, and {pc} is no longer listed as "
+                    f"isolated. If that router is still in use, remove "
+                    f"{iso['ip']} from its address list {LIST} by hand."))
+            cfg = build_device(raw, defaults)
+            audit = self._auditlog()
+            dev = rw_device(cfg)
+            api = PushApi(dev)
+            try:
+                api.connect()
+                plan = release_plan(cfg.name, api, agent_id=agent_id, label=pc)
+                Pusher(cfg, api, dry_run=False, audit=audit,
+                       user=user.get("login", "")).apply(plan,
+                                                        feature="isolate")
+            except (DeviceError, PushError) as exc:
+                return self._redirect(back + "?error=" + quote(
+                    f"Could not release {pc} on {iso['device']}: {exc}. It is "
+                    f"still isolated."))
+            finally:
+                dev.close()
+                if audit:
+                    audit.close()
+            edr_store.clear_isolated(org_id, agent_id)
+            log.info("antivirus: %s at org %s released on %s by %s", pc,
+                     org_id, iso["device"], user.get("login", ""))
+            return self._redirect(back + "?ok=" + quote(
+                f"{pc} can use the network again."))
+
+        def _antivirus_form(self, user):
+            """(form, None) for a superadmin with a valid CSRF token, else
+            (None, the refusal already sent)."""
+            if not (user and user.get("is_superadmin")):
+                return None, self._send(403, "forbidden")
+            flat, _ = self._form()
+            sess = self._session()
+            if sess is None or flat.get("csrf") != sess["csrf"]:
+                return None, self._send(400, "bad csrf token")
+            if edr_store is None:
+                return None, self._send(404, "antivirus not enabled")
+            return flat, None
+
+        def _post_antivirus_recipients(self, user):
+            """Who the support team's alert emails go to."""
+            flat, refused = self._antivirus_form(user)
+            if flat is None:
+                return refused
+            from .edr import SETTING_RECIPIENTS, parse_recipients
+            back = "/superadmin/antivirus"
+            try:
+                emails = parse_recipients(flat.get("recipients", ""))
+            except ValueError as exc:
+                return self._redirect(back + "?error=" + quote(str(exc)))
+            auth.set_setting(SETTING_RECIPIENTS, emails)
+            return self._redirect(back + "?ok=" + quote(
+                "Saved. Antivirus alerts go to " + ", ".join(emails) + "."
+                if emails else
+                "Saved. With no addresses set, antivirus alerts go to the "
+                "platform admins."))
+
+        def _post_antivirus_key(self, user):
+            """Make (or replace) a company's agent key, or remove it. A new
+            key is shown once, on the page this returns, and never again."""
+            flat, refused = self._antivirus_form(user)
+            if flat is None:
+                return refused
+            back = "/superadmin/antivirus"
+            try:
+                org_id = int(flat.get("org_id", "0"))
+            except (TypeError, ValueError):
+                org_id = 0
+            name = auth.org_name(org_id) if org_id else ""
+            if not name:
+                return self._redirect(back + "?error=" + quote(
+                    "Unknown company."))
+            if flat.get("action") == "revoke":
+                edr_store.revoke_key(org_id)
+                log.info("antivirus key for org %s removed by %s", org_id,
+                         user.get("email", "?"))
+                return self._redirect(back + "?ok=" + quote(
+                    f"{name}'s key is removed. Its PCs can no longer report."))
+            replaced = org_id in edr_store.keys()
+            key = edr_store.new_key(org_id)
+            log.info("antivirus key for org %s %s by %s", org_id,
+                     "replaced" if replaced else "made",
+                     user.get("email", "?"))
+            from .web_edr import render_new_key
+            base = _public_base(auth) or (
+                ("https" if self._is_https() else "http") + "://"
+                + self.headers.get("Host", ""))
+            return self._send(200, render_new_key(user, name, key, base,
+                                                  replaced),
+                              "text/html; charset=utf-8",
+                              {"Cache-Control": "no-store"})
 
         def _post_superadmin_offsite(self, user):
             """Platform admin -> Off-site backups: save, test the upload,
@@ -13848,6 +14217,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # has. The router has no session; the script's token is the key.
             if path == "/provision/join":
                 return self._post_provision_join()
+            # An antivirus agent on a customer's PC reporting what it found.
+            # No session either: the company's agent key is the authority.
+            if path == "/api/v1/edr/alerts":
+                return self._post_edr_alert()
             if path == "/signup":
                 return self._post_signup()
             if path == "/signup/verify":
@@ -13931,6 +14304,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_nextdns(user)
             if path == "/superadmin/quote-handled":
                 return self._post_superadmin_quote_handled(user)
+            if path == "/superadmin/antivirus/recipients":
+                return self._post_antivirus_recipients(user)
+            if path == "/superadmin/antivirus/key":
+                return self._post_antivirus_key(user)
+            if path == "/superadmin/antivirus/isolate":
+                return self._post_isolate(user)
+            if path == "/superadmin/antivirus/release":
+                return self._post_release(user)
             # Everything below requires a logged-in user + a valid CSRF token.
             if not user:
                 # A stale/expired session (e.g. the in-memory session table

@@ -5,9 +5,25 @@ Imported by web.py and web_auth.py so neither needs to duplicate these.
 from __future__ import annotations
 
 import html
+import json
 import re
 
 esc = html.escape
+
+
+def confirm_attr(text: str) -> str:
+    """`return confirm("...")`, ready to sit inside an onclick or onsubmit
+    attribute: f'onsubmit="{confirm_attr(msg)}"'.
+
+    The browser decodes an attribute before it runs it as script, so
+    escaping the message for HTML is not enough. "Joe's Shop" came back as
+    Joe's, ended the quoted message early, and a handler that does not
+    parse never runs -- the button did its job WITHOUT asking. The
+    server-backup Restore button ("every company's current data") did
+    exactly that. A JSON string is valid script whatever the text, and
+    escaping it once more keeps it inside the attribute.
+    """
+    return f"return confirm({esc(json.dumps(text))})"
 
 _MULTIPART_BOUNDARY_RE = re.compile(r'boundary="?([^";]+)"?')
 _MULTIPART_NAME_RE = re.compile(r'name="([^"]*)"')
@@ -547,6 +563,13 @@ _SIDE_ICONS = {
     "/superadmin": '<path d="M10 2.7l5.8 2.2v4.5c0 3.9-2.5 6.6-5.8 7.6-'
                    '3.3-1-5.8-3.7-5.8-7.6V4.9z"/>',
 }
+# A PC screen with a tick: the antivirus agents on PCs. The same picture
+# for a company's own page and the platform's page for every company.
+_SIDE_ICONS["/antivirus"] = _SIDE_ICONS["/superadmin/antivirus"] = (
+    '<rect x="2.5" y="3.5" width="15" height="10" rx="1.5"/>'
+    '<line x1="7" y1="16.8" x2="13" y2="16.8"/>'
+    '<line x1="10" y1="13.5" x2="10" y2="16.8"/>'
+    '<polyline points="7.2,8.6 9.2,10.5 12.9,6.6"/>')
 
 
 def _dash_icon(href) -> str:
@@ -611,11 +634,16 @@ def _nav_items(user) -> list:
     if user.get("role") == "owner":
         items += [("/devices", "Devices"), ("/logs", "Activity"),
                   ("/admin", "Users")]
+        if user.get("_show_antivirus"):
+            items.append(("/antivirus", "Antivirus"))
         if user.get("_show_billing"):
             items.append(("/billing", "Billing"))
     items += [("/guide", "Guide"), ("/account", "Account")]
     if user.get("is_superadmin"):
         items.append(("/superadmin", "Platform"))
+        from . import edr
+        if edr.ENABLED:
+            items.append(("/superadmin/antivirus", "Antivirus"))
     return items
 
 

@@ -59,6 +59,10 @@ def backup_paths(*, config_path=None, auth_db=None, devices_db=None,
         # hub.json (tunnel-IP allocation registry) lives alongside devices.db.
         paths["hub.json"] = os.path.join(
             os.path.dirname(devices_db) or ".", "hub.json")
+        # So do the antivirus agents' company keys (edr.py). A new server
+        # without them refuses every PC until each is given a new key.
+        paths["edr.db"] = os.path.join(
+            os.path.dirname(devices_db) or ".", "edr.db")
     if metrics_db:
         paths["metrics.db"] = metrics_db
     if push_log_db:
