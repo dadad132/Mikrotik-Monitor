@@ -2845,9 +2845,13 @@ def scripts_form(current, cfg):
          "placeholder": "block-badnet"},
         {"type": "textarea", "name": "new_source",
          "label": "Script source (RouterOS commands)", "value": ""},
-        {"type": "select", "name": "sched_every", "label": "Run it on a timer",
-         "value": "off", "options": [("off", "No, only when Run is pressed"),
-                                     ("day", "Every day"),
+        # Unticked, the timer fields are greyed out and no timer is set:
+        # the script only runs when Run is pressed.
+        {"type": "hidden", "name": "sched_form", "value": "1"},
+        {"type": "check", "name": "sched_recurring",
+         "label": "Recurring: run it on a timer", "on": False},
+        {"type": "select", "name": "sched_every", "label": "How often",
+         "value": "day", "options": [("day", "Every day"),
                                      ("week", "Every week")]},
         {"type": "select", "name": "sched_day", "label": "Day (weekly only)",
          "value": "mon", "options": SCHEDULE_DAYS},
@@ -2877,11 +2881,21 @@ def _week_start(api, day) -> str:
     return f"{_ROS_MONTHS[d.month - 1]}/{d.day:02d}/{d.year}"
 
 
+def timer_choice(flat) -> str:
+    """The timer a form asked for: sched_every as sent -- or "off" when the
+    form carries the Recurring box (sched_form) and it was left unticked.
+    The page greys the fields out then, but the rule lives here, so a
+    browser without JavaScript gets the same answer."""
+    if flat.get("sched_form") == "1" and flat.get("sched_recurring") != "1":
+        return "off"
+    return (flat.get("sched_every") or "off").strip()
+
+
 def _schedule_ops(pusher, script, flat) -> list:
     """Make `script`'s timer what was asked: sched_every "off", "day" or
     "week" ("keep" leaves a timing set by hand on the router alone), with
     sched_day for weekly and sched_time as HH:MM on the router's clock."""
-    every = (flat.get("sched_every") or "off").strip()
+    every = timer_choice(flat)
     if every == "keep":
         return []
     tag = _SCRIPT_SCHED_TAG + script
@@ -3022,7 +3036,7 @@ def scripts_plan(pusher, cfg, flat, multi):
                                     owns=_prefix_owner(_SCRIPT_TAG), label="script")
     # A timer picked on the add form goes on with the script. "No" here leaves
     # any timer the script already has alone: that is changed on its own row.
-    if nm and src.strip() and flat.get("sched_every") in ("day", "week"):
+    if nm and src.strip() and timer_choice(flat) in ("day", "week"):
         plan.ops += _schedule_ops(pusher, nm, flat)
     return plan
 

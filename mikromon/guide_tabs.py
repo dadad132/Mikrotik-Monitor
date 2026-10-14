@@ -253,10 +253,13 @@ TABS = [
                "<b>Preview</b> to see exactly what will be sent.",
                "<b>Save</b> stores it on the router — <b>it does not run it</b>.",
                "Use <b>Run</b> on a saved script to actually execute it.",
-               "To run it on a timer, pick <b>Every day</b> or <b>Every "
-               "week</b>, the day and the time beside the script, and "
-               "<b>Save timer</b>. The router keeps the timer itself, by its "
-               "own clock, so it runs even when this site cannot reach it."],
+               "To run it on a timer, tick <b>Recurring</b> (on the add "
+               "form, or beside a saved script), pick <b>Every day</b> or "
+               "<b>Every week</b> and the time &mdash; the day is only asked "
+               "for weekly &mdash; and <b>Save timer</b>. Untick Recurring to "
+               "take the timer off. The router keeps the timer itself, by "
+               "its own clock, so it runs even when this site cannot reach "
+               "it."],
      "warn": "Removing a saved script does <b>not</b> undo whatever it "
              "already did to the router — write an undo script for that, or "
              "use the typed tabs, whose changes are reversible. Nothing here "

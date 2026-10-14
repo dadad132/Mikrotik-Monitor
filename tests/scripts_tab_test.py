@@ -222,8 +222,16 @@ try:
           and 'name="sched_time"' in page)
     check("the router's own clock is shown, since that is what timers use",
           "20:41 on 2026-10-13 (Africa/Johannesburg)" in page)
-    check("the add form can put a timer on a new script",
-          "Run it on a timer" in page)
+    check("the add form can put a timer on a new script, behind a "
+          "Recurring box", "Recurring: run it on a timer" in page
+          and page.count('name="sched_recurring"') >= 3)
+    check("...and the page greys out what does not apply: everything until "
+          "Recurring is ticked, the day unless it is weekly",
+          "Tick Recurring to set a timer" in page
+          and "Only used for a weekly timer" in page)
+    check("a script with no timer has Recurring unticked beside it",
+          not re.search(r'name="sched_recurring" value="1" checked> '
+                        r'Recurring', page))
 
     base = {"csrf": tok, "device": "R1", "feature": "scripts",
             "script_name": "reboot", "script_action": "schedule"}
@@ -277,6 +285,27 @@ try:
     st, prev = req("/device/push", {**weekly, "sched_day": "funday"})
     check("a week with no day is refused", "Pick the day" in prev
           and not ops_sent(n))
+
+    print("the Recurring box")
+    st, page = req("/device?name=R1&tab=scripts")
+    check("a script with a timer has Recurring ticked beside it",
+          re.search(r'name="sched_recurring" value="1" checked> Recurring',
+                    page))
+    n = len(ROUTER.log)
+    st, prev = req("/device/push", {**weekly, "sched_form": "1"})
+    check("unticking Recurring takes the timer off, whatever the greyed-out "
+          "fields still say (a browser without JavaScript sends them)",
+          "remove the timer for script" in prev and not ops_sent(n))
+    st, prev = req("/device/push", {**weekly, "sched_form": "1",
+                                    "sched_recurring": "1"})
+    check("ticked, the same timer is kept as it is", "no changes" in prev)
+    st, done = req("/device/push", {
+        "csrf": tok, "device": "R1", "feature": "scripts",
+        "new_name": "unticked", "new_source": ":log info y",
+        "sched_form": "1", "sched_every": "day", "sched_time": "04:00",
+        "apply": "1"})
+    check("a new script with Recurring unticked gets no timer",
+          not any("unticked" in t["on-event"] for t in ROUTER.timers()))
 
     print("off, and removing the script")
     st, done = req("/device/push", {**base, "sched_every": "off", "apply": "1"})

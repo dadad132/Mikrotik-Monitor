@@ -6264,6 +6264,13 @@ def _field_html(desc) -> str:
                 f'class="switch" name="{desc["name"]}" '
                 f'value="{esc(desc["value"])}"{ck}{excl}{inst}> '
                 f'<b>{esc(label)}</b></label>{d}</div>')
+    if t == "check":
+        # A plain tick box, sent with the form -- unlike "toggle", which
+        # applies itself the moment it is flipped.
+        ck = " checked" if desc.get("on") else ""
+        return (f'<div class="f full"><label class="chk"><input '
+                f'type="checkbox" name="{desc["name"]}" value="1"{ck}> '
+                f'<b>{esc(label)}</b></label>{hint}</div>')
     if t == "text":
         return (f'<div class="f"><label class="f">{esc(label)}</label>'
                 f'<input name="{desc["name"]}" value="{esc(desc.get("value",""))}" '
@@ -6579,16 +6586,55 @@ def _queue_script_box(name, csrf, facts=None) -> str:
     )
 
 
-_SCHED_DAY_TOGGLE = ("this.form.sched_day.style.display="
-                     "this.value==='week'?'':'none'")
+# Greys out the timer fields that do not apply: all of them until
+# Recurring is ticked, and the day unless the timer is weekly. Greyed fields
+# are disabled, so they are not sent; the server applies the same rule
+# (features.timer_choice) for a browser without JavaScript.
+_SCHED_FORM_JS = """
+<script>
+(function(){
+  function sync(f){
+    var ev = f.elements.sched_every;
+    if (!ev) return;
+    var box = f.elements.sched_recurring;
+    var on = box ? box.checked : true;
+    var day = f.elements.sched_day, at = f.elements.sched_time;
+    [[ev, on, 'Tick Recurring to set a timer'],
+     [day, on && ev.value === 'week',
+      on ? 'Only used for a weekly timer' : 'Tick Recurring to set a timer'],
+     [at, on, 'Tick Recurring to set a timer']].forEach(function(p){
+      var el = p[0];
+      if (!el) return;
+      el.disabled = !p[1];
+      el.title = p[1] ? '' : p[2];
+      var wrap = el.closest('.f') || el;
+      wrap.style.opacity = p[1] ? '' : '.45';
+    });
+  }
+  function wire(){
+    document.querySelectorAll('form').forEach(function(f){
+      if (!f.elements.sched_every || f.dataset.mmSched) return;
+      f.dataset.mmSched = '1';
+      ['sched_recurring', 'sched_every'].forEach(function(n){
+        var el = f.elements[n];
+        if (el) el.addEventListener('change', function(){ sync(f); });
+      });
+      sync(f);
+    });
+  }
+  if (document.readyState === 'loading')
+    document.addEventListener('DOMContentLoaded', wire);
+  else wire();
+})();
+</script>"""
 
 
 def _script_timer_cell(hidden, sch) -> str:
     """A saved script's timer: what it is now, and a form to change it."""
     from .push.features import SCHEDULE_DAYS, describe_schedule
     every = sch["every"] if sch else "off"
-    choices = [("off", "Not scheduled"), ("day", "Every day"),
-               ("week", "Every week")]
+    recurring = every != "off"
+    choices = [("day", "Every day"), ("week", "Every week")]
     if every == "other":
         # Timed by hand on the router (every 12h, say): kept unless changed.
         choices.insert(0, ("keep", "As set on the router"))
@@ -6602,12 +6648,16 @@ def _script_timer_cell(hidden, sch) -> str:
     at = at if re.fullmatch(r"\d\d:\d\d", at) else "03:00"
     nxt = (f'<div class="muted">next run {esc(sch["next"])}</div>'
            if sch and sch.get("next") else "")
-    hide = "" if every == "week" else ' style="display:none"'
     return (f'<div>{esc(describe_schedule(sch))}</div>{nxt}'
             f'<form method="POST" action="/device/push" class="inline" '
             f'style="margin-top:6px">{hidden("schedule")}'
-            f'<select name="sched_every" onchange="{_SCHED_DAY_TOGGLE}">'
-            f'{opts}</select> <select name="sched_day"{hide}>{days}</select> '
+            f'<input type="hidden" name="sched_form" value="1">'
+            f'<label class="chk" style="margin-right:6px"><input '
+            f'type="checkbox" name="sched_recurring" value="1"'
+            f'{" checked" if recurring else ""}> Recurring</label> '
+            f'<select name="sched_every">{opts}</select> '
+            f'<select name="sched_day" title="Only used for a weekly timer">'
+            f'{days}</select> '
             f'<input type="time" name="sched_time" value="{at}"> '
             f'<button class="btn ghost" type="submit">Save timer</button></form>')
 
@@ -11297,8 +11347,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         unmanaged = feature["unmanaged"](pusher, cfg)
                     if slug == "scripts":
                         from .push.features import script_clock
-                        extra_html = _scripts_box(name, csrf, current,
-                                                  clock=script_clock(pusher.api))
+                        extra_html = (_scripts_box(name, csrf, current,
+                                                   clock=script_clock(pusher.api))
+                                      + _SCHED_FORM_JS)
                     elif slug == "qos":
                         extra_html = _queue_script_box(name, csrf, facts)
                     elif slug == "hubtunnel":
