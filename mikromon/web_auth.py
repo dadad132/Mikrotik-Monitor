@@ -1149,31 +1149,50 @@ def _invoice_fields(org: dict, order: dict, contact: dict | None,
     pill = ('<span class="pill paid">Paid</span>' if settled
             else f'<span class="pill">Due {esc(due_date)}</span>')
 
-    # Nothing hardcodes an account number. The design came with one in it,
-    # from a sample, and an account number that is not this business's is
-    # the single worst thing that can be printed on an invoice.
-    rows = [(k, v) for k, v in (
-        ("Bank", c.get("bank_name")),
-        ("Account Holder", c.get("bank_holder")),
-        ("Account Number", c.get("bank_account")),
-        ("Branch Code", c.get("bank_branch")),
-    ) if v]
-    pay_rows = "".join(
-        f'<tr><td>{esc(k)}:</td><td class="v">{esc(str(v))}</td></tr>'
-        for k, v in rows)
-    pay_rows += (f'<tr><td>Payment Ref:</td>'
-                 f'<td class="v">{esc(ref)}</td></tr>')
-    if pay_link:
-        pay_rows += (f'<tr><td>Online Gateway:</td>'
-                     f'<td class="v" style="font-weight:400;word-break:'
-                     f'break-all">{esc(pay_link)}</td></tr>')
-    payment_block = (
-        f'<div class="eyebrow">Payment information</div>'
-        f'<table>{pay_rows}</table>'
-        + ('' if rows else
-           '<p style="color:#64748b;font-size:12.5px;margin:8px 0 0">'
-           'Paying by card is the quickest route; a bank transfer needs '
-           'the reference above.</p>'))
+    if settled:
+        # A receipt. Payment instructions on it -- above all bank details --
+        # read as "this is still owed", which is how somebody pays twice.
+        payment_block = (
+            f'<div class="eyebrow">Payment information</div>'
+            f'<p style="margin:0">Paid on {esc(paid_on)}. Thank you.</p>')
+    elif pay_link:
+        # Card payment is on, so the invoice offers that and only that. It
+        # is the route that settles itself: the packet carries on the moment
+        # the card clears. Bank details beside it are what turned invoices
+        # into payments somebody here had to find on a statement and record
+        # by hand -- and one nobody recorded is a paying company suspended.
+        payment_block = (
+            f'<div class="eyebrow">Payment information</div>'
+            f'<table><tr><td>Pay online:</td>'
+            f'<td class="v" style="font-weight:400;word-break:break-all">'
+            f'<a href="{esc(pay_link)}">{esc(pay_link)}</a></td></tr></table>'
+            f'<p style="color:#64748b;font-size:12.5px;margin:8px 0 0">'
+            f'Pay by card with the button on this invoice or the link above. '
+            f'Your service carries on the moment the payment clears.</p>')
+    else:
+        # No card payment on this server: the bank transfer is the only
+        # route, so it is spelled out. Nothing hardcodes an account number.
+        # The design came with one in it, from a sample, and an account
+        # number that is not this business's is the single worst thing that
+        # can be printed on an invoice.
+        rows = [(k, v) for k, v in (
+            ("Bank", c.get("bank_name")),
+            ("Account Holder", c.get("bank_holder")),
+            ("Account Number", c.get("bank_account")),
+            ("Branch Code", c.get("bank_branch")),
+        ) if v]
+        pay_rows = "".join(
+            f'<tr><td>{esc(k)}:</td><td class="v">{esc(str(v))}</td></tr>'
+            for k, v in rows)
+        pay_rows += (f'<tr><td>Payment Ref:</td>'
+                     f'<td class="v">{esc(ref)}</td></tr>')
+        payment_block = (
+            f'<div class="eyebrow">Payment information</div>'
+            f'<table>{pay_rows}</table>'
+            + ('<p style="color:#64748b;font-size:12.5px;margin:8px 0 0">'
+               'Quote the reference above on the bank transfer.</p>' if rows
+               else '<p style="color:#64748b;font-size:12.5px;margin:8px 0 0">'
+                    'To pay, sign in and open the Billing tab.</p>'))
 
     pay_button = ("" if settled or not pay_link else
                   f'<a class="cta" href="{esc(pay_link)}">Pay by card</a>')
@@ -1750,9 +1769,10 @@ def _test_invoice_page(user, plan, plan_name: str, subject: str, body: str,
         f'</option>' for p in PLANS)
     warn = "" if link else (
         '<p class="muted" style="color:#dc2626;margin:0 0 12px">'
-        '<b>There is no pay link in this email</b>, because no public '
-        'address is set. A real invoice would go out the same way, and '
-        'every renewal would then need recording by hand.</p>')
+        '<b>There is no pay link in this email</b>, because card payment '
+        'is off or no public address is set. A real invoice would go out '
+        'the same way, offering a bank transfer instead, and every renewal '
+        'would then need recording by hand.</p>')
     inner = (
         f'<div class="wrap" style="max-width:820px">'
         f'<h1 style="margin:0 0 4px">What the customer gets</h1>'
@@ -3686,10 +3706,11 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
         'are taken to Yoco to pay. The new packet switches on <b>by '
         'itself</b> the moment the payment clears — usually a few '
         'seconds. Nobody at our end has to notice and do anything.</li>'
-        '<li><b>By EFT.</b> The Billing tab shows the bank details and a '
-        'reference to quote. Use that reference: it is how the payment is '
-        'matched to your company. A packet bought this way is switched on '
-        'by hand once the money lands.</li>'
+        '<li><b>By EFT</b>, only when card payment is unavailable. The '
+        'invoice then carries the bank details and a reference to quote. '
+        'Use that reference: it is how the payment is matched to your '
+        'company. A packet paid this way is switched on by hand once the '
+        'money lands.</li>'
         '</ul>'
         '<p>The owner can also move up straight from <b>Account &rarr; '
         'Your plan</b>, which is where you already are when you run out '

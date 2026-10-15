@@ -3577,8 +3577,6 @@ def _renewal_email(org_name, plan, amount, currency, period_end, due_days,
 
     when = time.strftime("%d %B %Y", time.localtime(period_end))
     total = money(amount, currency)
-    pay = (f"Pay now: {link}" if link else
-           "To pay, sign in to your account and open Billing.")
     text = (
         f"Hello,\n\n"
         + (f"This invoice replaces the one sent earlier for {replaces}: "
@@ -3589,13 +3587,27 @@ def _renewal_email(org_name, plan, amount, currency, period_end, due_days,
         f"  Router monitoring, up to {plan['devices']} devices\n"
         f"  {total} for the month\n"
         f"  Payable within {due_days} days\n\n"
-        f"{pay}\n\n"
-        f"Paying by card takes a moment and your service simply carries on "
-        f"-- nobody here has to do anything.\n\n"
-        f"Paying by bank transfer instead? Quote {ref} so the payment can "
-        f"be matched to your account.\n\n"
+        f"{_how_to_pay(link, ref)}\n\n"
         f"Thank you,\nEasyMikroTik\n")
     return f"EasyMikroTik invoice \u2014 {total}, due {when}", text
+
+
+def _how_to_pay(link: str, ref: str) -> str:
+    """The paragraph every billing email ends on: the card link, or -- only
+    when card payment is off -- the bank transfer.
+
+    Never both. A bank transfer lands where this server cannot see it, so
+    somebody here has to find it on a statement and record it by hand; an
+    email offering it beside a working card link was inviting the one
+    payment that can leave a paid-up company suspended.
+    """
+    if link:
+        return (f"Pay now: {link}\n\n"
+                f"Paying by card takes a moment and your service simply "
+                f"carries on -- nobody here has to do anything.")
+    return ("To pay, sign in to your account and open Billing.\n\n"
+            f"Paying by bank transfer? Quote {ref} so the payment can be "
+            f"matched to your account.")
 
 
 def _signup_code_email(code: str, company: str) -> tuple:
@@ -3653,8 +3665,6 @@ def _upgrade_email(org_name, plan, amount, currency, days, link,
     from .billing import UPGRADE_HOLD_DAYS, money
 
     total = money(amount, currency)
-    pay = (f"Pay now: {link}" if link else
-           "To pay, sign in to your account and open Billing.")
     text = (
         f"Hello,\n\n"
         f"You asked to move {org_name} up to {plan['label']} now.\n\n"
@@ -3662,15 +3672,13 @@ def _upgrade_email(org_name, plan, amount, currency, days, link,
         f"{days} day{'' if days == 1 else 's'} left of this month\n"
         f"  {total}: the difference between your packets for those days\n"
         f"  Payable within {UPGRADE_HOLD_DAYS} days\n\n"
-        f"{pay}\n\n"
+        f"{_how_to_pay(link, ref)}\n\n"
         f"The bigger packet arrives the moment this is paid. Your renewal "
         f"date does not change; from then on each month's invoice is the "
         f"new packet's price.\n\n"
         f"Not paid within {UPGRADE_HOLD_DAYS} days, this request lapses: "
         f"you stay on the packet you have, and can ask for the upgrade "
         f"again from Billing.\n\n"
-        f"Paying by bank transfer instead? Quote {ref} so the payment can "
-        f"be matched to your account.\n\n"
         f"Thank you,\nEasyMikroTik\n")
     return (f"EasyMikroTik invoice \u2014 {total}, upgrade to "
             f"{plan['label']}", text)
@@ -3821,12 +3829,7 @@ def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
         log.warning("%s: org %s invoiced but no mail server is "
                     "configured, so nothing was sent", kind, org_id)
         return []
-    to = []
-    for u in (auth.list_users(org_id) if auth else []) or []:
-        if u.get("role") == "owner" and u.get("email"):
-            to.append(u["email"])
-    to += [e for e in ((auth.org(org_id) or {}).get("alert_emails") or [])
-           if e not in to] if auth else []
+    to = _billing_recipients(auth, org_id)
     if not to:
         log.warning("%s: org %s has nobody to email", kind, org_id)
         return []
@@ -3835,9 +3838,9 @@ def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
     name = org.get("name") or f"Company {org_id}"
     ref = payment_reference(org_id, org.get("name", ""))
     if not link:
-        log.warning("renewal: org %s was invoiced with NO pay link -- set "
-                    "the public address in Platform admin, or every renewal "
-                    "needs recording by hand", org_id)
+        log.warning("renewal: org %s was invoiced with NO pay link -- switch "
+                    "on card payment and set the public address in Platform "
+                    "admin, or every renewal needs recording by hand", org_id)
 
     if kind == "upgrade":
         subject, text = _upgrade_email(name, plan, amount, currency, days,
@@ -3860,6 +3863,148 @@ def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
         log.exception("%s: could not email the invoice for org %s", kind,
                       org_id)
         return []
+
+
+def _billing_recipients(auth, org_id) -> list:
+    """Who a company's invoices and payment reminders go to: its owners,
+    then its alert addresses, each once."""
+    if auth is None:
+        return []
+    to = [u["email"] for u in (auth.list_users(org_id) or [])
+          if u.get("role") == "owner" and u.get("email")]
+    to += [e for e in ((auth.org(org_id) or {}).get("alert_emails") or [])
+           if e not in to]
+    return to
+
+
+def _reminder_email(stage, org_name, total, due, cutoff, link, ref,
+                    contact: str = "") -> tuple:
+    """(subject, body) for a payment reminder. Builds it; does not send it.
+
+    stage is "overdue" (the day the paid-up date passes), "final" (two days
+    before the account is suspended) or "suspended". Every one ends on the
+    link that pays the invoice, because the reminder exists to get the card
+    paid -- which carries the account on by itself -- before anybody here
+    has to do anything.
+    """
+    def day(ts):
+        return time.strftime("%d %B %Y", time.localtime(ts)) if ts else ""
+
+    what = f"The invoice for {org_name}'s EasyMikroTik packet ({total})"
+    if stage == "suspended":
+        subject = f"EasyMikroTik: {org_name} is suspended"
+        lead = (f"{what}, due on {day(due)}, was not paid, so the account is "
+                f"now suspended.\n\n"
+                + ("Paying it switches the account back on as soon as the "
+                   "payment clears." if link else
+                   "Paying it switches the account back on once the payment "
+                   "is received."))
+    elif stage == "final":
+        subject = f"EasyMikroTik: {org_name} will be suspended on {day(cutoff)}"
+        lead = (f"{what}, due on {day(due)}, is still unpaid. If it is still "
+                f"unpaid on {day(cutoff)}, the account will be suspended.")
+    else:
+        subject = f"EasyMikroTik: payment overdue for {org_name}"
+        lead = (f"{what} was due on {day(due)} and has not been paid yet.\n\n"
+                f"Everything keeps working for now. If it is still unpaid on "
+                f"{day(cutoff)}, the account will be suspended.")
+    asked = (f"Already paid? Let us know at {contact} and we will sort it "
+             f"out.\n\n" if contact else "")
+    return subject, (f"Hello,\n\n{lead}\n\n{_how_to_pay(link, ref)}\n\n"
+                     f"{asked}Thank you,\nEasyMikroTik\n")
+
+
+def _email_reminder(auth, billing, smtp_cfg, org_id, stage,
+                    base: str = "") -> bool:
+    """Chase a company's unpaid renewal invoice, with the link that pays it.
+
+    True when it was dealt with -- sent, or nothing to chase -- and False
+    when it should be tried again at tomorrow's pass.
+
+    The "final" one also goes to the platform admins. The card pays itself,
+    so the one way a paid-up company still gets suspended is a bank transfer
+    nobody recorded; two days' warning is time to look at the statement and
+    press Paid.
+    """
+    from email.message import EmailMessage
+
+    from . import billing_runner
+    from .billing import money, payment_reference
+    from .notify.org_email import _smtp_send
+
+    order = billing.open_renewal(org_id) if billing else None
+    if not order:
+        # Nothing was invoiced for the lapsed period (no agreed price, say).
+        # Platform admin already reports that; there is no invoice to chase.
+        log.warning("billing: org %s is %s but has no unpaid renewal invoice "
+                    "to remind it about", org_id, stage)
+        return True
+    if not (smtp_cfg and getattr(smtp_cfg, "host", "")):
+        log.warning("billing: org %s is %s but no mail server is configured, "
+                    "so no reminder was sent", org_id, stage)
+        return False
+    org = (auth.org(org_id) if auth else None) or {}
+    name = org.get("name") or f"Company {org_id}"
+    row = billing.get(org_id) or {}
+    total = money((order.get("amount_cents") or 0) / 100,
+                  order.get("currency") or "USD")
+    due = order.get("due") or row.get("current_period_end")
+    cutoff = row.get("grace_period_end")
+    ref = payment_reference(org_id, org.get("name", ""))
+    link = billing_runner.pay_link(auth, int(order["id"]), base)
+    try:
+        contact = ((auth.get_billing_contact() or {}).get("email", "")
+                   if auth else "")
+    except Exception:  # noqa: BLE001 - the reminder matters more
+        contact = ""
+
+    ok = True
+    to = _billing_recipients(auth, org_id)
+    if to:
+        subject, text = _reminder_email(stage, name, total, due, cutoff,
+                                        link, ref, contact)
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = smtp_cfg.from_addr
+        msg["To"] = ", ".join(to)
+        msg.set_content(text)
+        try:
+            _smtp_send(smtp_cfg, msg)
+            log.info("billing: %s reminder for org %s emailed to %s", stage,
+                     org_id, to)
+        except Exception:  # noqa: BLE001
+            log.exception("billing: could not email the %s reminder to org "
+                          "%s", stage, org_id)
+            ok = False
+    else:
+        log.warning("billing: org %s is %s and has nobody to email", org_id,
+                    stage)
+
+    admins = auth.superadmin_emails() if (auth and stage == "final") else []
+    if admins:
+        when = (time.strftime("%d %B %Y", time.localtime(cutoff))
+                if cutoff else "soon")
+        due_s = (time.strftime("%d %B %Y", time.localtime(due))
+                 if due else "")
+        msg = EmailMessage()
+        msg["Subject"] = (f"{smtp_cfg.subject_prefix} {name} will be suspended "
+                          f"on {when}: {total} unpaid").strip()
+        msg["From"] = smtp_cfg.from_addr
+        msg["To"] = ", ".join(admins)
+        msg.set_content(
+            f"{name} has not paid its renewal invoice: {total}, due {due_s}, "
+            f"reference {ref}. It will be suspended on {when}.\n\n"
+            + (f"They have been sent a reminder with the link that pays it."
+               if to else "Nobody at the company could be emailed.")
+            + "\n\nIf they paid by bank transfer, open Platform admin, find "
+            f"them under \"Waiting for payment\" and press Paid -- otherwise "
+            f"they are suspended even though the money arrived.\n")
+        try:
+            _smtp_send(smtp_cfg, msg)
+        except Exception:  # noqa: BLE001 - the company's reminder stands
+            log.exception("billing: could not warn the platform admins that "
+                          "org %s is about to be suspended", org_id)
+    return ok
 
 
 def _server_selfcheck(devices_db, metrics_db, access_cfg, smtp_cfg,
@@ -8277,8 +8422,16 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     _email_upgrade_lapsed(
                         auth, effective_smtp(auth, smtp_cfg), order)
 
+                def _send_reminder(org_id, stage):
+                    """Chase an unpaid renewal with the link that pays it."""
+                    from .notify.org_email import effective_smtp
+                    return _email_reminder(
+                        auth, billing, effective_smtp(auth, smtp_cfg), org_id,
+                        stage, _public_base(auth))
+
                 billing_runner.start(billing, auth, send=_send_invoice,
-                                     lapsed_upgrade=_send_lapsed)
+                                     lapsed_upgrade=_send_lapsed,
+                                     remind=_send_reminder)
             except Exception:  # noqa: BLE001 - dashboard still starts
                 log.exception("could not start the billing runner")
     # Safe mode's server half (push/safemode.py): logs back in after a change
@@ -14943,10 +15096,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 try:
                     fx = zar_amount(cents / 100.0)
                 except RateUnavailable:
+                    # Not "pay by bank transfer": with card payment on, the
+                    # invoice that brought them here carries no bank details.
                     return self._send(200, _pay_page(
                         None, "Today's exchange rate could not be fetched, "
                               "and we will not convert at a rate we made up. "
-                              "Please pay by bank transfer, or try shortly."),
+                              "Please try this link again a little later."),
                         "text/html; charset=utf-8")
                 cents = int(round(fx["amount"] * 100))
             host = self.headers.get("Host", "")
@@ -15263,7 +15418,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     shown["paid"] = None
                     shown["status"] = "pending"
                     shown["due"] = time.time() + _DEFAULT_DUE_DAYS * 86400
-                base = _public_base(auth)
+                # A link only where a real invoice would get one: card
+                # payment on and a public address to build it from. Without
+                # card payment the preview shows the bank details instead,
+                # because that is what customers are being sent.
+                base = _public_base(auth) if self._yoco_live() else ""
                 html = _render_invoice(
                     user, {"name": _SAMPLE_ORG,
                            "email": "accounts@sample.example"}, shown,
@@ -15274,12 +15433,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(200, _sample_bar(
                     html,
                     "The receipt sent after payment" if paid
-                    else "The invoice, with the Yoco pay button on it",
+                    else "The invoice, with the Yoco pay button on it" if base
+                    else "The invoice: card payment is off, so it carries "
+                         "the bank details",
                     plan["name"]),
                     "text/html; charset=utf-8")
 
             # The email, built by the same function that sends the real one.
-            base = _public_base(auth)
+            base = _public_base(auth) if self._yoco_live() else ""
             link = f"{base}/pay?t=sample" if base else ""
             renews = first_billing_date()
             subject, body = _renewal_email(
@@ -15299,16 +15460,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             """
             if not order or order.get("paid") or order.get("status") == "paid":
                 return ""
-            base = _public_base(auth)
-            if not base:
-                return ""
-            try:
-                from .paylink import url as _link
-                return _link(auth, base, int(order["id"]))
-            except Exception:  # noqa: BLE001
-                log.exception("could not build a pay link for order %s",
-                              order.get("id"))
-                return ""
+            # The same rule the emailed invoice follows -- no card payment,
+            # no link -- so the copy opened here offers what the email did.
+            from . import billing_runner
+            return billing_runner.pay_link(auth, int(order["id"]),
+                                           _public_base(auth))
 
         def _serve_invoice(self, url, user):
             """One invoice, printable, for the company it belongs to.

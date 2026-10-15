@@ -15,7 +15,7 @@ from __future__ import annotations
 from .web_shared import (_BRAND, _THEME_INIT_JS, _THEME_TOGGLE_JS, _THEME_VARS,
                          _theme_toggle_btn, esc)
 
-TERMS_VERSION = "2026-10-13"
+TERMS_VERSION = "2026-10-15"
 
 
 def terms_checkbox(note: str = "") -> str:
@@ -74,8 +74,9 @@ def _sections(provider: str, email: str) -> list:
           "allows.",
           "Card payments are processed by Yoco and charged in South African "
           "rand, converted at the day's published exchange rate, which is "
-          "recorded with the payment. You can also pay by EFT using the "
-          "reference on your invoice.",
+          "recorded with the payment. If card payment is unavailable, your "
+          "invoice gives our bank details instead: pay by EFT and quote the "
+          "reference on it.",
           "We may change prices. Any change applies from your next renewal "
           "after we have given you at least 30 days' notice."]),
         ("6. Billing",

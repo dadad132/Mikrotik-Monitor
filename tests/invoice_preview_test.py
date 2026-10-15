@@ -181,11 +181,42 @@ check("...saying what is owed rather than what was taken",
       "Total Due" in unpaid and "Total Paid" not in unpaid)
 check("...with the reference for a bank transfer on it",
       "SAMPLECOMPAN" in unpaid)
-check("...and a Pay by card button, because the person it was forwarded to "
-      "has no login here", "Pay by card" in unpaid and "Yoco" in unpaid)
+check("...and, card payment being off on this server, the bank transfer is "
+      "what it offers: no Pay by card button leading to a page that says "
+      "card payment is off", "Pay by card" not in unpaid
+      and "Payment Ref" in unpaid)
 check("the receipt carries NO live pay button: an invoice already settled "
       "with a working Pay button is how somebody pays twice",
       "Pay by card" not in inv)
+check("...nor bank details or a reference to pay with, which on a receipt "
+      "read as money still owed", "Payment Ref" not in inv
+      and "Paid on" in inv)
+
+print("\nWith card payment on, the invoice offers the card and only the card")
+
+# A bank transfer lands where this server cannot see it, so somebody here
+# has to find it on a statement and press Paid -- and one nobody records is
+# a paid-up company suspended. With the card on, the invoice sends people
+# down the path that records itself.
+_a = AuthStore(adb)
+_a.set_yoco({"secret_key": "sk_test", "webhook_secret": "whsec_test"})
+_a.close()
+st, card = get(boss,
+               f"/superadmin/test-invoice?doc=invoice&plan={PLAN['name']}")
+check("the unpaid invoice carries a Pay by card button, because the person "
+      "it was forwarded to has no login here",
+      st == 200 and "Pay by card" in card and "Yoco" in card)
+check("...and the pay link written out, for a printed copy",
+      "/pay?t=" in card and "Pay online" in card)
+check("...and no bank details or transfer reference to pay with instead",
+      "Payment Ref" not in card and "bank transfer" not in card.lower())
+st, mail = get(boss, "/superadmin/test-invoice")
+import re as _re  # noqa: E402
+_body = _re.search(r"<pre[^>]*>(.*?)</pre>", mail, _re.S)
+_body = _body.group(1) if _body else ""
+check("the renewal email leads with the card link and does not offer a bank "
+      "transfer beside it", "Pay now:" in _body
+      and "bank transfer" not in _body.lower())
 
 st, big = get(boss, "/superadmin/test-invoice?plan=" + B.PLANS[-1]["name"])
 check("any packet can be previewed, not just the cheapest",

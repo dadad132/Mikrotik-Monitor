@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mikromon.notify.org_email as org_email
 from mikromon import billing as B
-from mikromon import billing_runner, web
+from mikromon import billing_runner, paylink, web
 from mikromon.auth import AuthStore
 from mikromon.config import DEFAULT_THRESHOLDS, SmtpConfig
 from mikromon.metrics import MetricsStore
@@ -187,8 +187,9 @@ try:
 
     req("/billing/change-plan", {"csrf": csrf, "plan": "d10", "when": "now"})
     up = [o for o in upgrades() if o["status"] == "pending"][0]
-    link = billing_runner.pay_link(auth, int(up["id"]),
-                                   "https://easymikrotik.test")
+    # Card payment is off here, so billing_runner.pay_link rightly gives no
+    # link to send; a link issued while it was on still opens the page.
+    link = paylink.url(auth, "https://easymikrotik.test", int(up["id"]))
     token = link.split("t=", 1)[1]
     bs.db.execute("UPDATE orders SET created = ? WHERE id = ?",
                   (time.time() - 3 * DAY - 60, up["id"]))
@@ -213,8 +214,7 @@ try:
 
     print("\nAn upgrade paid after the month's renewal invoice went out")
     ren = bs.create_order(org, "d5", 2500, due=period_end)
-    ren_link = billing_runner.pay_link(auth, int(ren),
-                                       "https://easymikrotik.test")
+    ren_link = paylink.url(auth, "https://easymikrotik.test", int(ren))
     st, page, _ = req("/billing/change-plan", {"csrf": csrf, "plan": "d10",
                                                "when": "now"})
     up = [o for o in upgrades() if o["status"] == "pending"][0]

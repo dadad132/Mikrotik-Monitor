@@ -729,6 +729,9 @@ class BillingStore:
         # When the owner asked to cancel. Access then ends on the paid-up
         # date with no grace, and comes back when the next invoice is paid.
         self._add_col_if_missing("billing", "cancel_requested", "REAL")
+        # The grace deadline the last payment reminder was sent for, so it
+        # goes out once per lapse rather than on every daily pass.
+        self._add_col_if_missing("billing", "final_reminded", "REAL")
         # Renewal or upgrade. A renewal extends the period; an upgrade
         # changes the packet and leaves the renewal date exactly where it
         # is, so nobody pays twice for the same days.
@@ -1452,6 +1455,43 @@ class BillingStore:
                 self.suspend(org_id)
                 moved["suspended"].append(org_id)
         return moved
+
+    def orgs_suspending_soon(self, within: float,
+                             now: float | None = None) -> list:
+        """Companies in grace whose deadline is less than `within` seconds
+        away and who have not had the last reminder for it yet.
+
+        Keyed on the deadline rather than a yes/no flag: paying clears the
+        deadline and the next lapse sets a new one, which earns its own
+        reminder without anything having to remember to reset.
+        """
+        now = now if now is not None else time.time()
+        rows = self.db.execute(
+            "SELECT org_id, grace_period_end FROM billing "
+            "WHERE status = 'grace' AND grace_period_end IS NOT NULL "
+            "AND grace_period_end > ? AND grace_period_end <= ? "
+            "AND cancel_requested IS NULL "
+            "AND (final_reminded IS NULL "
+            "     OR final_reminded != grace_period_end)",
+            (now, now + float(within))).fetchall()
+        return [{"org_id": r[0], "grace_period_end": r[1]} for r in rows]
+
+    def mark_final_reminded(self, org_id: int, grace_end: float) -> None:
+        """The last reminder before `grace_end` has gone out."""
+        self._upsert(org_id, final_reminded=float(grace_end))
+
+    def open_renewal(self, org_id: int) -> dict | None:
+        """The unpaid invoice for the period a company is behind on, or None.
+
+        The one a reminder links to. Matched on the paid-up date that ran
+        out, so an invoice for some other month is never the one chased.
+        """
+        end = (self.get(org_id) or {}).get("current_period_end")
+        if not end:
+            return None
+        found = self._open_renewals(int(org_id), float(end))
+        found.sort(key=lambda o: o.get("created") or 0, reverse=True)
+        return found[0] if found else None
 
     def suspend(self, org_id: int) -> None:
         """Cut a company off until they pay, by hand.

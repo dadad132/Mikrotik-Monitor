@@ -18,6 +18,9 @@ Three jobs, on two clocks:
                        answer at 09:00 and 09:15.
   DAILY                lapse the unpaid into grace, and grace into
                        suspension. A payment at any point undoes both.
+                       Each step emails the company the link that pays
+                       it, and two days before a suspension the
+                       platform admins are told too.
   EVERY 15 MINUTES     nothing, unless somebody paid by bank transfer and a
                        human recorded it. The card path does not need a
                        poll: the webhook already said so.
@@ -44,6 +47,10 @@ _DEFAULT_DUE_DAYS = 7
 # on the guard that stopped it.
 _RAISE_HOUR = 8                 # local; nobody wants a 03:00 invoice
 _RAISE_STATE_KEY = "billing_last_raise"
+
+# The last reminder goes out this long before a suspension: time to pay on
+# a working day, close enough to the date that it is the email acted on.
+FINAL_REMINDER_DAYS = 2
 
 # What the last pass did, so the panel can show it. A thread that stopped
 # looks exactly like a quiet month until somebody can see when it last ran.
@@ -112,7 +119,14 @@ def pay_link(auth, order_id: int, base_url: str = "") -> str:
     Without a base URL there is nothing to build a link from, and an invoice
     that goes out with a broken link is worse than one that goes out with
     none -- so this returns "" and the caller says so.
+
+    The same goes for card payment being off: the link would open a page
+    saying so. "" then too, and the invoice offers the bank details instead.
+    Whether there is a link is the one thing every invoice, email and
+    reminder decides "card or bank transfer" by, so they cannot disagree.
     """
+    if not card_ready(auth):
+        return ""
     try:
         from . import paylink
         base = base_url or str(
@@ -291,14 +305,39 @@ def outstanding(billing, auth, limit: int = 50) -> list:
 # The loop
 # ---------------------------------------------------------------------------
 
+def _remind(remind, org_id: int, stage: str) -> bool:
+    """Ask for one reminder to go out. True when it was dealt with.
+
+    A reminder that fails is logged and reported, never raised: the lapse it
+    belongs to has already happened, and one company's mail must not stop
+    the pass for the rest.
+    """
+    if not remind:
+        return True
+    try:
+        return bool(remind(org_id, stage))
+    except Exception:  # noqa: BLE001
+        log.exception("billing: could not send the %s reminder to org %s",
+                      stage, org_id)
+        return False
+
+
 def run_once(billing, auth, now: float | None = None,
-             force_raise: bool = False, send=None, lapsed_upgrade=None) -> tuple:
+             force_raise: bool = False, send=None, lapsed_upgrade=None,
+             remind=None) -> tuple:
     """One pass. Returns (invoices_raised, accounts_lapsed).
 
     Lapsing and invoicing both happen once a day; nothing else needs a
     poll, because a card payment announces itself. Upgrade invoices that
     ran past their three days are withdrawn on every pass, so one lapses
     within a quarter of an hour rather than at tomorrow's run.
+
+    `remind(org_id, stage)` chases an unpaid renewal: "overdue" the day it
+    lapses into grace, "final" FINAL_REMINDER_DAYS before it would be
+    suspended, and "suspended" when it is. So a company is not cut off
+    without first being sent, twice, the link that pays it. The final
+    one is recorded once sent, so it goes out once per lapse; a send that
+    fails (False) is tried again at tomorrow's pass.
     """
     if billing is None:
         return (0, 0)
@@ -319,17 +358,37 @@ def run_once(billing, auth, now: float | None = None,
     if force_raise or raise_is_due(auth, now):
         # Lapse BEFORE invoicing: an account suspended this morning should
         # not also be invoiced for next month in the same pass.
+        moved = {"grace": [], "suspended": []}
         try:
             moved = billing.lapse_due(now)
             lapsed = len(moved["grace"]) + len(moved["suspended"])
             for org_id in moved["grace"]:
                 log.info("billing: org %s has lapsed into the grace period",
                          org_id)
+                _remind(remind, org_id, "overdue")
             for org_id in moved["suspended"]:
                 log.warning("billing: org %s suspended, grace expired with "
                             "no payment", org_id)
+                # Somebody who asked to cancel was not cut off for an unpaid
+                # invoice, and an email saying they were would be wrong.
+                if not (billing.get(org_id) or {}).get("cancel_requested"):
+                    _remind(remind, org_id, "suspended")
         except Exception:  # noqa: BLE001
             log.exception("the lapse pass failed")
+        try:
+            for row in billing.orgs_suspending_soon(
+                    FINAL_REMINDER_DAYS * 86400, now):
+                org_id = int(row["org_id"])
+                # Lapsed into grace on this very pass (the server was off
+                # for days): the overdue email just sent already names the
+                # date. The last reminder follows tomorrow, not now.
+                if org_id in moved["grace"]:
+                    continue
+                if _remind(remind, org_id, "final"):
+                    billing.mark_final_reminded(org_id,
+                                                row["grace_period_end"])
+        except Exception:  # noqa: BLE001
+            log.exception("the final reminder pass failed")
         try:
             raised = raise_due_invoices(billing, auth, now=now, send=send)
             if not force_raise:
@@ -340,7 +399,7 @@ def run_once(billing, auth, now: float | None = None,
 
 
 def start(billing, auth, stop: threading.Event | None = None, send=None,
-          lapsed_upgrade=None):
+          lapsed_upgrade=None, remind=None):
     """Run the billing pass on a timer for the life of the process.
 
     A daemon thread rather than cron: it needs the same billing database the
@@ -356,7 +415,8 @@ def start(billing, auth, stop: threading.Event | None = None, send=None,
         while not stop.wait(_TICK_SECONDS):
             try:
                 raised, lapsed = run_once(billing, auth, send=send,
-                                          lapsed_upgrade=lapsed_upgrade)
+                                          lapsed_upgrade=lapsed_upgrade,
+                                          remind=remind)
                 _last.update({"ran": time.time(), "raised": raised,
                               "applied": lapsed, "error": ""})
                 if raised or lapsed:

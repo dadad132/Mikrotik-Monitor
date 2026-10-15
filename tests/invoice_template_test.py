@@ -137,6 +137,29 @@ check("...the reference a bank statement will show",
       fields["reference"].startswith("ALPHAFREIGH"))
 check("...and the pay link, so a template can put a button on the document",
       fields["pay_link"].endswith("t=abc"))
+
+# How to pay. A bank transfer lands where this server cannot see it, so
+# somebody has to find it on a statement and record it -- and one nobody
+# records is a paid-up company suspended. So the invoice offers the card
+# when the card is on, and the bank only when it is the sole way to pay.
+_bank = {"name": "Me", "email": "me@x.test", "bank_name": "Capitec",
+         "bank_account": "1234567890"}
+_card = web_auth._invoice_fields(
+    {"name": "Alpha Freight"}, _order, _bank,
+    pay_link="https://easymikrotik.com/pay?t=abc")["payment_block"]
+check("with card payment on, the payment block is the card link and only "
+      "that", "pay?t=abc" in _card and "Capitec" not in _card
+      and "1234567890" not in _card and "Payment Ref" not in _card)
+_eft = web_auth._invoice_fields(
+    {"name": "Alpha Freight"}, _order, _bank)["payment_block"]
+check("without card payment, the bank details and the reference to quote",
+      "Capitec" in _eft and "1234567890" in _eft and "ALPHAFREIGH" in _eft)
+_rcpt = web_auth._invoice_fields(
+    {"name": "Alpha Freight"}, dict(_order, paid=1760000000.0, status="paid"),
+    _bank)["payment_block"]
+check("a paid invoice says when it was paid, and offers no way to pay it "
+      "again", "Paid on" in _rcpt and "Capitec" not in _rcpt
+      and "Payment Ref" not in _rcpt)
 check("the logo is the real drawing at document size, not a picture pasted "
       "in two years ago", "<svg" in fields["logo"] and "MikroTik" in fields["logo"])
 

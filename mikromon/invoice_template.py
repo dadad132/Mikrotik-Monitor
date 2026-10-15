@@ -70,8 +70,9 @@ FIELDS = (
     ("total_label", '"Total Due" or "Total Paid"'),
     ("currency", "The currency code, e.g. USD"),
     ("paid_on", "The date it was paid, blank if it has not been"),
-    ("payment_block", "Bank details and reference, as markup; blank if "
-                      "no bank details have been saved"),
+    ("payment_block", "How to pay, as markup: the card link when card "
+                      "payment is on, otherwise the bank details and "
+                      "reference; on a paid invoice, the date it was paid"),
     ("pay_button", "The Pay by card button, as markup; blank once paid"),
     ("pay_link", "The URL that pays this invoice, blank if none"),
 )
