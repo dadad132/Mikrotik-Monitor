@@ -1,6 +1,7 @@
 """The monitoring engine: poll every device, run its checks, dispatch alerts."""
 from __future__ import annotations
 
+import dataclasses
 import logging
 import signal
 import threading
@@ -8,6 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as _FutureTimeout
 
+from . import restarts as _restarts
 from .alert import Severity
 from .checks import enabled_checks, required_datasets
 from .checks.wan_traffic import _wan_interfaces
@@ -128,6 +130,12 @@ class Engine:
         self._start_ts = self.now_fn()
         self._grace_seconds = max(0, int(getattr(config, "startup_grace_minutes", 20))) * 60
         self._grace_resynced = self._grace_seconds == 0
+        # Routers restarted from the dashboard (restarts.py): where the
+        # dashboard says so, and the alerts held while each comes back --
+        # {device: {"until", "rec", "alerts": {key: Alert}}}.
+        self._restarts_path = _restarts.path_for(
+            getattr(config, "devices_db", None))
+        self._held: dict = {}
         # The AI monitor (aimonitor.py): an incident per lost line, its likely
         # cause, a search online for outages in the area, and "still on the
         # backup line" reminders. Its own failures are logged, never fatal.
@@ -406,6 +414,7 @@ class Engine:
             except Exception:  # noqa: BLE001 — one device's crash must not
                 log.exception("Unexpected error polling a device")  # skip the rest
         batch = self._filter_fleet_wide_outage(batch, reach_before)
+        batch = self._hold_planned_restarts(batch)
         # Before dispatch, so a failover alert goes out already saying what
         # the router and the rest of the fleet make of it.
         if getattr(self, "aimon", None) is not None:
@@ -476,6 +485,74 @@ class Engine:
                    "unchanged. Affected: " + ", ".join(names)),
             ts=self.now_fn()))
         return kept
+
+    def _hold_planned_restarts(self, batch):
+        """Hold the alerts of a router that was restarted from the dashboard.
+
+        Somebody pressed Reboot, or updated it: of course it goes offline. It
+        used to be emailed as UNREACHABLE and then "reachable again" all the
+        same. Now, when the dashboard has said a router is restarting
+        (restarts.py) and it goes down in that window, its alerts are held
+        for restarts.GRACE_SECONDS and the dashboard shows it as Restarting.
+        Back within that, the held alerts are dropped together with the
+        recoveries that end them -- nobody hears about a restart they
+        started. Still down at the end, each alert goes out then, saying it
+        was restarted from the dashboard and has not come back.
+        """
+        now = self.now_fn()
+        held_map = self.__dict__.setdefault("_held", {})
+        try:
+            expected = _restarts.expected(
+                getattr(self, "_restarts_path", ""), now)
+        except Exception:  # noqa: BLE001 -- alerts must still go out
+            log.exception("could not read the dashboard's planned restarts")
+            expected = {}
+        out = []
+        for a in batch:
+            held = held_map.get(a.device)
+            if a.recovery:
+                # The end of something that was never announced is not
+                # announced either.
+                if held is not None and held["alerts"].pop(a.key, None):
+                    continue
+                out.append(a)
+                continue
+            if held is None and a.device in expected:
+                rec = expected[a.device]
+                held = held_map[a.device] = {
+                    "until": now + _restarts.GRACE_SECONDS, "rec": rec,
+                    "alerts": {}}
+                self.state.facts(a.device)["restarting"] = {
+                    "since": now, "until": held["until"],
+                    "what": _restarts.describe(rec)}
+                log.info("%s: restarted from the dashboard (%s); holding its "
+                         "alerts for %ds", a.device, _restarts.describe(rec),
+                         _restarts.GRACE_SECONDS)
+            if held is not None and now < held["until"]:
+                held["alerts"].setdefault(a.key, a)
+                continue
+            out.append(a)
+        for device, held in list(held_map.items()):
+            if held["alerts"] and now < held["until"]:
+                continue
+            mins = _restarts.GRACE_SECONDS // 60
+            for key, a in held["alerts"].items():
+                if self.state.condition(device, key).get("status") != "problem":
+                    continue
+                note = (f"{_restarts.describe(held['rec'])}, and not back "
+                        f"{mins} minutes later.")
+                out.append(dataclasses.replace(
+                    a, ts=now,
+                    detail=(a.detail + " " if a.detail else "") + note))
+            if held["alerts"]:
+                log.warning("%s: still down %d minutes after a restart from "
+                            "the dashboard; alerting", device, mins)
+            else:
+                log.info("%s: back after its restart from the dashboard; "
+                         "nobody was alerted", device)
+            del held_map[device]
+            self.state.facts(device).pop("restarting", None)
+        return out
 
     def _prune_if_due(self) -> None:
         """Enforce metrics retention on a timer while the service runs."""

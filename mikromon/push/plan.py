@@ -44,6 +44,14 @@ class Plan:
     # works against that: it can see the router missing while it boots and
     # restore the backup, a second restart nobody asked for.
     restarts: bool = False
+    # What happens next, in plain words, for the page shown once it has been
+    # sent -- when "Changes applied" would not tell the reader enough.
+    note: str = ""
+    # When this change takes the router down, counted from the moment it is
+    # sent: (seconds until the restart begins, seconds until it begins at
+    # the latest). The monitor holds that router's alerts while it comes
+    # back, instead of emailing that it went offline (restarts.py).
+    restart_window: tuple = ()
 
     @property
     def empty(self) -> bool:

@@ -272,10 +272,21 @@ TABS = [
              "runs on its own every night at midnight, which is what fills in "
              "the “update available” column on the Devices list.",
      "steps": ["Click to check for updates, or just read last night's result.",
-               "<b>Preview</b>, then <b>Apply</b> to install.",
-               "The router reboots and comes back in a minute or two."],
-     "warn": "Installing an upgrade reboots the router. Everything at that "
-             "site is offline for 1–2 minutes, so do it out of hours."},
+               "When an update is available, click <b>Update now</b> and pick "
+               "<b>Download and install now</b>, or <b>Download now, restart "
+               "later</b> with the time the router should restart.",
+               "The restart goes by the router's own clock and time zone, "
+               "shown beside the time. A planned restart can be cancelled "
+               "until then.",
+               "The router installs the update as it restarts, and is back "
+               "in two or three minutes. Meanwhile it shows as "
+               "<b>Restarting</b>, and no offline email goes out unless it "
+               "is still down five minutes after it went offline. The same "
+               "goes for Reboot, a restored backup, and a script that "
+               "restarts the router."],
+     "warn": "Installing an upgrade restarts the router. Everything at that "
+             "site is offline for 2–3 minutes, so do it out of hours, or "
+             "download now and restart later."},
 
     {"slug": "departments", "title": "Departments", "art": None,
      "what": "One company, several networks. Each department gets its own "
@@ -412,8 +423,8 @@ BY_SLUG = {t["slug"]: t for t in TABS}
 ONPAGE_WARNINGS = {
     "harden": "Include this monitoring server's own IP below, or the router "
               "will lock easymikrotik out along with the attackers.",
-    "update": "Installing reboots the router — the site goes offline for "
-              "1–2 minutes.",
+    "update": "Installing restarts the router — the site goes offline for "
+              "2–3 minutes.",
     "portfwd": "Every forward is a hole in the firewall. Never expose a "
                "device's admin page.",
     "scripts": "Scripts are sent exactly as typed and are not checked.",

@@ -2818,6 +2818,19 @@ def script_clock(api) -> dict:
             "unset": day is not None and day.year < 2020}
 
 
+def clock_datetime(clock):
+    """The router's clock (script_clock) as a datetime to the minute, or
+    None when it could not be read. A clock that was never set still reads
+    -- it runs, just from 1970 -- so this is fine for "two minutes from now"
+    but not for a time of day somebody picked."""
+    day = _ros_date((clock or {}).get("date"))
+    m = re.fullmatch(r"(\d\d):(\d\d)", (clock or {}).get("time", ""))
+    if day is None or not m:
+        return None
+    return datetime.datetime(day.year, day.month, day.day,
+                             int(m.group(1)), int(m.group(2)))
+
+
 def scripts_read(pusher, cfg):
     scheds = pusher.api.fetch(_SCHEDULER)
     out = []
@@ -2868,17 +2881,23 @@ def _same_sched_field(f, old, new) -> bool:
     return _ros_text(old) == new
 
 
+def _ros_date_text(api, d) -> str:
+    """A date written the way this router reads dates: 2026-10-16 from
+    RouterOS 7.10 on, oct/16/2026 before."""
+    major, minor = _ros_version(api)[:2]
+    if (major, minor) >= (7, 10):
+        return d.isoformat()
+    return f"{_ROS_MONTHS[d.month - 1]}/{d.day:02d}/{d.year}"
+
+
 def _week_start(api, day) -> str:
     """The latest `day` on or before today, written the way this router
     reads dates. Any such date would do: the timer repeats every 7 days from
     it, so the weekday is all it sets."""
-    major, minor = _ros_version(api)[:2]
     today = datetime.date.today()
     d = today - datetime.timedelta(
         days=(today.weekday() - _WEEKDAYS.index(day)) % 7)
-    if (major, minor) >= (7, 10):
-        return d.isoformat()
-    return f"{_ROS_MONTHS[d.month - 1]}/{d.day:02d}/{d.year}"
+    return _ros_date_text(api, d)
 
 
 def timer_choice(flat) -> str:
@@ -2990,8 +3009,11 @@ def scripts_plan(pusher, cfg, flat, multi):
         op = Operation("run", _SCRIPT, {"_cmd": "run", ".id": row[".id"]},
                        desc=f"run script '{target}' on the router (background)",
                        detach=True)
+        restarts = _restarts_router(row.get("source"))
         return Plan(cfg.name, [op], summary=f"run script {target}",
-                    restarts=_restarts_router(row.get("source")))
+                    restarts=restarts,
+                    restart_window=((0, _RESTART_BEGINS_WITHIN) if restarts
+                                    else ()))
 
     if action == "remove":
         desired = [d for d in _managed_desired(existing) if d["name"] != target]
@@ -3485,18 +3507,108 @@ def provision_apply(api, name, pwuser, pwd, *, harden=True, enable_api=True,
 
 
 # ===========================================================================
-# Update — check/install RouterOS upgrades + RouterBOOT firmware. Install
-# REBOOTS the router, so it is a `run` command (no inverse) gated behind the
-# normal dry-run -> explicit-confirm step with a loud warning.
+# Update — check/install RouterOS upgrades + RouterBOOT firmware. Installing
+# REBOOTS the router, so it goes through the normal preview -> explicit
+# confirm step, said in plain words.
+#
+# Installing, downloading and the later restart are one-shot timers on the
+# router (/system/scheduler, interval 0) rather than commands this server
+# sends and waits on. A download can take minutes on a slow line, and a
+# session that times out half way can take the download down with it; a
+# timer runs on the router whatever happens to the connection, by the
+# router's own clock. "Now" is a timer two minutes out.
 # ===========================================================================
 _PKG_UPDATE = ("system", "package", "update")
 _ROUTERBOARD = ("system", "routerboard")
+
+_UPDATE_TAG = "mikromon:update:"
+_UPDATE_JOB_NAME = {"now": "mikromon-update-now",
+                    "download": "mikromon-update-download",
+                    "reboot": "mikromon-update-restart"}
+_UPDATE_JOB_WORDS = {"now": "update start", "download": "download",
+                     "reboot": "planned restart"}
+_UPDATE_CHECK = ("/system package update check-for-updates once; "
+                 ":delay 5s; ")
+_UPDATE_SCRIPT = {
+    "now": _UPDATE_CHECK + "/system package update install",
+    "download": _UPDATE_CHECK + "/system package update download",
+    # Downloaded already, the usual case: restarting installs it. If the
+    # download failed or was lost, install fetches it and restarts anyway,
+    # so the restart that was chosen still brings the update.
+    "reboot": (':if ([/system package update get status] ~ "ownloaded") '
+               'do={/system reboot} else={' + _UPDATE_CHECK
+               + '/system package update install}'),
+}
+# "Now" starts this far ahead on the router's clock: the clock is read to the
+# minute, so two minutes is always at least one minute in the future.
+_UPDATE_LEAD = datetime.timedelta(minutes=2)
+# A restart has to leave time for the download, and a timer months out is a
+# surprise for whoever is running the site by then.
+_RESTART_MIN_AHEAD = datetime.timedelta(minutes=10)
+_RESTART_MAX_AHEAD = datetime.timedelta(days=30)
+# The restart suggested on the page: quiet hours, by the router's clock.
+_RESTART_DEFAULT_HOUR = 2
+# How long an update's restart may wait for its download, for holding that
+# router's alerts while it comes back (restarts.py): a slow line can take
+# many minutes over a RouterOS package.
+_DOWNLOAD_ALLOWANCE = 20 * 60
+# A plain restart -- Reboot, a script that restarts -- begins within this.
+_RESTART_BEGINS_WITHIN = 2 * 60
+
+
+def _update_jobs(api) -> list:
+    """The dashboard's update timers on the router, each with when it runs
+    as a datetime by the router's clock (None if it cannot be read)."""
+    out = []
+    for s in _safe_fetch(api, _SCHEDULER):
+        tag = _ros_text(s.get("comment"))
+        if not tag.startswith(_UPDATE_TAG):
+            continue
+        day = _ros_date(s.get("start-date"))
+        m = re.match(r"(\d\d):(\d\d)", _ros_text(s.get("start-time")))
+        at = (datetime.datetime(day.year, day.month, day.day,
+                                int(m.group(1)), int(m.group(2)))
+              if day and m else None)
+        out.append({"id": s.get(".id"), "kind": tag[len(_UPDATE_TAG):],
+                    "at": at, "row": s})
+    return out
+
+
+def when_text(at, clock=None) -> str:
+    """"02:00 on 16 October 2026 (Africa/Johannesburg)"."""
+    if at is None:
+        return "the time set on the router"
+    tz = (clock or {}).get("tz")
+    return (f"{at:%H:%M} on {at.day} {at:%B %Y}"
+            + (f" ({tz})" if tz else ""))
+
+
+def default_restart(clock):
+    """The restart time the page suggests: the next 02:00 on the router's
+    clock that leaves room for the download. None when the clock is unset,
+    since a time of day means nothing on a clock that is wrong."""
+    now = clock_datetime(clock)
+    if now is None or (clock or {}).get("unset"):
+        return None
+    at = now.replace(hour=_RESTART_DEFAULT_HOUR, minute=0)
+    if at < now + datetime.timedelta(hours=1):
+        at += datetime.timedelta(days=1)
+    return at
 
 
 def update_read(pusher, cfg):
     upd = pusher.api.fetch(_PKG_UPDATE)
     rb = pusher.api.fetch(_ROUTERBOARD)
-    return {"update": upd[0] if upd else {}, "routerboard": rb[0] if rb else {}}
+    clock = script_clock(pusher.api)
+    now = clock_datetime(clock)
+    # The restart still to come; one in the past already happened (or the
+    # router was off at the time), and is only a leftover timer.
+    restart = next((j for j in _update_jobs(pusher.api)
+                    if j["kind"] == "reboot"
+                    and (j["at"] is None or now is None or j["at"] > now)),
+                   None)
+    return {"update": upd[0] if upd else {}, "routerboard": rb[0] if rb else {},
+            "clock": clock, "restart": restart}
 
 
 def update_available(current):
@@ -3521,7 +3633,11 @@ def update_summary(current, cfg):
            f"Latest available: {u.get('latest-version', '(run a check)')}",
            f"Status: {u.get('status', '?')}"]
     if update_available(current):
-        out.append("⬆ An update is available — use the buttons below to install.")
+        out.append("⬆ An update is available — use Update now above.")
+    if current.get("restart"):
+        out.append(f"Restart planned for "
+                   f"{when_text(current['restart']['at'], current.get('clock'))}"
+                   f" — the downloaded update installs then.")
     if rb.get("current-firmware") or rb.get("upgrade-firmware"):
         out.append(f"RouterBOOT firmware: {rb.get('current-firmware', '?')} "
                    f"(available {rb.get('upgrade-firmware', '?')})")
@@ -3537,21 +3653,127 @@ def update_form(current, cfg):
              "value": u.get("channel", "stable") or "stable"}]
 
 
+def _drop_update_jobs(api, kinds) -> list:
+    """Remove the dashboard's earlier update timers of these kinds. A new
+    one replaces them: two restarts planned is one too many, and a timer's
+    name has to be free before it can be added again."""
+    return [Operation(
+        "remove", _SCHEDULER, {".id": j["id"]},
+        desc=f"remove the earlier "
+             f"{_UPDATE_JOB_WORDS.get(j['kind'], 'update timer')}",
+        inverse=Operation("add", _SCHEDULER,
+                          {f: j["row"][f] for f in _SCHED_FIELDS
+                           if f in j["row"]},
+                          desc="put the earlier update timer back"))
+        for j in _update_jobs(api) if j["kind"] in kinds]
+
+
+def _update_job(api, kind, at, desc) -> Operation:
+    """A one-shot timer on the router that runs one update step at `at`
+    (a datetime by the router's clock)."""
+    return Operation(
+        "add", _SCHEDULER,
+        {"name": _UPDATE_JOB_NAME[kind],
+         "start-date": _ros_date_text(api, at.date()),
+         "start-time": f"{at:%H:%M}:00", "interval": "0s",
+         "on-event": _UPDATE_SCRIPT[kind], "policy": _SCRIPT_POLICY,
+         "comment": _UPDATE_TAG + kind, "disabled": "no"},
+        desc=desc,
+        inverse=Operation("remove", _SCHEDULER, {},
+                          desc=f"remove the {_UPDATE_JOB_WORDS[kind]} timer"))
+
+
+def _restart_at(flat, clock):
+    """The restart time a form asked for, checked against the router's
+    clock. Raises PlanRefused with the reason a person can act on."""
+    now = clock_datetime(clock)
+    if now is None or (clock or {}).get("unset"):
+        raise PlanRefused(
+            "Nothing was sent to the router.\nThe router's clock is not set, "
+            "so it cannot restart at a time of day. Set its clock (System > "
+            "Clock, or NTP) and try again, or install the update now.")
+    raw = (flat.get("reboot_at") or "").strip()
+    try:
+        at = datetime.datetime.fromisoformat(raw).replace(second=0,
+                                                          microsecond=0)
+    except ValueError:
+        raise PlanRefused("Nothing was sent to the router.\nPick the date "
+                          "and time the router should restart.") from None
+    if at < now + _RESTART_MIN_AHEAD:
+        raise PlanRefused(
+            f"Nothing was sent to the router.\nPick a time at least "
+            f"{int(_RESTART_MIN_AHEAD.total_seconds() // 60)} minutes from "
+            f"now, so the download can finish first. It is "
+            f"{when_text(now, clock)} on the router.")
+    if at > now + _RESTART_MAX_AHEAD:
+        raise PlanRefused(
+            f"Nothing was sent to the router.\nPick a time within "
+            f"{_RESTART_MAX_AHEAD.days} days.")
+    return at
+
+
 def update_plan(pusher, cfg, flat, multi):
     action = flat.get("update_action", "")
     if action == "check":
         op = Operation("run", _PKG_UPDATE, {"_cmd": "check-for-updates"},
                        desc="check for RouterOS updates")
         return Plan(cfg.name, [op], summary="check for updates (no install)")
-    if action == "install":
-        cur = update_read(pusher, cfg).get("update", {})
-        latest = cur.get("latest-version", "") or "latest"
-        installed = cur.get("installed-version", "?")
-        op = Operation("run", _PKG_UPDATE, {"_cmd": "install"},
-                       desc=f"download & INSTALL RouterOS {latest} (currently "
-                            f"{installed}) — THE ROUTER WILL REBOOT now",
-                       detach=True)
-        return Plan(cfg.name, [op], summary="install RouterOS update + reboot")
+    if action in ("install", "download_later"):
+        api = pusher.api
+        cur = (_safe_fetch(api, _PKG_UPDATE) or [{}])[0]
+        latest = cur.get("latest-version", "") or "the latest RouterOS"
+        if cur.get("latest-version"):
+            latest = f"RouterOS {latest}"
+        clock = script_clock(api)
+        now = clock_datetime(clock)
+        if now is None:
+            raise PushError("could not read the router's clock, so no update "
+                            "timer could be set")
+        start = now + _UPDATE_LEAD
+        if action == "install":
+            ops = _drop_update_jobs(api, ("now", "download", "reboot"))
+            ops.append(_update_job(
+                api, "now", start,
+                f"in about two minutes ({start:%H:%M} on the router's "
+                f"clock) the router downloads {latest}, installs it and "
+                f"restarts by itself — the site is offline for about 2–3 "
+                f"minutes"))
+            lead = _UPDATE_LEAD.total_seconds()
+            return Plan(cfg.name, ops, summary="update RouterOS now",
+                        restarts=True,
+                        restart_window=(lead, lead + _DOWNLOAD_ALLOWANCE),
+                        note="The update starts on the router within two "
+                             "minutes. It downloads, installs and restarts "
+                             "by itself; the site is offline for about 2–3 "
+                             "minutes. Come back in about five minutes to "
+                             "see the new version.")
+        at = _restart_at(flat, clock)
+        when = when_text(at, clock)
+        ops = _drop_update_jobs(api, ("now", "download", "reboot"))
+        ops.append(_update_job(
+            api, "download", start,
+            f"download {latest} now, in the background on the router — the "
+            f"site stays online"))
+        ops.append(_update_job(
+            api, "reboot", at,
+            f"restart the router at {when} by its own clock, which installs "
+            f"the update — the site is offline for about 2–3 minutes then"))
+        # From this server's clock, not the router's: the two can differ,
+        # but the gap between "now" and the restart is the same on both.
+        until = (at - now).total_seconds()
+        return Plan(cfg.name, ops, summary=f"download now, restart {when}",
+                    restart_window=(until, until + _DOWNLOAD_ALLOWANCE),
+                    note=f"Downloading now, and the site stays online. The "
+                         f"router restarts at {when} by its own clock and "
+                         f"installs the update then. If it restarts for any "
+                         f"other reason before that, it installs the update "
+                         f"at that restart.")
+    if action == "cancel_reboot":
+        ops = _drop_update_jobs(pusher.api, ("reboot",))
+        return Plan(cfg.name, ops, summary="cancel the planned restart",
+                    note="Planned restart cancelled. The downloaded update "
+                         "stays on the router and installs at its next "
+                         "restart.")
     if action == "firmware":
         op = Operation("run", _ROUTERBOARD, {"_cmd": "upgrade"},
                        desc="upgrade RouterBOOT firmware — applies on next reboot")
@@ -3560,7 +3782,8 @@ def update_plan(pusher, cfg, flat, multi):
         op = Operation("run", ("system",), {"_cmd": "reboot"},
                        desc="reboot the router now — it will go offline ~1–2 min",
                        detach=True)
-        return Plan(cfg.name, [op], summary="reboot")
+        return Plan(cfg.name, [op], summary="reboot",
+                    restart_window=(0, _RESTART_BEGINS_WITHIN))
     channel = flat.get("channel", "").strip()
     if channel:
         return pusher.plan_settings(_PKG_UPDATE, {"channel": channel},

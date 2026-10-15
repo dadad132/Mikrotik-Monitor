@@ -2091,7 +2091,10 @@ RB = ("system", "routerboard")
 u_api = FakeApi({
     PKG: [{".id": "*0", "channel": "stable", "installed-version": "7.14",
            "latest-version": "7.15", "status": "New version is available"}],
-    RB: [{".id": "*0", "current-firmware": "7.14", "upgrade-firmware": "7.15"}]})
+    RB: [{".id": "*0", "current-firmware": "7.14", "upgrade-firmware": "7.15"}],
+    ("system", "clock"): [{"date": "2026-10-15", "time": "16:41:07",
+                           "time-zone-name": "Africa/Johannesburg"}],
+    ("system", "resource"): [{"version": "7.14"}]})
 pu = Pusher(qcfg, u_api, dry_run=True)
 cur = F.update_read(pu, qcfg)
 check("update_read reports installed vs latest version",
@@ -2104,9 +2107,15 @@ check("check is a single non-reboot run op",
       len(chk.ops) == 1 and chk.ops[0].action == "run"
       and chk.ops[0].params.get("_cmd") == "check-for-updates")
 inst = F.update_plan(pu, qcfg, {"update_action": "install"}, {})
-check("install runs the install command and warns about reboot",
-      inst.ops[0].params.get("_cmd") == "install"
-      and "REBOOT" in inst.ops[0].desc.upper())
+check("install is a one-shot timer on the router, two minutes out by its "
+      "own clock, that downloads, installs and restarts -- and says the "
+      "router restarts",
+      len(inst.ops) == 1 and inst.ops[0].action == "add"
+      and inst.ops[0].path == ("system", "scheduler")
+      and inst.ops[0].params["start-time"] == "16:43:00"
+      and inst.ops[0].params["interval"] == "0s"
+      and "update install" in inst.ops[0].params["on-event"]
+      and "restarts" in inst.ops[0].desc)
 fw = F.update_plan(pu, qcfg, {"update_action": "firmware"}, {})
 check("firmware upgrade runs routerboard upgrade",
       fw.ops[0].path == RB and fw.ops[0].params.get("_cmd") == "upgrade")
@@ -2187,8 +2196,9 @@ rb = F.update_plan(Pusher(qcfg, u_api, dry_run=True), qcfg,
 check("reboot is a detached run on /system",
       rb.ops[0].path == ("system",) and rb.ops[0].params.get("_cmd") == "reboot"
       and rb.ops[0].detach is True)
-check("install is detached too (survives the reboot disconnect)",
-      inst.ops[0].detach is True)
+check("install needs no session to survive the reboot: the router runs it "
+      "from its own timer", inst.ops[0].params.get("on-event")
+      and "_cmd" not in inst.ops[0].params)
 
 
 # ---- 15. gateway failover: recursive routes + RouterOS check-gateway=ping --

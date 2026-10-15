@@ -143,6 +143,14 @@ def _device_view(store, state, name) -> dict:
         up = 1 if up is None else up
     problems = _problems(conditions)
     keys = {p["key"] for p in problems}
+    # The monitor marks a router that was restarted from the dashboard while
+    # it holds that router's alerts (engine._hold_planned_restarts), so it
+    # reads Restarting rather than Offline. Only while down, and only until
+    # the hold ends: a mark left by a monitor stopped mid-restart must not
+    # outlive it.
+    rs = facts.get("restarting") or {}
+    restarting = (rs if not up and float(rs.get("until") or 0) > time.time()
+                  else None)
     if not up or "internet_down" in keys:
         wan_health = "down"
     elif "wan_failover" in keys:
@@ -152,6 +160,7 @@ def _device_view(store, state, name) -> dict:
     return {"device": name, "up": int(up), "metrics": metrics,
             "throughput": throughput, "problems": problems,
             "facts": facts, "wan_health": wan_health,
+            "restarting": restarting,
             # Kept for the dashboard's suggestion cards, which show each
             # condition's own recorded title rather than re-deriving one.
             "_conditions": conditions}
@@ -1577,11 +1586,26 @@ _DASH_STATUS_BADGE = {"ok": ("ok", "Healthy"),
                       "crit": ("crit", "Offline")}
 
 
+def _status_badge(d) -> tuple:
+    """(css class, label, tooltip) for a router's headline status. A router
+    restarted from the dashboard reads Restarting, in amber, while it comes
+    back -- it is offline because somebody restarted it, not broken."""
+    if d.get("restarting"):
+        rs = d["restarting"]
+        until = time.strftime("%H:%M", time.localtime(float(rs["until"])))
+        return ("warn", "Restarting",
+                f'{rs.get("what") or "Restarted from the dashboard"}. Offline '
+                f'alerts are held until {until}.')
+    cls, label = _DASH_STATUS_BADGE[_severity(d)]
+    return cls, label, ""
+
+
 def _dash_device_rows(devs) -> str:
     rows = []
     for d in devs:
         sev = _severity(d)
-        cls, label = _DASH_STATUS_BADGE[sev]
+        cls, label, tip = _status_badge(d)
+        tip_attr = f' title="{esc(tip)}"' if tip else ""
         n_alerts = len(d["problems"])
         link = f'/device?name={quote(d["device"])}'
         # Amber whenever there is anything to read, red only when the router
@@ -1599,7 +1623,7 @@ def _dash_device_rows(devs) -> str:
             f'<tr data-name="{esc(d["device"].lower())}" data-sev="{sev}">'
             f'<td class="dt-name"><a href="{link}"><span class="dt-ic">'
             f'&#9638;</span>{esc(d["device"])}</a></td>'
-            f'<td><span class="badge {cls}">{label}</span></td>'
+            f'<td><span class="badge {cls}"{tip_attr}>{label}</span></td>'
             f'<td>{alert_html}</td>'
             f'<td class="dt-view"><a href="{link}">View &rarr;</a></td>'
             f'</tr>')
@@ -2456,7 +2480,11 @@ def _render_device(store, state, name, user, csrf="",
     d = _device_view(store, state, name)
     f = d["facts"]
     sev = _severity(d)
-    badge = _DASH_STATUS_BADGE[sev]
+    badge = _status_badge(d)
+    restart_html = (
+        f'<div class="box" style="border-left:4px solid #d97706">'
+        f'<b>Restarting.</b> {esc(badge[2])} If it is not back by then, the '
+        f'offline alert goes out.</div>' if d.get("restarting") else "")
     m = d["metrics"]
     q = quote(name)
 
@@ -2801,7 +2829,7 @@ def _render_device(store, state, name, user, csrf="",
         f'<div class="wrap" style="max-width:1300px">'
         f'<h1 style="display:flex;align-items:center;gap:12px">{esc(name)}'
         f'<span class="badge {badge[0]}">{badge[1]}</span></h1>'
-        f'{tabbar}{facts_bar}{notice_html}'
+        f'{tabbar}{facts_bar}{restart_html}{notice_html}'
         # During an outage "what happened" is the first thing anybody opening
         # this page wants, so it spans the page; otherwise it is a footnote
         # in the side column.
@@ -7085,25 +7113,86 @@ def _wg_repair_box(name, csrf) -> str:
             f'Diagnose &amp; repair now</button></div></form></div>')
 
 
+def _note_restart(devices_db, name, window, why, by) -> None:
+    """Tell the monitor a router is being restarted from here, so it holds
+    that router's alerts while it comes back (restarts.py). `window` is the
+    plan's (seconds until the restart begins, seconds until it begins at the
+    latest). Never fails the change it follows: at worst somebody gets the
+    offline email they would have got before."""
+    from . import restarts as _rs
+    try:
+        now = time.time()
+        _rs.plan(_rs.path_for(devices_db), name, start=now + window[0],
+                 latest=now + window[1], why=why, by=by, now=now)
+    except Exception:  # noqa: BLE001
+        log.exception("could not record the restart of %s", name)
+
+
+def _restart_why(slug, flat) -> str:
+    """What restarted the router, as the dashboard and the alert say it."""
+    action = (flat or {}).get("update_action", "")
+    if slug == "update" and action == "install":
+        return "Updated from the dashboard"
+    if slug == "update" and action == "download_later":
+        return "Restarted for an update planned from the dashboard"
+    if slug == "scripts":
+        return (f"Restarted by the script "
+                f"'{(flat or {}).get('script_name', '')}' from the dashboard")
+    return "Rebooted from the dashboard"
+
+
+def _first(multi, key) -> str:
+    """One value of a submitted form, whether it arrived as a list (the
+    multi dict) or as a plain string."""
+    v = (multi or {}).get(key)
+    if isinstance(v, (list, tuple)):
+        return str(v[0]) if v else ""
+    return str(v or "")
+
+
+# The update tab's actions that are confirmed in plain words: what the box
+# asks, and what the button that sends it says.
+_UPDATE_ASK = {
+    "install": ("Download and install the update now?", "Yes, update now"),
+    "download_later": ("Download the update now and restart later?",
+                       "Yes, do that"),
+    "cancel_reboot": ("Cancel the planned restart?", "Yes, cancel it"),
+    "check": ("Check for a newer RouterOS?", "Yes, check now"),
+}
+
+
 def _update_box(name, csrf, current):
-    """Returns (extra_html, extra_actions) for the update feature tab.
-    extra_actions are injected into the top form's actions row.
-    extra_html holds the reboot box shown below."""
-    from .push.features import firmware_available, update_available
+    """Returns (extra_html, extra_actions, lead_html) for the update tab.
+
+    lead_html goes above everything else: when the router says an update is
+    available, an "Update now" button that opens the two ways to take it --
+    install now (the router restarts straight away) or download now and
+    restart at a time picked on the router's own clock. extra_actions are
+    injected into the channel form's actions row; extra_html holds the
+    reboot box shown below."""
+    from .push.features import (clock_datetime, default_restart,
+                                firmware_available, update_available,
+                                when_text)
 
     q = esc(name)
+    current = current if isinstance(current, dict) else {}
+    hidden = (f'<input type="hidden" name="csrf" value="{csrf}">'
+              f'<input type="hidden" name="device" value="{q}">'
+              f'<input type="hidden" name="feature" value="update">')
 
     def act(action, label, cls, confirm=""):
         oc = (f' onclick="{confirm_attr(confirm)}"' if confirm else "")
         return (f'<form method="POST" action="/device/push" class="inline">'
-                f'<input type="hidden" name="csrf" value="{csrf}">'
-                f'<input type="hidden" name="device" value="{q}">'
-                f'<input type="hidden" name="feature" value="update">'
+                f'{hidden}'
                 f'<input type="hidden" name="update_action" value="{action}">'
                 f'<button class="btn {cls}" type="submit"{oc}>{label}</button>'
                 f'</form>')
 
-    avail = update_available(current)
+    u = current.get("update") or {}
+    clock = current.get("clock") or {}
+    installed = esc(str(u.get("installed-version") or "?"))
+    latest = esc(str(u.get("latest-version") or ""))
+    channel = esc(str(u.get("channel") or "stable"))
 
     # Buttons that live in the top form's actions row
     actions = ""
@@ -7111,14 +7200,76 @@ def _update_box(name, csrf, current):
         actions += " " + act("firmware", "Upgrade RouterBOOT firmware", "ghost",
                               confirm="Schedules a firmware upgrade. Continue?")
 
-    avail_line = ('<p><span class="badge warn">update available</span></p>'
-                  if avail else "")
-    note = ('<p class="muted" style="border-left:3px solid #d97706;'
-            'padding-left:8px;margin-top:12px">'
-            '⚠ <b>Download &amp; install + reboot</b> checks for the latest '
-            'version, downloads and installs it, then <b>reboots</b> (~1–2 min '
-            'offline). If the router is already current, nothing happens. '
-            'You get a dry-run preview and confirm step first.</p>')
+    if update_available(current):
+        at = default_restart(clock)
+        now = clock_datetime(clock)
+        clock_line = (f'It is {esc(when_text(now, clock))} on the router. '
+                      f'The restart happens by this clock.' if now else "")
+        if at is not None:
+            later = (
+                f'<label style="display:block;margin:8px 0">Restart at<br>'
+                f'<input type="datetime-local" name="reboot_at" required '
+                f'value="{at:%Y-%m-%dT%H:%M}" style="max-width:260px"></label>'
+                f'<p class="muted" style="font-size:12px;margin:0 0 10px">'
+                f'{clock_line}</p>'
+                f'<button class="btn" type="submit">Download now, restart '
+                f'later</button>')
+        else:
+            later = ('<p class="muted" style="margin:8px 0 0">The router\'s '
+                     'clock is not set, so it cannot restart at a time of '
+                     'day. Set its clock (System &gt; Clock, or NTP), or '
+                     'install the update now.</p>')
+        lead = (
+            '<style>summary.btn{display:inline-block;list-style:none;'
+            'cursor:pointer}summary.btn::-webkit-details-marker{display:none}'
+            '.upd-opts{display:grid;gap:12px;margin-top:14px;'
+            'grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}'
+            '.upd-opt{border:1px solid var(--border);border-radius:8px;'
+            'padding:14px}.upd-opt h3{margin:0 0 6px;font-size:16px}</style>'
+            f'<div class="box" style="border-left:4px solid #2563eb">'
+            f'<h2>Update available</h2>'
+            f'<p style="margin:0 0 12px">RouterOS <b>{latest}</b> is '
+            f'available. This router runs <b>{installed}</b> ({channel} '
+            f'channel).</p>'
+            f'<details><summary class="btn">Update now</summary>'
+            f'<div class="upd-opts">'
+            f'<form method="POST" action="/device/push" class="upd-opt">'
+            f'{hidden}<input type="hidden" name="update_action" '
+            f'value="install">'
+            f'<h3>Download and install now</h3>'
+            f'<p class="muted" style="margin:0 0 10px">The router downloads '
+            f'the update, installs it and restarts straight away. The site '
+            f'is offline for about 2–3 minutes.</p>'
+            f'<button class="btn" type="submit">Download and install now'
+            f'</button></form>'
+            f'<form method="POST" action="/device/push" class="upd-opt">'
+            f'{hidden}<input type="hidden" name="update_action" '
+            f'value="download_later">'
+            f'<h3>Download now, restart later</h3>'
+            f'<p class="muted" style="margin:0">The download starts now and '
+            f'the site stays online. The router restarts at the time you '
+            f'pick and installs the update then.</p>{later}</form>'
+            f'</div></details></div>')
+    else:
+        status = esc(str(u.get("status") or ""))
+        lead = (f'<div class="box"><h2>RouterOS {installed}</h2>'
+                f'<p class="muted" style="margin:0 0 10px">'
+                + (f'The router says: {status}.' if status else
+                   'The router has not checked for updates yet.')
+                + '</p><div class="actions">'
+                + act("check", "Check for updates now", "ghost")
+                + '</div></div>')
+
+    restart = current.get("restart")
+    if restart:
+        lead += (f'<div class="box" style="border-left:4px solid #d97706">'
+                 f'<h2>Restart planned</h2>'
+                 f'<p>The router restarts at <b>'
+                 f'{esc(when_text(restart["at"], clock))}</b> by its own '
+                 f'clock and installs the downloaded update then. The site is '
+                 f'offline for about 2–3 minutes.</p><div class="actions">'
+                 + act("cancel_reboot", "Cancel the planned restart", "ghost")
+                 + '</div></div>')
 
     reboot = ('<div class="box"><h2>Reboot</h2><p class="muted">Manually reboot '
               'this router now — it will be offline ~1–2 minutes. Previewed and '
@@ -7127,8 +7278,7 @@ def _update_box(name, csrf, current):
                     confirm="Reboot the router now? It will go offline ~1–2 min.")
               + '</div></div>')
 
-    extra_html = avail_line + note + reboot
-    return extra_html, actions
+    return reboot, actions, lead
 
 
 def _interfaces_table(current) -> str:
@@ -7741,7 +7891,8 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                         extra_html="", extra_actions="", report_html="",
                         wan_ifaces=None, online_ifaces=None,
                         detected_gateways=None, can_manage=None,
-                        failover_on=False, seen_tips=None) -> str:
+                        failover_on=False, seen_tips=None,
+                        lead_html="") -> str:
     if can_manage is None:
         can_manage = AuthStore.is_admin(user or {})
     tabbar = _device_tabbar(name, slug, can_manage, csrf)
@@ -7786,6 +7937,31 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                 f'<button class="btn" type="submit">Yes, do it</button>'
                 f'<a class="btn ghost" href="/device?name={q}&tab={slug}">Cancel'
                 f'</a></div></form></div>')
+    elif (preview is not None and slug == "update"
+          and _first(submitted, "update_action") in _UPDATE_ASK):
+        # Updating is the one change here that takes the whole site offline,
+        # so it is asked in plain words -- what happens, and when -- rather
+        # than as a diff of scheduler rows.
+        ask, yes = _UPDATE_ASK[_first(submitted, "update_action")]
+        if preview.empty:
+            body = (f'<div class="box"><h2>Nothing to do</h2>'
+                    f'<p>There is no planned restart on this router.</p>'
+                    f'<div class="actions"><a class="btn ghost" '
+                    f'href="/device?name={q}&tab={slug}">Back</a></div></div>')
+        else:
+            steps = "".join(f'<li>{esc(op.desc[:1].upper() + op.desc[1:])}'
+                            f'</li>' for op in preview.ops
+                            if not op.desc.startswith("remove the earlier"))
+            body = (f'<div class="box"><h2>{ask}</h2>'
+                    f'<ul style="margin:0 0 12px 18px">{steps}</ul>'
+                    f'<form method="POST" action="{confirm_action}">'
+                    f'<input type="hidden" name="csrf" value="{csrf}">'
+                    f'<input type="hidden" name="apply" value="1">'
+                    f'{_hidden_from_multi(submitted or {}, device=name, feature=slug)}'
+                    f'<div class="actions">'
+                    f'<button class="btn" type="submit">{yes}</button>'
+                    f'<a class="btn ghost" href="/device?name={q}&tab={slug}">'
+                    f'Cancel</a></div></form></div>')
     elif preview is not None:
         # Safe mode (commit-confirm): offered for changes that could lock you
         # out. Not for 'update' (its reboot is intentional and would fight the
@@ -7858,6 +8034,10 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
             preview_btn = ('<button class="btn ghost" type="submit">'
                            'Preview changes (just show me)</button>'
                            if instant else
+                           # The update tab's form only holds the channel;
+                           # updating itself is the Update now box above.
+                           '<button class="btn ghost" type="submit">Change '
+                           'channel</button>' if slug == "update" else
                            '<button class="btn" type="submit">Preview changes '
                            '(dry-run)</button>')
             note = ('<p class="muted" style="font-size:12px;margin:10px 0 0">'
@@ -7876,7 +8056,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                     f'{extra_actions}</div>{note}</form></div>')
         else:
             form = ""  # read-only feature (e.g. Interfaces)
-        body = (form + state + extra_html
+        body = (lead_html + form + state + extra_html
                 + _adopt_box(name, slug, feature, csrf, unmanaged))
 
     # The SD-WAN tab gets an inline WAN-uplink editor (device metadata, so it
@@ -7964,7 +8144,8 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
     for n in all_names:
         d = devs_by_name.get(n, {})
         f = d.get("facts") or {}
-        sev = _severity(d) if d else "crit"
+        sev = ("warn" if d.get("restarting") else
+               _severity(d) if d else "crit")
         dot = {"ok": "#16a34a", "warn": "#d97706",
                "crit": "#dc2626"}.get(sev, "#dc2626")
         ver = f.get("version", "—")
@@ -7973,7 +8154,8 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
             f' <a class="up" href="/device?name={quote(n)}&tab=update">'
             f'upgrade</a>' if old else ""))
         host = f.get("host") or (store.raw(n) or {}).get("host", "—")
-        badge_lbl = "online" if d.get("up") else "offline"
+        badge_lbl = ("online" if d.get("up") else
+                     "restarting" if d.get("restarting") else "offline")
         upd = f.get("update_available")
         if upd is True:
             upd_html = '<span class="badge warn">Yes</span>'
@@ -11512,6 +11694,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if action == "restore":
                     pusher.apply(pusher.plan_restore(bkname or ""),
                                  feature="backup:restore")
+                    _note_restart(devices_db, name, (0, 180),
+                                  "Restarted to restore a backup from the "
+                                  "dashboard", uname)
                     msg = (f"Restoring '{bkname}' — the router is rebooting and "
                            f"will be back in 1–2 minutes with that configuration.")
                 elif action == "delete":
@@ -11704,7 +11889,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
             cfg = build_device(raw, defaults)  # device metadata (no router needed)
             summary_lines = fields = unmanaged = None
-            extra_html = extra_actions = ""
+            extra_html = extra_actions = lead_html = ""
             if slug == "departments":
                 # Built from stored config, not from the router. The tab has
                 # to be usable while the site is down -- that is often
@@ -11888,7 +12073,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                             _remote_regenerate_box(name, current.get("users", []), csrf)
                             + _remote_test_box(name, csrf))
                     elif slug == "update":
-                        extra_html, extra_actions = _update_box(name, csrf, current)
+                        extra_html, extra_actions, lead_html = _update_box(
+                            name, csrf, current)
                     elif slug == "interfaces":
                         extra_html = _interfaces_table(current)
                 except (DeviceError, PushError) as exc:
@@ -11903,7 +12089,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 fields=fields, preview=preview, submitted=submitted, error=error,
                 msg=msg, recent=recent, facts=facts, unmanaged=unmanaged,
                 confirm_action=confirm_action, cfg=cfg, extra_html=extra_html,
-                extra_actions=extra_actions, report_html=_report_html,
+                extra_actions=extra_actions, lead_html=lead_html,
+                report_html=_report_html,
                 wan_ifaces=wan_ifaces, online_ifaces=online_ifaces,
                 detected_gateways=detected_gateways, can_manage=can_manage,
                 failover_on=wan_failover_on,
@@ -12171,6 +12358,16 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if not commit:
                     return self._feature_tab_page(name, user, view, preview=plan,
                                                   submitted=multi)
+                # A change that restarts the router: say so to the monitor,
+                # so the router going offline is held as a restart rather
+                # than emailed as an outage (restarts.py).
+                if plan.restart_window:
+                    _note_restart(devices_db, name, plan.restart_window,
+                                  _restart_why(slug, flat), uname)
+                elif (slug == "update"
+                      and flat.get("update_action") == "cancel_reboot"):
+                    from . import restarts as _rs
+                    _rs.cancel(_rs.path_for(devices_db), name)
                 # After applying the hub-tunnel feature, register the router's
                 # WireGuard public key as a peer on this server automatically.
                 if slug == "hubtunnel" and devices_db:
@@ -12208,6 +12405,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                             "Remote user removed: it can no longer connect."
                             if action == "remove" else
                             "Remote users are switched off on this router."))
+                if slug == "update" and plan.note:
+                    # When the router goes offline, and when it is back, said
+                    # once the timers are on it: "Changes applied" tells the
+                    # reader nothing about a restart they have just booked.
+                    return self._redirect(
+                        f"/device?name={quote(name)}&tab={view}&msg="
+                        + quote(plan.note))
                 if armed["token"]:
                     # A flipped switch goes back to the switch. The watching
                     # page is right when somebody deliberately pressed Apply
@@ -12364,6 +12568,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                detach=True)
                 pusher.apply(Plan(cfg.name, [op], summary="reboot"),
                              feature="reboot")
+                _note_restart(devices_db, name, (0, 120),
+                              "Rebooted from the dashboard", uname)
             except (DeviceError, PushError) as exc:
                 err = str(exc)
             finally:
