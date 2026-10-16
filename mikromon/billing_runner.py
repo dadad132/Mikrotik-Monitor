@@ -31,7 +31,8 @@ import logging
 import threading
 import time
 
-from .billing import BILLING_CURRENCY, money, plan_by_name, plan_for
+from .billing import (BILLING_CURRENCY, add_billing_months, money,
+                      plan_by_name, plan_for)
 
 log = logging.getLogger(__name__)
 
@@ -172,6 +173,13 @@ def raise_due_invoices(billing, auth, now: float | None = None,
             log.exception("could not apply the booked change for org %s", org_id)
 
         period_end = float(row.get("current_period_end") or 0.0)
+        # A company still suspended a whole month after its paid-up date is
+        # not invoiced for that month: it was never given it. It starts
+        # again, pro rata from the day it pays, when it comes back -- and
+        # without this the invoice withdrawn as stale would be raised again
+        # the next morning.
+        if period_end and add_billing_months(period_end, 1) <= now:
+            continue
         # plan_for, not plan_by_name: a quoted company is not on a tier, and
         # looking their plan name up in the ladder is what returned nothing
         # and skipped them at every single renewal.
@@ -389,6 +397,16 @@ def run_once(billing, auth, now: float | None = None,
                                                 row["grace_period_end"])
         except Exception:  # noqa: BLE001
             log.exception("the final reminder pass failed")
+        try:
+            # An invoice for a month that is over is no longer owed: a
+            # company still suspended by then starts again from the day it
+            # pays (billing.outstanding_renewal).
+            for order in billing.lapse_stale_renewals(now):
+                log.info("billing: renewal invoice %s for org %s lapsed "
+                         "unpaid; its month is over", order.get("id"),
+                         order.get("org_id"))
+        except Exception:  # noqa: BLE001
+            log.exception("the stale invoice pass failed")
         try:
             raised = raise_due_invoices(billing, auth, now=now, send=send)
             if not force_raise:

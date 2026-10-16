@@ -8971,7 +8971,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                             '"detail":"This account is suspended pending '
                             'payment. Contact billing to restore access."}',
                             "application/json")
-                    if path != "/billing":
+                    # The invoice too: a suspended company asking for it
+                    # again needs to see what it owes, and where to pay.
+                    if path not in ("/billing", "/billing/invoice"):
                         return self._redirect("/billing")
                 elif billing.in_grace_period(org_id):
                     self._grace_banner = _grace_banner_html(
@@ -9295,6 +9297,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             q = parse_qs(url.query)
             bill = billing.get(user["org_id"]) if billing else None
             contact = auth.get_billing_contact() if auth else None
+            # The renewal invoice a company that has fallen behind still
+            # owes, in full (billing.outstanding_renewal): shown, and paid,
+            # the same way from every page.
+            owed = billing.outstanding_renewal(user["org_id"]) if billing else None
             if billing and billing.is_locked(user["org_id"]):
                 return self._send(200, _render_locked(
                     user, contact,
@@ -9303,7 +9309,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     yoco_on=self._yoco_live(),
                     bill=bill,
                     org_name=(auth.org_name(user["org_id"])
-                              if auth else "")),
+                              if auth else ""), owed=owed,
+                    msg=q.get("ok", [""])[0], error=q.get("error", [""])[0]),
                                   "text/html; charset=utf-8")
             pf_enabled = bool(_pf_merchant_id and _pf_merchant_key)
             # The page marks the packet that fits, which needs the real
@@ -9328,15 +9335,19 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 from . import billing_runner
                 base = _public_base(auth) or self._request_base()
                 for o in orders:
-                    if o.get("kind") == "upgrade" and o.get("status") not in (
-                            "paid", "cancelled", "lapsed", "replaced"):
+                    if ((o.get("kind") == "upgrade"
+                         or (owed and o["id"] == owed["id"]))
+                            and o.get("status") not in (
+                                "paid", "cancelled", "lapsed", "replaced")):
                         o["pay_link"] = billing_runner.pay_link(
                             auth, int(o["id"]), base)
+            if owed:
+                owed = next((o for o in orders if o["id"] == owed["id"]), owed)
             return self._send(200, _render_billing(
                 user, bill, pf_enabled, self._session()["csrf"],
                 msg=q.get("ok", [""])[0], error=q.get("error", [""])[0],
                 contact=contact, device_count=dev_count,
-                yoco_on=yoco_on, orders=orders),
+                yoco_on=yoco_on, orders=orders, owed=owed),
                 "text/html; charset=utf-8")
 
         def _serve_superadmin(self, url, user):
@@ -15224,6 +15235,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return None, ("This invoice was replaced by a newer one for "
                               "the packet you are on now; it has been "
                               "emailed. Sign in and open Billing to pay it.")
+            if order.get("kind") != "upgrade" and order.get("status") == "lapsed":
+                return None, ("This invoice is no longer payable: the month "
+                              "it was for has ended. Sign in and open "
+                              "Billing to pay from today to the 28th.")
+            if order.get("kind") != "upgrade" and order.get("status") == "cancelled":
+                return None, ("This invoice was withdrawn, so nothing is owed "
+                              "on it. Sign in and open Billing to see your "
+                              "account.")
             if order.get("kind") == "upgrade":
                 from .billing import UPGRADE_HOLD_DAYS, upgrade_lapses_at
                 if (order.get("status") not in ("cancelled", "lapsed")
@@ -15328,6 +15347,69 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             billing.set_order_checkout(int(order["id"]), res.get("id", ""))
             return self._redirect(res["redirectUrl"])
 
+        def _checkout_owed(self, order, flat, user, cfg):
+            """Send a company that has fallen behind to Yoco to pay the
+            renewal invoice it owes -- that invoice, at its own amount, so
+            paying it here and paying the emailed link are the same thing."""
+            from .billing import money, plan_by_name, zar_amount
+            from .fxrate import RateUnavailable
+            from .web_terms import TERMS_VERSION
+            from .yoco import YocoError, create_checkout
+
+            plan = plan_by_name(order.get("plan", "")) or {}
+            what = plan.get("label") or order.get("plan") or "your packet"
+            total = money((order.get("amount_cents") or 0) / 100,
+                          order.get("currency") or "USD")
+            chosen = (flat.get("plan") or "").strip()
+            if chosen and chosen != order.get("plan"):
+                return self._redirect("/billing?error=" + quote(
+                    f"The invoice for {what} ({total}) is still outstanding. "
+                    f"Pay it first; you can change packet afterwards."))
+            if flat.get("agree") != "1":
+                return self._redirect("/billing?error=" + quote(
+                    "Please tick the box to accept the Terms & Conditions, "
+                    "then pay."))
+            billing.record_order_terms(int(order["id"]), TERMS_VERSION,
+                                       by=user.get("login", ""))
+            cents = int(order.get("amount_cents") or 0)
+            if str(order.get("currency") or "ZAR").upper() != "ZAR":
+                try:
+                    cents = int(round(zar_amount(cents / 100.0)["amount"] * 100))
+                except RateUnavailable:
+                    return self._redirect("/billing?error=" + quote(
+                        "Card payment is unavailable right now: today's "
+                        "exchange rate could not be fetched, and we will not "
+                        "convert at a rate we made up. Please try shortly."))
+            host = self.headers.get("Host", "localhost")
+            base = ("https" if self._is_https() else "http") + "://" + host
+            try:
+                res = create_checkout(
+                    cfg["secret_key"], cents,
+                    metadata={"order": str(order["id"]),
+                              "org": str(user["org_id"])},
+                    success_url=base + "/billing?ok=" + quote(
+                        "Thank you. Your payment is being confirmed - the "
+                        "account switches back on within a minute."),
+                    cancel_url=base + "/billing",
+                    failure_url=base + "/billing?error=" + quote(
+                        "That payment did not go through. Nothing was "
+                        "charged."))
+            except YocoError as exc:
+                log.warning("Yoco checkout failed for org %s: %s",
+                            user["org_id"], exc)
+                return self._redirect("/billing?error=" + quote(str(exc)))
+            if res.get("id"):
+                billing.set_order_checkout(int(order["id"]), res["id"])
+            url = res.get("redirectUrl") or res.get("redirect_url") or ""
+            if not url:
+                return self._redirect("/billing?error=" + quote(
+                    "Yoco did not return a payment page. Nothing was "
+                    "charged - please try again."))
+            log.info("Yoco checkout %s: org %s pays its outstanding invoice "
+                     "%s (R%.2f)", res.get("id"), user["org_id"], order["id"],
+                     cents / 100)
+            return self._redirect(url)
+
         def _post_billing_checkout(self, flat, user):
             """Send an owner to Yoco to pay for a packet.
 
@@ -15348,6 +15430,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._redirect("/billing?error=" + quote(
                     "Card payment is not switched on yet - please pay by EFT "
                     "using the reference on this page."))
+            # Behind on a renewal: the invoice that went out is what is owed,
+            # in full, whichever button pays it -- not a fresh pro rata price
+            # that only this page would charge, beside an invoice left open
+            # to be paid a second time (billing.outstanding_renewal).
+            owed = billing.outstanding_renewal(user["org_id"])
+            if owed is not None:
+                return self._checkout_owed(owed, flat, user, cfg)
             plan = plan_by_name((flat.get("plan") or "").strip())
             if plan is None:
                 return self._redirect("/billing?error=" + quote(
@@ -15664,7 +15753,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             pays for, and empty for one already settled -- a paid invoice
             carrying a live Pay button is how somebody pays twice.
             """
-            if not order or order.get("paid") or order.get("status") == "paid":
+            if not order or order.get("paid") or order.get("status") in (
+                    "paid", "cancelled", "lapsed", "replaced"):
                 return ""
             # The same rule the emailed invoice follows -- no card payment,
             # no link -- so the copy opened here offers what the email did.

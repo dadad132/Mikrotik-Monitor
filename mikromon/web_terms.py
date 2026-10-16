@@ -15,7 +15,7 @@ from __future__ import annotations
 from .web_shared import (_BRAND, _THEME_INIT_JS, _THEME_TOGGLE_JS, _THEME_VARS,
                          _theme_toggle_btn, esc)
 
-TERMS_VERSION = "2026-10-15"
+TERMS_VERSION = "2026-10-16"
 
 
 def terms_checkbox(note: str = "") -> str:
@@ -99,6 +99,13 @@ def _sections(provider: str, email: str) -> list:
           f"you lose access to the service and to all of your units until "
           f"the outstanding invoice is paid. Paying switches the account "
           f"back on.",
+          f"A renewal paid late is paid in full, for the month from one "
+          f"{BILLING_DAY}th to the next, even if part of that month was "
+          f"spent suspended; the days you were suspended are not refunded "
+          f"or carried over. If the account is still suspended when that "
+          f"month ends, its invoice is withdrawn and nothing is owed for it. "
+          f"Coming back after that is charged like a first payment: from "
+          f"the day you pay to the next {BILLING_DAY}th.",
           "Your settings and data are kept while the account is suspended. "
           "An account that stays suspended for a long time may be closed and "
           "its data deleted after we have warned you."]),

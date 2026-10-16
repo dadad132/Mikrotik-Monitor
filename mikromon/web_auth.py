@@ -943,6 +943,40 @@ def _waiting_box(orders, csrf: str = "", reference: str = "",
     return ""
 
 
+def _owed_box(order, reference: str = "", grace_end=None) -> str:
+    """The renewal invoice a company that has fallen behind still owes, at
+    the top of Billing: what it is, how much, and how to pay it.
+
+    The same invoice, for the same amount, that the email, the reminders and
+    the suspended page all point at -- the Billing tab used to offer its own
+    pro rata price beside it instead, and the invoice stayed open to be paid
+    a second time."""
+    plan = plan_by_name(order.get("plan", ""))
+    what = (f'{plan["devices"]} devices' if plan
+            else order.get("plan") or "your packet")
+    due = (time.strftime("%d %B %Y", time.localtime(float(order["due"])))
+           if order.get("due") else "")
+    when = (f' Pay it by <b>{esc(time.strftime("%d %B %Y", time.localtime(float(grace_end))))}'
+            f'</b> or the account is suspended.'
+            if grace_end and float(grace_end) > time.time() else "")
+    how = ("" if order.get("pay_link") else
+           f' Pay by bank transfer quoting <b>{esc(reference)}</b>; the bank '
+           f'details are on the invoice.' if reference else "")
+    pay = (f'<a class="btn" href="{esc(order["pay_link"])}">Pay now</a>'
+           if order.get("pay_link") else "")
+    view = (f'<a class="btn ghost" href="/billing/invoice?id='
+            f'{int(order["id"])}">View invoice</a>')
+    return (f'<div class="box" style="border-left:4px solid #dc2626;'
+            f'display:flex;align-items:center;justify-content:space-between;'
+            f'gap:12px;flex-wrap:wrap"><div><b>Invoice for {esc(what)}</b> '
+            f'&middot; {_order_usd(order, plan)} overdue'
+            + (f' since {esc(due)}' if due else "")
+            + f'<div class="muted" style="font-size:13px">The month it was '
+            f'for has started, so it is owed in full.{when}{how}</div></div>'
+            f'<div style="display:flex;gap:8px;flex-wrap:wrap">{pay}{view}'
+            f'</div></div>')
+
+
 def _orders_box(orders) -> str:
     """What this company has bought, newest first, each with its invoice.
 
@@ -967,6 +1001,10 @@ def _orders_box(orders) -> str:
             state = '<span class="badge ok">Paid</span>'
             act = (f'<a class="btn ghost" style="padding:4px 12px" '
                    f'href="/billing/invoice?id={int(o["id"])}">Invoice</a>')
+        elif o.get("status") == "lapsed" and not upgrade:
+            state = ('<span class="muted">Lapsed &mdash; the month it was '
+                     'for ended unpaid</span>')
+            act = ""
         elif o.get("status") == "lapsed":
             from .billing import UPGRADE_HOLD_DAYS
             state = (f'<span class="muted">Lapsed &mdash; not paid within '
@@ -983,6 +1021,13 @@ def _orders_box(orders) -> str:
             state = '<span style="color:#d97706">Waiting for payment</span>'
             act = (f'<a class="btn" style="padding:4px 12px" '
                    f'href="{esc(o["pay_link"])}">Pay</a>')
+        elif o.get("due") and not upgrade:
+            # A renewal invoice, raised before its 28th. It used to read
+            # "Not completed" with nothing to click: the one row a company
+            # paying by transfer needed to open.
+            state = '<span style="color:#d97706">Waiting for payment</span>'
+            act = (f'<a class="btn ghost" style="padding:4px 12px" '
+                   f'href="/billing/invoice?id={int(o["id"])}">Invoice</a>')
         else:
             state = '<span class="muted">Not completed</span>'
             act = ""
@@ -1330,9 +1375,14 @@ def _pending_from_row(bill) -> dict | None:
 def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                     msg: str = "", error: str = "", contact: dict | None = None,
                     device_count: int = 0, yoco_on: bool = False,
-                    orders=None) -> str:
+                    orders=None, owed=None) -> str:
     """Billing page: current subscription status, the packet ladder, and the
     company's own EFT reference for paying by bank transfer.
+
+    `owed` is the renewal invoice a company that has fallen behind still
+    owes (billing.outstanding_renewal). It goes at the top, and the packet
+    buttons wait until it is paid: they would otherwise offer a second,
+    pro rata price for the same month.
 
     The packet prices render whether or not card payment is configured. What
     a packet costs is the customer's business; which gateway the server has
@@ -1366,7 +1416,7 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
         contact_p = (f'<p class="muted" style="margin:4px 0 0">{_contact_line(contact)}</p>'
                     if _contact_line(contact) else "")
         status_html = (f'<p style="margin:0"><span style="color:#d97706;font-weight:700">'
-                       f'Grace Period</span> &middot; subscribe before {ge_fmt} to '
+                       f'Grace Period</span> &middot; pay before {ge_fmt} to '
                        f'avoid lockout</p>{contact_p}')
     elif status in ("canceled", "locked", "inactive"):
         contact_p = (f'<p class="muted" style="margin:4px 0 0">{_contact_line(contact)}</p>'
@@ -1472,6 +1522,8 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
         per_dev = p["price_usd"] / p["devices"]
         if is_current:
             btn = '<span class="badge ok">Current plan</span>'
+        elif owed:
+            btn = ""
         elif yoco_on:
             # Priced here, on the server, from our own table. The browser
             # sends only which packet was chosen -- never the amount, which
@@ -1534,12 +1586,15 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
     # problem, so the customer is told about the payment route that does work
     # (the EFT box directly below) rather than being shown an empty page with
     # a note about a config file they will never open.
-    pay_line = ("Pay by card — your packet changes the moment the payment "
+    pay_line = ("Pay the overdue invoice above first; after that you can "
+                "change packet here."
+                if owed else
+                "Pay by card — your packet changes the moment the payment "
                 "goes through."
                 if yoco_on else
                 "Cancel anytime." if pf_enabled
                 else "Pay monthly by EFT using the reference below.")
-    card_ladder = yoco_on and card_rate_ok
+    card_ladder = yoco_on and card_rate_ok and not owed
     ladder_open = (f'<form method="POST" action="/billing/checkout">'
                    f'<input type="hidden" name="csrf" value="{csrf}">'
                    f'{terms_checkbox("Payments are not refundable.")}'
@@ -1564,18 +1619,19 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
 
     from .billing import payment_reference
     _cur = plan_by_name(plan_name)
-    waiting = _waiting_box(
-        orders or [], csrf,
-        payment_reference(user.get("org_id") or 0,
-                          user.get("org_name") or ""),
-        (_cur or {}).get("label", ""))
+    _ref = payment_reference(user.get("org_id") or 0,
+                             user.get("org_name") or "")
+    waiting = ((_owed_box(owed, _ref, grace_end) if owed else "")
+               + _waiting_box(orders or [], csrf, _ref,
+                              (_cur or {}).get("label", "")))
     inner = (f'<div class="wrap"><h1>Billing</h1>{note}'
              f'{waiting}{status_box}{plans_html}</div>')
     return _page("Billing", _header(user, "/billing") + inner)
 
 
 def _locked_pay_block(user, csrf: str, yoco_on: bool, bill,
-                      contact: dict | None, org_name: str) -> str:
+                      contact: dict | None, org_name: str,
+                      owed=None) -> str:
     """How a suspended company actually pays, on the page that suspends them.
 
     The old button here linked to /billing, which redirects locked companies
@@ -1585,12 +1641,58 @@ def _locked_pay_block(user, csrf: str, yoco_on: bool, bill,
     Only offered to an owner: a member who happens to log in during a
     suspension cannot commit the company to a payment, and showing them a
     button that will 403 is worse than showing nothing.
+
+    `owed` is the renewal invoice still outstanding (billing.
+    outstanding_renewal): what comes back on is paid with THAT invoice, in
+    full, and the invoice can be opened from here -- the copy somebody asks
+    for again when the email is lost. With none (the month it was for is
+    over) they start again, pro rata from today.
     """
-    from .billing import PLANS, plan_by_name
+    from .billing import PLANS, payment_reference, plan_by_name
 
     if not AuthStore.is_owner(user):
         return ('<p class="muted" style="margin-top:14px">Ask the account '
                 'owner to settle this &mdash; only they can pay.</p>')
+    if owed:
+        oplan = plan_by_name(owed.get("plan", ""))
+        what = (f'{oplan["devices"]} devices' if oplan
+                else owed.get("plan") or "your packet")
+        amount = _order_usd(owed, oplan)
+        due = (time.strftime("%d %B %Y", time.localtime(float(owed["due"])))
+               if owed.get("due") else "")
+        head = (f'<p style="margin:18px 0 0;text-align:left">'
+                f'<b>Outstanding:</b> {amount} for {esc(what)}'
+                + (f', due {esc(due)}' if due else "") + '. '
+                f'<a href="/billing/invoice?id={int(owed["id"])}">View or '
+                f'print the invoice</a></p>')
+        if yoco_on:
+            return (
+                head +
+                f'<form method="POST" action="/billing/checkout" '
+                f'style="margin:12px 0 0;text-align:left">'
+                f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+                f'<input type="hidden" name="plan" '
+                f'value="{esc(owed.get("plan", ""))}">'
+                f'{terms_checkbox()}'
+                f'<button class="btn" type="submit" style="width:100%">'
+                f'Pay {amount} and switch everything back on</button>'
+                f'<p class="muted" style="font-size:12px;margin:10px 0 0;'
+                f'text-align:center">Paid by card on Yoco. Your account comes '
+                f'back on by itself the moment the payment clears.</p>'
+                f'</form>')
+        ref = payment_reference(user.get("org_id", 0), org_name or "")
+        return (
+            head +
+            f'<div style="margin-top:12px;text-align:left;padding:14px;'
+            f'border-radius:8px;background:rgba(148,163,184,0.12)">'
+            f'<p style="margin:0 0 8px">Pay {amount} by bank transfer, '
+            f'quoting this reference so it can be matched to your account:'
+            f'</p><code style="display:inline-block;font-size:17px;'
+            f'padding:8px 12px;border-radius:6px;background:var(--surface);'
+            f'border:1px solid var(--border)">{esc(ref)}</code>'
+            f'<p class="muted" style="font-size:12px;margin:10px 0 0">The '
+            f'bank details are on the invoice. Everything comes back on once '
+            f'the payment is recorded.</p></div>')
     b = bill or {}
     cur = plan_by_name(b.get("plan", "") or "")
     cap = b.get("device_limit")
@@ -1615,8 +1717,10 @@ def _locked_pay_block(user, csrf: str, yoco_on: bool, bill,
             f'<button class="btn" type="submit" style="width:100%">'
             f'Pay now and switch everything back on</button>'
             f'<p class="muted" style="font-size:12px;margin:10px 0 0;'
-            f'text-align:center">Paid by card on Yoco. Your account comes '
-            f'back on by itself the moment the payment clears.</p>'
+            f'text-align:center">You pay for the days from today to the '
+            f'next 28th, like a first payment. Paid by card on Yoco; your '
+            f'account comes back on by itself the moment the payment '
+            f'clears.</p>'
             f'</form>')
     # No card payment on this server. This page exists to tell a locked-out
     # customer how to get back on, so it has to answer that -- the reference
@@ -1629,22 +1733,22 @@ def _locked_pay_block(user, csrf: str, yoco_on: bool, bill,
         f'<div style="margin-top:18px;text-align:left;padding:14px;'
         f'border-radius:8px;background:rgba(148,163,184,0.12)">'
         f'<p style="margin:0 0 8px"><b>To switch everything back on</b>, '
-        f'settle the outstanding invoice. Quote this reference on the '
-        f'payment so it can be matched to your account:</p>'
+        f'ask us for an invoice from today to the next 28th, and quote '
+        f'this reference on the payment so it can be matched to your '
+        f'account:</p>'
         f'<code style="display:inline-block;font-size:17px;padding:8px 12px;'
         f'border-radius:6px;background:var(--surface);'
         f'border:1px solid var(--border)">{esc(ref)}</code>'
         f'<p class="muted" style="font-size:12px;margin:10px 0 0">'
-        f'The bank details are on your invoice. This reference belongs to '
-        f'your account and never changes. Everything comes back on by '
-        f'itself once the payment is confirmed &mdash; nobody here has to '
-        f'do anything.</p></div>')
+        f'This reference belongs to your account and never changes. '
+        f'Everything comes back on once the payment is recorded.</p></div>')
 
 
 def _render_locked(user, contact: dict | None = None,
                    manual: bool = False, csrf: str = "",
                    yoco_on: bool = False, bill=None,
-                   org_name: str = "") -> str:
+                   org_name: str = "", owed=None, msg: str = "",
+                   error: str = "") -> str:
     """Full-page lockout shown when an org has lost access.
 
     The reason is stated because the two paths here need different actions
@@ -1664,13 +1768,17 @@ def _render_locked(user, contact: dict | None = None,
     else:
         why = (f'<p>Your subscription has lapsed and the {GRACE_DAYS}-day '
                f'grace period has expired. All access has been suspended.</p>')
+    # What just happened -- a card payment that did not go through, say.
+    # Every checkout error lands back here for a suspended company, and this
+    # page used to drop it, leaving them looking at the same button.
     inner = (f'<div class="wrap" style="max-width:560px;margin-top:10vh;text-align:center">'
+             f'{_flash(msg, error)}'
              f'<div class="box">'
              f'<h1 style="color:#dc2626;margin-bottom:8px">Account Suspended</h1>'
              f'{why}'
              f'{contact_p}'
              + _locked_pay_block(user, csrf, yoco_on, bill, contact,
-                                 org_name)
+                                 org_name, owed=owed)
              + f'<p class="muted" style="margin-top:18px">'
              f'<a href="/logout">Log out</a></p>'
              f'</div></div>')
@@ -3719,6 +3827,12 @@ def _render_guide(user, tab_intro: dict | None = None) -> str:
         'away.</b> Renewing or upgrading early extends the date you are '
         'paid up to; it never restarts it from today. If the company was '
         'suspended for non-payment, paying un-suspends it on its own.</p>'
+        '<p><b>Paying late.</b> A renewal paid late is the invoice as it '
+        'went out, in full, whichever way it is paid; the Billing tab and '
+        'the suspended page show it, with the invoice to view or print. '
+        'Still suspended when the month it was for ends, that invoice is '
+        'withdrawn, and coming back is charged from the day you pay to the '
+        'next 28th, like a first payment.</p>'
         '<p>Every completed card payment gets an invoice, listed under '
         '<b>Payments</b> on the Billing tab and emailed to the alert '
         'recipients. It is generated from what you were actually charged, '

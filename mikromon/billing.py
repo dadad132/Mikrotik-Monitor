@@ -176,6 +176,17 @@ def first_payment_quote(price: float, now: float | None = None) -> dict:
             "days_in_period": total, "full": full}
 
 
+def renewal_month_over(order: dict, now: float | None = None) -> bool:
+    """Whether the month a renewal invoice was raised for has ended: it was
+    due on a 28th, and the next 28th has passed too."""
+    now = now if now is not None else time.time()
+    due = float((order or {}).get("due") or 0.0)
+    if not due:
+        return False
+    months = max(1, int((order or {}).get("months") or 1))
+    return add_billing_months(due, months) <= now
+
+
 def add_billing_months(period_end: float, months: int = 1) -> float:
     """Advance a paid-up date by whole calendar months, staying on the 28th.
 
@@ -1492,6 +1503,52 @@ class BillingStore:
         found = self._open_renewals(int(org_id), float(end))
         found.sort(key=lambda o: o.get("created") or 0, reverse=True)
         return found[0] if found else None
+
+    def outstanding_renewal(self, org_id: int,
+                            now: float | None = None) -> dict | None:
+        """What a company that has fallen behind owes: the renewal invoice
+        that went out for the month it did not pay, or None.
+
+        Paid late -- in its grace days or after being suspended -- that
+        invoice is what is owed, in full, whichever button pays it: the link
+        in the email, the Billing tab, the page a suspended company sees, or
+        a bank transfer. Days spent suspended are not taken off it; the
+        terms say so. Once the month it was for is over the invoice lapses
+        (lapse_stale_renewals), and a company coming back after that starts
+        again from the day it pays, like a first payment.
+        """
+        now = now if now is not None else time.time()
+        row = self.get(org_id) or {}
+        end = float(row.get("current_period_end") or 0.0)
+        if not end or end > now:
+            return None                  # paid up: nothing is overdue
+        order = self.open_renewal(org_id)
+        if order is None or renewal_month_over(order, now):
+            return None
+        return order
+
+    def lapse_stale_renewals(self, now: float | None = None) -> list:
+        """Withdraw every unpaid renewal invoice whose month is over.
+
+        A company still suspended when the next 28th comes round does not
+        owe a month it was never given; it starts again from the day it
+        pays. Leaving the old invoice open would keep it payable -- for a
+        month already gone -- and keep it in the list of money owed.
+        Returns the orders withdrawn just now."""
+        now = now if now is not None else time.time()
+        rows = self.db.execute(
+            f"SELECT {', '.join(self._ORDER_COLS)} FROM orders "
+            f"WHERE status NOT IN {_CLOSED} "
+            "AND COALESCE(NULLIF(kind, ''), 'renewal') = 'renewal' "
+            "AND due IS NOT NULL AND due <= ?", (now,)).fetchall()
+        gone = []
+        for r in rows:
+            order = dict(zip(self._ORDER_COLS, r))
+            if (renewal_month_over(order, now)
+                    and self.withdraw_order(int(order["id"]), "lapsed")):
+                order["status"] = "lapsed"
+                gone.append(order)
+        return gone
 
     def suspend(self, org_id: int) -> None:
         """Cut a company off until they pay, by hand.
