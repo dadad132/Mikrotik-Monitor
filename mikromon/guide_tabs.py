@@ -153,20 +153,23 @@ TABS = [
              "lose the router for a couple of minutes first."},
 
     {"slug": "nextdns", "title": "DNS", "art": None,
-     "what": "Points the router at a DNS provider, and can force every client "
-             "through it. The NextDNS box is separate: it gives this router "
-             "its own real NextDNS.io profile — blocklists, parental control, "
-             "security protections — managed from here, with nothing to sign "
-             "into on NextDNS's own site.",
-     "steps": ["Pick a quick provider, or enable NextDNS for a full filtered "
-               "profile.",
+     "what": "Points the router at one DNS provider, and can force every "
+             "client through it. NextDNS is one of the providers: it gives "
+             "this router its own real NextDNS.io profile — blocklists, "
+             "parental control, security protections — managed from here, "
+             "with nothing to sign into on NextDNS's own site.",
+     "steps": ["Switch on the provider you want: NextDNS for a full filtered "
+               "profile, or one of the others. Only one is ever on, so "
+               "switching another on changes to it. Moving off NextDNS asks "
+               "first, because it deletes this router's NextDNS profile and "
+               "its settings.",
                "<b>Allow remote requests</b> has to be on, or the router will "
                "not answer its clients at all.",
                "Optionally force client DNS. That redirects every device's "
                "port-53 traffic to the router, so nobody opts out by "
                "hard-coding 8.8.8.8 on their laptop.",
-               "Every switch here applies as you flip it, and undoes itself "
-               "when you flip it back."],
+               "Every switch here applies as you flip it. The two below the "
+               "providers undo themselves when you flip them back."],
      "warn": "Do not trust the banner on NextDNS's own website to tell you "
              "whether a router is connected. It reports on <b>whichever "
              "computer is viewing it</b>, so a PC with Secure DNS switched on "

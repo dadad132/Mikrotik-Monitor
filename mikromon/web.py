@@ -4794,6 +4794,36 @@ def _nextdns_cleanup_legacy(api_key, raw) -> list:
     return notes
 
 
+def _nextdns_drop(api_key, raw, defaults) -> list:
+    """Take a router off NextDNS in the dashboard: delete every profile it
+    owns, main first, and clear its NextDNS state -- snapshot included, so
+    read that first if it is wanted. Mutates `raw` (the caller saves it);
+    returns notes on any profile that could not be deleted.
+
+    Every profile, because a per-uplink one left behind would keep filtering
+    (and counting against the account's profile limit) for a router that has
+    been told to stop using NextDNS. Best-effort, because a profile orphaned
+    on the account is untidy and a router stuck showing NextDNS on is worse."""
+    from . import nextdns as nextdns_client
+    from .config import build_device
+
+    notes = []
+    for pid in build_device(raw, defaults).nextdns_all_profile_ids():
+        try:
+            if not api_key:
+                raise nextdns_client.NextDnsError(
+                    "this server has no NextDNS API key")
+            nextdns_client.delete_profile(api_key, pid)
+        except nextdns_client.NextDnsError as exc:
+            notes.append(f"could not delete the NextDNS profile {pid} "
+                         f"({exc}) - remove it on NextDNS by hand")
+    raw["nextdns_enabled"] = False
+    raw["nextdns_profile_id"] = ""
+    raw["nextdns_wan_profiles"] = {}
+    raw["nextdns_dns_snapshot"] = {}
+    return notes
+
+
 def _nextdns_mirror_settings(api_key, main_id, wan_ids) -> list:
     """Copy every setting mikromon manages from one profile onto others.
     Now used only to apply the superadmin's optional template profile to a
@@ -4879,7 +4909,8 @@ def _nextdns_box(name, cfg, csrf, nextdns_configured: bool) -> str:
             f'blocked/allowed domains, security, parental control and '
             f'privacy settings below — everything for this router stays '
             f'in this dashboard, nothing to sign into on NextDNS.io.</p>'
-            f'<form method="POST" action="/device/nextdns">'
+            f'<form method="POST" action="/device/nextdns" onsubmit="'
+            f'{confirm_attr(f"Turn NextDNS off for {name} and delete its profile? Its blocked and allowed domains and its security, parental control and privacy settings are deleted with it. That cannot be undone.")}">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="device" value="{q}">'
             f'<input type="hidden" name="enable" value="0">'
@@ -6347,14 +6378,27 @@ _FEATURE_JS = """
      });
    });
  }
- // Toggles sharing a data-exclusive group behave like radio buttons: switching
- // one ON turns the others in the same group OFF (e.g. only one DNS provider at
- // a time). Leaving them all off falls back to the manual field.
+ // Toggles sharing a data-exclusive group are one choice, like radio buttons:
+ // switching one ON turns the others in the same group OFF, and the one that
+ // is on stays on -- it is changed by switching another on (e.g. one DNS
+ // provider at a time). One carrying data-mm-ask asks first: Cancel leaves
+ // every switch as it was, OK sends its data-mm-ask-send field as 1.
+ // Registered before mmInstantToggles, so this runs first and can stop the
+ // instant submit.
  function mmExclusive(){
    document.querySelectorAll('input[data-exclusive]').forEach(function(cb){
      if(cb._excl) return; cb._excl=1;
-     cb.addEventListener('change', function(){
-       if(!cb.checked) return;
+     cb.addEventListener('change', function(ev){
+       if(!cb.checked){ cb.checked=true; ev.stopImmediatePropagation(); return; }
+       var ask=cb.getAttribute('data-mm-ask');
+       if(ask && !confirm(ask)){
+         cb.checked=false; ev.stopImmediatePropagation(); return;
+       }
+       var send=cb.getAttribute('data-mm-ask-send');
+       if(ask && send && cb.form){
+         var h=document.createElement('input');
+         h.type='hidden'; h.name=send; h.value='1'; cb.form.appendChild(h);
+       }
        var g=cb.getAttribute('data-exclusive');
        document.querySelectorAll('input[data-exclusive="'+g+'"]').forEach(
          function(o){ if(o!==cb) o.checked=false; });
@@ -6424,6 +6468,12 @@ def _field_html(desc) -> str:
         # mmExclusive() turns the others off when one is switched on.
         excl = (f' data-exclusive="{esc(desc["exclusive"])}"'
                 if desc.get("exclusive") else "")
+        # One that asks before it does anything (mmExclusive puts the
+        # question): "ask_send" is the field OK sends as 1, so the server can
+        # tell the reader said yes.
+        ask = (f' data-mm-ask="{esc(desc["ask"])}"'
+               f' data-mm-ask-send="{esc(desc.get("ask_send", ""))}"'
+               if desc.get("ask") else "")
         # A switch that moves but changes nothing until a second button is
         # pressed is telling the same lie the Provision button told: it looks
         # like the act, and is not. Flipping one applies it there and then.
@@ -6432,7 +6482,7 @@ def _field_html(desc) -> str:
         inst = "" if desc.get("no_instant") else ' data-mm-instant="1"'
         return (f'<div class="f"><label class="chk"><input type="checkbox" '
                 f'class="switch" name="{desc["name"]}" '
-                f'value="{esc(desc["value"])}"{ck}{excl}{inst}> '
+                f'value="{esc(desc["value"])}"{ck}{excl}{ask}{inst}> '
                 f'<b>{esc(label)}</b></label>{d}</div>')
     if t == "check":
         # A plain tick box, sent with the form -- unlike "toggle", which
@@ -12031,6 +12081,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     # every visit once the list had anything in it.
                     wan_failover_on = (isinstance(current, dict) and
                                        bool(current.get("failover_routes")))
+                    if slug == "nextdns":
+                        # NextDNS is offered among the providers only where
+                        # a profile can be made for it (nd_api_key, above).
+                        current["nextdns_available"] = bool(nd_api_key)
                     if slug == "tunnel" and devices_db:
                         hub = _hub_load(_hub_path(devices_db))
                         role, info = _vpn_group_info(hub, name)
@@ -12301,6 +12355,32 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._deny_manage(user, name, f"push:{slug}")
             cfg = build_device(raw, defaults)
             commit = flat.get("apply") == "1"
+            # The DNS tab's providers are one choice, and NextDNS is one of
+            # them. Switching it on is the NextDNS box's Enable. Switching
+            # another on while NextDNS is on removes NextDNS -- only once the
+            # reader has said yes to that, and only after the router has
+            # taken the new DNS, so a router that cannot be reached keeps
+            # NextDNS rather than losing its profile for nothing.
+            leave_nextdns = ""
+            if slug == "nextdns":
+                from .push.features import (_DNS_PRESET_LABELS,
+                                            NEXTDNS_CHOICE, dns_choice)
+
+                choice = dns_choice(multi)
+                nd_on = bool(cfg.nextdns_enabled and cfg.nextdns_profile_id)
+                if choice == NEXTDNS_CHOICE and not nd_on and commit:
+                    return self._device_nextdns_post({**flat, "enable": "1"},
+                                                     user)
+                if choice in _DNS_PRESET_LABELS and nd_on:
+                    leave_nextdns = _DNS_PRESET_LABELS[choice]
+                    if flat.get("remove_nextdns") != "1":
+                        return self._redirect(
+                            f"/device?name={quote(name)}&tab={view}&msg="
+                            + quote(f"Nothing was changed: this router still "
+                                    f"uses NextDNS. To move to "
+                                    f"{leave_nextdns}, switch it on again: "
+                                    f"you will be asked first whether to "
+                                    f"remove NextDNS."))
             uname = (user or {}).get("login", "")
             audit = self._auditlog()
             dev = rw_device(cfg)
@@ -12369,6 +12449,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if not commit:
                     return self._feature_tab_page(name, user, view, preview=plan,
                                                   submitted=multi)
+                # The router has its new DNS, so NextDNS can go now.
+                done = (self._nextdns_leave(name, leave_nextdns) + " "
+                        if leave_nextdns else "")
                 # A change that restarts the router: say so to the monitor,
                 # so the router going offline is held as a restart rather
                 # than emailed as an outage (restarts.py).
@@ -12432,10 +12515,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     if flat.get("instant") == "1":
                         return self._redirect(
                             f"/device?name={quote(name)}&tab={view}&msg="
-                            + quote("Sent to the router. Safe mode checks it "
-                                    "in about a minute and puts the previous "
-                                    "settings back if the router can no "
-                                    "longer be reached or managed."))
+                            + quote(done + "Sent to the router. Safe mode "
+                                    "checks it in about a minute and puts the "
+                                    "previous settings back if the router can "
+                                    "no longer be reached or managed."))
                     sess = self._session()
                     return self._send(200, _render_confirm_page(
                         name, user, view, armed["backup"], hub_ip,
@@ -12444,8 +12527,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         "text/html; charset=utf-8")
                 return self._redirect(
                     f"/device?name={quote(name)}&tab={view}&msg=" +
-                    quote("Sent to the router." if flat.get("instant") == "1"
-                          else "Changes applied to the router."))
+                    quote(done + ("Sent to the router."
+                                  if flat.get("instant") == "1"
+                                  else "Changes applied to the router.")))
             finally:
                 dev.close()
                 if audit:
@@ -13675,24 +13759,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # as good a moment as any to let go of them.
                 wan_notes += _nextdns_cleanup_legacy(api_key, raw)
             else:
-                # Every profile this device owns, main first — leaving a
-                # per-uplink one behind would keep filtering (and billing
-                # against the account's profile limit) for a router that has
-                # been told to stop using NextDNS entirely.
-                for old_id in build_device(raw, defaults).nextdns_all_profile_ids():
-                    if old_id and api_key:
-                        try:
-                            nextdns_client.delete_profile(api_key, old_id)
-                        except nextdns_client.NextDnsError:
-                            pass  # best-effort — still clear local state below
-                raw["nextdns_enabled"] = False
-                raw["nextdns_profile_id"] = ""
-                raw["nextdns_wan_profiles"] = {}
                 # Read out before it is cleared: the push below needs it to
                 # put the customer's own resolvers back, and the stored copy
                 # has done its job once that lands.
                 restore_from = dict(raw.get("nextdns_dns_snapshot") or {})
-                raw["nextdns_dns_snapshot"] = {}
+                wan_errors += _nextdns_drop(api_key, raw, defaults)
             store = self._devstore()
             if store is not None:
                 store.upsert(raw, defaults, org_id=None)
@@ -13781,6 +13852,27 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         " No saved previous settings for this router, so its "
                         "DNS-over-HTTPS was simply cleared.")
             return self._redirect(f"/device?name={q}&tab=nextdns&msg=" + quote(msg))
+
+        def _nextdns_leave(self, name, label) -> str:
+            """Take NextDNS off a router the DNS tab has just switched to
+            another provider (`label`): delete its profiles and clear its
+            NextDNS state. Nothing to put back on the router -- the switch
+            that called this has already set the new DNS. Returns the
+            sentence for the message."""
+            raw = self._device_raw(name)
+            if raw is None:
+                return ""
+            api_key = (auth.get_nextdns() if auth else {}).get("api_key", "")
+            notes = _nextdns_drop(api_key, raw, defaults)
+            store = self._devstore()
+            if store is not None:
+                store.upsert(raw, defaults, org_id=None)
+                store.close()
+            if notes:
+                return (f"Switched from NextDNS to {label}. NextDNS is off for "
+                        f"this router, but " + "; ".join(notes) + ".")
+            return (f"Switched from NextDNS to {label}, and deleted this "
+                    f"router's NextDNS profile.")
 
         def _nextdns_prereqs(self, flat, user):
             """Common guard + lookup for every NextDNS settings-panel POST

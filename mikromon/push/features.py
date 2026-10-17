@@ -1358,6 +1358,26 @@ _DNS_PRESETS = [
      "1.1.1.1,1.0.0.1"),
 ]
 _DNS_PRESET_SERVERS = {k: s for k, _label, s in _DNS_PRESETS}
+_DNS_PRESET_LABELS = {k: label for k, label, _s in _DNS_PRESETS}
+
+# NextDNS is one of the DNS tab's providers rather than a box beside them: a
+# router resolves through one DNS, and NextDNS on beside a lit provider read
+# as two. Its switch is only offered where the platform has a NextDNS API key
+# (or the router already uses it) -- a profile cannot be made without one.
+NEXTDNS_CHOICE = "nextdns"
+_NEXTDNS_CHOICE_LABEL = ("NextDNS — this router's own filtering: blocklists, "
+                         "parental control, security")
+
+
+def dns_choice(multi) -> str:
+    """The provider the DNS tab's form picked: NEXTDNS_CHOICE, a preset key,
+    or '' for none.
+
+    One at a time in the UI. If more than one arrives (no JS) the first
+    wins -- and NextDNS's switch comes first, so a provider sent alongside it
+    can never quietly replace NextDNS's DNS."""
+    return next((k for k in multi.get("dns_preset", [])
+                 if k == NEXTDNS_CHOICE or k in _DNS_PRESET_SERVERS), "")
 
 
 def _server_set(s):
@@ -1368,11 +1388,22 @@ def _server_set(s):
 def _active_preset(dns):
     """Which provider preset the router's DNS currently matches, so its toggle
     shows on. Tolerant on purpose: matches if ANY of a provider's IPs appears in
-    the configured OR dynamic (WAN-learned) servers — so it still detects the
-    provider when only the primary is set, the order differs, or an extra server
-    is present. '' when nothing matches (a custom/unknown DNS)."""
+    the servers — so it still detects the provider when only the primary is
+    set, the order differs, or an extra server is present. '' when nothing
+    matches (a custom/unknown DNS).
+
+    The servers set on the router decide; the ones the WAN hands out
+    (dynamic-servers) only count when none are set. Counting both lit Google
+    on a router switched to Cloudflare, because its ISP hands out 8.8.8.8.
+
+    And none at all while DNS-over-HTTPS is set: RouterOS then sends every
+    query to that server and uses the plain servers only to look up its
+    name, so a provider lit for them is not the DNS in use. That is how
+    NextDNS and a provider both showed on."""
+    if str(dns.get("use-doh-server", "") or "").strip():
+        return ""
     live = (_server_set(dns.get("servers", ""))
-            | _server_set(dns.get("dynamic-servers", "")))
+            or _server_set(dns.get("dynamic-servers", "")))
     return next((k for k, s in _DNS_PRESET_SERVERS.items()
                  if live & _server_set(s)), "")
 
@@ -1466,19 +1497,42 @@ def nextdns_form(current, cfg):
     entirely, which would also quietly defeat NextDNS's own filtering."""
     dns = current.get("dns", {})
     ips = "\n".join(r.get("address", "") for r in current.get("bypass", []))
-    cur_preset = _active_preset(dns)
+    nd_on = bool(getattr(cfg, "nextdns_enabled", False)
+                 and getattr(cfg, "nextdns_profile_id", ""))
+    # With NextDNS on, it is the one in use whatever the plain servers say.
+    cur = NEXTDNS_CHOICE if nd_on else _active_preset(dns)
+    offer_nd = nd_on or bool(current.get("nextdns_available"))
     fields: list[dict] = [
-        {"type": "static", "label": "Quick DNS provider",
-         "value": "Flip one on to point the router at that DNS — only one at a "
-                  "time (turning one on switches the others off). The one that "
-                  "matches the router's current DNS is shown on. Leave them all "
-                  "off to keep the current DNS unchanged."},
+        {"type": "static", "label": "DNS provider",
+         "value": "The one DNS this router uses — only one is ever on. To "
+                  "change it, switch another on."
+                  + (" Moving off NextDNS asks first, because it deletes "
+                     "this router's NextDNS profile." if offer_nd else "")},
     ]
+    if offer_nd:
+        fields.append({"type": "toggle", "name": "dns_preset",
+                       "value": NEXTDNS_CHOICE, "label": _NEXTDNS_CHOICE_LABEL,
+                       "on": nd_on, "exclusive": "dns_preset"})
     for k, label, _servers in _DNS_PRESETS:
-        fields.append({"type": "toggle", "name": "dns_preset", "value": k,
-                       "label": label, "on": k == cur_preset,
-                       "exclusive": "dns_preset"})
+        toggle = {"type": "toggle", "name": "dns_preset", "value": k,
+                  "label": label, "on": k == cur, "exclusive": "dns_preset"}
+        if nd_on:
+            # Asked in the browser before anything is sent. OK sends
+            # remove_nextdns=1, without which the server changes nothing.
+            toggle["ask"] = (
+                f"Stop using NextDNS and switch this router to {label}?\n\n"
+                f"OK deletes this router's NextDNS profile, with its blocked "
+                f"and allowed domains and its security, parental control and "
+                f"privacy settings. That cannot be undone.\n\n"
+                f"Cancel keeps NextDNS exactly as it is.")
+            toggle["ask_send"] = "remove_nextdns"
+        fields.append(toggle)
     fields += [
+        # Not providers, though they look the same: on beside a provider they
+        # read as a second DNS switched on.
+        {"type": "heading", "label": "Making the network use it",
+         "hint": "These are not DNS providers. They make the devices on this "
+                 "network ask the router, so they get the DNS picked above."},
         {"type": "toggle", "name": "opt", "value": "allow_remote",
          "label": "Allow remote DNS requests",
          "on": _norm(dns.get("allow-remote-requests", "")) == "true"},
@@ -1494,11 +1548,12 @@ def nextdns_form(current, cfg):
 def nextdns_plan(pusher, cfg, flat, multi):
     opts = set(multi.get("opt", []))
     force_dns = "force_dns" in opts
-    # A switched-on provider preset sets the DNS servers. The toggles are
-    # mutually exclusive in the UI, but if more than one arrives (e.g. no JS)
-    # just take the first. With NONE on we leave /ip dns servers untouched
-    # (the servers field was removed from the form).
-    chosen = [k for k in multi.get("dns_preset", []) if k in _DNS_PRESET_SERVERS]
+    # A switched-on provider preset sets the DNS servers. With NONE on we
+    # leave /ip dns servers untouched (the servers field was removed from the
+    # form), and the same with NextDNS on: its DNS is set up by the web layer,
+    # which makes its profile (see dns_choice for which one wins).
+    choice = dns_choice(multi)
+    chosen = [choice] if choice in _DNS_PRESET_SERVERS else []
     # MikroTik's boolean fields are normally yes/no, but /ip dns is a
     # confirmed exception — allow-remote-requests is true/false on the
     # router, so sending yes/no here would never match on read-back and
@@ -1510,6 +1565,11 @@ def nextdns_plan(pusher, cfg, flat, multi):
                    or force_dns) else "false"}
     if chosen:
         desired_dns["servers"] = _DNS_PRESET_SERVERS[chosen[0]]
+        # While a DNS-over-HTTPS server is set RouterOS sends every query to
+        # it, so a provider picked with NextDNS's still there changed nothing
+        # the router did. Empty already, or no such field (RouterOS 6), is no
+        # change at all.
+        desired_dns["use-doh-server"] = ""
     plan = pusher.plan_settings(_DNS, desired_dns, label="dns")
     ips = [x.strip() for x in (flat.get("bypass", "") or "").splitlines()
            if x.strip()]
@@ -1534,7 +1594,10 @@ def nextdns_plan(pusher, cfg, flat, multi):
     force_plan = pusher.plan_managed_list(
         _NAT, "comment", force_desired,
         owns=_prefix_owner(_DNSFORCE_TAG), label="dns redirect")
-    return Plan(cfg.name, plan.ops + list_plan.ops + force_plan.ops,
+    # A retired per-uplink switcher left on the router would set NextDNS's
+    # DoH server back within a minute of it being cleared above.
+    switcher = _nextdns_remove_switcher(pusher) if chosen else []
+    return Plan(cfg.name, plan.ops + list_plan.ops + force_plan.ops + switcher,
                 summary="dns")
 
 
