@@ -349,9 +349,12 @@ try:
           [:1] == ["nextdns"] and "nextdns" not in lit(page))
     check("nothing asks before switching while NextDNS is off",
           not any(asks(page).values()))
+    _t = text(page)
     check("the two client options sit under their own heading, apart from "
-          "the providers", "Making the network use it" in text(page)
-          and "These are not DNS providers" in text(page))
+          "the providers", "Making the network use it" in _t
+          and _t.index("Cloudflare — fast & private")
+          < _t.index("Making the network use it")
+          < _t.index("Allow remote DNS requests"))
 
     if NODE:
         r = flip(page, "google")

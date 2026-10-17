@@ -1530,9 +1530,7 @@ def nextdns_form(current, cfg):
     fields += [
         # Not providers, though they look the same: on beside a provider they
         # read as a second DNS switched on.
-        {"type": "heading", "label": "Making the network use it",
-         "hint": "These are not DNS providers. They make the devices on this "
-                 "network ask the router, so they get the DNS picked above."},
+        {"type": "heading", "label": "Making the network use it"},
         {"type": "toggle", "name": "opt", "value": "allow_remote",
          "label": "Allow remote DNS requests",
          "on": _norm(dns.get("allow-remote-requests", "")) == "true"},
