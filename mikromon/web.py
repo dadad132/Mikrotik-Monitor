@@ -3893,6 +3893,39 @@ def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
         return []
 
 
+def _payment_received_text(order, org_name, paid_until=None) -> str:
+    """The "payment received" email, in the currency the card was charged.
+
+    It said "we have received R25.00" for a $25 invoice charged R411: the
+    dollar figure with a rand sign in front of it. It now says what left the
+    customer's account, what that bought in dollars, and the rate between
+    the two -- so the email, the receipt and the bank statement agree.
+    """
+    from .billing import money, order_amounts
+    amt = order_amounts(order)
+    if amt["charged"] is not None:
+        got = money(amt["charged"], amt["charged_currency"])
+    else:
+        got = money((order.get("amount_cents") or 0) / 100,
+                    order.get("currency") or "USD")
+    lines = [f"Thank you - we have received {got} from {org_name}."]
+    if (amt["charged"] is not None and amt["usd"] is not None
+            and amt["charged_currency"] != "USD"):
+        basis = amt["basis"].rstrip(".")
+        lines.append(f"That is US${amt['usd']:,.2f} for your packet"
+                     + (f", {basis[:1].lower()}{basis[1:]}." if basis
+                        else "."))
+    if paid_until:
+        when = time.strftime("%d %B %Y", time.localtime(float(paid_until)))
+        lines.append(f"Your packet is paid up until {when.lstrip('0')} and "
+                     f"is active now.")
+    else:
+        lines.append("Your packet is active now.")
+    lines.append("Your invoice is on the Billing page of the dashboard, under "
+                 "Payments.")
+    return "\n\n".join(lines) + "\n"
+
+
 def _billing_recipients(auth, org_id) -> list:
     """Who a company's invoices and payment reminders go to: its owners,
     then its alert addresses, each once."""
@@ -15421,6 +15454,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                               "Please try this link again a little later."),
                         "text/html; charset=utf-8")
                 cents = int(round(fx["amount"] * 100))
+                # The rand charge and the rate behind it, on the order: the
+                # receipt says both, so it matches the bank statement.
+                billing.set_order_charge(int(order["id"]), cents, "ZAR",
+                                         fx["rate"],
+                                         describe({**fx, "pair": "USDZAR"}))
             host = self.headers.get("Host", "")
             base = ("https" if self._is_https() else "http") + "://" + host
             try:
@@ -15465,13 +15503,18 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                        by=user.get("login", ""))
             cents = int(order.get("amount_cents") or 0)
             if str(order.get("currency") or "ZAR").upper() != "ZAR":
+                from .fxrate import describe
                 try:
-                    cents = int(round(zar_amount(cents / 100.0)["amount"] * 100))
+                    fx = zar_amount(cents / 100.0)
                 except RateUnavailable:
                     return self._redirect("/billing?error=" + quote(
                         "Card payment is unavailable right now: today's "
                         "exchange rate could not be fetched, and we will not "
                         "convert at a rate we made up. Please try shortly."))
+                cents = int(round(fx["amount"] * 100))
+                billing.set_order_charge(int(order["id"]), cents, "ZAR",
+                                         fx["rate"],
+                                         describe({**fx, "pair": "USDZAR"}))
             host = self.headers.get("Host", "localhost")
             base = ("https" if self._is_https() else "http") + "://" + host
             try:
@@ -15664,20 +15707,24 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 log.info("Yoco webhook for order %s replayed - already "
                          "applied", order_id)
                 return self._send(200, "ok")
+            # What Yoco actually took, in rands: the figure on the bank
+            # statement, and the one the receipt and the email give.
+            billing.record_charged(order_id, amount, "ZAR")
             replaced = billing.apply_paid_order(order) or []
             self._send_repriced(replaced)
             # (A call here once told Zoho about the payment. Zoho went with
             # b8fe333 and the call stayed, failing with an ImportError on
             # every card payment; Yoco is now the only rail, so there is no
             # other provider to tell.)
-            log.info("Order %s paid (%s): org %s now on %s for %s month(s)",
-                     order_id, payment_id, order["org_id"], order["plan"],
-                     order["months"])
+            log.info("Order %s paid (%s, %s cents ZAR): org %s now on %s for "
+                     "%s month(s)", order_id, payment_id, amount,
+                     order["org_id"], order["plan"], order["months"])
             try:
                 # Fire and forget: the packet is already granted, and the
                 # acknowledgement Yoco is waiting for must not be held up by
-                # a mail server.
-                self._email_invoice(order)
+                # a mail server. Read back, so it carries the charge just
+                # recorded.
+                self._email_invoice(billing.order(order_id) or order)
             except Exception:  # noqa: BLE001 - the packet is already granted
                 log.exception("could not email the invoice for order %s",
                               order_id)
@@ -15721,9 +15768,6 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if not smtp or not getattr(smtp, "host", ""):
                 return
             org_name = auth.org_name(org_id) or "your company"
-            total = (order.get("amount_cents") or 0) / 100
-            months = max(1, int(order.get("months") or 1))
-            plural = "" if months == 1 else "s"
             prefix = (getattr(smtp, "subject_prefix", "") or "").strip()
             msg = EmailMessage()
             msg["Subject"] = (
@@ -15731,13 +15775,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 f"#{int(order['id']):05d}").strip()
             msg["From"] = smtp.from_addr
             msg["To"] = ", ".join(to)
-            msg.set_content(
-                f"Thank you - we have received R{total:,.2f} from "
-                f"{org_name}.\n\n"
-                f"Your plan is paid up for the next {months} month{plural} "
-                f"and is active now.\n\n"
-                f"Your invoice is on the Billing page of the dashboard, under "
-                f"Payments.\n")
+            msg.set_content(_payment_received_text(
+                order, org_name,
+                (billing.get(org_id) or {}).get("current_period_end")
+                if billing else None))
             _smtp_send(smtp, msg)
 
         def _serve_invoice_template(self, url, user):
@@ -15816,7 +15857,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     auth.get_billing_contact() if auth else None,
                     brand=_BRAND, due_days=_DEFAULT_DUE_DAYS,
                     pay_link=(f"{base}/pay?t=sample" if base and not paid
-                              else ""))
+                              else ""),
+                    local=self._local_currency(None))
                 return self._send(200, _sample_bar(
                     html,
                     "The receipt sent after payment" if paid
@@ -15879,8 +15921,32 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._send(200, _render_invoice(
                 user, org, order, auth.get_billing_contact(), brand=_BRAND,
                 pay_link=self._pay_order_link(order),
-                due_days=_DEFAULT_DUE_DAYS),
+                due_days=_DEFAULT_DUE_DAYS,
+                local=self._local_currency(user)),
                 "text/html; charset=utf-8")
+
+        def _local_currency(self, user) -> str:
+            """The currency the reader's region uses: "ZAR" for South Africa,
+            "" otherwise.
+
+            Two signs, either enough: a browser whose region is South Africa
+            (en-ZA, af-ZA, zu-ZA ... in Accept-Language), or a company that has
+            already paid in rand -- a card here is only ever charged in rand,
+            so a company that has paid by card is reading its bank statement
+            in rand, whatever its browser says."""
+            al = self.headers.get("Accept-Language", "") or ""
+            if re.search(r"(?i)\b[a-z]{2,3}-za\b", al):
+                return "ZAR"
+            if billing and user and user.get("org_id") is not None:
+                try:
+                    for o in billing.orders_for_org(int(user["org_id"]), 50):
+                        if o.get("status") == "paid" and "ZAR" in (
+                                str(o.get("currency") or "").upper(),
+                                str(o.get("charged_currency") or "").upper()):
+                            return "ZAR"
+                except Exception:  # noqa: BLE001 - dollars are a fine default
+                    log.exception("could not read past payments")
+            return ""
 
         def _post_billing_subscribe(self, flat, user):
             """Redirect the owner to the PayFast payment page for their chosen plan."""

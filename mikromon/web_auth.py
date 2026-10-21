@@ -998,6 +998,15 @@ def _orders_box(orders) -> str:
                 f'{months} month{"" if months == 1 else "s"}')
         amount = _order_usd(o, plan)
         if o.get("status") == "paid":
+            # Beside the price, what the card was charged: the figure on
+            # the bank statement.
+            from .billing import money, order_amounts
+            _amt = order_amounts(o)
+            if (_amt["charged"] is not None
+                    and _amt["charged_currency"] not in (None, "USD")):
+                amount += (f' <span class="muted">('
+                           f'{money(_amt["charged"], _amt["charged_currency"])}'
+                           f')</span>')
             state = '<span class="badge ok">Paid</span>'
             act = (f'<a class="btn ghost" style="padding:4px 12px" '
                    f'href="/billing/invoice?id={int(o["id"])}">Invoice</a>')
@@ -1109,8 +1118,70 @@ def _pay_page(order, error: str, *, paid: bool = False,
             f'</div></body></html>')
 
 
+def _invoice_money(order: dict, settled: bool, local: str = "",
+                   card: bool = False) -> dict:
+    """What an invoice shows its figures in: {total, currency, note}.
+
+    Prices are in dollars, but a card is charged in rands (Yoco settles in
+    nothing else), and the rand figure is the one on the bank statement. An
+    invoice that only ever said $25 left a customer who paid R411 to look
+    the rate up for themselves -- and find a slightly different one, since
+    a live rate moves all day and ours is the ECB's daily reference.
+
+    So:
+      * a receipt is in what the card was charged, with the dollar price
+        and the exact rate between them
+      * an unpaid invoice is in rand for a customer whose region is South
+        Africa (`local`), at the last published rate, saying the rate on the
+        day it is paid is the one charged; anybody else sees dollars, with
+        the rand figure a card payment would come to today
+    """
+    from .billing import order_amounts
+    from .fxrate import cached
+
+    amt = order_amounts(order)
+    base = {"total": (order.get("amount_cents") or 0) / 100,
+            "currency": str(order.get("currency") or BILLING_CURRENCY).upper(),
+            "note": ""}
+
+    def rate_words(basis):
+        b = (basis or "").rstrip(".")
+        return f"{b[:1].lower()}{b[1:]}" if b else ""
+
+    if settled:
+        if amt["charged"] is not None and amt["charged_currency"]:
+            note = ""
+            if amt["usd"] is not None and amt["charged_currency"] != "USD":
+                how = rate_words(amt["basis"])
+                note = (f"Price US${amt['usd']:,.2f}, charged by card in rand"
+                        + (f", {how}." if how else "."))
+            return {"total": amt["charged"],
+                    "currency": amt["charged_currency"], "note": note}
+        card_paid = str(order.get("payment_id") or "")
+        if card_paid and not card_paid.startswith("eft:") and base["currency"] == "USD":
+            base["note"] = ("Paid by card in rand. The rand amount for this "
+                            "payment was not recorded at the time; it is the "
+                            "figure on your bank statement.")
+        return base
+    if card and amt["usd"] is not None:
+        row = cached("USD", "ZAR")
+        if row and row.get("rate"):
+            zar = round(amt["usd"] * float(row["rate"]), 2)
+            at = (f"the {row.get('source', 'published rate')} of "
+                  f"{row.get('date', '')} (1 USD = {float(row['rate']):,.4f} ZAR)")
+            if local == "ZAR":
+                return {"total": zar, "currency": "ZAR",
+                        "note": f"Price US${amt['usd']:,.2f}, shown in rand at "
+                                f"{at}. A card payment is charged at the rate "
+                                f"on the day it is paid."}
+            base["note"] = (f"Card payments are charged in rand: about "
+                            f"R{zar:,.2f} at {at}.")
+    return base
+
+
 def _invoice_fields(org: dict, order: dict, contact: dict | None,
-                    pay_link: str = "", due_days: int = 7) -> dict:
+                    pay_link: str = "", due_days: int = 7,
+                    local: str = "") -> dict:
     """Every value the invoice design places, for one order.
 
     Built from the ORDER, not from today's price list: an invoice that
@@ -1120,17 +1191,20 @@ def _invoice_fields(org: dict, order: dict, contact: dict | None,
     saved, a pay button on an invoice already settled -- come back empty
     rather than half-filled. A wrong account number on an invoice is the
     most expensive kind of placeholder there is.
+
+    `local` is the currency the reader's region uses ("ZAR" for South
+    Africa); see _invoice_money for what the figures are shown in.
     """
     from .brand import lockup_svg
 
     plan = plan_by_name(order.get("plan", ""))
     devices = plan["devices"] if plan else "?"
     months = max(1, int(order.get("months") or 1))
-    total = (order.get("amount_cents") or 0) / 100
-    cur = str(order.get("currency") or BILLING_CURRENCY).upper()
+    settled = bool(order.get("paid"))
+    shown = _invoice_money(order, settled, local, bool(pay_link))
+    total, cur, fx_note = shown["total"], shown["currency"], shown["note"]
     sym = CURRENCY_SYMBOL.get(cur, "")
     unit = total / months if months else total
-    settled = bool(order.get("paid"))
 
     issued = order.get("created") or order.get("paid") or time.time()
     due = order.get("due") or (issued + due_days * 86400)
@@ -1193,13 +1267,16 @@ def _invoice_fields(org: dict, order: dict, contact: dict | None,
 
     pill = ('<span class="pill paid">Paid</span>' if settled
             else f'<span class="pill">Due {esc(due_date)}</span>')
+    fx_html = (f'<p style="color:#64748b;font-size:12.5px;margin:8px 0 0">'
+               f'{esc(fx_note)}</p>' if fx_note else "")
 
     if settled:
         # A receipt. Payment instructions on it -- above all bank details --
         # read as "this is still owed", which is how somebody pays twice.
         payment_block = (
             f'<div class="eyebrow">Payment information</div>'
-            f'<p style="margin:0">Paid on {esc(paid_on)}. Thank you.</p>')
+            f'<p style="margin:0">Paid on {esc(paid_on)}. Thank you.</p>'
+            f'{fx_html}')
     elif pay_link:
         # Card payment is on, so the invoice offers that and only that. It
         # is the route that settles itself: the packet carries on the moment
@@ -1213,7 +1290,8 @@ def _invoice_fields(org: dict, order: dict, contact: dict | None,
             f'<a href="{esc(pay_link)}">{esc(pay_link)}</a></td></tr></table>'
             f'<p style="color:#64748b;font-size:12.5px;margin:8px 0 0">'
             f'Pay by card with the button on this invoice or the link above. '
-            f'Your service carries on the moment the payment clears.</p>')
+            f'Your service carries on the moment the payment clears.</p>'
+            f'{fx_html}')
     else:
         # No card payment on this server: the bank transfer is the only
         # route, so it is spelled out. Nothing hardcodes an account number.
@@ -1307,7 +1385,7 @@ def _invoice_pay_block(pay_link: str, ref: str) -> str:
 
 def _render_invoice(user, org: dict, order: dict, contact: dict | None,
                     brand: str = "", pay_link: str = "",
-                    due_days: int = 7) -> str:
+                    due_days: int = 7, local: str = "") -> str:
     """The invoice, as a document.
 
     One code path: the built-in design and an uploaded one are both
@@ -1327,7 +1405,7 @@ def _render_invoice(user, org: dict, order: dict, contact: dict | None,
 
     html = _tpl.render(_tpl.load(),
                        _invoice_fields(org, order, contact, pay_link,
-                                       due_days))
+                                       due_days, local=local))
     return _invoice_actions(html)
 
 

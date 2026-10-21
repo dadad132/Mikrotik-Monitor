@@ -221,7 +221,9 @@ box = web_auth._orders_box([{
     "currency": "ZAR", "fx_rate": 16.734, "status": "paid",
     "paid": time.time(), "created": time.time()}])
 check("a card payment, stored in the rands Yoco charged, is listed as the "
-      "dollars it was converted from", "$49.00" in box and "R819.97" not in box)
+      "dollars it was converted from, with the rand charge beside it -- the "
+      "figure on the bank statement", "$49.00" in box and "(R819.97)" in box
+      and box.index("$49.00") < box.index("R819.97"))
 
 print()
 if FAILS:

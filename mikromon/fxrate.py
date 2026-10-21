@@ -162,6 +162,18 @@ def get(base: str = "USD", quote: str = "ZAR", max_age: float = 0.0) -> dict:
     return _with_age(fresh)
 
 
+def cached(base: str = "USD", quote: str = "ZAR") -> dict | None:
+    """The last rate fetched, without asking anybody -- or None.
+
+    For showing an estimate on a page ("about R411 at today's rate"), where
+    waiting on a rate provider to draw an invoice would be absurd. Charging
+    always goes through get(), which refreshes."""
+    key = f"{base}{quote}"
+    with _lock:
+        hit = _cache.get(key) or _load_cached().get(key)
+    return _with_age(hit) if hit else None
+
+
 def _with_age(row: dict) -> dict:
     out = dict(row)
     try:

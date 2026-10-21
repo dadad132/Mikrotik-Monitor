@@ -108,6 +108,35 @@ def zar_amount(usd: float) -> dict:
     return convert(float(usd), "ZAR")
 
 
+def order_amounts(order: dict) -> dict:
+    """An order's money, both ways round: what it cost in dollars, and what
+    the card was charged in the currency it was charged in.
+
+    Returns {"usd", "charged", "charged_currency", "rate", "basis"}; any of
+    them None/"" when not known. Dollar invoices paid by card carry the rand
+    charge in charged_cents. Orders opened from the Billing tab were written
+    in rands from the start, with the rate they were converted at."""
+    o = order or {}
+    cur = str(o.get("currency") or BILLING_CURRENCY).upper()
+    amount = (o.get("amount_cents") or 0) / 100
+    rate = float(o.get("fx_rate") or 0.0) or None
+    out = {"usd": None, "charged": None, "charged_currency": None,
+           "rate": rate, "basis": str(o.get("fx_basis") or "")}
+    if cur == "USD":
+        out["usd"] = amount
+        if o.get("charged_cents"):
+            out["charged"] = int(o["charged_cents"]) / 100
+            out["charged_currency"] = str(o.get("charged_currency")
+                                          or "ZAR").upper()
+    else:
+        out["charged"] = (int(o["charged_cents"]) / 100
+                          if o.get("charged_cents") else amount)
+        out["charged_currency"] = str(o.get("charged_currency") or cur).upper()
+        if rate:
+            out["usd"] = round(amount / rate, 2)
+    return out
+
+
 def money(amount, currency: str = BILLING_CURRENCY) -> str:
     """Format an amount for a person to read, in the currency it is in.
 
@@ -756,6 +785,12 @@ class BillingStore:
         # outlive the day it was charged on.
         self._add_col_if_missing("orders", "fx_rate", "REAL")
         self._add_col_if_missing("orders", "fx_basis", "TEXT")
+        # What the card was actually charged, in the currency it was charged
+        # in. A dollar invoice paid by card is charged in rands (Yoco settles
+        # in nothing else), and the rand figure is the one on the customer's
+        # bank statement -- the receipt has to be able to say it.
+        self._add_col_if_missing("orders", "charged_cents", "INTEGER")
+        self._add_col_if_missing("orders", "charged_currency", "TEXT")
         self._add_col_if_missing("billing", "trial_end", "REAL")
         self._add_col_if_missing("billing", "pf_token", "TEXT")
         self._add_col_if_missing("billing", "payment_id", "TEXT")
@@ -1088,7 +1123,8 @@ class BillingStore:
     _ORDER_COLS = ("id", "org_id", "plan", "months", "amount_cents",
                    "provider", "external_id", "due",
                    "currency", "status", "checkout_id", "payment_id",
-                   "created", "paid", "kind", "fx_rate", "fx_basis")
+                   "created", "paid", "kind", "fx_rate", "fx_basis",
+                   "charged_cents", "charged_currency")
 
     def create_order(self, org_id: int, plan: str, amount_cents: int,
                      months: int = 1, currency: str = BILLING_CURRENCY,
@@ -1136,6 +1172,35 @@ class BillingStore:
             "SELECT terms_version, terms_by FROM orders WHERE id = ?",
             (int(order_id),)).fetchone()
         return (row[0] or "", row[1] or "") if row else ("", "")
+
+    def set_order_charge(self, order_id: int, cents: int, currency: str,
+                         fx_rate: float | None = None,
+                         fx_basis: str = "") -> None:
+        """What the card is about to be charged for this order, and the rate
+        that turned its dollar price into that -- set when the checkout is
+        opened, so the receipt can say both. The webhook then records what
+        was actually taken (record_charged)."""
+        with self._lock:
+            self.db.execute(
+                "UPDATE orders SET charged_cents = ?, charged_currency = ?, "
+                "fx_rate = COALESCE(?, fx_rate), "
+                "fx_basis = COALESCE(NULLIF(?, ''), fx_basis) WHERE id = ?",
+                (int(cents), str(currency).upper(), fx_rate, str(fx_basis or ""),
+                 int(order_id)))
+            self.db.commit()
+
+    def record_charged(self, order_id: int, cents: int,
+                       currency: str = "ZAR") -> None:
+        """What the card was actually charged, as the payment provider
+        reported it. The figure on the customer's bank statement."""
+        if not cents:
+            return
+        with self._lock:
+            self.db.execute(
+                "UPDATE orders SET charged_cents = ?, charged_currency = ? "
+                "WHERE id = ?", (int(cents), str(currency).upper(),
+                                 int(order_id)))
+            self.db.commit()
 
     def set_order_checkout(self, order_id: int, checkout_id: str) -> None:
         with self._lock:
