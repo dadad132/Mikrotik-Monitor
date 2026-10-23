@@ -3,4 +3,5 @@ librouteros>=3.2.1   # MikroTik RouterOS binary API client (works on v6 and v7)
 PyYAML>=6.0          # configuration file parsing
 cryptography>=42     # secrets sealed at rest, and the encrypted off-site backups
 qrcode>=7.4          # the QR code an authenticator app scans for two-factor sign-in
+paramiko>=3.4        # copying a backup off a router (SFTP), to download from the Backups tab
 anthropic>=1.11       # AI monitor: Claude looks online for ISP/area outages when a line drops (optional at runtime)

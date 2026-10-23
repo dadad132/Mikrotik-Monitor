@@ -6269,19 +6269,39 @@ def _space_box(name, csrf, space=None, scan_error="") -> str:
             f'#space">Check again</a></div></div>')
 
 
+def _backup_download_href(name, file) -> str:
+    return (f'/device/backup/download?device={quote(name)}'
+            f'&file={quote(file)}')
+
+
 def _render_device_backups(name, user, facts, csrf, *, backups=None,
                            error="", msg="", dry_plan=None, flash=None,
-                           error_title="", space=None, scan_error="") -> str:
+                           error_title="", space=None, scan_error="",
+                           made="") -> str:
     """The Backups tab — wired to the real config-push engine (admin-only).
 
     `error_title` set means the router was reached and refused the action
     (a full flash, say); unset, the error is that it could not be reached.
+
+    `made` is the backup just created: the banner offers to download it
+    there and then, since a copy that only lives on the router goes with
+    the router.
     """
     from .push.runner import _bytes, _human, made_by_dashboard
     tabbar = _device_tabbar(name, "backups", True, csrf)
     q = quote(name)
-    banner = (f'<div class="box" style="border-left:4px solid #16a34a">{esc(msg)}'
-              f'</div>' if msg else "")
+    just_made = next((b["name"] for b in (backups or [])
+                      if made and (b["name"] == made
+                                   or b["name"].endswith("/" + made))), "")
+    banner = (f'<div class="box" style="border-left:4px solid #16a34a;'
+              f'display:flex;align-items:center;justify-content:space-between;'
+              f'gap:12px;flex-wrap:wrap"><span>{esc(msg)}'
+              + (' Download a copy to keep somewhere other than the router.'
+                 if just_made else "")
+              + '</span>'
+              + (f'<a class="btn" href="{esc(_backup_download_href(name, just_made))}">'
+                 f'Download it</a>' if just_made else "")
+              + '</div>' if msg else "")
     unreachable = bool(error) and not error_title
     if error_title and error:
         err = (f'<div class="box" style="border-left:4px solid #dc2626">'
@@ -6323,13 +6343,18 @@ def _render_device_backups(name, user, facts, csrf, *, backups=None,
         rows = ""
         for b in (backups or []):
             bn = b["name"]
+            # Download for every backup, whoever made it: a copy off the
+            # router is the one that survives the router.
+            acts = (f'<a class="btn ghost" '
+                    f'href="{esc(_backup_download_href(name, bn))}">Download'
+                    f'</a> ')
             # Restore is for .backup files only (an .rsc is imported, not
             # loaded). Delete only on the dashboard's own files: anything
             # else was put on the router some other way, and is not ours.
-            acts = (_bk_btn(bn, "restore", "Restore", "",
-                            f"Restore {bn}? This REBOOTS the router and replaces "
-                            f"its config with this snapshot.")
-                    if bn.endswith(".backup") else "")
+            acts += (_bk_btn(bn, "restore", "Restore", "",
+                             f"Restore {bn}? This REBOOTS the router and "
+                             f"replaces its config with this snapshot.")
+                     if bn.endswith(".backup") else "")
             acts += (" " + _bk_btn(bn, "delete", "Delete", "ghost",
                                    f"Delete {bn} from the router?")
                      if made_by_dashboard(bn) else
@@ -6348,6 +6373,10 @@ def _render_device_backups(name, user, facts, csrf, *, backups=None,
         table = (f'<div class="box"><h2>Restore points on the router'
                  f'{_help_dot("backups", "Backups")}</h2>'
                  f'{_flash_line(flash or {})}'
+                 f'<p class="muted" style="margin:4px 0 10px">Download keeps '
+                 f'a copy somewhere other than the router. A backup holds '
+                 f'the router\'s whole configuration, passwords and keys '
+                 f'included, so keep it somewhere safe.</p>'
                  f'<table><tr><th>File</th><th>Size</th><th>Created</th>'
                  f'<th>Actions</th></tr>{rows}</table></div>'
                  ) if not unreachable else ""
@@ -9092,6 +9121,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if path == "/superadmin/backup/download":
                 name = parse_qs(url.query).get("name", [""])[0]
                 return self._serve_superadmin_backup_download(user, name)
+            if path == "/device/backup/download":
+                q = parse_qs(url.query)
+                return self._device_backup_download(
+                    user, q.get("device", [""])[0], q.get("file", [""])[0])
             if path == "/superadmin/diagnostics/download":
                 return self._serve_superadmin_diagnostics_download(user)
             if path == "/account":
@@ -9209,7 +9242,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                             return self._send(403, "forbidden")
                         return self._device_backups_page(
                             dev, user, msg=q.get("msg", [""])[0],
-                            scan=q.get("scan", [""])[0] == "1")
+                            scan=q.get("scan", [""])[0] == "1",
+                            made=q.get("made", [""])[0])
                     if tab == "tempaccess":
                         if not can_manage:
                             return self._send(403, "forbidden")
@@ -11210,7 +11244,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 store.close()
 
         def _device_backups_page(self, name, user, dry_plan=None, error="",
-                                 msg="", error_title="", scan=False):
+                                 msg="", error_title="", scan=False,
+                                 made=""):
             raw = self._device_raw(name)
             if raw is None:
                 return self._send(400, "This device is not managed in the "
@@ -11249,8 +11284,86 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                           backups=backups, error=error, msg=msg,
                                           dry_plan=dry_plan, flash=flash,
                                           error_title=error_title, space=space,
-                                          scan_error=scan_error)
+                                          scan_error=scan_error, made=made)
             return self._send(200, page, "text/html; charset=utf-8")
+
+        def _device_backup_download(self, user, name, filename):
+            """A backup copied off the router, to keep somewhere else.
+
+            Only a file the router lists as a backup (.backup or .rsc) is
+            handed over -- the name comes from the browser, and nothing else
+            on the router's flash is anybody's to download from here. It is
+            the router's whole configuration, passwords and keys included,
+            so it is for whoever may manage the router, and it is logged."""
+            if not self._can_manage_device(user, name):
+                return self._deny_manage(user, name, "backup-download")
+            raw = self._device_raw(name)
+            if raw is None:
+                return self._send(404, "no such device")
+            from .config import build_device
+            from .device import DeviceError
+            from .push import Pusher, PushError, rw_device
+            from .push.api import PushApi
+            from .router_files import RouterFileError, download, ssh_service
+
+            cfg = build_device(raw, defaults)
+            dev = rw_device(cfg)
+            api = PushApi(dev)
+            uname = (user or {}).get("login", "")
+            refused = "Could not download it:"
+            try:
+                api.connect()
+                names = [b["name"] for b in Pusher(cfg, api).list_backups()]
+                if filename not in names:
+                    return self._device_backups_page(
+                        name, user, error_title=refused,
+                        error=f"{filename} is not a backup on this router "
+                              f"any more.")
+                ssh = ssh_service(api)
+                if ssh["disabled"]:
+                    return self._device_backups_page(
+                        name, user, error_title=refused,
+                        error="SSH is switched off on this router (IP > "
+                              "Services, or the Security tab here), and a "
+                              "backup is copied off the router over SSH. "
+                              "Switch it on (it can be limited to the "
+                              "management tunnel) and try again.")
+                data = download(dev.cfg.host, ssh["port"], dev.cfg.username,
+                                dev.cfg.password, filename)
+            except (DeviceError, PushError) as exc:
+                return self._device_backups_page(name, user, error=str(exc))
+            except RouterFileError as exc:
+                self._audit_note(name, uname, "backup:download", "error",
+                                 f"download {filename}", str(exc))
+                return self._device_backups_page(
+                    name, user, error=str(exc), error_title=refused)
+            finally:
+                dev.close()
+            self._audit_note(name, uname, "backup:download", "ok",
+                             f"downloaded {filename}",
+                             f"{len(data)} bytes")
+            base = filename.rsplit("/", 1)[-1]
+            full = f"{name}-{base}"
+            ascii_name = re.sub(r"[^A-Za-z0-9._-]+", "-", full).strip("-")
+            return self._send(
+                200, data, "application/octet-stream",
+                headers={"Content-Disposition":
+                         f'attachment; filename="{ascii_name}"; '
+                         f"filename*=UTF-8''{quote(full)}",
+                         "Cache-Control": "no-store"})
+
+        def _audit_note(self, name, uname, feature, status, summary, detail):
+            """One line in the activity log, never failing what it records."""
+            audit = self._auditlog()
+            if not audit:
+                return
+            try:
+                audit.append(name, uname, feature, "apply", status, summary,
+                             detail)
+            except Exception:  # noqa: BLE001
+                log.exception("could not write the activity log")
+            finally:
+                audit.close()
 
         def _device_provision_page(self, name, user, msg="", script=None,
                                    creds=None, error=""):
@@ -11818,8 +11931,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         f"/device?name={quote(name)}&tab=backups&scan=1&msg="
                         + quote(msg) + "#space")
                 else:
-                    pusher.apply(pusher.plan_backup(bkname), feature="backup")
-                    msg = "Backup created on the router."
+                    plan = pusher.plan_backup(bkname)
+                    pusher.apply(plan, feature="backup")
+                    saved = next((o.params.get("name", "") for o in plan.ops
+                                  if o.action == "run"), "")
+                    # Back on the tab with a button that downloads the one
+                    # just made -- the copy that survives the router.
+                    return self._redirect(
+                        f"/device?name={quote(name)}&tab=backups&msg="
+                        + quote("Backup created on the router.")
+                        + (f"&made={quote(saved + '.backup')}" if saved
+                           else ""))
                 return self._redirect(
                     f"/device?name={quote(name)}&tab=backups&msg=" + quote(msg))
             except DeviceError as exc:
