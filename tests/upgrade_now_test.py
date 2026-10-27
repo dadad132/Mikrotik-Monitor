@@ -112,10 +112,10 @@ try:
     check("...and emails it to the owner with a link that pays it",
           len(sent) == 1 and "jp@eca.test" in sent[0]["To"]
           and "upgrade to" in sent[0]["Subject"].lower()
-          and "https://easymikrotik.test/pay?t=" in sent[0].get_content())
+          and "https://easymikrotik.test/pay?t=" in sent[0].get_body(("plain",)).get_content())
     check("...in words that say what it is: the days left, not a month",
-          "day" in sent[0].get_content()
-          and "renewal date does not change" in sent[0].get_content())
+          "day" in sent[0].get_body(("plain",)).get_content()
+          and "renewal date does not change" in sent[0].get_body(("plain",)).get_content())
     check("the page says it was emailed and how to pay",
           "emailed to jp@eca.test" in page
           and "Pay it within 3 days, below or from the email" in page)

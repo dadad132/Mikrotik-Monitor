@@ -248,7 +248,7 @@ try:
     o = bs.order(inv)
     check("Yoco's webhook marks it paid and records what it took",
           o["status"] == "paid" and o["charged_cents"] == 41123)
-    body = sent[-1].get_content() if sent else ""
+    body = sent[-1].get_body(("plain",)).get_content() if sent else ""
     check("the email says R411.23 was received -- not R25.00",
           "we have received R411.23" in body and "R25.00" not in body
           and "US$25.00" in body)

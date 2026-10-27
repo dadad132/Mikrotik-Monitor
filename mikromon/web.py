@@ -3594,7 +3594,8 @@ def _sample_order(plan, now=None) -> dict:
 
 
 def _renewal_email(org_name, plan, amount, currency, period_end, due_days,
-                   link, ref, replaces: str = "") -> tuple:
+                   link, ref, replaces: str = "",
+                   attached: bool = False) -> tuple:
     """(subject, body) for a renewal invoice. Builds it; does not send it.
 
     Separated so the preview in Platform admin shows the message that will
@@ -3616,7 +3617,8 @@ def _renewal_email(org_name, plan, amount, currency, period_end, due_days,
         f"  {total} for the month\n"
         f"  Payable within {due_days} days\n\n"
         f"{_how_to_pay(link, ref)}\n\n"
-        f"Thank you,\nEasyMikroTik\n")
+        + (_ATTACHED if attached else "")
+        + f"Thank you,\nEasyMikroTik\n")
     return f"EasyMikroTik invoice \u2014 {total}, due {when}", text
 
 
@@ -3686,8 +3688,62 @@ def _send_signup_code(smtp_cfg, to: str, code: str, company: str) -> None:
     _smtp_send(smtp_cfg, msg)
 
 
+def _company_currency(billing, org_id) -> str:
+    """"ZAR" when a company has already paid in rand, "" otherwise.
+
+    A card here is only ever charged in rand, so a company that has paid by
+    card reads its bank statement in rand. Used where there is no browser to
+    ask -- an emailed invoice -- and as one of the signs on the page."""
+    if not billing or org_id is None:
+        return ""
+    try:
+        for o in billing.orders_for_org(int(org_id), 50):
+            if o.get("status") == "paid" and "ZAR" in (
+                    str(o.get("currency") or "").upper(),
+                    str(o.get("charged_currency") or "").upper()):
+                return "ZAR"
+    except Exception:  # noqa: BLE001 - dollars are a fine default
+        log.exception("could not read past payments")
+    return ""
+
+
+def _invoice_pdf(auth, billing, order, link: str = "", to=None):
+    """(bytes, filename) of the invoice -- or receipt, once paid -- as the
+    PDF an email carries; None when it cannot be drawn.
+
+    Never stops the email it belongs to: without the PDF the email still
+    goes, with its link, and the failure is logged."""
+    if not order:
+        return None
+    try:
+        from . import invoice_pdf
+        from .billing_runner import _DEFAULT_DUE_DAYS
+        from .web_auth import _invoice_data
+        org_id = int(order["org_id"])
+        org = {"name": ((auth.org_name(org_id) if auth else "") or ""),
+               "email": (list(to or []) or [""])[0]}
+        d = _invoice_data(org, order,
+                          auth.get_billing_contact() if auth else None,
+                          pay_link=link, due_days=_DEFAULT_DUE_DAYS,
+                          local=_company_currency(billing, org_id))
+        return invoice_pdf.render(d), invoice_pdf.filename(d)
+    except Exception:  # noqa: BLE001
+        log.exception("could not draw the PDF for order %s", order.get("id"))
+        return None
+
+
+def _attach(msg, pdf) -> None:
+    """Put an (_invoice_pdf) attachment on a message whose text is set."""
+    if pdf:
+        msg.add_attachment(pdf[0], maintype="application", subtype="pdf",
+                           filename=pdf[1])
+
+
+_ATTACHED = "The invoice is attached as a PDF.\n\n"
+
+
 def _upgrade_email(org_name, plan, amount, currency, days, link,
-                   ref) -> tuple:
+                   ref, attached: bool = False) -> tuple:
     """(subject, body) for the invoice a mid-month upgrade raises: the
     difference between the packets for the days left, and nothing else."""
     from .billing import UPGRADE_HOLD_DAYS, money
@@ -3707,7 +3763,8 @@ def _upgrade_email(org_name, plan, amount, currency, days, link,
         f"Not paid within {UPGRADE_HOLD_DAYS} days, this request lapses: "
         f"you stay on the packet you have, and can ask for the upgrade "
         f"again from Billing.\n\n"
-        f"Thank you,\nEasyMikroTik\n")
+        + (_ATTACHED if attached else "")
+        + f"Thank you,\nEasyMikroTik\n")
     return (f"EasyMikroTik invoice \u2014 {total}, upgrade to "
             f"{plan['label']}", text)
 
@@ -3838,13 +3895,17 @@ _CLAIM_REFUSED = {
 
 def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
                    period_end, due_days, link, kind="renewal",
-                   days=0, replaces: str = "") -> list:
+                   days=0, replaces: str = "", billing=None) -> list:
     """The renewal invoice, as an email somebody can act on.
 
     Sent to the owner. The pay link is the point of the message, so it is
     the first thing after the amount rather than a footnote -- an invoice
     that has to be hunted through for a way to pay gets paid by bank
     transfer, which is the path that needs a human here.
+
+    The invoice itself rides along as a PDF (given `billing` to read the
+    order from): the email used to carry the link and nothing else, so
+    whoever pays the bills had nothing to file or forward.
 
     kind="upgrade" sends the invoice a mid-month upgrade raises instead
     (`days` left in the month). Returns who it went to; [] if nobody.
@@ -3870,22 +3931,26 @@ def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
                     "on card payment and set the public address in Platform "
                     "admin, or every renewal needs recording by hand", org_id)
 
+    pdf = (_invoice_pdf(auth, billing, billing.order(int(order_id)), link, to)
+           if billing is not None else None)
     if kind == "upgrade":
         subject, text = _upgrade_email(name, plan, amount, currency, days,
-                                       link, ref)
+                                       link, ref, attached=bool(pdf))
     else:
         subject, text = _renewal_email(name, plan, amount, currency,
                                        period_end, due_days, link, ref,
-                                       replaces=replaces)
+                                       replaces=replaces, attached=bool(pdf))
 
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = smtp_cfg.from_addr
     msg["To"] = ", ".join(to)
     msg.set_content(text)
+    _attach(msg, pdf)
     try:
         _smtp_send(smtp_cfg, msg)
-        log.info("%s: invoice for org %s emailed to %s", kind, org_id, to)
+        log.info("%s: invoice for org %s emailed to %s%s", kind, org_id, to,
+                 " with the PDF" if pdf else "")
         return to
     except Exception:  # noqa: BLE001 - the invoice exists either way
         log.exception("%s: could not email the invoice for org %s", kind,
@@ -3893,7 +3958,8 @@ def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
         return []
 
 
-def _payment_received_text(order, org_name, paid_until=None) -> str:
+def _payment_received_text(order, org_name, paid_until=None,
+                           attached: bool = False) -> str:
     """The "payment received" email, in the currency the card was charged.
 
     It said "we have received R25.00" for a $25 invoice charged R411: the
@@ -3921,7 +3987,10 @@ def _payment_received_text(order, org_name, paid_until=None) -> str:
                      f"is active now.")
     else:
         lines.append("Your packet is active now.")
-    lines.append("Your invoice is on the Billing page of the dashboard, under "
+    lines.append(("Your receipt is attached as a PDF, and is also on the "
+                  "Billing page of the dashboard, under Payments.")
+                 if attached else
+                 "Your invoice is on the Billing page of the dashboard, under "
                  "Payments.")
     return "\n\n".join(lines) + "\n"
 
@@ -3939,7 +4008,7 @@ def _billing_recipients(auth, org_id) -> list:
 
 
 def _reminder_email(stage, org_name, total, due, cutoff, link, ref,
-                    contact: str = "") -> tuple:
+                    contact: str = "", attached: bool = False) -> tuple:
     """(subject, body) for a payment reminder. Builds it; does not send it.
 
     stage is "overdue" (the day the paid-up date passes), "final" (two days
@@ -3972,7 +4041,8 @@ def _reminder_email(stage, org_name, total, due, cutoff, link, ref,
     asked = (f"Already paid? Let us know at {contact} and we will sort it "
              f"out.\n\n" if contact else "")
     return subject, (f"Hello,\n\n{lead}\n\n{_how_to_pay(link, ref)}\n\n"
-                     f"{asked}Thank you,\nEasyMikroTik\n")
+                     + (_ATTACHED if attached else "")
+                     + f"{asked}Thank you,\nEasyMikroTik\n")
 
 
 def _email_reminder(auth, billing, smtp_cfg, org_id, stage,
@@ -4022,13 +4092,16 @@ def _email_reminder(auth, billing, smtp_cfg, org_id, stage,
     ok = True
     to = _billing_recipients(auth, org_id)
     if to:
+        pdf = _invoice_pdf(auth, billing, order, link, to)
         subject, text = _reminder_email(stage, name, total, due, cutoff,
-                                        link, ref, contact)
+                                        link, ref, contact,
+                                        attached=bool(pdf))
         msg = EmailMessage()
         msg["Subject"] = subject
         msg["From"] = smtp_cfg.from_addr
         msg["To"] = ", ".join(to)
         msg.set_content(text)
+        _attach(msg, pdf)
         try:
             _smtp_send(smtp_cfg, msg)
             log.info("billing: %s reminder for org %s emailed to %s", stage,
@@ -8709,7 +8782,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     # and nobody saw.
                     _email_renewal(auth, effective_smtp(auth, smtp_cfg),
                                    org_id, order_id, plan, amount, currency,
-                                   period_end, due_days, link)
+                                   period_end, due_days, link,
+                                   billing=billing)
 
                 def _send_lapsed(order):
                     from .notify.org_email import effective_smtp
@@ -9085,7 +9159,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                             "application/json")
                     # The invoice too: a suspended company asking for it
                     # again needs to see what it owes, and where to pay.
-                    if path not in ("/billing", "/billing/invoice"):
+                    if path not in ("/billing", "/billing/invoice",
+                                    "/billing/invoice.pdf"):
                         return self._redirect("/billing")
                 elif billing.in_grace_period(org_id):
                     self._grace_banner = _grace_banner_html(
@@ -9110,6 +9185,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._serve_test_invoice(url, user)
             if path == "/billing/invoice":
                 return self._serve_invoice(url, user)
+            if path == "/billing/invoice.pdf":
+                return self._serve_invoice_pdf(url, user)
             if path == "/billing":
                 return self._serve_billing(url, user)
             if path == "/superadmin":
@@ -10503,7 +10580,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 sent = _email_renewal(
                     auth, effective_smtp(auth, smtp_cfg), org_id, order_id,
                     plan, amount, cur, period_end, UPGRADE_HOLD_DAYS, link,
-                    kind="upgrade", days=days)
+                    kind="upgrade", days=days, billing=billing)
             except Exception:  # noqa: BLE001 - the invoice exists either way
                 log.exception("upgrade: could not email org %s", org_id)
                 sent = []
@@ -10551,7 +10628,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                             float(new.get("due") or 0), _DEFAULT_DUE_DAYS,
                             billing_runner.pay_link(auth, int(new_id), base),
                             replaces=(was or {}).get("label")
-                            or old.get("plan") or "your old packet")
+                            or old.get("plan") or "your old packet",
+                            billing=billing)
                     except Exception:  # noqa: BLE001
                         log.exception("could not email re-priced renewal %s",
                                       new_id)
@@ -15897,10 +15975,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 f"#{int(order['id']):05d}").strip()
             msg["From"] = smtp.from_addr
             msg["To"] = ", ".join(to)
+            # The receipt itself, as the invoice marked paid.
+            pdf = _invoice_pdf(auth, billing, order, "", to)
             msg.set_content(_payment_received_text(
                 order, org_name,
                 (billing.get(org_id) or {}).get("current_period_end")
-                if billing else None))
+                if billing else None, attached=bool(pdf)))
+            _attach(msg, pdf)
             _smtp_send(smtp, msg)
 
         def _serve_invoice_template(self, url, user):
@@ -15958,6 +16039,22 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(200, _sample_bar(
                     html, "The page the pay link opens", plan["name"]),
                     "text/html; charset=utf-8")
+
+            if doc == "pdf":
+                # The PDF the invoice email carries, drawn by the same code.
+                from . import invoice_pdf
+                from .web_auth import _invoice_data
+                shown = dict(order, paid=None, status="pending",
+                             due=time.time() + _DEFAULT_DUE_DAYS * 86400)
+                base = _public_base(auth) if self._yoco_live() else ""
+                d = _invoice_data(
+                    {"name": _SAMPLE_ORG, "email": "accounts@sample.example"},
+                    shown, auth.get_billing_contact() if auth else None,
+                    pay_link=f"{base}/pay?t=sample" if base else "",
+                    due_days=_DEFAULT_DUE_DAYS,
+                    local=self._local_currency(None))
+                return self._send(200, invoice_pdf.render(d),
+                                  "application/pdf")
 
             if doc in ("invoice", "receipt"):
                 paid = doc == "receipt"
@@ -16044,7 +16141,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 user, org, order, auth.get_billing_contact(), brand=_BRAND,
                 pay_link=self._pay_order_link(order),
                 due_days=_DEFAULT_DUE_DAYS,
-                local=self._local_currency(user)),
+                local=self._local_currency(user),
+                pdf_href=f"/billing/invoice.pdf?id={int(order['id'])}"),
                 "text/html; charset=utf-8")
 
         def _local_currency(self, user) -> str:
@@ -16059,16 +16157,32 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             al = self.headers.get("Accept-Language", "") or ""
             if re.search(r"(?i)\b[a-z]{2,3}-za\b", al):
                 return "ZAR"
-            if billing and user and user.get("org_id") is not None:
-                try:
-                    for o in billing.orders_for_org(int(user["org_id"]), 50):
-                        if o.get("status") == "paid" and "ZAR" in (
-                                str(o.get("currency") or "").upper(),
-                                str(o.get("charged_currency") or "").upper()):
-                            return "ZAR"
-                except Exception:  # noqa: BLE001 - dollars are a fine default
-                    log.exception("could not read past payments")
-            return ""
+            return _company_currency(billing, (user or {}).get("org_id"))
+
+        def _serve_invoice_pdf(self, url, user):
+            """The invoice as the PDF its email carries, to download from
+            the invoice page. The same company check as the page."""
+            if not AuthStore.is_admin(user) or not billing or auth is None:
+                return self._send(403, "forbidden")
+            try:
+                order_id = int(parse_qs(url.query).get("id", ["0"])[0])
+            except ValueError:
+                order_id = 0
+            order = billing.order(order_id) if order_id else None
+            if not order or int(order["org_id"]) != int(user["org_id"]):
+                return self._send(404, "not found")
+            from . import invoice_pdf
+            from .billing_runner import _DEFAULT_DUE_DAYS
+            from .web_auth import _invoice_data
+            d = _invoice_data(
+                {"name": auth.org_name(user["org_id"]) or "",
+                 "email": user.get("email", "")}, order,
+                auth.get_billing_contact(), self._pay_order_link(order),
+                _DEFAULT_DUE_DAYS, local=self._local_currency(user))
+            return self._send(
+                200, invoice_pdf.render(d), "application/pdf",
+                headers={"Content-Disposition":
+                         f'attachment; filename="{invoice_pdf.filename(d)}"'})
 
         def _post_billing_subscribe(self, flat, user):
             """Redirect the owner to the PayFast payment page for their chosen plan."""

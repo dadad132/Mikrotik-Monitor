@@ -1179,24 +1179,19 @@ def _invoice_money(order: dict, settled: bool, local: str = "",
     return base
 
 
-def _invoice_fields(org: dict, order: dict, contact: dict | None,
-                    pay_link: str = "", due_days: int = 7,
-                    local: str = "") -> dict:
-    """Every value the invoice design places, for one order.
+def _invoice_data(org: dict, order: dict, contact: dict | None,
+                  pay_link: str = "", due_days: int = 7,
+                  local: str = "") -> dict:
+    """Everything an invoice says, as plain values -- one source for both the
+    page (_invoice_fields) and the PDF that is emailed (invoice_pdf), so the
+    two cannot come to say different things.
 
     Built from the ORDER, not from today's price list: an invoice that
     changes when prices change is not a record of anything.
 
-    The blocks that would otherwise print blanks -- bank details nobody has
-    saved, a pay button on an invoice already settled -- come back empty
-    rather than half-filled. A wrong account number on an invoice is the
-    most expensive kind of placeholder there is.
-
     `local` is the currency the reader's region uses ("ZAR" for South
     Africa); see _invoice_money for what the figures are shown in.
     """
-    from .brand import lockup_svg
-
     plan = plan_by_name(order.get("plan", ""))
     devices = plan["devices"] if plan else "?"
     months = max(1, int(order.get("months") or 1))
@@ -1208,32 +1203,18 @@ def _invoice_fields(org: dict, order: dict, contact: dict | None,
 
     issued = order.get("created") or order.get("paid") or time.time()
     due = order.get("due") or (issued + due_days * 86400)
-    issue_date = time.strftime("%d %B %Y", time.localtime(issued))
-    due_date = time.strftime("%d %B %Y", time.localtime(due))
-    paid_on = (time.strftime("%d %B %Y", time.localtime(order["paid"]))
-               if settled else "")
-    ref = payment_reference(order.get("org_id", 0), org.get("name", ""))
-    number = f'{int(order.get("id") or 0):05d}'
-    invoice_no = (f'EMT-{time.strftime("%Y", time.localtime(issued))}-'
-                  f'{int(order.get("id") or 0):04d}')
-
     c = contact or {}
-    seller_name = c.get("name") or _BRAND
-    support = c.get("email") or ""
+    ref = payment_reference(order.get("org_id", 0), org.get("name", ""))
+
     seller_bits = []
     if c.get("web"):
         seller_bits.append(("Web", c["web"]))
     if c.get("email"):
         seller_bits.append(("Email", c["email"]))
-    seller_lines = "".join(
-        f'<p><b>{esc(k)}:</b> {esc(str(v))}</p>' for k, v in seller_bits)
-
     client_bits = []
     if org.get("email"):
         client_bits.append(("Email", org["email"]))
     client_bits.append(("Reference", ref))
-    client_lines = "".join(
-        f'<p><b>{esc(k)}:</b> {esc(str(v))}</p>' for k, v in client_bits)
 
     # A first payment is pro rata to the first 28th, and says so: an invoice
     # that reads like a full month for thirteen days' money is a dispute.
@@ -1253,14 +1234,82 @@ def _invoice_fields(org: dict, order: dict, contact: dict | None,
                   f'{time.strftime("%d %B %Y", time.localtime(_q["period_end"]))}'
                   f', after which the packet renews monthly on the '
                   f'{BILLING_DAY}th.')
+
+    bank_rows = [(k, v) for k, v in (
+        ("Bank", c.get("bank_name")),
+        ("Account Holder", c.get("bank_holder")),
+        ("Account Number", c.get("bank_account")),
+        ("Branch Code", c.get("bank_branch")),
+    ) if v]
+    return {
+        "settled": settled,
+        "issue_date": time.strftime("%d %B %Y", time.localtime(issued)),
+        "due_date": time.strftime("%d %B %Y", time.localtime(due)),
+        "paid_on": (time.strftime("%d %B %Y", time.localtime(order["paid"]))
+                    if settled else ""),
+        "number": f'{int(order.get("id") or 0):05d}',
+        "invoice_no": (f'EMT-{time.strftime("%Y", time.localtime(issued))}-'
+                       f'{int(order.get("id") or 0):04d}'),
+        "reference": ref,
+        "seller_name": c.get("name") or _BRAND,
+        "seller_tagline": "Automated Network Solutions & Cloud RouterOS",
+        "seller_bits": seller_bits,
+        "seller": " · ".join(str(v) for v in (
+            c.get("name"), c.get("email")) if v),
+        "support_email": c.get("email") or "",
+        "company": org.get("name", ""),
+        "client_bits": client_bits,
+        "devices": devices,
+        "months": months,
+        "item": f"Router monitoring — up to {devices} devices",
+        "item_detail": (f"Continuous polling, alerting, remote access and "
+                        f"configuration push across up to {devices} "
+                        f"RouterBOARD devices.{covers}"),
+        "unit": unit, "total": total, "sym": sym, "currency": cur,
+        "total_label": "Total Paid" if settled else "Total Due",
+        "fx_note": fx_note,
+        # How it is paid: a receipt has nothing left to pay; card payment
+        # on means the card and only the card; otherwise the bank.
+        "pay": "paid" if settled else "card" if pay_link else "bank",
+        "pay_link": pay_link,
+        "bank_rows": bank_rows,
+        "due_days": due_days,
+    }
+
+
+def _invoice_fields(org: dict, order: dict, contact: dict | None,
+                    pay_link: str = "", due_days: int = 7,
+                    local: str = "") -> dict:
+    """Every value the invoice design places, for one order -- the page's
+    markup around _invoice_data.
+
+    The blocks that would otherwise print blanks -- bank details nobody has
+    saved, a pay button on an invoice already settled -- come back empty
+    rather than half-filled. A wrong account number on an invoice is the
+    most expensive kind of placeholder there is.
+    """
+    from .brand import lockup_svg
+
+    d = _invoice_data(org, order, contact, pay_link, due_days, local)
+    settled, devices, months = d["settled"], d["devices"], d["months"]
+    total, cur, fx_note = d["total"], d["currency"], d["fx_note"]
+    sym, unit = d["sym"], d["unit"]
+    issue_date, due_date, paid_on = (d["issue_date"], d["due_date"],
+                                     d["paid_on"])
+    ref, number, invoice_no = d["reference"], d["number"], d["invoice_no"]
+    c = contact or {}
+    seller_name, support = d["seller_name"], d["support_email"]
+    seller_lines = "".join(
+        f'<p><b>{esc(k)}:</b> {esc(str(v))}</p>' for k, v in d["seller_bits"])
+    client_lines = "".join(
+        f'<p><b>{esc(k)}:</b> {esc(str(v))}</p>' for k, v in d["client_bits"])
+
     # One line, because a renewal charges for one thing. A legacy order
     # bought for several months at once shows the months as the quantity.
     items = (
         f'<tr><td class="n">1</td>'
         f'<td class="item">Router monitoring &mdash; up to {devices} '
-        f'devices<small>Continuous polling, alerting, remote access and '
-        f'configuration push across up to {devices} RouterBOARD devices.'
-        f'{esc(covers)}</small></td>'
+        f'devices<small>{esc(d["item_detail"])}</small></td>'
         f'<td class="n">{months}</td>'
         f'<td class="n">{unit:,.2f}</td>'
         f'<td class="n">{total:,.2f}</td></tr>')
@@ -1298,12 +1347,7 @@ def _invoice_fields(org: dict, order: dict, contact: dict | None,
         # The design came with one in it, from a sample, and an account
         # number that is not this business's is the single worst thing that
         # can be printed on an invoice.
-        rows = [(k, v) for k, v in (
-            ("Bank", c.get("bank_name")),
-            ("Account Holder", c.get("bank_holder")),
-            ("Account Number", c.get("bank_account")),
-            ("Branch Code", c.get("bank_branch")),
-        ) if v]
+        rows = d["bank_rows"]
         pay_rows = "".join(
             f'<tr><td>{esc(k)}:</td><td class="v">{esc(str(v))}</td></tr>'
             for k, v in rows)
@@ -1329,22 +1373,21 @@ def _invoice_fields(org: dict, order: dict, contact: dict | None,
         "date": issue_date,
         "due_date": due_date,
         "due_days": due_days,
-        "company": org.get("name", ""),
+        "company": d["company"],
         "client_lines": client_lines,
         "seller_name": seller_name,
-        "seller_tagline": "Automated Network Solutions & Cloud RouterOS",
+        "seller_tagline": d["seller_tagline"],
         "seller_lines": seller_lines,
-        "seller": " \u00b7 ".join(str(v) for v in (
-            c.get("name"), c.get("email")) if v),
+        "seller": d["seller"],
         "support_email": support,
         "reference": ref,
-        "description": f"Router monitoring \u2014 up to {devices} devices",
+        "description": d["item"],
         "devices": devices,
         "unit": f"{sym}{unit:,.2f}",
         "months": months,
         "items": items,
         "total": f"{sym}{total:,.2f}",
-        "total_label": "Total Paid" if settled else "Total Due",
+        "total_label": d["total_label"],
         "currency": cur,
         "paid_on": paid_on,
         "payment_block": payment_block,
@@ -1385,7 +1428,8 @@ def _invoice_pay_block(pay_link: str, ref: str) -> str:
 
 def _render_invoice(user, org: dict, order: dict, contact: dict | None,
                     brand: str = "", pay_link: str = "",
-                    due_days: int = 7, local: str = "") -> str:
+                    due_days: int = 7, local: str = "",
+                    pdf_href: str = "") -> str:
     """The invoice, as a document.
 
     One code path: the built-in design and an uploaded one are both
@@ -1406,18 +1450,23 @@ def _render_invoice(user, org: dict, order: dict, contact: dict | None,
     html = _tpl.render(_tpl.load(),
                        _invoice_fields(org, order, contact, pay_link,
                                        due_days, local=local))
-    return _invoice_actions(html)
+    return _invoice_actions(html, pdf_href)
 
 
-def _invoice_actions(html: str) -> str:
+def _invoice_actions(html: str, pdf_href: str = "") -> str:
     """A print/back bar on the document, which the document does not carry.
 
     Injected into the page rather than written into the design, so it cannot
     end up on a printed invoice and an uploaded design does not have to know
-    about it.
+    about it. `pdf_href` adds the PDF the email carries, to download.
     """
+    pdf = (f'<a href="{esc(pdf_href)}" style="background:#2563eb;color:#fff;'
+           f'border-radius:6px;padding:10px 18px;font:600 14px system-ui,'
+           f'sans-serif;text-decoration:none">Download PDF</a>'
+           if pdf_href else "")
     bar = ('<div class="mm-actions" style="max-width:860px;margin:18px auto '
            '0;padding:0 18px;display:flex;gap:10px;flex-wrap:wrap">'
+           + pdf +
            '<button type="button" onclick="window.print()" '
            'style="background:#2563eb;color:#fff;border:0;border-radius:6px;'
            'padding:10px 18px;font:600 14px system-ui,sans-serif;'
@@ -2008,7 +2057,10 @@ def _test_invoice_page(user, plan, plan_name: str, subject: str, body: str,
         f'somebody here reading a bank statement.</p>'
         f'<a class="btn" target="_blank" '
         f'href="/superadmin/test-invoice?doc=invoice&plan={esc(plan_name)}">'
-        f'Open the invoice</a></div>'
+        f'Open the invoice</a> '
+        f'<a class="btn ghost" target="_blank" '
+        f'href="/superadmin/test-invoice?doc=pdf&plan={esc(plan_name)}">'
+        f'Open the PDF the email carries</a></div>'
         f'<div class="actions" style="margin-top:14px">'
         f'<a class="btn ghost" href="/superadmin">Back to Platform '
         f'admin</a></div></div>')

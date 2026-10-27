@@ -147,8 +147,8 @@ try:
           "happens if it is not", "Pay it within 3 days" in page
           and "the request lapses" in page)
     check("...and the emailed invoice says the same",
-          sent and "Payable within 3 days" in sent[-1].get_content()
-          and "lapses" in sent[-1].get_content())
+          sent and "Payable within 3 days" in sent[-1].get_body(("plain",)).get_content()
+          and "lapses" in sent[-1].get_body(("plain",)).get_content())
     first = upgrades()[0]
     check("the invoice is due in three days, not seven",
           abs(first["due"] - (first["created"] + 3 * DAY)) < 5)
@@ -209,8 +209,8 @@ try:
     check("the company is emailed that it lapsed, that nothing is owed and "
           "how to ask again", to == ["jp@eca.test"] and sent
           and "lapsed" in sent[-1]["Subject"]
-          and "Nothing is owed" in sent[-1].get_content()
-          and "ask for it again from Billing" in sent[-1].get_content())
+          and "Nothing is owed" in sent[-1].get_body(("plain",)).get_content()
+          and "ask for it again from Billing" in sent[-1].get_body(("plain",)).get_content())
 
     print("\nAn upgrade paid after the month's renewal invoice went out")
     ren = bs.create_order(org, "d5", 2500, due=period_end)
@@ -235,13 +235,13 @@ try:
           == round(B.plan_by_name("d10")["price"] * 100)
           and abs(fresh[0]["due"] - period_end) < 5)
     for _ in range(50):
-        if any("replaces the one sent earlier" in m.get_content()
+        if any("replaces the one sent earlier" in m.get_body(("plain",)).get_content()
                for m in sent):
             break
         time.sleep(0.1)
     check("...and the new invoice is emailed, saying which one it replaces",
-          any("replaces the one sent earlier for 5 devices" in m.get_content()
-              and "pay this one instead" in m.get_content() for m in sent))
+          any("replaces the one sent earlier for 5 devices" in m.get_body(("plain",)).get_content()
+              and "pay this one instead" in m.get_body(("plain",)).get_content() for m in sent))
     st, page, _ = req("/pay?t=" + ren_link.split("t=", 1)[1])
     check("the old invoice's pay link says it was replaced, and takes no "
           "money", "replaced by a newer one" in page
