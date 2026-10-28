@@ -324,6 +324,9 @@ def render_nginx_http(grants, cert: str, key: str) -> str:
             f"    listen {g['port']} ssl;\n"
             f"    ssl_certificate {cert};\n"
             f"    ssl_certificate_key {key};\n"
+            # No nginx version in the Server header (a security scan's
+            # "software version disclosure").
+            f"    server_tokens off;\n"
             f"    client_max_body_size {_MAX_BODY};\n"
             f"    location / {{\n"
             f"        proxy_pass http://{g['tunnel_ip']}:{g['router_port']};\n"

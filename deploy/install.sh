@@ -959,6 +959,7 @@ server {
     listen 80;
     listen [::]:80;
     server_name ${DOMAIN} www.${DOMAIN};
+    server_tokens off;
     location /.well-known/acme-challenge/ { root /var/www/html; }
     location / { return 301 https://\$host\$request_uri; }
 }
@@ -975,10 +976,25 @@ server {
     ssl_ciphers         HIGH:!aNULL:!MD5;
     ssl_session_cache   shared:SSL:10m;
 
-    # Security headers
-    add_header X-Frame-Options        SAMEORIGIN;
-    add_header X-Content-Type-Options nosniff;
-    add_header Referrer-Policy        strict-origin-when-cross-origin;
+    # Security headers. "always" puts them on error pages too.
+    #
+    # Content-Security-Policy: scripts only from this site, nothing to
+    # embed (object-src), no <base> hijack, and no framing by other sites.
+    # The dashboard's pages carry their own inline scripts and onclick
+    # handlers, so inline script is allowed -- the protection kept is that
+    # no script can be loaded from anywhere else. Styles, fonts and images
+    # may come over https so an uploaded invoice design with a web font
+    # still renders. No form-action: paying redirects a posted form to Yoco
+    # (and the old PayFast page posts there), which form-action would block.
+    #
+    # Permissions-Policy: switch off browser features the site never uses,
+    # so injected code cannot ask for them either.
+    server_tokens off;
+    add_header X-Frame-Options        SAMEORIGIN always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy        strict-origin-when-cross-origin always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; upgrade-insecure-requests" always;
+    add_header Permissions-Policy     "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=(), magnetometer=(), gyroscope=(), accelerometer=()" always;
 ${HSTS_LINE}
 
     # Slow or oversized requests: a visitor trickling headers or a body to
