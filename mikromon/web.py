@@ -6891,7 +6891,7 @@ function qbGen(){
     L.push('    add name=("'+pfx+'-$i") target=($subnet . ".$i") max-limit='+lim);
     L.push('    }');
   }
-  document.getElementById('qb-out').value=L.join('\n');
+  document.getElementById('qb-out').value=L.join('\\n');
 }
 window.addEventListener('DOMContentLoaded',qbGen);
 </script>'''
