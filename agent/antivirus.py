@@ -18,6 +18,10 @@ LaunchAgent). --uninstall undoes that. --test sends one test alert, which
 checks the key and that the support team's email arrives, without any
 malware. Run with no options, it runs in the foreground until stopped.
 
+On Windows there is no need for Python: EasyMikroTik-Antivirus-Setup.exe
+(made by build_windows.py, downloaded from the Antivirus page) installs
+this agent as a program of its own -- see windows_setup.py.
+
 It runs as the signed-in user, so it watches that user's folders and can
 only stop that user's processes. Without a key it still protects the PC,
 and keeps its reports in ~/.easymikrotik_edr/outbox until one is set.
@@ -218,9 +222,15 @@ def _inside(path, folder):
         return False
 
 
+def _own_program():
+    """What runs this agent: the script, or, installed by the Windows setup,
+    the program with Python inside it."""
+    return sys.executable if getattr(sys, "frozen", False) else __file__
+
+
 def _is_own_file(path):
     """The agent's own folder (quarantine, outbox, log) and its own script."""
-    here = os.path.normcase(os.path.abspath(__file__))
+    here = os.path.normcase(os.path.abspath(_own_program()))
     return (_inside(path, STATE_DIR)
             or os.path.normcase(os.path.abspath(path)) == here)
 
@@ -894,7 +904,10 @@ _PLIST = "com.easymikrotik.antivirus"
 
 def _command():
     """How the agent is started: this Python and this file. On Windows the
-    windowless pythonw.exe beside it, so sign-in does not open a console."""
+    windowless pythonw.exe beside it, so sign-in does not open a console.
+    The Windows setup's program needs nothing but itself."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
     exe = sys.executable
     if os.name == "nt":
         windowless = os.path.join(os.path.dirname(exe), "pythonw.exe")
@@ -951,18 +964,20 @@ def _run(args):
                                          f"exit {r.returncode}").strip()
 
 
-def _stop_running():
+def _stop_running(program=None):
     """Stop any other copy of the agent this user is running, however it
     was started -- by full path at sign-in, or as `python antivirus.py`
-    from its own folder."""
-    me = os.path.normcase(os.path.abspath(__file__))
+    from its own folder. `program` is another copy's file, for the Windows
+    setup replacing the one it installed."""
+    me = os.path.normcase(os.path.abspath(program or _own_program()))
     stopped = 0
     for proc in psutil.process_iter(["pid", "cmdline", "cwd"]):
         if proc.info["pid"] == os.getpid():
             continue
         cwd = proc.info.get("cwd") or ""
+        # The script is an argument to Python; a program is the command.
         cmd = [os.path.normcase(os.path.abspath(os.path.join(cwd, str(a))))
-               for a in (proc.info.get("cmdline") or [])[1:3]]
+               for a in (proc.info.get("cmdline") or [])[:3]]
         if me in cmd:
             try:
                 proc.terminate()

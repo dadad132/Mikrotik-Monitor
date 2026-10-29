@@ -228,10 +228,46 @@ def _agents_box(agents: list, names: dict, now: float, *,
         f'</thead><tbody>{rows}</tbody></table></div></div>')
 
 
+_SETUP_HREF = "/superadmin/antivirus/setup.exe"
+
+
+def _windows_steps(base: str, key_html: str, setup_ready: bool) -> str:
+    """Putting the agent on a Windows PC with the setup. `base` and
+    `key_html` are already escaped."""
+    if not setup_ready:
+        return ('<p class="muted">The Windows setup is not on this server '
+                'yet: build it with <code>agent/build_windows.py</code> and '
+                'deploy. Until then, use the steps for Python below.</p>')
+    return (
+        f'<p><a class="btn" href="{_SETUP_HREF}" download>Download the '
+        f'Windows setup</a></p>'
+        f'<ol style="line-height:1.7;font-size:14px">'
+        f'<li>Run it on the PC, signed in as the person who uses it. No '
+        f'administrator is needed, and nor is Python.</li>'
+        f'<li>Windows may say it protected the PC: the setup is not signed '
+        f'yet. Choose <b>More info</b> &rarr; <b>Run anyway</b>.</li>'
+        f'<li>Leave the address as <code>{base}</code>, paste the key '
+        f'{key_html}, and choose <b>Install</b>. It checks the key, starts '
+        f'now and at every sign-in, and offers to send a test alert.</li>'
+        f'<li>The PC shows under <b>PCs with the agent</b> straight away. '
+        f'It is removed under Settings &rarr; Apps.</li></ol>'
+        f'<p class="muted" style="font-size:13px">For many PCs: '
+        f'<code>EasyMikroTik-Antivirus-Setup.exe --url {base} --key '
+        f'&lt;key&gt; --quiet</code> installs without the window.</p>')
+
+
+def _install_box(base: str, setup_ready: bool) -> str:
+    return (f'<div class="box"><h2>Install on a PC</h2>'
+            f'{_windows_steps(esc(base), "(made under Company keys)", setup_ready)}'
+            f'<p class="muted" style="font-size:13px;margin:8px 0 0">Linux '
+            f'and macOS: the steps are shown with each new key.</p></div>')
+
+
 def render_antivirus(user, csrf: str, *, orgs: list, keys: dict, agents: list,
                      events: list, saved: list, fallback: list,
                      isolations: dict | None = None, msg: str = "",
-                     error: str = "", now: float | None = None) -> str:
+                     error: str = "", now: float | None = None,
+                     base_url: str = "", setup_ready: bool = False) -> str:
     now = time.time() if now is None else now
     names = {o["id"]: o["name"] for o in orgs}
     pcs_by_org: dict = {}
@@ -247,7 +283,9 @@ def render_antivirus(user, csrf: str, *, orgs: list, keys: dict, agents: list,
         f'{_events_box(events, names)}'
         f'{_agents_box(agents, names, now, isolations=isolations, csrf=csrf, manage=True)}'
         f'{_recipients_box(saved, fallback, csrf)}'
-        f'{_keys_box(orgs, keys, pcs_by_org, csrf)}</div>')
+        f'{_keys_box(orgs, keys, pcs_by_org, csrf)}'
+        f'{_install_box(base_url or "https://your-easymikrotik-address", setup_ready)}'
+        f'</div>')
     return _page("Antivirus", _header(user, "/superadmin/antivirus") + inner)
 
 
@@ -271,7 +309,7 @@ def render_company_antivirus(user, *, org_name: str, agents: list,
 
 
 def render_new_key(user, org_name: str, key: str, base_url: str,
-                   replaced: bool = False) -> str:
+                   replaced: bool = False, setup_ready: bool = False) -> str:
     """The new key, shown this once, with how to put it on a PC."""
     base = esc(base_url or "https://your-easymikrotik-address")
     k = esc(key)
@@ -286,7 +324,9 @@ def render_new_key(user, org_name: str, key: str, base_url: str,
         f'<pre style="font-size:15px;padding:14px;border:1px solid '
         f'var(--border);border-radius:8px;white-space:pre-wrap;'
         f'word-break:break-all">{k}</pre>'
-        f'<h3>Install the agent on each of {esc(org_name)}&rsquo;s PCs</h3>'
+        f'<h3>Windows PCs</h3>'
+        f'{_windows_steps(base, "above", setup_ready)}'
+        f'<h3>Linux and macOS, or Windows with Python</h3>'
         f'<ol style="line-height:1.7;font-size:14px">'
         f'<li>Copy <code>agent/antivirus.py</code> and '
         f'<code>agent/requirements.txt</code> from the EasyMikroTik code onto '

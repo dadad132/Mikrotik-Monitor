@@ -31,3 +31,6 @@ last-install.log
 
 # Safe mode's pending confirmations (written next to devices.db)
 safemode.json
+
+# The Windows antivirus setup's build tools and leftovers (agent/build_windows.py)
+agent/build/

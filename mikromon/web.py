@@ -9180,6 +9180,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 user["_show_antivirus"] = True
             if path == "/antivirus":
                 return self._serve_company_antivirus(user)
+            if path == "/superadmin/antivirus/setup.exe":
+                return self._serve_antivirus_setup(user)
 
             if path == "/superadmin/invoice-template":
                 return self._serve_invoice_template(url, user)
@@ -9937,7 +9939,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if edr_store is None:
                 return self._send(404, "The antivirus store is not enabled "
                                        "on this server (no devices_db).")
-            from .edr import saved_recipients
+            from .edr import SETUP_FILE, saved_recipients
             from .web_edr import render_antivirus
             q = parse_qs(url.query)
             return self._send(200, render_antivirus(
@@ -9947,8 +9949,33 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 saved=saved_recipients(auth),
                 fallback=auth.superadmin_emails(),
                 isolations=edr_store.isolations(),
-                msg=q.get("ok", [""])[0], error=q.get("error", [""])[0]),
+                msg=q.get("ok", [""])[0], error=q.get("error", [""])[0],
+                base_url=self._antivirus_base(),
+                setup_ready=os.path.isfile(SETUP_FILE)),
                 "text/html; charset=utf-8")
+
+        def _antivirus_base(self) -> str:
+            """The address agents report to: this server as the public
+            sees it."""
+            return _public_base(auth) or (
+                ("https" if self._is_https() else "http") + "://"
+                + self.headers.get("Host", ""))
+
+        def _serve_antivirus_setup(self, user):
+            """The Windows setup, for the support team who hold the keys.
+            Nothing secret is in it -- it asks for the key when it runs."""
+            if not user.get("is_superadmin"):
+                return self._send(403, "forbidden")
+            from .edr import SETUP_FILE, SETUP_NAME
+            if edr_store is None or not os.path.isfile(SETUP_FILE):
+                return self._send(404, "The Windows setup is not on this "
+                                       "server. Build it with "
+                                       "agent/build_windows.py.")
+            return self._send_file(
+                200, SETUP_FILE, "application/vnd.microsoft.portable-executable",
+                headers={"Content-Disposition":
+                         f'attachment; filename="{SETUP_NAME}"',
+                         "Cache-Control": "no-store"})
 
         def _serve_company_antivirus(self, user):
             """A company's own antivirus page: what the agents on its PCs
@@ -10195,12 +10222,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             log.info("antivirus key for org %s %s by %s", org_id,
                      "replaced" if replaced else "made",
                      user.get("email", "?"))
+            from .edr import SETUP_FILE
             from .web_edr import render_new_key
-            base = _public_base(auth) or (
-                ("https" if self._is_https() else "http") + "://"
-                + self.headers.get("Host", ""))
-            return self._send(200, render_new_key(user, name, key, base,
-                                                  replaced),
+            return self._send(200, render_new_key(
+                user, name, key, self._antivirus_base(), replaced,
+                setup_ready=os.path.isfile(SETUP_FILE)),
                               "text/html; charset=utf-8",
                               {"Cache-Control": "no-store"})
 

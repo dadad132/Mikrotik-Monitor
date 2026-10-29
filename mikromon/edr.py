@@ -38,11 +38,17 @@ from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
-# Off until the agent can be installed on a PC without Python (a Windows
-# .exe first). While False nothing of this is reachable: the agents'
-# endpoint and both Antivirus pages answer 404, the sidebar links are
-# hidden, and no edr.db is created. True switches all of it on.
-ENABLED = False
+# On since the agent installs on Windows without Python (SETUP_FILE). While
+# False nothing of this is reachable: the agents' endpoint, both Antivirus
+# pages and the setup download answer 404, the sidebar links are hidden,
+# and no edr.db is created.
+ENABLED = True
+
+# The Windows setup, built by agent/build_windows.py, which copies it here so
+# a deploy ships it with the code.
+SETUP_NAME = "EasyMikroTik-Antivirus-Setup.exe"
+SETUP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "downloads", SETUP_NAME)
 
 KEY_PREFIX = "emk_"
 # How long after emailing about a PC its further alerts are only counted.

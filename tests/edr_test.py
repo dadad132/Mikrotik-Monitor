@@ -207,7 +207,9 @@ check("...which only a threat offers, not a problem with the agent itself",
 
 print("switched off:")
 DEF = dict(DEFAULT_THRESHOLDS)
-check("antivirus is off unless switched on", edr.ENABLED is False)
+check("antivirus is on, now that it installs on Windows without Python",
+      edr.ENABLED is True)
+edr.ENABLED = False
 off_dir = os.path.join(tmp, "off")
 os.makedirs(off_dir)
 o_mdb, o_sfile, o_adb, o_ddb = (os.path.join(off_dir, x) for x in
@@ -241,10 +243,16 @@ try:
         page_code = 200
     except urllib.error.HTTPError as e:
         page_code = e.code
+    try:
+        o.open(o_base + "/superadmin/antivirus/setup.exe", timeout=15)
+        setup_code = 200
+    except urllib.error.HTTPError as e:
+        setup_code = e.code
     check("...then agents' reports are refused, as from a server without it",
           off_code == 404)
     check("...the Antivirus page is not there",
           page_code == 404)
+    check("...nor the Windows setup", setup_code == 404)
     check("...no edr.db is made",
           not os.path.exists(os.path.join(off_dir, "edr.db")))
     check("...and platform admins have no Antivirus link",
@@ -256,6 +264,12 @@ finally:
 edr.ENABLED = True
 
 print("over HTTP:")
+# A stand-in for the built setup: the test must not depend on a build.
+SETUP_BYTES = b"MZ stand-in for the Windows setup"
+SETUP_PATH = os.path.join(tmp, "EasyMikroTik-Antivirus-Setup.exe")
+with open(SETUP_PATH, "wb") as fh:
+    fh.write(SETUP_BYTES)
+edr.SETUP_FILE = SETUP_PATH
 web_dir = os.path.join(tmp, "web")      # its own edr.db, beside devices.db
 os.makedirs(web_dir)
 mdb, sfile, adb, ddb = (os.path.join(web_dir, x) for x in
@@ -382,6 +396,38 @@ try:
           "the --test check", "agent/antivirus.py" in page
           and f"--install --url https://em.test --key {akey}" in page
           and "--test" in page)
+    check("...Windows first, with the setup to download and the address "
+          "to leave in it", page.index("Windows PCs") < page.index(
+              "agent/antivirus.py")
+          and 'href="/superadmin/antivirus/setup.exe"' in page
+          and "<code>https://em.test</code>" in page
+          and "Run anyway" in page)
+    _, page, _ = req(boss, "/superadmin/antivirus")
+    check("the Antivirus page offers the Windows setup too",
+          "Install on a PC" in page
+          and 'href="/superadmin/antivirus/setup.exe"' in page)
+
+    def fetch(op, path):
+        try:
+            r = op.open(BASE + path, timeout=15)
+            return r.status, r.read(), r.headers
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(), e.headers
+    st_, body, hdrs = fetch(boss, "/superadmin/antivirus/setup.exe")
+    check("a platform admin downloads it, as a file named for what it is",
+          st_ == 200 and body == SETUP_BYTES
+          and 'filename="EasyMikroTik-Antivirus-Setup.exe"'
+          in hdrs.get("Content-Disposition", ""))
+    st_, _, _ = fetch(owner, "/superadmin/antivirus/setup.exe")
+    check("...a company owner does not: the support team installs it, "
+          "holding the keys", st_ == 403)
+    edr.SETUP_FILE = os.path.join(tmp, "not-built.exe")
+    st_, _, _ = fetch(boss, "/superadmin/antivirus/setup.exe")
+    _, nopage, _ = req(boss, "/superadmin/antivirus")
+    check("a server without the setup built says so, rather than a "
+          "broken link", st_ == 404 and "not on this server yet" in nopage
+          and 'href="/superadmin/antivirus/setup.exe"' not in nopage)
+    edr.SETUP_FILE = SETUP_PATH
     _, page, _ = req(boss, "/superadmin/antivirus")
     check("afterwards the page shows only the key's first characters",
           akey not in page and akey[:10] in page)
