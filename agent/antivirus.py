@@ -7,6 +7,11 @@ clearly bad files into quarantine, and watches for Office or a web server
 starting a shell. Everything it finds goes to EasyMikroTik, which emails
 the support team and lists it under Antivirus on the dashboard.
 
+The known-bad hashes are EasyMikroTik's shared threat list, downloaded every
+15 minutes: what any agent quarantines, what Windows Defender catches on any
+PC (reported from here too), the MalwareBazaar feed, and the support team's
+decisions -- including "safe", which puts a quarantined file back.
+
 Set up on a PC (the key comes from EasyMikroTik -> Antivirus -> Make a key):
 
     pip install -r requirements.txt
@@ -93,6 +98,12 @@ CONFIG = {
     # never suspended: see REPORT_ONLY_PARENTS.
     "SUSPEND_SUSPICIOUS_PROCESSES": True,
     "HEARTBEAT_MINUTES": 15,
+    # How often the shared threat list is checked for changes, and Windows
+    # Defender for new finds. Defender out of date by more than this many
+    # days is reported.
+    "SYNC_MINUTES": 15,
+    "DEFENDER_MINUTES": 5,
+    "DEFENDER_STALE_DAYS": 7,
 
     "QUARANTINE_DIR": os.path.join(STATE_DIR, "quarantine"),
     "OUTBOX_DIR": os.path.join(STATE_DIR, "outbox"),
@@ -247,16 +258,38 @@ def is_executable(filepath):
     return head.startswith(_EXEC_MAGIC)
 
 
+# Standard safe EICAR Antivirus Test File SHA-256 hash (the 68-byte file
+# exactly: one saved with a trailing newline hashes differently, and only the
+# YARA rule catches that one).
+_EICAR_SHA256 = "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f"
+_SHA256_HEX = frozenset("0123456789abcdef")
+
+
+def _is_sha256(value):
+    return len(value) == 64 and set(value) <= _SHA256_HEX
+
+
 class DetectionEngine:
+    # The fingerprints of the files scanned last, by path: Windows Defender
+    # often removes a file before anything else can read it, and this is
+    # how its find still gets a fingerprint to share.
+    RECENT = 2000
+
     def __init__(self, db_path):
         self.db_path = db_path
         self.yara_error = ""
+        self._recent = {}
+        self._recent_lock = threading.Lock()
         self._init_db()
         self.yara_rules = self._compile_default_yara()
 
+    def _db(self):
+        # The scanner and the threat list update each open their own.
+        return closing(sqlite3.connect(self.db_path, timeout=30))
+
     def _init_db(self):
         """Creates local SQLite signature DB and inserts the standard EICAR test hash."""
-        with closing(sqlite3.connect(self.db_path)) as conn:
+        with self._db() as conn:
             cur = conn.cursor()
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS malware_hashes (
@@ -265,15 +298,89 @@ class DetectionEngine:
                     severity TEXT
                 )
             """)
-            # Standard safe EICAR Antivirus Test File SHA-256 hash (the
-            # 68-byte file exactly: one saved with a trailing newline hashes
-            # differently, and only the YARA rule catches that one).
-            eicar_sha256 = "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f"
+            # Files the support team said are safe: never flagged, whatever
+            # a rule thinks of them.
+            cur.execute("CREATE TABLE IF NOT EXISTS allowed_hashes ("
+                        "sha256 TEXT PRIMARY KEY, name TEXT)")
+            cur.execute("CREATE TABLE IF NOT EXISTS meta ("
+                        "key TEXT PRIMARY KEY, value TEXT)")
             cur.execute(
                 "INSERT OR IGNORE INTO malware_hashes VALUES (?, ?, ?)",
-                (eicar_sha256, "EICAR-Standard-Antivirus-Test-File", "HIGH")
+                (_EICAR_SHA256, "EICAR-Standard-Antivirus-Test-File", "HIGH")
             )
             conn.commit()
+
+    # ----- the shared threat list -------------------------------------------
+    def is_allowed(self, file_hash):
+        with self._db() as conn:
+            return conn.execute("SELECT 1 FROM allowed_hashes WHERE sha256 = ?",
+                                (file_hash,)).fetchone() is not None
+
+    def known_count(self):
+        with self._db() as conn:
+            return conn.execute("SELECT COUNT(*) FROM malware_hashes").fetchone()[0]
+
+    def threat_rev(self):
+        """Where the last update from EasyMikroTik's list got to."""
+        with self._db() as conn:
+            row = conn.execute("SELECT value FROM meta WHERE key = 'threat_rev'"
+                               ).fetchone()
+        try:
+            return int(row[0]) if row else 0
+        except (TypeError, ValueError):
+            return 0
+
+    def apply_threats(self, items, rev):
+        """Changes from EasyMikroTik's list, as [sha256, verdict, name,
+        severity]. Returns the fingerprints newly marked safe, whose files
+        are to come out of quarantine."""
+        safe = []
+        with self._db() as conn:
+            for item in items or []:
+                try:
+                    sha, verdict, name, severity = (str(x) for x in item[:4])
+                except (TypeError, ValueError):
+                    continue
+                sha = sha.lower()
+                if not _is_sha256(sha):
+                    continue
+                if verdict == "malicious":
+                    conn.execute(
+                        "INSERT OR REPLACE INTO malware_hashes VALUES (?,?,?)",
+                        (sha, name or "On EasyMikroTik's threat list",
+                         severity if severity in _SEVERITY_RANK else "HIGH"))
+                    conn.execute("DELETE FROM allowed_hashes WHERE sha256 = ?",
+                                 (sha,))
+                elif verdict == "safe" and sha != _EICAR_SHA256:
+                    conn.execute("DELETE FROM malware_hashes WHERE sha256 = ?",
+                                 (sha,))
+                    conn.execute(
+                        "INSERT OR REPLACE INTO allowed_hashes VALUES (?, ?)",
+                        (sha, name))
+                    safe.append(sha)
+                elif verdict == "removed" and sha != _EICAR_SHA256:
+                    conn.execute("DELETE FROM malware_hashes WHERE sha256 = ?",
+                                 (sha,))
+                    conn.execute("DELETE FROM allowed_hashes WHERE sha256 = ?",
+                                 (sha,))
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('threat_rev', ?)",
+                         (str(int(rev)),))
+            conn.commit()
+        return safe
+
+    def _remember(self, path, file_hash):
+        key = os.path.normcase(os.path.abspath(path))
+        with self._recent_lock:
+            self._recent.pop(key, None)
+            self._recent[key] = file_hash
+            while len(self._recent) > self.RECENT:
+                self._recent.pop(next(iter(self._recent)))
+
+    def hash_of(self, path):
+        """The fingerprint of a file this agent scanned lately, even if it
+        is gone now; "" if it never saw it."""
+        with self._recent_lock:
+            return self._recent.get(os.path.normcase(os.path.abspath(path)), "")
 
     def _compile_default_yara(self):
         """Compiles built-in cross-platform YARA rules."""
@@ -288,7 +395,7 @@ class DetectionEngine:
             return None
 
     def known_hash(self, file_hash):
-        with closing(sqlite3.connect(self.db_path)) as conn:
+        with self._db() as conn:
             return conn.execute(
                 "SELECT threat_name, severity FROM malware_hashes WHERE sha256 = ?",
                 (file_hash,)).fetchone()
@@ -327,6 +434,9 @@ class DetectionEngine:
 
             # Stage 1: Fast SHA-256 Hash Lookup
             file_hash = self.calculate_sha256(filepath)
+            self._remember(filepath, file_hash)
+            if self.is_allowed(file_hash):
+                return None   # the support team said it is safe
             row = self.known_hash(file_hash)
             if row:
                 return {"stage": "hash", "reason": f"Known malware hash ({row[0]})",
@@ -632,6 +742,344 @@ def handle_file(engine, reporter, filepath):
     logging.critical(f"[THREAT DETECTED] {filepath} | {result['reason']}")
     quarantine_file(filepath, result, reporter)
 
+
+def _free_name(path):
+    """`path`, or beside it with "(restored)" added if something has taken
+    its place since."""
+    if not os.path.exists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    for i in range(1, 100):
+        candidate = f"{base} (restored{'' if i == 1 else f' {i}'}){ext}"
+        if not os.path.exists(candidate):
+            return candidate
+    return f"{base} (restored {uuid.uuid4().hex[:6]}){ext}"
+
+
+def release_from_quarantine(shas, reporter):
+    """Put back the quarantined files the support team marked safe, where
+    they were found. Returns how many."""
+    qdir = CONFIG["QUARANTINE_DIR"]
+    shas = {s.lower() for s in shas}
+    try:
+        names = os.listdir(qdir)
+    except OSError:
+        return 0
+    released = 0
+    for name in names:
+        if not name.endswith(".quarantined.json"):
+            continue
+        info_path = os.path.join(qdir, name)
+        try:
+            with open(info_path, encoding="utf-8") as fh:
+                info = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if str(info.get("sha256", "")).lower() not in shas:
+            continue
+        q_path = info_path[:-len(".json")]
+        original = str(info.get("original_path") or "")
+        if not (original and os.path.isfile(q_path)):
+            continue
+        dest = _free_name(original)
+        try:
+            os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+            os.chmod(q_path, 0o600)   # quarantine left it read-only
+            shutil.move(q_path, dest)
+            os.remove(info_path)
+        except OSError as e:
+            logging.error(f"Could not put back {original}: {e}")
+            reporter.report("AGENT_ERROR", "MEDIUM", target=original,
+                            reason=f"Could not put back a file marked safe: {e}",
+                            action=f"It is still in quarantine: {q_path}")
+            continue
+        released += 1
+        logging.info(f"[RELEASED] {dest} was marked safe by the support team")
+        reporter.report("FILE_RESTORED", "LOW", target=dest,
+                        reason="Marked safe by the support team",
+                        action="Put back where it was quarantined from",
+                        sha256=str(info.get("sha256", "")))
+    return released
+
+
+class ThreatSync:
+    """Keeps this PC's threat list in step with EasyMikroTik's shared one.
+
+    That list is how one PC's find protects the others: what any agent
+    quarantines, what Windows Defender catches, the MalwareBazaar feed and
+    the support team's own decisions. Only what changed since the last look
+    is fetched, so after the first it is a few bytes every 15 minutes. A file
+    marked safe comes out of quarantine and goes back where it was."""
+
+    MAX_PAGES = 1000
+
+    def __init__(self, reporter, engine):
+        self.reporter = reporter
+        self.engine = engine
+        base = reporter.url[:-len("/alerts")] if reporter.url.endswith(
+            "/alerts") else ""
+        self.url = base + "/threats" if base else ""
+        self.last_error = ""
+
+    def once(self):
+        """One look. Returns how many changes were applied, or None when
+        EasyMikroTik could not be asked."""
+        if not (self.url and self.reporter.key):
+            self.last_error = "No EasyMikroTik address or agent key is set"
+            return None
+        applied = 0
+        for _ in range(self.MAX_PAGES):
+            since = self.engine.threat_rev()
+            try:
+                resp = requests.get(
+                    self.url, params={"since": since}, timeout=30,
+                    headers={"Authorization": f"Bearer {self.reporter.key}"})
+            except requests.RequestException as e:
+                self.last_error = f"EasyMikroTik not reachable: {e}"
+                return applied or None
+            if resp.status_code != 200:
+                self.last_error = f"EasyMikroTik answered {resp.status_code}"
+                return applied or None
+            try:
+                data = resp.json()
+                rev = int(data.get("rev", since))
+            except (ValueError, TypeError, AttributeError):
+                self.last_error = "EasyMikroTik sent a list this agent cannot read"
+                return applied or None
+            items = data.get("items") or []
+            safe = self.engine.apply_threats(items, rev)
+            applied += len(items)
+            if safe:
+                release_from_quarantine(safe, self.reporter)
+            if not data.get("more") or rev <= since:
+                break
+        self.last_error = ""
+        if applied:
+            logging.info(f"Threat list: {applied} change(s) from EasyMikroTik")
+        return applied
+
+    def run(self):
+        logged = ""
+        while True:
+            try:
+                self.once()
+            except Exception:
+                logging.exception("Updating the threat list failed")
+            # Once per change, so a revoked key or a server that is down shows
+            # in the log without repeating every 15 minutes.
+            if self.last_error != logged:
+                if self.last_error:
+                    logging.warning(f"Threat list not updated: {self.last_error}")
+                else:
+                    logging.info("Threat list: reaching EasyMikroTik again")
+                logged = self.last_error
+            time.sleep(CONFIG["SYNC_MINUTES"] * 60)
+
+
+# Windows Defender's SeverityID, in this agent's three words.
+_DEFENDER_SEVERITY = {1: "LOW", 2: "MEDIUM", 4: "HIGH", 5: "HIGH"}
+
+
+def _defender_rows(wmi_class):
+    """Rows of one of Windows Defender's WMI classes, as dicts. Through
+    pywin32 when it is there (the Windows setup has it), otherwise through
+    PowerShell, which every Windows has. Neither needs administrator rights."""
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError:
+        return _defender_rows_powershell(wmi_class)
+    # Left initialised for the thread's life: uninitialising while Python
+    # still holds the query's objects is what Windows complains about.
+    pythoncom.CoInitialize()
+    svc = win32com.client.GetObject(
+        r"winmgmts:\\.\root\Microsoft\Windows\Defender")
+    return [{p.Name: p.Value for p in obj.Properties_}
+            for obj in svc.ExecQuery(f"SELECT * FROM {wmi_class}")]
+
+
+def _defender_rows_powershell(wmi_class):
+    import subprocess
+    r = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+         f"Get-CimInstance -Namespace root/Microsoft/Windows/Defender "
+         f"-ClassName {wmi_class} | ConvertTo-Json -Depth 2 -Compress"],
+        capture_output=True, text=True, timeout=120,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if r.returncode != 0:
+        raise OSError((r.stderr or "").strip()[:300] or f"exit {r.returncode}")
+    out = (r.stdout or "").strip()
+    if not out:
+        return []
+    data = json.loads(out)
+    return data if isinstance(data, list) else [data]
+
+
+def _defender_path(resource):
+    """'file:_C:\\x.exe' (or a file inside an archive or a download) to the
+    path on disk; "" for what is not a file, such as a running process."""
+    kind, _, rest = str(resource).partition(":_")
+    if kind.lower() not in ("file", "containerfile", "webfile") or not rest:
+        return ""
+    return rest.split("|")[0].split("->")[0].strip()
+
+
+class DefenderWatch:
+    """What Windows Defender finds on this PC, reported like the agent's own
+    finds -- with the file's fingerprint when it can still be had, which puts
+    it on the shared list for the other PCs -- and Defender being switched
+    off or falling out of date, which is the first thing much malware does.
+
+    The first look only notes what Defender found before the agent was
+    installed: that is old news, and reporting it would email the support
+    team about every PC's history at once."""
+
+    MAX_SEEN = 5000
+
+    def __init__(self, reporter, engine, rows=None):
+        self.reporter = reporter
+        self.engine = engine
+        self.rows = rows or _defender_rows
+        self.seen_file = os.path.join(STATE_DIR, "defender_seen.json")
+        self.health_file = os.path.join(STATE_DIR, "defender_health.json")
+        self._failed = False
+
+    def _load(self, path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return None
+
+    def _save(self, path, value):
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(value, fh)
+            os.replace(tmp, path)
+        except OSError as e:
+            logging.error(f"Could not save {path}: {e}")
+
+    def _fingerprint(self, paths):
+        # The file on disk first: what the agent scanned at that path earlier
+        # may since have been replaced by what Defender is flagging now, and
+        # the old file's fingerprint would put an innocent file on the list.
+        for p in paths:
+            try:
+                if (os.path.isfile(p) and os.path.getsize(p)
+                        <= CONFIG["MAX_FILE_SIZE_MB"] * 1024 * 1024):
+                    return DetectionEngine.calculate_sha256(p)
+            except OSError:
+                pass
+            sha = self.engine.hash_of(p)
+            if sha:
+                return sha
+        return ""
+
+    def detections(self):
+        """Report Defender's new finds. Returns their threat names."""
+        rows = self.rows("MSFT_MpThreatDetection")
+        ids = {str(r.get("DetectionID") or "") for r in rows} - {""}
+        seen = self._load(self.seen_file)
+        if not isinstance(seen, list):
+            self._save(self.seen_file, sorted(ids))
+            return []
+        seen = set(seen)
+        new = [r for r in rows if str(r.get("DetectionID") or "")
+               and str(r.get("DetectionID")) not in seen]
+        if not new:
+            return []
+        threats = {}
+        try:
+            for t in self.rows("MSFT_MpThreat"):
+                threats[str(t.get("ThreatID"))] = t
+        except Exception as e:
+            logging.debug(f"Defender threat names unavailable: {e}")
+        names = []
+        for r in new:
+            t = threats.get(str(r.get("ThreatID")), {})
+            name = str(t.get("ThreatName") or f"threat {r.get('ThreatID')}")
+            try:
+                severity = _DEFENDER_SEVERITY.get(int(t.get("SeverityID") or 0),
+                                                  "MEDIUM")
+            except (TypeError, ValueError):
+                severity = "MEDIUM"
+            resources = r.get("Resources") or []
+            if isinstance(resources, str):
+                resources = [resources]
+            paths = [p for p in (_defender_path(x) for x in resources) if p]
+            target = paths[0] if paths else (str(resources[0]) if resources else "")
+            done = r.get("ActionSuccess")
+            action = ("Windows Defender removed or quarantined it" if done is True
+                      else "Windows Defender could NOT remove it" if done is False
+                      else "")
+            if done is False and severity == "LOW":
+                # Still on the PC: worth an email, not just a line on the page.
+                severity = "MEDIUM"
+            logging.warning(f"[DEFENDER] {name} | {target}")
+            self.reporter.report(
+                "DEFENDER_DETECTION", severity, target=target,
+                reason=f"Windows Defender found {name}", action=action,
+                sha256=self._fingerprint(paths),
+                details={"threat": name,
+                         "threat_id": str(r.get("ThreatID") or ""),
+                         "detection_id": str(r.get("DetectionID"))})
+            names.append(name)
+        keep = sorted(seen | ids)
+        self._save(self.seen_file, keep[-self.MAX_SEEN:])
+        return names
+
+    def health(self):
+        """Report Defender going off or out of date, and coming back. Not
+        while another antivirus is in charge: Windows puts Defender in
+        passive mode then, on purpose. Returns whether it is healthy."""
+        rows = self.rows("MSFT_MpComputerStatus")
+        if not rows:
+            return None
+        s = rows[0]
+        problems = []
+        if str(s.get("AMRunningMode") or "Normal").strip().lower() == "normal":
+            if s.get("AntivirusEnabled") is False:
+                problems.append("Microsoft Defender Antivirus is switched off")
+            elif s.get("RealTimeProtectionEnabled") is False:
+                problems.append("its real-time protection is switched off")
+            try:
+                age = int(s.get("AntivirusSignatureAge") or 0)
+            except (TypeError, ValueError):
+                age = 0
+            if CONFIG["DEFENDER_STALE_DAYS"] < age < 65535:
+                problems.append(f"its virus definitions are {age} days old")
+        healthy = not problems
+        before = self._load(self.health_file)
+        before = before.get("healthy") if isinstance(before, dict) else None
+        if healthy != before:
+            if not healthy:
+                self.reporter.report(
+                    "DEFENDER_OFF", "MEDIUM",
+                    reason="Windows Defender: " + "; ".join(problems),
+                    action="Switch it back on in Windows Security, and find "
+                           "out what turned it off: malware often does")
+            elif before is False:
+                self.reporter.report(
+                    "DEFENDER_OK", "LOW",
+                    reason="Windows Defender is on and up to date again")
+            self._save(self.health_file, {"healthy": healthy})
+        return healthy
+
+    def run(self):
+        while True:
+            try:
+                self.detections()
+                self.health()
+                self._failed = False
+            except Exception as e:
+                # Once, not every five minutes: a PC without Defender (or
+                # with it removed) would otherwise fill the log.
+                if not self._failed:
+                    logging.warning(f"Windows Defender could not be read: {e}")
+                self._failed = True
+            time.sleep(CONFIG["DEFENDER_MINUTES"] * 60)
+
 # =====================================================================
 # 6. REAL-TIME WATCHERS (File System + Process Monitor)
 # =====================================================================
@@ -838,6 +1286,13 @@ def main(url=None, key=None):
     if engine.yara_error:
         reporter.report("AGENT_ERROR", "MEDIUM", reason=engine.yara_error,
                         action="Running on hash and entropy checks only")
+    # Before the scanner: what the rest of the fleet has learned is known
+    # here as early as possible.
+    threading.Thread(target=ThreatSync(reporter, engine).run,
+                     name="threat-list", daemon=True).start()
+    if CONFIG["OS_TYPE"] == "Windows":
+        threading.Thread(target=DefenderWatch(reporter, engine).run,
+                         name="defender", daemon=True).start()
     scans = ScanQueue(lambda path: handle_file(engine, reporter, path),
                       CONFIG["SETTLE_SECONDS"])
     threading.Thread(target=scans.run, name="scanner", daemon=True).start()
@@ -870,7 +1325,8 @@ def main(url=None, key=None):
                            + ("" if engine.yara_rules else
                               "; YARA rules off (yara-python not installed)"),
                     details={"folders": watched_dirs,
-                             "yara": bool(engine.yara_rules)})
+                             "yara": bool(engine.yara_rules),
+                             "known_threats": engine.known_count()})
 
     # A service manager stops the agent with SIGTERM; treat it like Ctrl+C
     # so the stop is reported.

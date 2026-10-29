@@ -452,6 +452,10 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
         f'style="width:100%;max-width:360px"></p>'
         f'<p>New password <span class="muted">(leave blank to keep current)</span>'
         f'<br><input name="password" type="password" placeholder="min 6 characters" '
+        f'autocomplete="new-password" style="width:100%;max-width:360px"></p>'
+        f'<p>Current password <span class="muted">(needed to change your '
+        f'email or password)</span><br><input name="current_password" '
+        f'type="password" autocomplete="current-password" '
         f'style="width:100%;max-width:360px"></p>'
         f'<button class="btn" type="submit">Save changes</button>'
         f'</form></div>')

@@ -136,15 +136,15 @@ fallback = SmtpConfig(host="config-host", port=25)
 check("no DB SMTP -> falls back to config.yaml relay",
       effective_smtp(a, fallback).host == "config-host")
 check("get_smtp is None until set", a.get_smtp() is None)
-a.set_smtp({"host": "mail-eu.smtp2go.com", "port": 2525,
+a.set_smtp({"host": "smtp.relay.invalid", "port": 2525,
             "username": "noreply@x.com", "password": "sekret",
             "use_tls": True, "use_ssl": False, "from_addr": "noreply@x.com"})
 check("get_smtp round-trips what was saved",
-      a.get_smtp()["host"] == "mail-eu.smtp2go.com"
+      a.get_smtp()["host"] == "smtp.relay.invalid"
       and a.get_smtp()["port"] == 2525)
 eff = effective_smtp(a, fallback)
 check("effective_smtp now prefers the DB relay over config",
-      eff.host == "mail-eu.smtp2go.com" and eff.port == 2525
+      eff.host == "smtp.relay.invalid" and eff.port == 2525
       and eff.use_tls and not eff.use_ssl and eff.password == "sekret")
 a.close()
 
@@ -698,6 +698,41 @@ try:
           ">Add device</button>" in body
           and "You are at your device limit" not in body)
 
+    print("A company cannot point a device at what only the server can reach:")
+    for _bad in ("127.0.0.1", "localhost", "169.254.169.254", "192.168.1.1",
+                 "::1"):
+        st, body = _add("CapEvil", host=_bad)
+        check(f"{_bad} is refused, saying why, and nothing is saved",
+              st == 400 and "not on the public internet" in body
+              and "CapEvil" not in _devices_of(_cid))
+    _hubf = os.path.join(os.path.dirname(wdb), "hub.json")
+    try:
+        with open(_hubf, encoding="utf-8") as fh:
+            _hub = json.load(fh)
+    except (OSError, ValueError):
+        _hub = {}
+    _hub.setdefault("leases", {})["SomeoneElsesRouter"] = "10.10.7.7"
+    with open(_hubf, "w", encoding="utf-8") as fh:
+        json.dump(_hub, fh)
+    st, body = _add("CapEvil", host="10.10.7.7")
+    check("another company's router's tunnel address is refused",
+          st == 400 and "belongs to another router" in body
+          and "CapEvil" not in _devices_of(_cid))
+    st, body = _add("SomeoneElsesRouter", host="10.10.7.7")
+    check("...even by naming a new device after the router whose lease it "
+          "is: a lease left behind is not anyone's to type in",
+          st == 400 and "belongs to another router" in body
+          and "SomeoneElsesRouter" not in _devices_of(_cid))
+    _add("CapTun", host="")
+    _ds_t = DevicesStore(wdb)
+    _tun_ip = (_ds_t.raw("CapTun") or {}).get("host", "")
+    _ds_t.close()
+    st, body = _add("CapTun", original="CapTun", host=_tun_ip)
+    check("a router set up over the tunnel can still be edited, keeping the "
+          "tunnel address it was given",
+          _tun_ip.startswith("10.10.") and st == 200
+          and "CapTun" in _devices_of(_cid))
+
     print("Correcting a paid-up date from the Platform panel:")
     # Reported: an account given a month too many still said 61 days after
     # being suspended and restored -- neither touches the date, and
@@ -1076,18 +1111,43 @@ try:
 
     print("Account self-service (edit email/password):")
     _, acct = req(bob, "/account")
+    check("the form asks for the current password",
+          'name="current_password"' in acct)
     bc = csrf_of(acct)
+    st, page = req(bob, "/account", {"csrf": bc, "email": "bob@acme.test",
+                   "password": "stolen-session-pw"})
+    a4 = AuthStore(adb)
+    check("a new password without the current one is refused (a session "
+          "alone cannot take the account over)",
+          "current password is not right" in page
+          and a4.verify("bob@acme.test", "bob123") is not None)
+    a4.close()
+    st, page = req(bob, "/account", {"csrf": bc, "email": "evil@else.test",
+                   "password": "", "current_password": "wrong"})
+    a4 = AuthStore(adb)
+    check("...and so is a new email with the wrong current password",
+          "current password is not right" in page
+          and a4.get_user("evil@else.test") is None)
+    a4.close()
+    bob2 = opener()
+    req(bob2, "/login", {"email": "bob@acme.test", "password": "bob123"})
+    check("bob signed in on a second browser",
+          req(bob2, "/api/devices")[0] == 200)
     st, _ = req(bob, "/account", {"csrf": bc, "email": "bob@acme.test",
-                "password": "bobnewpw"})
+                "password": "bobnewpw", "current_password": "bob123"})
     a4 = AuthStore(adb)
     check("password change takes effect",
           a4.verify("bob@acme.test", "bobnewpw") is not None
           and a4.verify("bob@acme.test", "bob123") is None)
     a4.close()
+    check("...signs bob out of the other browser",
+          req(bob2, "/api/devices")[0] != 200)
+    check("...but not out of the one that changed it",
+          req(bob, "/api/devices")[0] == 200)
     _, acct = req(bob, "/account")
     bc = csrf_of(acct)
     st, _ = req(bob, "/account", {"csrf": bc, "email": "bobby@acme.test",
-                "password": ""})
+                "password": "", "current_password": "bobnewpw"})
     a4 = AuthStore(adb)
     check("email change takes effect + keeps session",
           a4.get_user("bobby@acme.test") is not None

@@ -10,7 +10,7 @@ import time
 from urllib.parse import quote
 
 from .edr import (EMAIL_FAILED, EMAIL_GAP, EMAIL_HELD, EMAIL_SENT,
-                  EMAILS_PER_HOUR, label)
+                  EMAILS_PER_HOUR, SOURCES, label)
 from .util import human_duration
 from .web_shared import _flash, _header, _page, confirm_attr, esc
 
@@ -120,8 +120,54 @@ def _keys_box(orgs: list, keys: dict, pcs_by_org: dict, csrf: str) -> str:
         f'</thead><tbody>{rows}</tbody></table></div></div>')
 
 
+def _threat_form(sha256: str, action: str, text: str, csrf: str,
+                 cls: str = "btn ghost", confirm: str = "",
+                 name: str = "") -> str:
+    onclick = f' onclick="{confirm_attr(confirm)}"' if confirm else ""
+    named = (f'<input type="hidden" name="name" value="{esc(name)}">'
+             if name else "")
+    return (f'<form method="POST" action="/superadmin/antivirus/threat" '
+            f'style="display:inline">'
+            f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<input type="hidden" name="sha256" value="{esc(sha256)}">'
+            f'<input type="hidden" name="action" value="{action}">{named}'
+            f'<button class="{cls}" type="submit" style="padding:3px 9px;'
+            f'font-size:12px"{onclick}>{text}</button></form>')
+
+
+def _verdict_cell(sha256: str, entry: dict | None, csrf: str,
+                  names: dict) -> str:
+    """Where this file stands on the shared list, and the support team's
+    buttons for it."""
+    if entry is None or entry["verdict"] == "removed":
+        state = '<span class="muted">Not on the list</span>'
+    elif entry["verdict"] == "safe":
+        state = ('<span class="pill" style="background:var(--surface-2)">'
+                 'Marked safe</span>')
+    elif entry["org_id"] is None:
+        state = (f'<span class="pill" style="{_SEV_STYLE["HIGH"]}">Blocked '
+                 f'on every PC</span>')
+    else:
+        state = (f'<span class="pill" style="{_SEV_STYLE["MEDIUM"]}">Blocked '
+                 f'at {esc(names.get(entry["org_id"], "one company"))}'
+                 f'</span>')
+    buttons = []
+    if entry is None or entry["verdict"] != "malicious" \
+            or entry["org_id"] is not None:
+        buttons.append(_threat_form(sha256, "block", "Block everywhere", csrf))
+    if entry is None or entry["verdict"] != "safe":
+        buttons.append(_threat_form(
+            sha256, "safe", "Safe", csrf,
+            confirm="Mark this file safe? Every PC stops flagging it, and "
+                    "PCs that quarantined it put it back."))
+    return state + "<br>" + " ".join(buttons)
+
+
 def _events_box(events: list, names: dict, *, show_company: bool = True,
-                show_email: bool = True) -> str:
+                show_email: bool = True, verdicts: dict | None = None,
+                csrf: str = "") -> str:
+    """`verdicts` (sha256 -> list entry) adds each file's place on the
+    shared list and the Block / Safe buttons: the support team's page."""
     rows = ""
     for e in events:
         what = esc(label(e["event_type"]))
@@ -130,6 +176,11 @@ def _events_box(events: list, names: dict, *, show_company: bool = True,
         where = esc(e.get("target") or "")
         if e.get("action"):
             where += (f'<br><span class="muted">{esc(e["action"])}</span>')
+        if verdicts is not None and e.get("sha256"):
+            where += (f'<br><code class="muted" style="font-size:11px">'
+                      f'{esc(e["sha256"][:16])}&hellip;</code><br>'
+                      + _verdict_cell(e["sha256"], verdicts.get(e["sha256"]),
+                                      csrf, names))
         emailed = _EMAILED.get(e.get("emailed"), "")
         if e.get("emailed") == EMAIL_FAILED:
             emailed = f'<span style="color:var(--danger)">{emailed}</span>'
@@ -228,6 +279,132 @@ def _agents_box(agents: list, names: dict, now: float, *,
         f'</thead><tbody>{rows}</tbody></table></div></div>')
 
 
+def _threats_box(t: dict, names: dict, csrf: str) -> str:
+    """The shared threat list: how much every PC knows, and the finds
+    waiting for the support team to put them on every PC."""
+    c = t.get("counts") or {}
+    src = c.get("by_source") or {}
+    parts = [f'{src.get(k, 0):,} {what}' for k, what in (
+        ("agent", "found on PCs"), ("defender", "from Windows Defender"),
+        ("feed", "from MalwareBazaar"), ("support", "added by the support "
+                                                     "team"))]
+    rows = ""
+    for p in t.get("pending") or []:
+        more = int(p.get("orgs") or 1) - 1
+        others = (f' and {more} other compan{"y" if more == 1 else "ies"}'
+                  if more > 0 else "")
+        rows += (
+            f'<tr><td><code style="font-size:12px">{esc(p["sha256"][:16])}'
+            f'&hellip;</code><br><span class="muted">{esc(p["name"])}'
+            f'</span></td><td>{esc(names.get(p["org_id"], "?"))}{others}<br>'
+            f'<span class="muted">{esc(SOURCES.get(p["source"], ""))}, '
+            f'{_when(p["first_seen"])}</span></td>'
+            f'<td style="white-space:nowrap">'
+            f'{_threat_form(p["sha256"], "block", "Block everywhere", csrf, "btn")} '
+            f'{_threat_form(p["sha256"], "safe", "Safe", csrf, confirm="Mark this file safe? Every PC stops flagging it, and PCs that quarantined it put it back.")}'
+            f'</td></tr>')
+    pending = (
+        f'<h3 style="margin:16px 0 6px">Waiting for a decision</h3>'
+        f'<p class="muted" style="margin:0 0 8px;font-size:13px">Found by '
+        f'companies&rsquo; own PCs, so blocked only on the PCs of the '
+        f'companies that found them. Only <b>Block everywhere</b> puts one '
+        f'on every PC: however many companies report a file, that is no '
+        f'proof when anyone can sign up twice.</p>'
+        f'<div style="overflow-x:auto"><table style="min-width:620px"><thead>'
+        f'<tr><th>File</th><th>Found at</th><th></th></tr></thead>'
+        f'<tbody>{rows}</tbody></table></div>') if rows else ""
+    recent = ""
+    for r in t.get("recent") or []:
+        verdict = {"malicious": "blocked", "safe": "marked safe",
+                   "removed": "taken off"}.get(r["verdict"], r["verdict"])
+        scope = ("" if r["org_id"] is None or r["verdict"] != "malicious"
+                 else f' at {esc(names.get(r["org_id"], "one company"))}')
+        recent += (f'<li><code style="font-size:12px">{esc(r["sha256"][:16])}'
+                   f'&hellip;</code> {esc(r["name"])} &mdash; {verdict}'
+                   f'{scope}, {_when(r["updated"])}'
+                   + (f' by {esc(r["by_user"])}' if r["by_user"] else "")
+                   + '</li>')
+    recent = (f'<h3 style="margin:16px 0 6px">Latest changes</h3>'
+              f'<ul style="margin:0;padding-left:18px;font-size:13px;'
+              f'line-height:1.7">{recent}</ul>') if recent else ""
+    add = (
+        f'<h3 style="margin:16px 0 6px">Block a file by its fingerprint</h3>'
+        f'<form method="POST" action="/superadmin/antivirus/threat" '
+        f'style="display:flex;gap:8px;flex-wrap:wrap">'
+        f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+        f'<input type="hidden" name="action" value="add">'
+        f'<input name="sha256" placeholder="SHA-256 (64 characters)" '
+        f'style="flex:2;min-width:260px" required>'
+        f'<input name="name" placeholder="What it is (optional)" '
+        f'style="flex:1;min-width:160px">'
+        f'<button class="btn" type="submit">Block everywhere</button></form>')
+    return (
+        f'<div class="box"><h2>Threat list</h2>'
+        f'<p style="margin:0 0 4px"><b>{c.get("blocked", 0):,}</b> files '
+        f'blocked on every PC: {", ".join(parts)}.'
+        + (f' {c["safe"]:,} marked safe.' if c.get("safe") else "")
+        + '</p>'
+        f'<p class="muted" style="margin:0;font-size:13px">Every agent '
+        f'downloads the list when it starts and every 15 minutes after, and '
+        f'quarantines what is on it. What one PC finds is added by itself; '
+        f'<b>Safe</b> takes a false alarm off every PC and puts the file '
+        f'back where it was quarantined.</p>'
+        f'{pending}{recent}{add}</div>')
+
+
+def _feed_box(t: dict, csrf: str) -> str:
+    """MalwareBazaar: fingerprints of malware found around the world, free
+    with an abuse.ch key."""
+    f = t.get("feed") or {}
+    on = bool(t.get("feed_key"))
+
+    def stamp(v):
+        try:
+            return _when(float(v)) if v and float(v) else ""
+        except ValueError:
+            return ""
+    if not on:
+        status = ('<p class="muted" style="margin:0 0 10px">Off. With a free '
+                  'key the list gains the malware MalwareBazaar collects '
+                  'from researchers worldwide &mdash; a few thousand new '
+                  'files a day &mdash; each kept for 30 days.</p>')
+    elif f.get("feed_error"):
+        status = (f'<p style="margin:0 0 10px;color:var(--danger)">Last try '
+                  f'{stamp(f.get("feed_tried"))}: {esc(f["feed_error"])}'
+                  f'</p>')
+    elif f.get("feed_ok"):
+        status = (f'<p style="margin:0 0 10px">On. Last import '
+                  f'{stamp(f["feed_ok"])}: {esc(f.get("feed_added") or "0")} '
+                  f'new of {esc(f.get("feed_seen") or "0")} in its last 48 '
+                  f'hours. Imports again every 6 hours.</p>')
+    else:
+        status = '<p style="margin:0 0 10px">On; not imported yet.</p>'
+    hidden = f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+    return (
+        f'<div class="box"><h2>MalwareBazaar feed</h2>{status}'
+        f'<form method="POST" action="/superadmin/antivirus/feed" '
+        f'style="display:flex;gap:8px;flex-wrap:wrap">{hidden}'
+        f'<input type="hidden" name="action" value="save">'
+        f'<input type="password" name="key" autocomplete="off" '
+        f'placeholder="{"Key saved" if on else "abuse.ch Auth-Key"}" '
+        f'style="flex:1;min-width:220px">'
+        f'<button class="btn" type="submit">Save and import</button></form>'
+        + (f'<div style="margin-top:8px">'
+           f'<form method="POST" action="/superadmin/antivirus/feed" '
+           f'style="display:inline">{hidden}'
+           f'<input type="hidden" name="action" value="import">'
+           f'<button class="btn ghost" type="submit">Import now</button>'
+           f'</form> <form method="POST" action="/superadmin/antivirus/feed" '
+           f'style="display:inline">{hidden}'
+           f'<input type="hidden" name="action" value="clear">'
+           f'<button class="btn ghost" type="submit">Switch the feed off'
+           f'</button></form></div>' if on else "")
+        + '<p class="muted" style="margin:10px 0 0;font-size:13px">Get a '
+          'key free: sign in at <a href="https://auth.abuse.ch/" '
+          'target="_blank" rel="noopener">auth.abuse.ch</a> and copy the '
+          'Auth-Key it shows.</p></div>')
+
+
 _SETUP_HREF = "/superadmin/antivirus/setup.exe"
 
 
@@ -267,7 +444,8 @@ def render_antivirus(user, csrf: str, *, orgs: list, keys: dict, agents: list,
                      events: list, saved: list, fallback: list,
                      isolations: dict | None = None, msg: str = "",
                      error: str = "", now: float | None = None,
-                     base_url: str = "", setup_ready: bool = False) -> str:
+                     base_url: str = "", setup_ready: bool = False,
+                     threats: dict | None = None) -> str:
     now = time.time() if now is None else now
     names = {o["id"]: o["name"] for o in orgs}
     pcs_by_org: dict = {}
@@ -280,8 +458,10 @@ def render_antivirus(user, csrf: str, *, orgs: list, keys: dict, agents: list,
         f'its company&rsquo;s key. What it quarantines or stops, and any '
         f'problem of its own, is emailed to the support team.</p>'
         f'{_flash(msg, error)}'
-        f'{_events_box(events, names)}'
+        f'{_events_box(events, names, verdicts=(threats or {}).get("verdicts") or {}, csrf=csrf)}'
         f'{_agents_box(agents, names, now, isolations=isolations, csrf=csrf, manage=True)}'
+        f'{_threats_box(threats or {}, names, csrf)}'
+        f'{_feed_box(threats or {}, csrf)}'
         f'{_recipients_box(saved, fallback, csrf)}'
         f'{_keys_box(orgs, keys, pcs_by_org, csrf)}'
         f'{_install_box(base_url or "https://your-easymikrotik-address", setup_ready)}'

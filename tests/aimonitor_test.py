@@ -304,6 +304,14 @@ check("only the pages it actually cited are kept, once each",
       == ["https://status.vumatel.co.za/x", "https://news.example/y"])
 check("searches are counted across the paused and resumed calls",
       res["searches"] == 3)
+_cites = [{"type": "text", "citations": [
+    {"type": "web_search_result_location", "url": u, "title": "t"}
+    for u in ("javascript:alert(1)", "data:text/html,x",
+              "https://ok.example/a")]}]
+check("only web pages become sources: a javascript: or data: address "
+      "would still be a live link after escaping",
+      [s["url"] for s in am.collect_sources(_cites)]
+      == ["https://ok.example/a"])
 fc = FakeClient([resp("refusal", [])])
 try:
     am.claude_analyze(inc_for_ai, settings, client=fc)

@@ -68,7 +68,9 @@ with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
 
 print("build_archive — plain files (config/json) are added verbatim:")
 cfg_path = os.path.join(tmp, "config.yaml")
-with open(cfg_path, "w") as fh:
+# Unix line endings, as on the server, so the byte-for-byte check below
+# holds on Windows too.
+with open(cfg_path, "w", newline="\n") as fh:
     fh.write("poll_interval: 60\n")
 state_path = os.path.join(tmp, "state.json")
 with open(state_path, "w") as fh:
@@ -81,6 +83,10 @@ with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
     got = tar.extractfile("config.yaml").read().decode()
     check("plain file content round-trips", got == "poll_interval: 60\n")
 
+class _SkipOnWindows(Exception):
+    pass
+
+
 print("build_archive_to_file — an unreadable file is skipped, not fatal:")
 readable_path = os.path.join(tmp, "readable.json")
 with open(readable_path, "w") as fh:
@@ -90,6 +96,10 @@ with open(unreadable_path, "w") as fh:
     fh.write('{"grants": {}}')
 os.chmod(unreadable_path, 0o000)
 try:
+    if os.name == "nt":
+        # chmod cannot take read access away on Windows; the server is Linux.
+        print("  (skipped on Windows: a file cannot be made unreadable here)")
+        raise _SkipOnWindows
     out_path = os.path.join(tmp, "partial.tar.gz")
     skipped = backup.build_archive_to_file(
         {"readable.json": readable_path, "unreadable.json": unreadable_path},
@@ -99,6 +109,8 @@ try:
     with tarfile.open(out_path, mode="r:gz") as tar:
         check("the rest of the archive is still built successfully",
               tar.getnames() == ["readable.json"])
+except _SkipOnWindows:
+    pass
 finally:
     os.chmod(unreadable_path, 0o644)  # so cleanup can remove tmp/ afterward
 
@@ -172,9 +184,11 @@ with open(stale_shm, "w") as fh:
 backup.restore_archive(archive, new_paths)
 check("stale -wal sidecar is removed on restore", not os.path.exists(stale_wal))
 check("stale -shm sidecar is removed on restore", not os.path.exists(stale_shm))
+_c = sqlite3.connect(new_auth_db)
 check("the restored db itself still opens and reads correctly",
-      [r[0] for r in sqlite3.connect(new_auth_db).execute(
+      [r[0] for r in _c.execute(
           "SELECT v FROM t ORDER BY id")] == ["before-backup", "also-before-backup"])
+_c.close()
 
 print("restore_archive — a member missing from the archive is left alone:")
 untouched_path = os.path.join(new_dir, "metrics.db")

@@ -2886,6 +2886,86 @@ def _host_is_unroutable(host: str) -> bool:
                 or ip.is_reserved or ip.is_unspecified)
 
 
+_HOST_NOT_PUBLIC = (
+    "That address is not on the public internet. Enter the router's public "
+    "IP address or hostname -- or leave it blank and set the router up with "
+    "the provisioning script, which connects it over the secure tunnel.")
+_HOST_NOT_YOURS = (
+    "That address is inside the secure tunnel and belongs to another router. "
+    "Leave it blank and set this router up with the provisioning script: it "
+    "is given its own tunnel address.")
+
+
+def _device_host_problem(host, names, current_host, hub, resolve=None,
+                         server_ips=()) -> str:
+    """Why a company may not point a device at `host`; "" if it may.
+
+    The server connects to whatever a device's host says, logs in to it and
+    shows on the page how that went. Pointed at the server itself, its own
+    network, or another company's router inside the tunnel, that is a way
+    to reach -- and try passwords against -- what only the server can see.
+    So a company's router is on a public address that is not the server's
+    own (`server_ips`: reaching itself that way skips its firewall), or in
+    the tunnel at the address leased to that very router. `names` are the
+    names the device already had -- none for a new one, which is given its
+    tunnel address by provisioning, never by typing one in: a lease left
+    behind by a deleted router must not go to whoever reuses its name. The
+    address it already has is never refused, so editing a device always
+    works. A hostname is checked by what it resolves to now; one that does
+    not resolve is let through, as there is nothing there to reach.
+    """
+    import ipaddress
+    import socket as _socket
+    h = (host or "").strip().strip("[]").split("%")[0]
+    if not h or h == (current_host or "").strip():
+        return ""
+    if h.lower() == "localhost" or h.lower().endswith(".localhost"):
+        return _HOST_NOT_PUBLIC
+    try:
+        subnet = ipaddress.ip_network(
+            (hub or {}).get("subnet") or _HUB_SUBNET_DEFAULT, strict=False)
+    except ValueError:
+        subnet = ipaddress.ip_network(_HUB_SUBNET_DEFAULT)
+    try:
+        addrs = {ipaddress.ip_address(h)}
+    except ValueError:
+        try:
+            addrs = {ipaddress.ip_address(i[4][0].split("%")[0])
+                     for i in (resolve or _socket.getaddrinfo)(h, None)}
+        except (OSError, ValueError, UnicodeError):
+            return ""
+    leases = (hub or {}).get("leases") or {}
+    meta = (hub or {}).get("leases_meta") or {}
+    own = {leases.get(n) for n in names} | {(meta.get(n) or {}).get("ip")
+                                            for n in names}
+    server = {s for s in server_ips if s}
+    for ip in addrs:
+        if ip.version == 6 and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        if ip.version == 6 and (ip.sixtofour or ip.teredo
+                                or ip in ipaddress.ip_network("64:ff9b::/96")):
+            return _HOST_NOT_PUBLIC     # an IPv4 address wrapped in IPv6
+        if ip.version == 4 and ip in subnet:
+            if str(ip) not in own:
+                return _HOST_NOT_YOURS
+        elif not ip.is_global or ip.is_multicast or str(ip) in server:
+            return _HOST_NOT_PUBLIC
+    return ""
+
+
+def _server_own_ips(hub) -> set:
+    """This server's own addresses, as a device's host would name them: the
+    hub's public address, the one it reaches the internet from, and what
+    its own name resolves to."""
+    import socket as _socket
+    ips = {(hub or {}).get("hub_ip") or "", _detect_server_ip()}
+    try:
+        ips.update(_socket.gethostbyname_ex(_socket.gethostname())[2])
+    except OSError:
+        pass
+    return {i for i in ips if i}
+
+
 def _strip_port(host: str) -> str:
     """"example.com:8080" -> "example.com"; "[::1]:80" -> "::1"."""
     h = (host or "").strip()
@@ -8702,6 +8782,17 @@ class SessionManager:
     def destroy(self, token: str) -> None:
         self._s.pop(token or "", None)
 
+    def destroy_others(self, logins, keep: str) -> int:
+        """Sign one person out everywhere but here (`keep`), after their
+        password changes. `logins` is every name they can sign in with.
+        Returns how many sessions ended."""
+        names = {n for n in logins if n}
+        gone = [t for t, s in list(self._s.items())
+                if t != keep and s.get("login") in names]
+        for t in gone:
+            self._s.pop(t, None)
+        return len(gone)
+
     # Signed in with the password, waiting for the code from the phone.
     # Not a session: only POST /login/2fa takes one of these.
     def begin_2fa(self, login: str) -> str:
@@ -8814,8 +8905,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
     from . import edr as _edr
     if _edr.ENABLED and devices_db and auth is not None:
         try:
-            from .edr import EdrStore, edr_path
+            from .edr import EdrStore, edr_path, start_feed_thread
             edr_store = EdrStore(edr_path(devices_db))
+            # MalwareBazaar, once a key is saved on the Antivirus page.
+            start_feed_thread(edr_store, auth)
         except Exception:  # noqa: BLE001 - the dashboard still starts
             log.exception("could not open the antivirus store")
     # Reports per company: two a second, bursts of 200. Generous for any real
@@ -9070,6 +9163,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # web-managed mode so orphans never leak onto the open dashboard.
                 allowed = sorted(known) if managed else None
                 return self._serve_data(path, url, user=None, allowed=allowed)
+
+            # The shared threat list, for antivirus agents. No session: the
+            # company's agent key is the authority, as for their reports.
+            if path == "/api/v1/edr/threats":
+                return self._serve_edr_threats(url)
 
             # "Choose your region" — other independent mikromon deployments a
             # visitor can jump to, superadmin-configured (Platform admin).
@@ -9912,6 +10010,31 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 self._edr_email(out["id"], out["held"])
             return answer(200, {"ok": True})
 
+        def _serve_edr_threats(self, url):
+            """GET /api/v1/edr/threats?since=N: what changed on the shared
+            threat list since the agent last asked, for its company's PCs.
+            Paged; the agent asks again while `more` is true."""
+            from .edr import SYNC_PAGE
+
+            def answer(code, data, headers=None):
+                return self._send(code, json.dumps(data), "application/json",
+                                  headers)
+            if edr_store is None:
+                return answer(404, {"error": "antivirus_not_enabled"})
+            authz = self.headers.get("Authorization", "")
+            key = authz[7:].strip() if authz[:7].lower() == "bearer " else ""
+            org_id = edr_store.org_for_key(key) if key else None
+            if org_id is None or auth.org(org_id) is None:
+                return answer(401, {"error": "unknown_key"})
+            wait = edr_limit.take(str(org_id))
+            if wait:
+                return answer(429, {"error": "slow_down"},
+                              {"Retry-After": str(max(1, int(wait + 0.999)))})
+            since = parse_qs(url.query).get("since", ["0"])[0]
+            items, rev, more = edr_store.threats_since(org_id, since,
+                                                       SYNC_PAGE)
+            return answer(200, {"rev": rev, "more": more, "items": items})
+
         def _edr_email(self, event_id, held) -> None:
             """Email the support team on a background thread: the agent is
             waiting for its answer, and a slow mail server must not make it
@@ -9939,19 +10062,30 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if edr_store is None:
                 return self._send(404, "The antivirus store is not enabled "
                                        "on this server (no devices_db).")
-            from .edr import SETUP_FILE, saved_recipients
+            from .edr import SETTING_FEED_KEY, SETUP_FILE, saved_recipients
             from .web_edr import render_antivirus
             q = parse_qs(url.query)
+            events = edr_store.recent(100)
             return self._send(200, render_antivirus(
                 user, self._session()["csrf"],
                 orgs=auth.list_orgs_summary(), keys=edr_store.keys(),
-                agents=edr_store.agents(), events=edr_store.recent(100),
+                agents=edr_store.agents(), events=events,
                 saved=saved_recipients(auth),
                 fallback=auth.superadmin_emails(),
                 isolations=edr_store.isolations(),
                 msg=q.get("ok", [""])[0], error=q.get("error", [""])[0],
                 base_url=self._antivirus_base(),
-                setup_ready=os.path.isfile(SETUP_FILE)),
+                setup_ready=os.path.isfile(SETUP_FILE),
+                threats={
+                    "counts": edr_store.threat_counts(),
+                    "pending": edr_store.pending_threats(),
+                    "recent": edr_store.recent_threats(),
+                    "verdicts": edr_store.threats_for(
+                        e.get("sha256") for e in events),
+                    "feed_key": bool(auth.get_setting(SETTING_FEED_KEY)),
+                    "feed": {k: edr_store.meta(k) for k in (
+                        "feed_ok", "feed_tried", "feed_error", "feed_added",
+                        "feed_seen")}}),
                 "text/html; charset=utf-8")
 
         def _antivirus_base(self) -> str:
@@ -10195,6 +10329,66 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if emails else
                 "Saved. With no addresses set, antivirus alerts go to the "
                 "platform admins."))
+
+        def _post_antivirus_threat(self, user):
+            """The support team's word on a file, for every company's PCs:
+            block it, call it safe (agents free it from quarantine), take it
+            off the list, or add one by its fingerprint."""
+            flat, refused = self._antivirus_form(user)
+            if flat is None:
+                return refused
+            back = "/superadmin/antivirus"
+            verdict = {"block": "malicious", "add": "malicious",
+                       "safe": "safe", "remove": "removed"}.get(
+                flat.get("action", ""))
+            if verdict is None:
+                return self._redirect(back + "?error=" + quote(
+                    "Unknown action."))
+            try:
+                entry = edr_store.set_verdict(
+                    flat.get("sha256", ""), verdict,
+                    user.get("email", "") or "support",
+                    name=flat.get("name", ""))
+            except ValueError as exc:
+                return self._redirect(back + "?error=" + quote(str(exc)))
+            log.info("antivirus: %s marked %s by %s", entry["sha256"],
+                     verdict, user.get("email", "?"))
+            short = entry["sha256"][:12]
+            return self._redirect(back + "?ok=" + quote({
+                "malicious": f"{short}... is blocked on every PC. Agents "
+                             f"pick it up within 15 minutes.",
+                "safe": f"{short}... is marked safe. Agents stop flagging "
+                        f"it, and put it back where they had quarantined "
+                        f"it, within 15 minutes.",
+                "removed": f"{short}... is off the list.",
+            }[verdict]))
+
+        def _post_antivirus_feed(self, user):
+            """The MalwareBazaar feed: save or remove the abuse.ch key, or
+            import now rather than waiting for the next timed one."""
+            flat, refused = self._antivirus_form(user)
+            if flat is None:
+                return refused
+            from .edr import SETTING_FEED_KEY, run_feed
+            back = "/superadmin/antivirus"
+            action = flat.get("action", "")
+            if action == "clear":
+                auth.set_setting(SETTING_FEED_KEY, "")
+                return self._redirect(back + "?ok=" + quote(
+                    "The feed is off. What it added stays until it ages "
+                    "off."))
+            if action == "save":
+                key = flat.get("key", "").strip()
+                if not key or len(key) > 200 or any(c.isspace() for c in key):
+                    return self._redirect(back + "?error=" + quote(
+                        "Paste the Auth-Key from auth.abuse.ch."))
+                auth.set_setting(SETTING_FEED_KEY, key)
+            elif action != "import":
+                return self._redirect(back + "?error=" + quote(
+                    "Unknown action."))
+            ok, message = run_feed(edr_store, auth)
+            return self._redirect(back + ("?ok=" if ok else "?error=")
+                                  + quote(message))
 
         def _post_antivirus_key(self, user):
             """Make (or replace) a company's agent key, or remove it. A new
@@ -14704,6 +14898,20 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if path == "/devices/save":
                     raw = self._device_form_to_raw(store, flat, multi)
                     orig = flat.get("original_name") or None
+                    # Staff may point a device anywhere (the platform's own
+                    # routers can be on its network); a company may not.
+                    if user and not user.get("is_superadmin"):
+                        _hub_now = _hub_load(_hub_path(devices_db))
+                        problem = _device_host_problem(
+                            raw.get("host", ""), {orig} if orig else set(),
+                            (store.raw(orig) or {}).get("host", "")
+                            if orig else "", _hub_now,
+                            server_ips=_server_own_ips(_hub_now))
+                        if problem:
+                            log.warning("device host refused for %s (org %s): "
+                                        "%r", user.get("login"),
+                                        user.get("org_id"), raw.get("host"))
+                            return self._send(400, f"Error: {problem}")
                     # The package's device cap, enforced on the one path that
                     # creates a device -- before a tunnel address is reserved
                     # for it. Edits and renames are not new devices, and
@@ -15027,6 +15235,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_superadmin_nextdns(user)
             if path == "/superadmin/quote-handled":
                 return self._post_superadmin_quote_handled(user)
+            if path == "/superadmin/antivirus/threat":
+                return self._post_antivirus_threat(user)
+            if path == "/superadmin/antivirus/feed":
+                return self._post_antivirus_feed(user)
             if path == "/superadmin/antivirus/recipients":
                 return self._post_antivirus_recipients(user)
             if path == "/superadmin/antivirus/key":
@@ -15687,8 +15899,12 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 billing.set_order_charge(int(order["id"]), cents, "ZAR",
                                          fx["rate"],
                                          describe({**fx, "pair": "USDZAR"}))
-            host = self.headers.get("Host", "")
-            base = ("https" if self._is_https() else "http") + "://" + host
+            # The address set for this server, not the request's Host header:
+            # that is the sender's to choose, and a forged one would send the
+            # payer to someone else's site once they have paid.
+            base = _public_base(auth).rstrip("/") or (
+                ("https" if self._is_https() else "http") + "://"
+                + self.headers.get("Host", ""))
             try:
                 res = create_checkout(
                     cfg["secret_key"], cents,
@@ -15743,8 +15959,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 billing.set_order_charge(int(order["id"]), cents, "ZAR",
                                          fx["rate"],
                                          describe({**fx, "pair": "USDZAR"}))
-            host = self.headers.get("Host", "localhost")
-            base = ("https" if self._is_https() else "http") + "://" + host
+            # The configured address first, as on /pay: not the Host header.
+            base = _public_base(auth).rstrip("/") or (
+                ("https" if self._is_https() else "http") + "://"
+                + self.headers.get("Host", "localhost"))
             try:
                 res = create_checkout(
                     cfg["secret_key"], cents,
@@ -15852,8 +16070,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                             fx_basis=_fx_basis,
                                             terms_version=TERMS_VERSION,
                                             terms_by=user.get("login", ""))
-            host = self.headers.get("Host", "localhost")
-            base = ("https" if self._is_https() else "http") + "://" + host
+            # The configured address first, as on /pay: not the Host header.
+            base = _public_base(auth).rstrip("/") or (
+                ("https" if self._is_https() else "http") + "://"
+                + self.headers.get("Host", "localhost"))
             try:
                 res = create_checkout(
                     cfg["secret_key"], amount_cents,
@@ -16589,10 +16809,26 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             new_email = flat.get("email", "").strip().lower()
             new_pw = flat.get("password", "")
             ident = user["login"]
+            changing_email = bool(new_email
+                                  and new_email != (user.get("email") or ""))
+            # Either change is enough to take the account over, so a session
+            # alone (a browser left open, a stolen cookie) is not enough.
+            if (new_pw or changing_email) and not auth.verify(
+                    ident, flat.get("current_password", "")):
+                time.sleep(0.5)
+                return self._redirect("/account?error=" + quote(
+                    "Your current password is not right: nothing was "
+                    "changed."))
             try:
                 if new_pw:
                     auth.set_password(ident, new_pw)
-                if new_email and new_email != (user.get("email") or ""):
+                    ended = sessions.destroy_others(
+                        {user.get("email"), user.get("username"),
+                         user.get("login")}, keep=self._token())
+                    if ended:
+                        log.info("password changed by %s: signed out of %d "
+                                 "other session(s)", ident, ended)
+                if changing_email:
                     auth.set_email(ident, new_email)
                     sess = self._session()
                     if sess and sess.get("login") == user.get("email"):

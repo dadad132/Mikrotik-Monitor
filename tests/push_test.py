@@ -179,6 +179,34 @@ check("apply raised on failure", raised)
 check("rollback removed the first add (state restored)",
       final == ["8.8.8.8"])
 
+print("rollback that cannot undo everything:")
+
+
+class StuckApi(FakeApi):
+    """The second add fails, and so does undoing the first."""
+
+    def execute(self, op):
+        if op.action == "remove":
+            raise PushError("simulated failure: router went read-only")
+        return super().execute(op)
+
+
+api = StuckApi({PATH: [dict(r) for r in start]})
+p = Pusher(cfg, api, dry_run=False)
+plan = p.plan_managed_list(PATH, "address", desired_two, manage_tag=TAG,
+                           label="entry")
+api.fail_desc = [o for o in plan.ops if o.action == "add"][1].desc
+msg = ""
+try:
+    p.apply(plan)
+except PushError as exc:
+    msg = str(exc)
+check("an incomplete rollback says so, not just 'rolled back 0'",
+      "ROLLBACK INCOMPLETE" in msg and "1 change(s)" in msg
+      and "2.2.2.2" in msg)
+check("...and the change it could not undo is really still there",
+      sorted(r["address"] for r in api.state[PATH]) == ["2.2.2.2", "8.8.8.8"])
+
 
 # ---- 5. backups: plan + list ----------------------------------------------
 print("backups:")

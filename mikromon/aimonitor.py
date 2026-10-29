@@ -328,6 +328,10 @@ def _attr(obj, name, default=None):
             else getattr(obj, name, default))
 
 
+def _is_web_url(url) -> bool:
+    return str(url or "").strip().lower().startswith(("https://", "http://"))
+
+
 def collect_sources(content, limit: int = 5) -> list:
     """The pages Claude actually cited, in order, without repeats. Cited
     sources only: a page that was searched but not relied on is not a
@@ -340,7 +344,8 @@ def collect_sources(content, limit: int = 5) -> list:
             if _attr(c, "type") != "web_search_result_location":
                 continue
             url = _attr(c, "url") or ""
-            if url and url not in seen:
+            # Web pages only: these become links on the page and in emails.
+            if _is_web_url(url) and url not in seen:
                 seen.add(url)
                 out.append({"url": url, "title": _attr(c, "title") or url})
     return out[:limit]
@@ -574,7 +579,7 @@ def gemini_analyze(inc: dict, settings: dict, now: float | None = None,
     for ch in gm.get("groundingChunks") or []:
         web = ch.get("web") or {}
         uri = str(web.get("uri") or "")
-        if uri and uri not in seen:
+        if _is_web_url(uri) and uri not in seen:
             seen.add(uri)
             sources.append({"url": uri, "title": str(web.get("title") or uri)})
     queries = [str(q) for q in (gm.get("webSearchQueries") or []) if q][:5]
@@ -926,7 +931,7 @@ def cause_email(inc: dict, prefix: str, every_hours: int) -> tuple:
         + "\n-- easymikrotik AI monitor\n")
     src_html = "".join(
         f'<li><a href="{render.esc(s["url"])}">{render.esc(s["title"])}</a></li>'
-        for s in sources)
+        for s in sources if _is_web_url(s.get("url")))
     ev_html = "".join(f"<li>{render.esc(line)}</li>" for line in ev)
     html = (
         f'<div style="font:14px/1.55 system-ui,sans-serif;color:#0f172a">'
@@ -988,7 +993,7 @@ def reminder_email(org_name: str, items: list, prefix: str,
                if cause else "")
             + "".join(f'<br><a href="{render.esc(s["url"])}" '
                       f'style="font-size:12.5px">{render.esc(s["title"])}</a>'
-                      for s in srcs[:2])
+                      for s in srcs[:2] if _is_web_url(s.get("url")))
             + '</li>')
     every = (f"every {every_hours} hour{'' if every_hours == 1 else 's'}"
              if every_hours else "")

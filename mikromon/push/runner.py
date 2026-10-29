@@ -883,14 +883,25 @@ class Pusher:
                     op.inverse.params[".id"] = result
                 done.append(op)
         except PushError as exc:
-            rolled = self._rollback(done) if rollback_on_error else 0
+            rolled, stuck = (self._rollback(done) if rollback_on_error
+                             else (0, []))
+            # Said in so many words: "rolled back 3" reads as a clean undo,
+            # and the router may still carry changes nobody asked for.
+            left = ""
+            if stuck:
+                left = (f" ROLLBACK INCOMPLETE: {len(stuck)} change(s) could "
+                        f"not be undone and are still on the router: "
+                        + "; ".join(op.line() for op in stuck[:5])
+                        + (" ..." if len(stuck) > 5 else ""))
+                log.error("%s: rollback incomplete, %d change(s) left on the "
+                          "router", self.cfg.name, len(stuck))
             detail = (plan.diff_text() + f"\n\nFAILED after {len(done)} op(s): "
-                      f"{exc}\nRolled back {rolled} op(s).")
+                      f"{exc}\nRolled back {rolled} op(s).{left}")
             self._log(feature, "apply", "error",
                       f"failed: {exc}", detail)
             raise PushError(
                 f"apply failed after {len(done)} op(s); "
-                f"rolled back {rolled}. {exc}") from None
+                f"rolled back {rolled}. {exc}{left}") from None
         self._log(feature, "apply", "ok",
                   f"{len(done)} change(s) applied", plan.diff_text())
         return {"dry_run": False, "applied": len(done)}
@@ -900,8 +911,10 @@ class Pusher:
             self.audit.append(self.cfg.name, self.user, feature, mode, status,
                               summary, detail)
 
-    def _rollback(self, done) -> int:
-        undone = 0
+    def _rollback(self, done) -> tuple:
+        """Undo `done` in reverse. Returns (how many were undone, the ops
+        whose undo failed, so still in effect on the router)."""
+        undone, stuck = 0, []
         for op in reversed(done):
             if op.inverse is None:
                 continue
@@ -910,4 +923,5 @@ class Pusher:
                 undone += 1
             except PushError:
                 log.exception("rollback step failed: %s", op.inverse.line())
-        return undone
+                stuck.append(op)
+        return undone, stuck

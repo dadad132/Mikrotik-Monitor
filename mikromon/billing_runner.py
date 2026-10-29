@@ -183,25 +183,32 @@ def raise_due_invoices(billing, auth, now: float | None = None,
         # plan_for, not plan_by_name: a quoted company is not on a tier, and
         # looking their plan name up in the ladder is what returned nothing
         # and skipped them at every single renewal.
-        plan = plan_for(row)
-        if plan is None:
-            # Still no price: unlimited or hand-granted with nothing agreed.
-            # Inventing a figure would be worse than leaving it to a person,
-            # but it is reported now instead of only logged -- see
-            # orgs_without_a_price and the Platform admin check.
-            log.warning("renewal: org %s is on %r with no agreed price -- "
-                        "NOT invoiced. Set the quoted price in Platform "
-                        "admin or this repeats every month.", org_id,
-                        row.get("plan"))
-            continue
-        if billing.has_open_order_for_period(org_id, period_end):
-            continue
+        try:
+            plan = plan_for(row)
+            if plan is None:
+                # Still no price: unlimited or hand-granted with nothing
+                # agreed. Inventing a figure would be worse than leaving it to
+                # a person, but it is reported now instead of only logged --
+                # see orgs_without_a_price and the Platform admin check.
+                log.warning("renewal: org %s is on %r with no agreed price -- "
+                            "NOT invoiced. Set the quoted price in Platform "
+                            "admin or this repeats every month.", org_id,
+                            row.get("plan"))
+                continue
+            if billing.has_open_order_for_period(org_id, period_end):
+                continue
 
-        amount = float(plan["price"])
-        currency = str(plan.get("currency") or BILLING_CURRENCY)
-        order_id = billing.create_order(
-            org_id, plan["name"], int(round(amount * 100)), months=1,
-            currency=currency, provider="yoco", due=period_end)
+            amount = float(plan["price"])
+            currency = str(plan.get("currency") or BILLING_CURRENCY)
+            order_id = billing.create_order(
+                org_id, plan["name"], int(round(amount * 100)), months=1,
+                currency=currency, provider="yoco", due=period_end)
+        except Exception:  # noqa: BLE001 - one company must not stop the pass
+            # Without this, one company's bad row stopped every company
+            # after it from being invoiced, the same way every morning.
+            log.exception("renewal: could not invoice org %s; the others "
+                          "still are", org_id)
+            continue
         raised += 1
         log.info("renewal: invoiced org %s %s, packet lapses %s",
                  org_id, money(amount, currency),

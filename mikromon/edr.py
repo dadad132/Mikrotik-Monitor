@@ -20,6 +20,18 @@ sent. A company gets at most EMAILS_PER_HOUR, so a leaked key cannot be used
 to flood the support inbox. Everything is listed on the Antivirus page
 either way.
 
+The shared threat list is how one PC's find protects the rest. Every agent
+downloads it (GET /api/v1/edr/threats) and quarantines what is on it. It
+grows from four places: what agents quarantine, what Windows Defender
+catches on a PC, the MalwareBazaar feed (with a free abuse.ch key), and the
+support team marking a file malicious -- or safe, which frees it from
+quarantine on every PC. A find reported by a company's PCs blocks on that
+company's PCs at once -- and on the PCs of any other company whose PCs
+report it too -- but only the support team puts it on everyone's. However
+many companies report it: anyone can sign up twice, and a leaked key or a
+made-up company must not be able to get somebody's accounting software
+quarantined across every customer.
+
 SQLite in WAL mode beside devices.db, like the other stores the web process
 shares.
 """
@@ -72,13 +84,22 @@ QUIET_EVENTS = frozenset({"HEARTBEAT", "AGENT_STARTED", "AGENT_STOPPED"})
 # Something found on the PC, as opposed to news about the agent: the alerts
 # whose email offers to cut the PC off the network.
 THREAT_EVENTS = frozenset({"FILE_QUARANTINED", "THREAT_DETECTED",
-                           "SUSPICIOUS_PROCESS", "SUSPICIOUS_FILE"})
+                           "SUSPICIOUS_PROCESS", "SUSPICIOUS_FILE",
+                           "DEFENDER_DETECTION"})
+# Finds whose file goes on the shared threat list. Not SUSPICIOUS_FILE: a
+# packed program is as often an ordinary installer.
+LEARN_EVENTS = frozenset({"FILE_QUARANTINED", "THREAT_DETECTED",
+                          "DEFENDER_DETECTION"})
 
 _LABELS = {
     "FILE_QUARANTINED": "Threat quarantined",
     "THREAT_DETECTED": "Threat found, NOT quarantined",
     "SUSPICIOUS_PROCESS": "Suspicious process",
     "SUSPICIOUS_FILE": "Packed program downloaded",
+    "DEFENDER_DETECTION": "Windows Defender found a threat",
+    "DEFENDER_OFF": "Windows Defender is off or out of date",
+    "DEFENDER_OK": "Windows Defender is back on",
+    "FILE_RESTORED": "Released from quarantine",
     "AGENT_ERROR": "Antivirus agent problem",
     # `antivirus.py --test`: checks a PC's key and the email path, no malware.
     "AGENT_TEST": "Test alert",
@@ -86,6 +107,24 @@ _LABELS = {
     "AGENT_STOPPED": "Agent stopped",
     "HEARTBEAT": "Agent running",
 }
+
+# The shared threat list. `verdict` is what agents do with a file:
+# quarantine it, leave it alone, or forget it.
+VERDICTS = ("malicious", "safe", "removed")
+SOURCES = {"agent": "Found on a PC", "defender": "Windows Defender",
+           "feed": "MalwareBazaar", "support": "Support team"}
+# Agents download the list in pages this long.
+SYNC_PAGE = 5000
+# MalwareBazaar: "recent" holds the last 48 hours and is rebuilt every 5
+# minutes; fetched every FEED_EVERY, each sample kept FEED_KEEP_DAYS. Most
+# malware is rebuilt into new files within weeks, so an old fingerprint
+# catches little and only makes every PC's list longer.
+SETTING_FEED_KEY = "edr_feed_key"
+FEED_URL = "https://mb-api.abuse.ch/v2/files/exports/{key}/recent.csv"
+FEED_EVERY = 6 * 3600
+FEED_RETRY = 3600
+FEED_KEEP_DAYS = 30
+FEED_EXPIRED = "expired"         # by_user on a feed sample aged off the list
 
 _EVENT_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,39}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -143,6 +182,34 @@ CREATE TABLE IF NOT EXISTS edr_isolations (
     since    REAL NOT NULL,
     by_user  TEXT,
     PRIMARY KEY (org_id, agent_id)
+);
+-- The shared threat list every agent downloads. `rev` numbers each change,
+-- so an agent asks only for what changed since it last looked.
+CREATE TABLE IF NOT EXISTS edr_threats (
+    sha256     TEXT PRIMARY KEY,
+    verdict    TEXT NOT NULL,              -- malicious | safe | removed
+    name       TEXT NOT NULL DEFAULT '',
+    severity   TEXT NOT NULL DEFAULT 'HIGH',
+    source     TEXT NOT NULL,              -- agent | defender | feed | support
+    org_id     INTEGER,                    -- only this company's PCs; NULL: all
+    first_seen REAL NOT NULL,
+    updated    REAL NOT NULL,
+    by_user    TEXT NOT NULL DEFAULT '',   -- who decided, if a person did
+    rev        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_edr_threats_rev ON edr_threats(rev);
+-- Which companies' PCs reported a file: each of them blocks it. Only the
+-- support team makes it fleet-wide.
+CREATE TABLE IF NOT EXISTS edr_sightings (
+    sha256     TEXT NOT NULL,
+    org_id     INTEGER NOT NULL,
+    first_seen REAL NOT NULL,
+    PRIMARY KEY (sha256, org_id)
+);
+CREATE INDEX IF NOT EXISTS ix_edr_sightings_org ON edr_sightings(org_id);
+CREATE TABLE IF NOT EXISTS edr_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 """
 
@@ -417,6 +484,8 @@ class EdrStore:
                  ev["sha256"], json.dumps(ev["details"]), ev["agent_ts"],
                  status))
             event_id = cur.lastrowid
+            if ev["event_type"] in LEARN_EVENTS and ev["sha256"]:
+                self._learn(org_id, ev, now)
             self._prune(now)
             self.db.commit()
         return {"id": event_id, "email": email, "held": held}
@@ -451,6 +520,256 @@ class EdrStore:
             "SELECT 1 FROM edr_isolations i WHERE i.org_id = "
             "edr_agents.org_id AND i.agent_id = edr_agents.agent_id)",
             (cutoff,))
+
+    # ----- the shared threat list --------------------------------------------
+    def _next_rev(self) -> int:
+        """A change number never handed out before. Kept apart from the
+        entries: counting from the highest entry would hand a number out
+        again after that entry is deleted (a company leaving), and agents
+        already past it would never see the change made under it."""
+        row = self.db.execute("SELECT value FROM edr_meta WHERE key = 'rev'"
+                              ).fetchone()
+        top = self.db.execute("SELECT COALESCE(MAX(rev), 0) FROM edr_threats"
+                              ).fetchone()[0]
+        rev = max(int(row[0]) if row else 0, int(top)) + 1
+        self.db.execute("INSERT INTO edr_meta (key, value) VALUES ('rev', ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (str(rev),))
+        return rev
+
+    def _put_threat(self, sha256: str, verdict: str, *, name: str,
+                    severity: str, source: str, org_id, by_user: str,
+                    now: float, first_seen: float | None = None) -> None:
+        """Write one entry under the next change number. The caller holds
+        the lock and commits."""
+        rev = self._next_rev()
+        self.db.execute(
+            "INSERT INTO edr_threats (sha256, verdict, name, severity, source, "
+            "org_id, first_seen, updated, by_user, rev) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(sha256) DO UPDATE SET "
+            "verdict = excluded.verdict, name = excluded.name, "
+            "severity = excluded.severity, source = excluded.source, "
+            "org_id = excluded.org_id, updated = excluded.updated, "
+            "by_user = excluded.by_user, rev = excluded.rev",
+            (sha256, verdict, name[:200], severity, source, org_id,
+             now if first_seen is None else first_seen, now, by_user, rev))
+
+    def _learn(self, org_id: int, ev: dict, now: float) -> None:
+        """A PC found this file: block it on the PCs of every company whose
+        PCs found it -- never on everyone's. Two companies reporting a file
+        is no proof when anyone can sign up twice and report any file they
+        like; only the support team (Block everywhere) or the feed puts one
+        on every PC. Never over the support team's word that it is safe.
+
+        The entry's org_id is the first company to find it, and is only
+        ever None once it is everyone's; which other companies block it is
+        in edr_sightings (see threats_since)."""
+        sha = ev["sha256"]
+        new_here = self.db.execute(
+            "INSERT OR IGNORE INTO edr_sightings (sha256, org_id, first_seen) "
+            "VALUES (?,?,?)", (sha, org_id, now)).rowcount > 0
+        row = self.db.execute("SELECT * FROM edr_threats WHERE sha256 = ?",
+                              (sha,)).fetchone()
+        if row is not None and row["verdict"] == "safe":
+            return
+        if row is not None and row["verdict"] == "removed" \
+                and row["by_user"] not in ("", FEED_EXPIRED):
+            return                      # a person took it off; stays off
+        if row is not None and row["verdict"] == "malicious":
+            if row["org_id"] is None or not new_here:
+                return                  # everyone's already, or this one's
+            # One more company: the same entry under a new change number,
+            # or its PCs, already past the old one, would never fetch it.
+            self._put_threat(sha, "malicious", name=row["name"],
+                             severity=row["severity"], source=row["source"],
+                             org_id=row["org_id"], by_user=row["by_user"],
+                             now=now, first_seen=row["first_seen"])
+            return
+        details = ev.get("details") or {}
+        name = str(details.get("threat") or ev.get("reason") or
+                   label(ev["event_type"]))
+        self._put_threat(
+            sha, "malicious", name=name, severity=ev["severity"],
+            source="defender" if ev["event_type"] == "DEFENDER_DETECTION"
+            else "agent", org_id=org_id, by_user="", now=now)
+
+    def set_verdict(self, sha256: str, verdict: str, by_user: str,
+                    name: str = "", now: float | None = None) -> dict:
+        """The support team's decision, for every company's PCs: block it,
+        call it safe (agents free it from quarantine), or take it off the
+        list. Returns the entry as it now is."""
+        sha = (sha256 or "").strip().lower()
+        if not _SHA256_RE.match(sha):
+            raise ValueError("That is not a SHA-256 fingerprint (64 letters "
+                             "and digits, 0-9 and a-f).")
+        if verdict not in VERDICTS:
+            raise ValueError(f"Unknown verdict {verdict!r}.")
+        now = time.time() if now is None else now
+        with self._lock:
+            row = self.db.execute("SELECT * FROM edr_threats WHERE sha256 = ?",
+                                  (sha,)).fetchone()
+            self._put_threat(
+                sha, verdict,
+                name=(name or "").strip() or (row["name"] if row else "")
+                or "Added by the support team",
+                severity=row["severity"] if row else "HIGH",
+                source=row["source"] if row else "support",
+                org_id=None, by_user=by_user or "support", now=now,
+                first_seen=row["first_seen"] if row else None)
+            self.db.commit()
+        return self.threat(sha)
+
+    def threat(self, sha256: str) -> dict | None:
+        row = self.db.execute("SELECT * FROM edr_threats WHERE sha256 = ?",
+                              ((sha256 or "").lower(),)).fetchone()
+        return dict(row) if row is not None else None
+
+    def threats_for(self, shas) -> dict:
+        """{sha256: entry} for these fingerprints, for the alerts list."""
+        shas = sorted({s for s in shas if s})
+        out = {}
+        for i in range(0, len(shas), 500):
+            part = shas[i:i + 500]
+            for r in self.db.execute(
+                    "SELECT * FROM edr_threats WHERE sha256 IN (%s)"
+                    % ",".join("?" * len(part)), part):
+                out[r["sha256"]] = dict(r)
+        return out
+
+    def threats_since(self, org_id: int, since: int,
+                      limit: int = SYNC_PAGE) -> tuple:
+        """(items, rev, more) for one company's agents: every change after
+        `since` that applies to them, as [sha256, verdict, name, severity].
+        `rev` is where to ask from next time."""
+        try:
+            since = max(0, int(since))
+        except (TypeError, ValueError):
+            since = 0
+        # Under the lock: the connection is shared, so without it a writer
+        # mid-way through could add a row between reading the changes and
+        # reading the top rev, and the PC would be sent past a change it
+        # never got.
+        with self._lock:
+            row = self.db.execute("SELECT value FROM edr_meta WHERE key = "
+                                  "'rev'").fetchone()
+            top = max(int(row[0]) if row else 0, self.db.execute(
+                "SELECT COALESCE(MAX(rev), 0) FROM edr_threats").fetchone()[0])
+            # A PC asking from past the top has a list from before this one
+            # was restored or started over: send it everything again.
+            if since > top:
+                since = 0
+            # Everyone's entries, and those this company's own PCs found.
+            rows = self.db.execute(
+                "SELECT sha256, verdict, name, severity, rev FROM edr_threats "
+                "WHERE rev > ? AND (org_id IS NULL OR org_id = ? OR sha256 IN "
+                "(SELECT sha256 FROM edr_sightings WHERE org_id = ?)) "
+                "ORDER BY rev LIMIT ?",
+                (since, int(org_id), int(org_id), int(limit) + 1)
+            ).fetchall()
+        more = len(rows) > limit
+        rows = rows[:limit]
+        items = [[r["sha256"], r["verdict"], r["name"], r["severity"]]
+                 for r in rows]
+        if more:
+            rev = rows[-1]["rev"]
+        else:
+            # Past other companies' entries too, so they are not looked at
+            # again on every visit.
+            rev = max(since, top)
+        return items, rev, more
+
+    def threat_counts(self) -> dict:
+        """For the page: what the list holds."""
+        out = {"blocked": 0, "pending": 0, "safe": 0,
+               "by_source": {s: 0 for s in SOURCES}}
+        for r in self.db.execute(
+                "SELECT verdict, source, org_id IS NULL AS everyone, "
+                "COUNT(*) AS n FROM edr_threats GROUP BY 1, 2, 3"):
+            if r["verdict"] == "safe":
+                out["safe"] += r["n"]
+            elif r["verdict"] == "malicious" and r["everyone"]:
+                out["blocked"] += r["n"]
+                out["by_source"][r["source"]] = (
+                    out["by_source"].get(r["source"], 0) + r["n"])
+            elif r["verdict"] == "malicious":
+                out["pending"] += r["n"]
+        return out
+
+    def pending_threats(self, limit: int = 50) -> list:
+        """Blocked only at the companies whose PCs found them: waiting for
+        the support team before every PC blocks them. Newest first, each
+        with `orgs`, how many companies found it."""
+        return [dict(r) for r in self.db.execute(
+            "SELECT t.*, (SELECT COUNT(*) FROM edr_sightings s "
+            "WHERE s.sha256 = t.sha256) AS orgs FROM edr_threats t "
+            "WHERE t.verdict = 'malicious' AND t.org_id IS NOT NULL "
+            "ORDER BY t.updated DESC LIMIT ?", (int(limit),))]
+
+    def recent_threats(self, limit: int = 20) -> list:
+        """What people and PCs added or decided lately; not the feed, which
+        would bury them."""
+        return [dict(r) for r in self.db.execute(
+            "SELECT * FROM edr_threats WHERE source != 'feed' OR by_user "
+            "NOT IN ('', ?) ORDER BY updated DESC LIMIT ?",
+            (FEED_EXPIRED, int(limit)))]
+
+    def add_feed(self, samples, now: float | None = None) -> int:
+        """MalwareBazaar's samples, blocked on every PC. Never over a
+        person's decision: one marked safe or taken off stays that way.
+        Returns how many were new."""
+        now = time.time() if now is None else now
+        added = 0
+        with self._lock:
+            for sha, name in samples:
+                row = self.db.execute(
+                    "SELECT verdict, by_user FROM edr_threats WHERE sha256 = ?",
+                    (sha,)).fetchone()
+                if row is not None and not (
+                        row["verdict"] == "removed"
+                        and row["by_user"] == FEED_EXPIRED):
+                    continue
+                self._put_threat(sha, "malicious", name=name, severity="HIGH",
+                                 source="feed", org_id=None, by_user="",
+                                 now=now)
+                # Aged off and back in the feed: seen afresh, so its 30 days
+                # start again rather than ending at once.
+                self.db.execute("UPDATE edr_threats SET first_seen = ? "
+                                "WHERE sha256 = ?", (now, sha))
+                added += 1
+            self.db.commit()
+        return added
+
+    def expire_feed(self, now: float | None = None) -> int:
+        """Feed samples older than FEED_KEEP_DAYS come off every PC's list,
+        unless a person has decided about them."""
+        now = time.time() if now is None else now
+        with self._lock:
+            old = [r[0] for r in self.db.execute(
+                "SELECT sha256 FROM edr_threats WHERE source = 'feed' AND "
+                "verdict = 'malicious' AND by_user = '' AND first_seen < ?",
+                (now - FEED_KEEP_DAYS * 86400,))]
+            for sha in old:
+                row = self.db.execute("SELECT * FROM edr_threats WHERE "
+                                      "sha256 = ?", (sha,)).fetchone()
+                self._put_threat(sha, "removed", name=row["name"],
+                                 severity=row["severity"], source="feed",
+                                 org_id=None, by_user=FEED_EXPIRED, now=now,
+                                 first_seen=row["first_seen"])
+            self.db.commit()
+        return len(old)
+
+    def meta(self, key: str, default: str = "") -> str:
+        row = self.db.execute("SELECT value FROM edr_meta WHERE key = ?",
+                              (key,)).fetchone()
+        return row[0] if row is not None else default
+
+    def set_meta(self, **values) -> None:
+        with self._lock:
+            for k, v in values.items():
+                self.db.execute("INSERT INTO edr_meta (key, value) VALUES "
+                                "(?, ?) ON CONFLICT(key) DO UPDATE SET "
+                                "value = excluded.value", (k, str(v)))
+            self.db.commit()
 
     # ----- isolation ----------------------------------------------------------
     def isolations(self, org_id: int | None = None) -> dict:
@@ -524,10 +843,166 @@ class EdrStore:
         """A deleted company: its key stops working and its PCs go."""
         with self._lock:
             for table in ("edr_keys", "edr_agents", "edr_events",
-                          "edr_isolations"):
+                          "edr_isolations", "edr_sightings"):
                 self.db.execute(f"DELETE FROM {table} WHERE org_id = ?",
                                 (int(org_id),))
+            # Its finds stay blocked at the other companies that found them
+            # too, now under one of theirs; the rest go with it.
+            self.db.execute(
+                "UPDATE edr_threats SET org_id = (SELECT MIN(s.org_id) FROM "
+                "edr_sightings s WHERE s.sha256 = edr_threats.sha256) "
+                "WHERE org_id = ? AND EXISTS (SELECT 1 FROM edr_sightings s "
+                "WHERE s.sha256 = edr_threats.sha256)", (int(org_id),))
+            self.db.execute("DELETE FROM edr_threats WHERE org_id = ?",
+                            (int(org_id),))
             self.db.commit()
+
+
+# ----- the MalwareBazaar feed ---------------------------------------------------
+class FeedError(Exception):
+    """Why the feed could not be read, in words for the Antivirus page."""
+
+
+def parse_feed_csv(text: str) -> list:
+    """[(sha256, name)] from MalwareBazaar's CSV export.
+
+    Its header is a comment line ("# "first_seen_utc","sha256_hash",...),
+    so the columns are found by name there, and a file without it still
+    gives up its fingerprints. The name is the malware family when
+    MalwareBazaar knows it."""
+    import csv
+    import io
+    header = []
+    out, seen = [], set()
+    for line in io.StringIO(text or ""):
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            if "sha256" in line:
+                header = next(csv.reader([line.lstrip("# ")],
+                                         skipinitialspace=True), [])
+            continue
+        fields = next(csv.reader([line], skipinitialspace=True), [])
+        col = dict(zip(header, fields)) if header else {}
+        sha = (col.get("sha256_hash") or "").strip().lower()
+        if not _SHA256_RE.match(sha):
+            sha = next((f.strip().lower() for f in fields
+                        if _SHA256_RE.match(f.strip().lower())), "")
+        if not sha or sha in seen:
+            continue
+        seen.add(sha)
+        family = (col.get("signature") or "").strip()
+        kind = (col.get("file_type_guess") or "").strip()
+        if family and family.lower() != "n/a":
+            name = f"MalwareBazaar: {family}"
+        elif kind and kind.lower() != "n/a":
+            name = f"MalwareBazaar: {kind} sample"
+        else:
+            name = "MalwareBazaar sample"
+        out.append((sha, name))
+    return out
+
+
+def fetch_feed(key: str, fetch=None) -> str:
+    """The recent-additions CSV. `fetch(url) -> (status, bytes)` stands in
+    for the network in tests."""
+    import urllib.error
+    import urllib.request
+    url = FEED_URL.format(key=quote((key or "").strip(), safe=""))
+    if fetch is None:
+        def fetch(u):
+            req = urllib.request.Request(u, headers={
+                "User-Agent": "EasyMikroTik antivirus feed"})
+            try:
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    return r.status, r.read(50 * 1024 * 1024)
+            except urllib.error.HTTPError as e:
+                return e.code, e.read(2000)
+    try:
+        status, body = fetch(url)
+    except OSError as exc:
+        raise FeedError(f"MalwareBazaar could not be reached: {exc}") from exc
+    if status in (401, 403):
+        raise FeedError("abuse.ch did not accept the key. Check it on "
+                        "auth.abuse.ch and paste it again.")
+    if status != 200:
+        raise FeedError(f"MalwareBazaar answered {status}.")
+    if body[:2] == b"PK":                       # served zipped
+        import io
+        import zipfile
+        import zlib
+        # Capped unpacked too: 50 MB zipped could otherwise unpack to far
+        # more than the server has memory for.
+        cap = 200 * 1024 * 1024
+        try:
+            with zipfile.ZipFile(io.BytesIO(body)) as z:
+                with z.open(z.namelist()[0]) as fh:
+                    body = fh.read(cap + 1)
+        except (zipfile.BadZipFile, IndexError, NotImplementedError,
+                RuntimeError, zlib.error, OSError) as exc:
+            raise FeedError(f"MalwareBazaar sent a broken zip: {exc}") from exc
+        if len(body) > cap:
+            raise FeedError("MalwareBazaar's list unpacked to more than "
+                            "200 MB; not imported.")
+    return body.decode("utf-8", "replace")
+
+
+def run_feed(store: EdrStore, auth, now: float | None = None,
+             fetch=None) -> tuple:
+    """Fetch, add and age off, and record how it went for the page.
+    Returns (ok, message)."""
+    now = time.time() if now is None else now
+    key = (auth.get_setting(SETTING_FEED_KEY) or "") if auth else ""
+    if not key:
+        return False, "No abuse.ch key is saved, so the feed is off."
+    store.set_meta(feed_tried=now)
+    try:
+        samples = parse_feed_csv(fetch_feed(key, fetch))
+        if not samples:
+            raise FeedError("MalwareBazaar sent no fingerprints.")
+    except FeedError as exc:
+        store.set_meta(feed_error=str(exc))
+        log.warning("antivirus feed: %s", exc)
+        return False, str(exc)
+    added = store.add_feed(samples, now)
+    expired = store.expire_feed(now)
+    store.set_meta(feed_ok=now, feed_error="", feed_added=added,
+                   feed_seen=len(samples), feed_expired=expired)
+    log.info("antivirus feed: %d new of %d, %d aged off", added,
+             len(samples), expired)
+    return True, (f"{added} new fingerprint{'' if added == 1 else 's'} from "
+                  f"MalwareBazaar ({len(samples)} in its last 48 hours); "
+                  f"{expired} older than {FEED_KEEP_DAYS} days taken off.")
+
+
+def feed_due(store: EdrStore, now: float) -> bool:
+    """Every FEED_EVERY after a good import; an hour after a failed one."""
+    try:
+        tried = float(store.meta("feed_tried", "0") or 0)
+        ok = float(store.meta("feed_ok", "0") or 0)
+    except ValueError:
+        return True
+    if ok and ok >= tried:
+        return now - ok >= FEED_EVERY
+    return now - tried >= FEED_RETRY
+
+
+def start_feed_thread(store: EdrStore, auth, check_every: int = 1800):
+    """Import the feed on a timer inside the dashboard process. Does
+    nothing until a key is saved."""
+    def loop():
+        while True:
+            time.sleep(check_every)
+            try:
+                if auth.get_setting(SETTING_FEED_KEY) and feed_due(
+                        store, time.time()):
+                    run_feed(store, auth)
+            except Exception:  # noqa: BLE001 -- try again next time round
+                log.exception("antivirus feed import failed")
+    t = threading.Thread(target=loop, name="mikromon-edr-feed", daemon=True)
+    t.start()
+    return t
 
 
 def build_email(ev: dict, agent: dict | None, org_name: str, held: int,

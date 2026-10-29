@@ -18,11 +18,20 @@ from .web_shared import esc
 _PENDING = ("pending", "running")
 
 
+def _web_url(url) -> str:
+    """The address if it is a web page; "" for anything else, such as a
+    javascript: link, which escaping alone would leave clickable."""
+    url = str(url or "").strip()
+    return url if url.lower().startswith(("https://", "http://")) else ""
+
+
 def _src_links(sources, limit=3) -> str:
     return "".join(
-        f'<a class="bk-src" href="{esc(s.get("url", ""))}" target="_blank" '
-        f'rel="noopener noreferrer">{esc(s.get("title") or s.get("url", ""))}'
-        f'</a>' for s in (sources or [])[:limit])
+        f'<a class="bk-src" href="{esc(_web_url(s.get("url")))}" '
+        f'target="_blank" rel="noopener noreferrer">'
+        f'{esc(s.get("title") or s.get("url", ""))}'
+        f'</a>' for s in (sources or [])[:limit]
+        if _web_url(s.get("url")))
 
 
 def _search_suggestions(inc: dict) -> str:
