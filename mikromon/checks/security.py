@@ -110,16 +110,44 @@ class SecurityCheck(Check):
         it ends the monitoring and the ability to put it back, and it is the
         first thing an intruder with full access removes.
         """
-        if "users" in snap.errors:
-            return                      # could not read it; say nothing
+        if "users" in snap.errors or "users" not in snap.data:
+            return                      # not read this poll; say nothing
         current = {}
         for row in snap.rows("users"):
             nm = str(row.get("name", "")).strip()
             if nm:
                 current[nm] = str(row.get("group", "") or "")
 
+        if not current:
+            # A router always has at least the login this poll read it with,
+            # so an empty list is a read that went wrong, never every account
+            # deleted at once. Storing it is what turned one bad read into
+            # "New login" alerts for every long-standing account on the next
+            # good one. Kept out of the stored list, and said once per run of
+            # bad reads so it can be seen without flooding Recent activity.
+            if not mem.get("users_unreadable"):
+                mem["users_unreadable"] = True
+                ctx.event(
+                    "login_list_unreadable", Severity.INFO,
+                    "Login list read back empty; ignored",
+                    cause=("The router answered the request for its "
+                           "accounts with no accounts at all, which cannot "
+                           "be right: the dashboard was logged in with one "
+                           "to ask. The list from the last good read was "
+                           "kept, so nothing is reported as a new login "
+                           "when the next read succeeds. The router's own "
+                           "accounts are not affected. If this keeps "
+                           "appearing, the link to this router is dropping "
+                           "replies."),
+                )
+            return
+        mem.pop("users_unreadable", None)
+
         known = set(mem.get("router_users", []))
-        if not seeding:
+        # No stored list to compare against -- never had a good read, or
+        # one bad read was stored by an older version -- means nothing on
+        # this read can be called new. Taken as the starting list instead.
+        if not seeding and known:
             # Removals are otherwise ignored on purpose (see the docstring),
             # but OUR OWN account going is the single most consequential
             # change anyone can make to a router we manage: it ends both the

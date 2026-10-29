@@ -239,20 +239,53 @@ class Device:
         Collected in a fixed order (see _fetch_order): the datasets whose
         values the collection itself would distort are read first, the
         expensive bulk menus last.
+
+        A read that breaks partway -- a timeout over a slow tunnel, a dropped
+        connection -- is not like a missing menu. The router's reply to it is
+        still on its way, and the API cannot tell one reply from the next, so
+        every later read on that connection got the reply meant for the one
+        before it, with no error. Seen live: /user came back holding the
+        /system/routerboard reply, read as "no logins", and the next good
+        poll reported every long-standing login on the router as newly
+        created. So the connection is dropped and opened afresh, once per
+        poll; a second break gives up on the rest rather than guessing.
         """
         if self.api is None:
             self.connect()
         snap = Snapshot(handle=self)
-        for name in _fetch_order(datasets):
-            path = DATASETS.get(name)
-            if path is None:
-                continue
+        order = [n for n in _fetch_order(datasets) if n in DATASETS]
+        redialled = False
+        for i, name in enumerate(order):
             try:
-                snap.data[name] = list(self.api.path(*path))
-            except Exception as exc:  # noqa: BLE001 — per-dataset isolation
+                snap.data[name] = list(self.api.path(*DATASETS[name]))
+                continue
+            except (librouteros.exceptions.TrapError,
+                    librouteros.exceptions.MultiTrapError) as exc:
+                # The router refused this menu and said so to the end of its
+                # reply, so the connection is still in step for the next one.
                 snap.data[name] = []
                 snap.errors[name] = str(exc)
                 log.debug("%s: dataset %s unavailable: %s", self.name, name, exc)
+                continue
+            except Exception as exc:  # noqa: BLE001 — per-dataset isolation
+                snap.data[name] = []
+                snap.errors[name] = str(exc) or exc.__class__.__name__
+            log.warning("%s: reading %s broke off (%s); reconnecting so the "
+                        "rest of this poll is not read out of step",
+                        self.name, name, snap.errors[name])
+            self.close()
+            why = "not read: the connection broke twice in one poll"
+            if not redialled:
+                redialled = True
+                try:
+                    self.connect()
+                    continue
+                except DeviceError as exc:
+                    why = f"not read: {exc}"
+            for later in order[i + 1:]:
+                snap.data[later] = []
+                snap.errors[later] = why
+            break
         return snap
 
     def run_command(self, path, cmd: str, **params) -> bool:

@@ -6817,8 +6817,10 @@ def _activity_timeline_box(push_rows, alert_rows, device=None) -> str:
                      f'<pre style="white-space:pre-wrap;background:var(--surface-2);color:var(--text);padding:8px;'
                      f'border-radius:6px">{esc(r["detail"])}</pre></details></td></tr>')
         else:
+            kind = ("Logins" if str(r["key"]).startswith(
+                ("router_user", "login_list")) else "WAN / reachability")
             rows += (f'<tr><td class="muted">{when}</td>{dev}'
-                     f'<td>WAN / reachability</td>'
+                     f'<td>{kind}</td>'
                      f'<td>{esc(r["title"])}</td>'
                      f'<td>{_alert_status_badge(r["severity"], r["recovery"])}</td>'
                      f'<td class="muted">{esc(r["key"])}</td></tr>')

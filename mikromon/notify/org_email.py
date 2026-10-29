@@ -38,6 +38,12 @@ def _should_notify(alert) -> bool:
             or alert.key.startswith("router_user:"))
 
 
+# Shown in Recent activity but never mailed: notes about how the dashboard
+# read the router, which nobody receiving alerts can act on, but which
+# explain an alert around them when somebody goes looking.
+_LOG_ONLY_KEYS = {"login_list_unreadable"}
+
+
 def effective_smtp(auth, fallback):
     """Prefer the SMTP relay the superadmin configured in the dashboard (stored
     in auth.db) over the smtp: block in config.yaml. `auth` is an open AuthStore
@@ -351,7 +357,8 @@ def _build_report(org_name: str, device_names: list[str], state_data: dict,
         reachable = conditions.get("reachability", {}).get("status") != "problem"
         status = "UP" if reachable else "DOWN"
 
-        dev_rows = (events_by_device or {}).get(name, [])
+        dev_rows = [r for r in (events_by_device or {}).get(name, [])
+                    if r.get("key") not in _LOG_ONLY_KEYS]
         events = _pair_events(dev_rows)
         # A condition that's live-unhealthy right now but has no "still open"
         # event from the log (e.g. alert_log was only just enabled, or it
@@ -466,19 +473,21 @@ class OrgEmailNotifier(Notifier):
             return set()
 
     def send(self, alerts) -> None:
-        targets = [a for a in alerts if _should_notify(a)]
-        if not targets:
-            return
-
-        if self._alert_log_db:
+        logged = [a for a in alerts
+                  if _should_notify(a) or a.key in _LOG_ONLY_KEYS]
+        if self._alert_log_db and logged:
             from ..alert_log import AlertLog
             try:
                 alog = AlertLog(self._alert_log_db)
-                for a in targets:
+                for a in logged:
                     alog.append(a.device, a.key, a.title, int(a.severity),
                                a.recovery, ts=a.ts)
             except Exception:  # noqa: BLE001 — history must never break alerting
                 log.exception("OrgEmailNotifier: could not log alert history")
+
+        targets = [a for a in logged if _should_notify(a)]
+        if not targets:
+            return
 
         from ..auth import AuthStore
         from ..devices_store import DevicesStore

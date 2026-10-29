@@ -48,6 +48,7 @@ class Snap:
 
     def __init__(self, users):
         self._u = users
+        self.data = {"users": users}
 
     def rows(self, key):
         return [{"name": n} for n in self._u] if key == "users" else []
