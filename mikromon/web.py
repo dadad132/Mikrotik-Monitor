@@ -42,7 +42,8 @@ from .util import human_bps, human_duration
 from .web_shared import (
     esc, confirm_attr, _flash, _BRAND, _SAFE_CHECK_SECONDS, _PAGE_CSS,
     _SHELL_CSS, _AI_CSS, _header, _page, parse_multipart_form,
-    _THEME_VARS, _THEME_INIT_JS, _THEME_TOGGLE_JS,
+    _THEME_VARS, _THEME_INIT_JS, _THEME_TOGGLE_JS, _SKIP_LINK, _APP_DESCRIPTION,
+    _theme_colours,
 )
 from . import invoice_template as _invoice_tpl
 from .web_auth import (
@@ -1646,7 +1647,7 @@ a{color:var(--accent);text-decoration:none}
 .tipcard .tiphead{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .tipcard .tiphead h2{font-size:17px;color:var(--text)}
 .tipcard .tipbadge{font-size:10.5px;font-weight:700;text-transform:uppercase;
-  letter-spacing:.09em;color:#fff;background:var(--accent);padding:3px 8px;
+  letter-spacing:.09em;color:#fff;background:var(--accent-fill);padding:3px 8px;
   border-radius:20px}
 .tipcard .gsteps{counter-reset:gstep;list-style:none;padding:0;font-size:14px;
   color:var(--text)}
@@ -1654,12 +1655,12 @@ a{color:var(--accent);text-decoration:none}
   line-height:1.55}
 .tipcard .gsteps li::before{counter-increment:gstep;content:counter(gstep);
   position:absolute;left:0;top:1px;width:23px;height:23px;border-radius:50%;
-  background:var(--accent);color:#fff;font-size:12px;font-weight:700;
+  background:var(--accent-fill);color:#fff;font-size:12px;font-weight:700;
   display:flex;align-items:center;justify-content:center}
 .tipcard .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.tipcard .btn{background:var(--accent);color:#fff;border:0;padding:8px 15px;
+.tipcard .btn{background:var(--accent-fill);color:#fff;border:0;padding:8px 15px;
   border-radius:7px;cursor:pointer;font:inherit;font-weight:600}
-.tipcard .btn:hover{background:var(--accent-hover)}
+.tipcard .btn:hover{background:var(--accent-fill-hover)}
 .tipcard .btn.ghost{background:var(--surface);color:var(--text);
   border:1px solid var(--border)}
 .tipcard .btn.ghost:hover{background:var(--surface-2)}
@@ -1682,9 +1683,9 @@ a{color:var(--accent);text-decoration:none}
 .fs-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;
   background:var(--text-faint)}
 .fs-risk.ok .fs-dot{background:#16a34a}
-.fs-risk.warn{color:#b45309}
+.fs-risk.warn{color:var(--warning-text)}
 .fs-risk.warn .fs-dot{background:#d97706}
-.fs-risk.crit{color:#dc2626}
+.fs-risk.crit{color:var(--danger-text)}
 .fs-risk.crit .fs-dot{background:#dc2626}
 @media(max-width:900px){.fleet-strip{display:none}}
 .dash-top-right{display:flex;align-items:center;gap:10px}
@@ -1703,7 +1704,7 @@ a{color:var(--accent);text-decoration:none}
 .chip-lbl{font-size:11px;color:var(--text-faint);text-transform:uppercase;
   letter-spacing:.05em;margin-top:6px;font-weight:600}
 .chip.info .chip-num{color:var(--accent)}
-.chip.red .chip-num{color:var(--danger)}
+.chip.red .chip-num{color:var(--danger-text)}
 /* The two wider blocks beside the counters. They carry a pair of values and
    a caption rather than one big number, so they get their own sizing instead
    of stretching the counter chips out of shape. */
@@ -1712,8 +1713,8 @@ a{color:var(--accent);text-decoration:none}
 .chip-link:hover{border-color:var(--accent)}
 .chip-pair{display:flex;gap:14px;align-items:baseline;font-size:17px;
   font-weight:700;color:var(--text);line-height:1.1;margin-top:2px}
-.chip-dn{color:#2563eb}
-.chip-up{color:#16a34a}
+.chip-dn{color:var(--accent)}
+.chip-up{color:var(--success-text)}
 .chip-sub{font-size:11px;color:var(--text-faint);margin-top:4px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chip-sub a{color:var(--accent);text-decoration:none}
@@ -1782,7 +1783,7 @@ a{color:var(--accent);text-decoration:none}
   color:var(--text-muted);padding:6px 13px;border-radius:999px;font-size:12px;
   cursor:pointer;font-weight:600}
 .fchip:hover{color:var(--text)}
-.fchip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.fchip.on{background:var(--accent-fill);border-color:var(--accent);color:#fff}
 .dash-table-wrap{overflow-x:auto}
 .dash-table{width:100%;border-collapse:collapse;font-size:13px}
 .dash-table th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;
@@ -1800,20 +1801,24 @@ a{color:var(--accent);text-decoration:none}
 .dt-view a:hover{color:var(--accent)}
 .badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;
   font-weight:700}
-.badge.ok{background:var(--success-bg);color:var(--success)}
-.badge.warn{background:var(--warning-bg);color:var(--warning)}
-.badge.crit{background:var(--danger-bg);color:var(--danger)}
-.alert-badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px}
+.badge.ok{background:var(--success-bg);color:var(--success-text)}
+.badge.warn{background:var(--warning-bg);color:var(--warning-text)}
+.badge.crit{background:var(--danger-bg);color:var(--danger-text)}
+.alert-badge{font-size:11px;font-weight:700;padding:5px 9px;border-radius:999px}
 .alert-badge.ok{background:var(--surface-2);color:var(--text-faint)}
-.alert-badge.crit{background:var(--danger-bg);color:var(--danger)}
-.alert-badge.warn{background:rgba(217,119,6,.14);color:#b45309}
+.alert-badge.crit{background:var(--danger-bg);color:var(--danger-text)}
+.alert-badge.warn{background:rgba(217,119,6,.14);color:var(--warning-text)}
 a.alert-badge{text-decoration:none;display:inline-block}
 a.alert-badge:hover{filter:brightness(.94)}
 @media(max-width:820px){
   .dash-main{padding:16px 16px 28px}
   .dash-topbar{gap:10px}
   .dash-search{width:auto;flex:1;min-width:0}
-  .chip{padding:12px 16px;min-width:0;flex:1}
+  /* Two to a row: five squeezed onto one line cut their own labels off. */
+  .dash-chips{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:10px}
+  .chip{padding:12px 16px;min-width:0}
+  .chip-wide{grid-column:1 / -1;min-width:0}
 }
 """
 
@@ -1875,9 +1880,40 @@ function mmSetFilter(f){
     b.classList.toggle('on',b.getAttribute('data-f')===f);});
   mmApplyFilter();
 }
-if(mmQ) mmQ.addEventListener('input',mmApplyFilter);
+if(mmQ){
+  try{mmQ.value=sessionStorage.getItem('mm-q')||'';}catch(e){}
+  mmQ.addEventListener('input',function(){
+    try{sessionStorage.setItem('mm-q',mmQ.value);}catch(e){}
+    mmApplyFilter();
+  });
+}
 var mmSaved='all'; try{mmSaved=sessionStorage.getItem('mm-flt')||'all';}catch(e){}
 mmSetFilter(mmSaved);
+/* Keeps the page current. This was a <meta refresh>: a reload every 10
+   seconds whatever was going on, which wiped the search box in mid-word, and
+   which left a screen on the wall on the browser's error page for good if
+   the server was away for a moment. So not while someone is typing or
+   selecting text, not in a hidden tab, and only if the server answers. A
+   cursor left in the search box only holds it off for 30 seconds: a screen
+   on the wall must not go quietly out of date. */
+(function(){
+  var touched=0;
+  function note(){touched=Date.now();}
+  document.addEventListener('input',note);
+  document.addEventListener('selectionchange',note);
+  function busy(){
+    if(Date.now()-touched>30000) return false;
+    var a=document.activeElement;
+    return !!(a&&/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))
+      ||!!String(window.getSelection());
+  }
+  setInterval(function(){
+    if(document.hidden||busy()) return;
+    fetch('/health',{cache:'no-store'}).then(function(r){
+      if(r.ok&&!busy()) location.reload();
+    }).catch(function(){});
+  },10000);
+})();
 </script>"""
 
 
@@ -2200,7 +2236,7 @@ def _render_dashboard(store, state, user=None, allowed=None, csrf="",
         f'onclick="mmSetFilter(\'offline\')">Offline</button>'
         f'</div></div>'
         f'<div class="dash-table-wrap"><table class="dash-table">'
-        f'<thead><tr><th>Name</th><th>Status</th><th>Alerts</th><th></th></tr>'
+        f'<thead><tr><th>Name</th><th>Status</th><th>Alerts</th><th><span class="sr-only">Actions</span></th></tr>'
         f'</thead><tbody>{rows}</tbody></table></div>'
         f'<p id="dash-empty" class="muted" '
         f'style="padding:0 18px 16px;{"" if devs else "display:"}'
@@ -2208,20 +2244,22 @@ def _render_dashboard(store, state, user=None, allowed=None, csrf="",
         f'</div>')
     brand = esc(_BRAND)
     from .brand import favicon_tags as _favicon_tags
-    return f"""<!doctype html>
-<html><head><meta charset="utf-8">
+    return _theme_colours(f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="{esc(_APP_DESCRIPTION)}">
 {_THEME_INIT_JS}{_favicon_tags()}
-<meta http-equiv="refresh" content="10">
-<title>{brand} &middot; Dashboard</title>
+<noscript><meta http-equiv="refresh" content="10"></noscript>
+<title>Dashboard &middot; {brand}</title>
 <style>{_THEME_VARS}{_SHELL_CSS}{_DASH_CSS}{_AI_CSS}</style></head>
 <body class="has-sidebar">
+{_SKIP_LINK}
 {_header(user, "/dashboard")}
-<div class="dash-main">
+<main id="main" class="dash-main" tabindex="-1">
 <div class="dash-topbar"><h1>Dashboard</h1>
 {strip}
 <div class="dash-top-right">
-<input id="q" class="dash-search" placeholder="Search devices…">
+<input id="q" class="dash-search" aria-label="Search devices" placeholder="Search devices…">
 </div></div>
 <div class="dash-chips">{chips}</div>
 {backup_html}
@@ -2229,10 +2267,10 @@ def _render_dashboard(store, state, user=None, allowed=None, csrf="",
 {cards}
 {charts}
 {table}
-</div>
+</main>
 {_THEME_TOGGLE_JS}
 {_DASH_JS}
-</body></html>"""
+</body></html>""")
 
 
 # Flat tabs on the device bar.
@@ -2426,7 +2464,8 @@ def _render_inventory(store, state, user, allowed) -> str:
     inner = (
         f'<div class="wrap" style="max-width:1100px"><h1>Device inventory</h1>'
         f'<div class="box">'
-        f'<input id="iq" placeholder="Search by name, model, version, serial…" '
+        f'<input id="iq" aria-label="Search devices" '
+        f'placeholder="Search by name, model, version, serial…" '
         f'style="width:100%;margin-bottom:12px" '
         f'onkeyup="invFilter()"><table id="invt">'
         f'<tr><th>Name</th><th>Model</th><th>RouterOS</th><th>Serial</th>'
@@ -2706,7 +2745,7 @@ def _render_device(store, state, name, user, csrf="",
             f'<span style="font-size:12px">'
             f'<span style="color:var(--accent)">&darr;&nbsp;{human_bps(t.get("rx_bps", 0))}</span>'
             f'&nbsp;&nbsp;'
-            f'<span style="color:#f97316">&uarr;&nbsp;{human_bps(t.get("tx_bps", 0))}</span>'
+            f'<span style="color:var(--warning-text)">&uarr;&nbsp;{human_bps(t.get("tx_bps", 0))}</span>'
             f'&nbsp;&nbsp;'
             f'<span style="color:var(--text-faint)">peak&nbsp;{human_bps(peak_rx)}</span>'
             f'</span></div>'
@@ -2802,7 +2841,7 @@ def _render_device(store, state, name, user, csrf="",
             f'{esc(_problem_label(p))}</span>{_since(p)}</div>'
             for p in d["problems"])
     else:
-        phtml = ('<p style="color:#16a34a;font-weight:600;padding:4px 0">'
+        phtml = ('<p style="color:var(--success-text);font-weight:600;padding:4px 0">'
                  'No active problems</p>')
     # id="alerts" is what the dashboard's alert count links to.
     probs_box = (f'<div class="box" id="alerts"><h2 style="margin-bottom:12px">'
@@ -2843,7 +2882,7 @@ def _render_device(store, state, name, user, csrf="",
         f'</div>'
         f'<p style="margin-top:16px"><a href="/dashboard">&larr; dashboard</a></p>'
         f'</div>')
-    return _page(esc(name), _header(user, "/dashboard") + inner)
+    return _page(name, _header(user, "/dashboard") + inner)
 
 
 def _port_is_listening(port: int, timeout: float = 1.0) -> bool:
@@ -3131,7 +3170,7 @@ def _access_box(name, csrf, hub_host, tunnel_ip, creds, grants,
                           f'https://{esc(_lh)}:{port}</a>')
                 if cert_note:
                     target += (f'<br><span class="muted" '
-                               f'style="font-size:11px;color:#b45309">'
+                               f'style="font-size:11px;color:var(--warning-text)">'
                                f'{esc(cert_note)}</span>')
             else:
                 target = (f'<code>{esc(hub_host)}:{port}</code> '
@@ -3217,7 +3256,7 @@ def _render_offboard_page(name, result, back_url, user) -> str:
     if conn_err:
         router_box = (
             f'<div class="box" style="border-left:4px solid #d97706;margin-top:16px">'
-            f'<b style="color:#d97706">Router could not be reached</b>'
+            f'<b style="color:var(--warning-text)">Router could not be reached</b>'
             f'<p class="muted" style="margin-top:6px">{esc(conn_err)}</p>'
             f'<p class="muted">The device has been removed from the dashboard. '
             f'You will need to manually log in to the router and:<br>'
@@ -4793,7 +4832,7 @@ def _roadwarrior_box(devices_db, hub, org_id, csrf) -> str:
         f'<button class="btn ghost" type="submit">Revoke</button>'
         f'</form></td></tr>'
         for key, rw in sorted(mine, key=lambda kr: kr[1].get("label", "")))
-    table = (f'<table><tr><th>Label</th><th>Tunnel IP</th><th></th></tr>'
+    table = (f'<table><tr><th>Label</th><th>Tunnel IP</th><th><span class="sr-only">Actions</span></th></tr>'
             f'{rows}</table>' if mine else
             '<p class="muted">Nobody has personal VPN access yet.</p>')
     return (f'<div class="box"><h2>Personal VPN access</h2>'
@@ -4808,7 +4847,7 @@ def _roadwarrior_box(devices_db, hub, org_id, csrf) -> str:
             f'<form method="POST" action="/admin/roadwarrior-add" '
             f'style="margin-top:10px">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
-            f'<input name="label" placeholder="e.g. Alice\'s laptop" required> '
+            f'<input name="label" aria-label="Who this is for" placeholder="e.g. Alice\'s laptop" required> '
             f'<button class="btn" type="submit">Add a peer</button>'
             f'</form></div>')
 
@@ -4854,7 +4893,7 @@ def _render_roadwarrior_config_page(user, label, conf_text) -> str:
         f'peer and add it again to pick up the new addresses.</p>'
         f'<a class="btn ghost" href="/admin">Done</a>'
         f'</div></div>')
-    return _page(esc(label) + " · Personal VPN access", _header(user, "/admin") + inner)
+    return _page(label + " · Personal VPN access", _header(user, "/admin") + inner)
 
 
 def _vpn_refresh_form(name, csrf) -> str:
@@ -4913,7 +4952,7 @@ def _vpn_group_box(name, devices_db, org_id, csrf) -> str:
                 f'<input type="hidden" name="member" value="{esc(member_name)}">'
                 f'<button class="btn ghost" type="submit">Remove</button>'
                 f'</form></td></tr>')
-    table = (f'<table><tr><th>Sub-unit</th><th>Network</th><th></th></tr>'
+    table = (f'<table><tr><th>Sub-unit</th><th>Network</th><th><span class="sr-only">Actions</span></th></tr>'
             f'{rows}</table>' if members else
             '<p class="muted">No sub-units connected here yet.</p>')
 
@@ -5204,13 +5243,13 @@ def _existing_network_box(existing) -> str:
             f'Read from the router just now. A department planned on top of '
             f'one of these does not fail cleanly &mdash; it half works.</p>'
             f'<div style="display:flex;gap:22px;flex-wrap:wrap">'
-            + block("Addresses", "<th>Range</th><th>On</th><th></th>",
+            + block("Addresses", "<th>Range</th><th>On</th><th><span class='sr-only'>Actions</span></th>",
                     addr_rows, "No IP addresses configured.")
             + block("Ports", "<th>Port</th><th>Bridge</th><th>VLAN</th>"
-                             "<th></th>", port_rows,
+                             "<th><span class='sr-only'>Actions</span></th>", port_rows,
                     "No bridge ports. Nothing is plugged into a bridge, so a "
                     "department VLAN would have nowhere to land.")
-            + block("VLANs", "<th>Name</th><th>Id</th><th>On</th><th></th>",
+            + block("VLANs", "<th>Name</th><th>Id</th><th>On</th><th><span class='sr-only'>Actions</span></th>",
                     vlan_rows, "No VLANs yet.")
             + '</div></div>')
 
@@ -5228,7 +5267,7 @@ def _departments_box(name, csrf, departments, ports=(), problems=(),
     rows = ""
     for d in departments:
         dns = (", ".join(d["resolvers"]) if d["resolvers"]
-               else '<span style="color:#b45309">none &mdash; not filtered '
+               else '<span style="color:var(--warning-text)">none &mdash; not filtered '
                     'separately</span>')
         # Built out here: a second f-string nested inside the row, quoting
         # its own attributes, is unreadable rather than clever.
@@ -5258,7 +5297,7 @@ def _departments_box(name, csrf, departments, ports=(), problems=(),
 
     table = (f'<table><thead><tr><th>Department</th><th>VLAN</th>'
              f'<th>Range</th><th>Ports</th><th>NextDNS</th>'
-             f'<th>Clients use</th><th></th></tr></thead>'
+             f'<th>Clients use</th><th><span class="sr-only">Actions</span></th></tr></thead>'
              f'<tbody>{rows}</tbody></table>') if rows else (
         '<p class="muted">No departments yet. Everything on this router '
         'shares one network and one NextDNS profile.</p>')
@@ -5266,13 +5305,13 @@ def _departments_box(name, csrf, departments, ports=(), problems=(),
     warn = ""
     if problems:
         warn += ('<div class="box" style="border-color:#dc2626">'
-                 '<b style="color:#dc2626">These have to be fixed before '
+                 '<b style="color:var(--danger-text)">These have to be fixed before '
                  'anything can be pushed</b><ul style="margin:6px 0 0">'
                  + "".join(f'<li>{esc(p)}</li>' for p in problems)
                  + '</ul></div>')
     if todo:
         warn += ('<div class="box" style="border-color:#b45309">'
-                 '<b style="color:#b45309">Not filtered separately yet</b>'
+                 '<b style="color:var(--warning-text)">Not filtered separately yet</b>'
                  '<ul style="margin:6px 0 0">'
                  + "".join(f'<li><b>{esc(t["name"])}</b> &mdash; '
                            f'{esc(t["why"])}</li>' for t in todo)
@@ -5653,7 +5692,7 @@ def _remote_regenerate_box(name, users, csrf) -> str:
             f'once set, so if you missed it, the fix is a fresh one — this '
             f'revokes the login below and issues it a new password '
             f'immediately, shown once again.</p>'
-            f'<table><tr><th>Login</th><th></th></tr>{rows}</table></div>')
+            f'<table><tr><th>Login</th><th><span class="sr-only">Actions</span></th></tr>{rows}</table></div>')
 
 
 def _hub_peers_status(peers_path: str) -> dict:
@@ -6255,7 +6294,7 @@ def _render_device_provision(name, user, raw, csrf, *, hub_ip="", script=None,
              f'{banner}{err}{form}{out}'
              f'<p><a href="/device?name={q}">&larr; overview</a></p></div>'
              f'{_REVEAL_JS}')
-    return _page(esc(name) + " · Provision", _header(user, "/dashboard") + inner)
+    return _page(name + " · Provision", _header(user, "/dashboard") + inner)
 
 
 def _fmt_backup_date(bname, ctime) -> str:
@@ -6279,7 +6318,7 @@ def _flash_line(flash: dict) -> str:
     # Red near the point where a change would be refused for want of room,
     # not merely below a percentage: 1.5 MB free is normal on a 16 MB router.
     low = 0 <= free < 2 * FLASH_RESERVE_BYTES + 256 * 1024
-    color = "#dc2626" if low else "var(--muted)"
+    color = "#dc2626" if low else "var(--text-muted)"
     return (f'<p style="margin:0 0 10px;font-size:13px;color:{color}">'
             f'Flash: <b>{_human(max(free, 0))}</b> free of {_human(total)}. '
             f'The dashboard keeps its newest {keep} automatic backups here '
@@ -6352,7 +6391,7 @@ def _space_box(name, csrf, space=None, scan_error="") -> str:
                 f'files it made itself; anything else is shown so you can '
                 f'remove it in Winbox. It never deletes a file it did not '
                 f'make.</p>'
-                + (f'<p style="color:#dc2626">{esc(scan_error)}</p>'
+                + (f'<p style="color:var(--danger-text)">{esc(scan_error)}</p>'
                    if scan_error else "")
                 + f'<div class="actions">{scan_btn}</div></div>')
 
@@ -6541,7 +6580,7 @@ def _render_device_backups(name, user, facts, csrf, *, backups=None,
                   f'<form method="POST" action="/device/backup" class="actions">'
                   f'<input type="hidden" name="csrf" value="{csrf}">'
                   f'<input type="hidden" name="device" value="{esc(name)}">'
-                  f'<input name="bkname" placeholder="label (optional)">'
+                  f'<input name="bkname" aria-label="Backup label (optional)" placeholder="label (optional)">'
                   f'<button class="btn" type="submit">Preview backup (dry-run)'
                   f'</button></form></div>')
         action = (table
@@ -6553,7 +6592,7 @@ def _render_device_backups(name, user, facts, csrf, *, backups=None,
              f'<h1>{esc(name)} &middot; Backups</h1>{tabbar}'
              f'{_facts_strip(facts)}{banner}{err}{action}'
              f'<p><a href="/device?name={q}">&larr; overview</a></p></div>')
-    return _page(esc(name) + " · Backups", _header(user, "/dashboard") + inner)
+    return _page(name + " · Backups", _header(user, "/dashboard") + inner)
 
 
 # ---- generic feature tabs (SD-WAN / Security / DNS / QoS / …) ----------
@@ -6740,7 +6779,7 @@ def _field_html(desc) -> str:
         cols = desc["cols"]
         name = desc["name"]
         can_add = desc.get("can_add", True)
-        ths = "".join(f"<th>{esc(lbl)}</th>" for _c, lbl, _ph in cols) + "<th></th>"
+        ths = "".join(f"<th>{esc(lbl)}</th>" for _c, lbl, _ph in cols) + "<th><span class='sr-only'>Actions</span></th>"
 
         def row_html(r):
             tds = "".join(
@@ -6932,7 +6971,7 @@ def _adopt_box(name, slug, feature, csrf, unmanaged) -> str:
             "Shown for reference. Adopting these into an editable policy is coming "
             "next.")
     return (f'<div class="box"><h2>Existing on the router (unmanaged)</h2>'
-            f'<p class="muted">{note}</p><table><tr><th>Rule</th><th></th></tr>'
+            f'<p class="muted">{note}</p><table><tr><th>Rule</th><th><span class="sr-only">Actions</span></th></tr>'
             f'{rows}</table></div>')
 
 
@@ -7152,7 +7191,7 @@ def _scripts_box(name, csrf, scripts, clock=None) -> str:
     return (f'<div class="box"><h2>Saved scripts on the router'
             f'{_help_dot("scripts", "Custom scripts")}</h2>'
             f'{_script_clock_line(clock)}'
-            f'<table><tr><th>Script</th><th>Timer</th><th></th></tr>{rows}'
+            f'<table><tr><th>Script</th><th>Timer</th><th><span class="sr-only">Actions</span></th></tr>{rows}'
             f'</table></div>')
 
 
@@ -7342,7 +7381,7 @@ def _hubtunnel_box(name, current, csrf="", devices_db=None) -> str:
                     f'</form>')
             peer_html = (
                 f'<h3 style="margin:16px 0 8px">Hub peer status</h3>'
-                f'<p style="color:#dc2626">Cannot read <code>{esc(peers_path)}</code>: '
+                f'<p style="color:var(--danger-text)">Cannot read <code>{esc(peers_path)}</code>: '
                 f'{esc(st["error"])}</p>{reload_form}')
 
     return (f'<div class="box"><h2>Hub (Ubuntu WireGuard server) setup</h2>'
@@ -7627,7 +7666,7 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None,
 
     def _iface_field(selected=""):
         if ifaces is None:
-            return (f'<input name="link_iface" placeholder="ether1 / lte1" '
+            return (f'<input name="link_iface" aria-label="Interface" placeholder="ether1 / lte1" '
                     f'value="{esc(selected)}" style="width:100%">')
         opts = '<option value="">— select interface —</option>'
         names = [i.get("name", "") for i in ifaces]
@@ -7654,13 +7693,13 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None,
         if other:
             opts += (f'<optgroup label="Ethernet / other ports">'
                      f'{"".join(_opt(i) for i in other)}</optgroup>')
-        return f'<select name="link_iface" style="width:100%">{opts}</select>'
+        return f'<select name="link_iface" aria-label="Interface" style="width:100%">{opts}</select>'
 
     def _type_field(selected=""):
         opts = "".join(
             f'<option value="{v}"{" selected" if v == selected else ""}>{lbl}</option>'
             for v, lbl in (("", "Auto"), ("ppp", "Dial-up (PPPoE)"), ("dhcp", "DHCP / static")))
-        return f'<select name="link_type" style="width:100%">{opts}</select>'
+        return f'<select name="link_type" aria-label="Link type" style="width:100%">{opts}</select>'
 
     def row(link):
         dist = link.distance if (link and link.distance) else ""
@@ -7674,13 +7713,13 @@ def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None,
                    f'{esc(gw_detected)}</div>'
                    if gw_saved and gw_detected and gw_detected != gw_saved else "")
         return (f'<tr>'
-                f'<td><input name="link_name" placeholder="ISP name (Vodacom)" '
+                f'<td><input name="link_name" aria-label="ISP name" placeholder="ISP name (Vodacom)" '
                 f'value="{esc(link.name if link else "")}" style="width:100%"></td>'
                 f'<td>{_iface_field(link.interface if link else "")}</td>'
                 f'<td>{_type_field(link.link_type if link else "")}</td>'
                 f'<td><input name="link_gw" placeholder="{esc(gw_detected or "auto")}" '
-                f'value="{esc(gw_saved)}" style="width:100%">{gw_hint}</td>'
-                f'<td><input name="link_distance" type="number" min="1" max="253" '
+                f'value="{esc(gw_saved)}" aria-label="Gateway" style="width:100%">{gw_hint}</td>'
+                f'<td><input name="link_distance" aria-label="Priority (lower is preferred)" type="number" min="1" max="253" '
                 f'placeholder="10, 11…" title="Leave blank and the rows '
                 f'number themselves 10, 11, 12 down the list. A number you '
                 f'type carries the ladder with it — 10 here makes the blanks '
@@ -8036,7 +8075,7 @@ def _render_confirm_page(name, user, slug, backup, hub_ip, csrf, token="",
         f'{json.dumps(name).replace("</", "<" + chr(92) + "/")},'
         f'token:{json.dumps(token)}}};</script>'
         f'{_CONFIRM_JS}')
-    return _page(esc(name) + " · Change sent", _header(user, "/dashboard") + inner)
+    return _page(name + " · Change sent", _header(user, "/dashboard") + inner)
 
 
 _CONFIRM_JS = """
@@ -8086,7 +8125,7 @@ def _render_temp_login_page(name, user, username, password, address, minutes) ->
         f"{svc} — {addr_shown}:{port}"
         for svc, port in (("WinBox", "8291"), ("SSH", "22"), ("WebFig", "80")))
     addr_warning = ("" if address else
-                   '<p style="color:#dc2626">No tunnel IP or configured host '
+                   '<p style="color:var(--danger-text)">No tunnel IP or configured host '
                    'found for this router — look up its address on the '
                    'Devices page.</p>')
     inner = (
@@ -8110,7 +8149,7 @@ def _render_temp_login_page(name, user, username, password, address, minutes) ->
         f'LAN) — this login alone doesn\'t provide that.</p>'
         f'<a class="btn" href="/device?name={q}&tab=remote">Done</a>'
         f'</div></div>')
-    return _page(esc(name) + " · Temporary login", _header(user, "/dashboard") + inner)
+    return _page(name + " · Temporary login", _header(user, "/dashboard") + inner)
 
 
 def _friendly_push_error(error: str) -> str:
@@ -8350,7 +8389,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
              f'dry-run-first and logged above so you can see exactly what the '
              f'router accepted or rejected.</p>'
              f'<p><a href="/device?name={q}">&larr; overview</a></p></div>')
-    return _page(esc(name) + " · " + feature["title"],
+    return _page(name + " · " + feature["title"],
                  _header(user, "/dashboard") + inner + _FEATURE_JS)
 
 
@@ -8600,7 +8639,8 @@ def _render_devices(store, csrf, user, edit_name=None, msg="",
     inv_table = (
         f'<div class="box">'
         f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">'
-        f'<input id="iq" placeholder="Search by name, model, version, serial…" '
+        f'<input id="iq" aria-label="Search devices" '
+        f'placeholder="Search by name, model, version, serial…" '
         f'style="flex:1" onkeyup="invFilter()">'
         f'{add_btn}</div>'
         f'<table id="invt" style="width:100%">'
@@ -8648,11 +8688,11 @@ def _wan_link_row(idx, ep=None) -> str:
     ep = ep or {}
     dist = ep.get("distance") or ""
     return (f'<div class="wanrow"><span class="prio">{idx + 1}</span>'
-            f'<input name="link_name" placeholder="ISP name (e.g. Vodacom)" '
+            f'<input name="link_name" aria-label="ISP name" placeholder="ISP name (e.g. Vodacom)" '
             f'value="{esc(ep.get("name", ""))}">'
-            f'<input name="link_iface" placeholder="interface (ether1, lte1…)" '
+            f'<input name="link_iface" aria-label="Interface" placeholder="interface (ether1, lte1…)" '
             f'value="{esc(ep.get("interface", ""))}">'
-            f'<input name="link_distance" type="number" min="1" max="253" '
+            f'<input name="link_distance" aria-label="Priority (lower is preferred)" type="number" min="1" max="253" '
             f'placeholder="10, 11…" title="Route distance (optional). Blank '
             f'rows number themselves 10, 11, 12 down the list; lower wins." '
             f'style="width:70px" '
@@ -8922,6 +8962,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "mikromon"
+        sys_version = ""
+
+        def version_string(self):
+            return self.server_version  # no Python version on show
         # An idle keep-alive or a stalled client gives its thread back after
         # this long instead of holding it for ever.
         timeout = 60
@@ -8985,6 +9029,36 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(data)
+
+        def do_HEAD(self):
+            # Uptime monitors, link checkers and `curl -I` ask with HEAD, and
+            # were answered 501. It is a GET without the body: everything
+            # that writes a body looks at self.command first.
+            self.do_GET()
+
+        def _serve_seo(self, path):
+            """robots.txt, the sitemap and llms.txt, with this server's own
+            address in them."""
+            from . import web_seo
+            base = _public_base(auth).rstrip("/") or (
+                ("https" if self._is_https() else "http") + "://"
+                + self.headers.get("Host", "localhost"))
+            text = {"/robots.txt": web_seo.robots_txt,
+                    "/sitemap.xml": web_seo.sitemap_xml,
+                    "/llms.txt": lambda b: web_seo.llms_txt(b, _BRAND),
+                    }[path](base)
+            return self._send(200, text, web_seo.SEO_TYPES[path])
+
+        def _not_found(self, user):
+            """A way back for a person; plain text for a program."""
+            if self.path.startswith("/api/"):
+                return self._send(404, "not found")
+            return self._send(404, _page("Page not found", _header(user, "") + (
+                '<div class="wrap"><div class="box"><h1>Page not found</h1>'
+                '<p>That address does not lead anywhere here. The link may '
+                'be old, or a router may have been renamed.</p>'
+                '<a class="btn" href="/dashboard">Back to the dashboard</a>'
+                '</div></div>')), "text/html; charset=utf-8")
 
         def _send_file(self, code, path, ctype, headers=None):
             """Stream a file from disk in chunks rather than reading it
@@ -9097,6 +9171,16 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if path == "/pay":
                 return self._serve_pay(url)
 
+            # What crawlers and link previews read: they have no session.
+            if path in ("/robots.txt", "/sitemap.xml", "/llms.txt"):
+                return self._serve_seo(path)
+            if path == "/og.jpg":
+                from .web_seo import OG_IMAGE_FILE
+                if not os.path.isfile(OG_IMAGE_FILE):
+                    return self._send(404, "not found")
+                return self._send_file(200, OG_IMAGE_FILE, "image/jpeg",
+                                       {"Cache-Control": "public, max-age=86400"})
+
             # The artwork is served before any auth check: the landing page
             # and the login page both need it, and neither has a session.
             if path in ("/favicon.svg", "/favicon.ico", "/logo", "/logo.svg"):
@@ -9115,7 +9199,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 self.send_header("Cache-Control", "public, max-age=3600")
                 self.end_headers()
                 try:
-                    self.wfile.write(blob)
+                    self.wfile.write(b"" if self.command == "HEAD" else blob)
                 except (BrokenPipeError, ConnectionResetError):
                     pass
                 return
@@ -9136,7 +9220,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # isolation — the real entry point is "/" below.
             if path == "/landing":
                 from .web_landing import render_landing
-                return self._send(200, render_landing(self._ai_on(), self._ai_news()),
+                return self._send(200, render_landing(
+                    self._ai_on(), self._ai_news(),
+                    _public_base(auth).rstrip("/")),
                                   "text/html; charset=utf-8")
 
             # "/" is the public marketing page (SaaS mode only — self-hosted/
@@ -9147,7 +9233,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if self._session():
                     return self._redirect("/dashboard")
                 from .web_landing import render_landing
-                return self._send(200, render_landing(self._ai_on(), self._ai_news()),
+                return self._send(200, render_landing(
+                    self._ai_on(), self._ai_news(),
+                    _public_base(auth).rstrip("/")),
                                   "text/html; charset=utf-8")
 
             # No auth configured -> open dashboard (back-compat / demo without auth).
@@ -9499,7 +9587,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         "application/json")
                 if path == "/metrics":  # only reached when auth is None
                     return self._send(200, _render_prometheus(store, allowed))
-                return self._send(404, "not found")
+                return self._not_found(user)
             finally:
                 store.close()
 
@@ -13086,7 +13174,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 kind=flat.get("vu_type") or "windows",
                 reach=({"ok": True} if custom else reach),
                 safe_note=bool(armed.get("token")))
-            return self._send(200, _page(esc(name) + " · Remote user",
+            return self._send(200, _page(name + " · Remote user",
                                          _header(user, "/dashboard") + inner),
                               "text/html; charset=utf-8")
 
@@ -13137,7 +13225,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                        f'restarting and will be offline for ~1–2 minutes.</p>'
                        f'<a class="btn" href="/device?name={q}">Back to {esc(name)}'
                        f'</a></div>')
-            return self._send(200, _page(esc(name) + " · Reboot",
+            return self._send(200, _page(name + " · Reboot",
                               _header(user, "/dashboard") + f'<div class="wrap">{box}</div>'),
                               "text/html; charset=utf-8")
 
@@ -13258,7 +13346,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                    f'a couple of minutes.</p>'
                    f'<a class="btn" href="/device?name={q}">Back to {esc(name)}</a>'
                    f'</div>')
-            return self._send(200, _page(esc(name) + " · Confirm",
+            return self._send(200, _page(name + " · Confirm",
                               _header(user, "/dashboard") + f'<div class="wrap">{box}</div>'),
                               "text/html; charset=utf-8")
 
@@ -13283,7 +13371,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                      f'<p><a href="/device?name={quote(name)}">&larr; overview'
                      f'</a></p></div>')
             return self._send(
-                200, _page(esc(name) + " · Share",
+                200, _page(name + " · Share",
                            _header(user, "/dashboard") + inner),
                 "text/html; charset=utf-8")
 
@@ -16253,7 +16341,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             data = body.encode("utf-8")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
-            self.wfile.write(data)
+            if self.command != "HEAD":
+                self.wfile.write(data)
             return None
 
         def _serve_test_invoice(self, url, user):
@@ -16468,7 +16557,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 f'value="{esc(str(v))}">'
                 for k, v in data.items()
             )
-            html = (f'<!doctype html><html><body>'
+            html = (f'<!doctype html><html lang="en"><head>'
+                    f'<meta charset="utf-8"><title>Redirecting…</title>'
+                    f'</head><body>'
                     f'<p style="font-family:sans-serif;margin:40px auto;'
                     f'text-align:center">Redirecting to secure checkout…</p>'
                     f'<form id="pf" method="POST" action="{pf_url}">{fields}</form>'
@@ -16896,16 +16987,16 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     wb = creds.get("winbox_addr", "")
                     wf = creds.get("webfig_url", "")
                     winbox_row = (
-                        f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Winbox</td>'
+                        f'<tr><td style="padding:5px 16px 5px 0;color:var(--text-faint)">Winbox</td>'
                         f'<td><code style="font-weight:700">{esc(wb)}</code>'
-                        f'<span style="color:#64748b;font-size:12px;margin-left:8px">'
+                        f'<span style="color:var(--text-faint);font-size:12px;margin-left:8px">'
                         f'(enter in the desktop Winbox app — "Connect To")</span>'
                         f'</td></tr>') if wb else ""
                     webfig_row = (
-                        f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">WebFig</td>'
+                        f'<tr><td style="padding:5px 16px 5px 0;color:var(--text-faint)">WebFig</td>'
                         f'<td><a href="{esc(wf)}" target="_blank" rel="noopener">'
                         f'{esc(wf)}</a>'
-                        f'<span style="color:#64748b;font-size:12px;margin-left:8px">'
+                        f'<span style="color:var(--text-faint);font-size:12px;margin-left:8px">'
                         f'(browser)</span></td></tr>') if wf else ""
                     how_note = (
                         '<div style="margin:14px 0 0;padding:10px 12px;background:#dcfce7;'
@@ -16915,14 +17006,14 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                         'closes automatically when the timer runs out.</div>')
                 else:
                     winbox_row = (
-                        f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Winbox</td>'
+                        f'<tr><td style="padding:5px 16px 5px 0;color:var(--text-faint)">Winbox</td>'
                         f'<td><code>{esc(host)}:8291</code>'
-                        f'<span style="color:#64748b;font-size:12px;margin-left:8px">'
+                        f'<span style="color:var(--text-faint);font-size:12px;margin-left:8px">'
                         f'(desktop Winbox app)</span></td></tr>')
                     webfig_row = (
-                        f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">WebFig</td>'
+                        f'<tr><td style="padding:5px 16px 5px 0;color:var(--text-faint)">WebFig</td>'
                         f'<td><code>http://{esc(host)}</code>'
-                        f'<span style="color:#64748b;font-size:12px;margin-left:8px">'
+                        f'<span style="color:var(--text-faint);font-size:12px;margin-left:8px">'
                         f'(browser)</span></td></tr>')
                     how_note = (
                         f'<div style="margin:14px 0 0;padding:10px 12px;background:#fef9c3;'
@@ -16936,15 +17027,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     f'<div class="box" style="border-left:4px solid #d97706">'
                     f'<h2 style="margin-top:0">&#9888; Copy these now — shown once</h2>'
                     f'<table style="font-size:14px;width:auto;border:0">'
-                    f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Username</td>'
+                    f'<tr><td style="padding:5px 16px 5px 0;color:var(--text-faint)">Username</td>'
                     f'<td><code style="font-size:15px;font-weight:700">'
                     f'{esc(creds["username"])}</code></td></tr>'
-                    f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Password</td>'
+                    f'<tr><td style="padding:5px 16px 5px 0;color:var(--text-faint)">Password</td>'
                     f'<td><code style="font-size:15px;font-weight:700">'
                     f'{esc(creds["password"])}</code></td></tr>'
-                    f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Group</td>'
+                    f'<tr><td style="padding:5px 16px 5px 0;color:var(--text-faint)">Group</td>'
                     f'<td>{esc(creds["group"])}</td></tr>'
-                    f'<tr><td style="padding:5px 16px 5px 0;color:#64748b">Expires</td>'
+                    f'<tr><td style="padding:5px 16px 5px 0;color:var(--text-faint)">Expires</td>'
                     f'<td>{esc(creds["exp_time"])} on router clock '
                     f'({esc(str(creds["duration_mins"]))} min)</td></tr>'
                     f'{winbox_row}{webfig_row}'

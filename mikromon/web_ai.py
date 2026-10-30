@@ -230,11 +230,11 @@ def ai_settings_box(settings: dict, usage: dict, csrf: str,
     if usage.get("last_error"):
         when = time.strftime("%d %b %H:%M",
                              time.localtime(usage.get("last_error_ts") or 0))
-        last_err = (f'<p style="color:var(--danger);font-size:12.5px;'
+        last_err = (f'<p style="color:var(--danger-text);font-size:12.5px;'
                     f'margin:6px 0 0">Last failure ({when}): '
                     f'{esc(usage["last_error"])}</p>')
     sdk_note = ("" if sdk_ok or prov != "claude" else
-                '<p style="color:var(--danger);font-size:12.5px">The '
+                '<p style="color:var(--danger-text);font-size:12.5px">The '
                 '<code>anthropic</code> package is not installed on this '
                 'server yet: run <code>sudo bash deploy/install.sh</code>.</p>')
 

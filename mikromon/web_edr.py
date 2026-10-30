@@ -20,8 +20,8 @@ from .web_shared import _flash, _header, _page, confirm_attr, esc
 _QUIET_AFTER = 40 * 60
 
 _SEV_STYLE = {
-    "HIGH": "background:var(--danger-bg);color:var(--danger)",
-    "MEDIUM": "background:var(--warning-bg);color:var(--warning)",
+    "HIGH": "background:var(--danger-bg);color:var(--danger-text)",
+    "MEDIUM": "background:var(--warning-bg);color:var(--warning-text)",
     "LOW": "background:var(--surface-2);color:var(--text-faint)",
 }
 _EMAILED = {
@@ -116,7 +116,7 @@ def _keys_box(orgs: list, keys: dict, pcs_by_org: dict, csrf: str) -> str:
         f'ever speak for that company. The key is shown once, when it is '
         f'made, with the steps to install the agent.</p>'
         f'<div style="overflow-x:auto"><table style="min-width:560px">'
-        f'<thead><tr><th>Company</th><th>Key</th><th>PCs</th><th></th></tr>'
+        f'<thead><tr><th>Company</th><th>Key</th><th>PCs</th><th><span class="sr-only">Actions</span></th></tr>'
         f'</thead><tbody>{rows}</tbody></table></div></div>')
 
 
@@ -183,7 +183,7 @@ def _events_box(events: list, names: dict, *, show_company: bool = True,
                                       csrf, names))
         emailed = _EMAILED.get(e.get("emailed"), "")
         if e.get("emailed") == EMAIL_FAILED:
-            emailed = f'<span style="color:var(--danger)">{emailed}</span>'
+            emailed = f'<span style="color:var(--danger-text)">{emailed}</span>'
         rows += (f'<tr><td style="white-space:nowrap">{_when(e["ts"])}</td>'
                  + (f'<td>{esc(names.get(e["org_id"], "?"))}</td>'
                     if show_company else "")
@@ -243,7 +243,7 @@ def _agents_box(agents: list, names: dict, now: float, *,
     for a in agents:
         age = max(0, now - (a.get("last_seen") or 0))
         if age > _QUIET_AFTER:
-            seen = (f'<span style="color:var(--warning)">'
+            seen = (f'<span style="color:var(--warning-text)">'
                     f'{human_duration(age)} ago</span>')
         else:
             seen = f'{human_duration(age)} ago'
@@ -311,7 +311,7 @@ def _threats_box(t: dict, names: dict, csrf: str) -> str:
         f'on every PC: however many companies report a file, that is no '
         f'proof when anyone can sign up twice.</p>'
         f'<div style="overflow-x:auto"><table style="min-width:620px"><thead>'
-        f'<tr><th>File</th><th>Found at</th><th></th></tr></thead>'
+        f'<tr><th>File</th><th>Found at</th><th><span class="sr-only">Actions</span></th></tr></thead>'
         f'<tbody>{rows}</tbody></table></div>') if rows else ""
     recent = ""
     for r in t.get("recent") or []:
@@ -333,9 +333,9 @@ def _threats_box(t: dict, names: dict, csrf: str) -> str:
         f'style="display:flex;gap:8px;flex-wrap:wrap">'
         f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
         f'<input type="hidden" name="action" value="add">'
-        f'<input name="sha256" placeholder="SHA-256 (64 characters)" '
+        f'<input name="sha256" aria-label="SHA-256 fingerprint" placeholder="SHA-256 (64 characters)" '
         f'style="flex:2;min-width:260px" required>'
-        f'<input name="name" placeholder="What it is (optional)" '
+        f'<input name="name" aria-label="What it is (optional)" placeholder="What it is (optional)" '
         f'style="flex:1;min-width:160px">'
         f'<button class="btn" type="submit">Block everywhere</button></form>')
     return (
@@ -369,7 +369,7 @@ def _feed_box(t: dict, csrf: str) -> str:
                   'from researchers worldwide &mdash; a few thousand new '
                   'files a day &mdash; each kept for 30 days.</p>')
     elif f.get("feed_error"):
-        status = (f'<p style="margin:0 0 10px;color:var(--danger)">Last try '
+        status = (f'<p style="margin:0 0 10px;color:var(--danger-text)">Last try '
                   f'{stamp(f.get("feed_tried"))}: {esc(f["feed_error"])}'
                   f'</p>')
     elif f.get("feed_ok"):
@@ -385,7 +385,7 @@ def _feed_box(t: dict, csrf: str) -> str:
         f'<form method="POST" action="/superadmin/antivirus/feed" '
         f'style="display:flex;gap:8px;flex-wrap:wrap">{hidden}'
         f'<input type="hidden" name="action" value="save">'
-        f'<input type="password" name="key" autocomplete="off" '
+        f'<input type="password" name="key" aria-label="abuse.ch Auth-Key" autocomplete="off" '
         f'placeholder="{"Key saved" if on else "abuse.ch Auth-Key"}" '
         f'style="flex:1;min-width:220px">'
         f'<button class="btn" type="submit">Save and import</button></form>'
@@ -619,7 +619,7 @@ def render_isolate_preview(user, csrf: str, *, org_id: int, org_name: str,
                     "domain), so while isolated the PC's agent cannot report.")
     warnings = "".join(
         f'<p style="margin:0 0 10px;padding:8px 10px;border-radius:6px;'
-        f'background:var(--warning-bg);color:var(--warning);font-size:13px">'
+        f'background:var(--warning-bg);color:var(--warning-text);font-size:13px">'
         f'&#9888; {esc(w)}</p>' for w in warn)
     conns = (f"Then the {connections} connection"
              f"{'' if connections == 1 else 's'} it has open now "

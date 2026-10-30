@@ -27,6 +27,9 @@ from .billing import (PLANS, MAX_TIER_DEVICES, TIER_STEP, QUOTE_ABOVE_DEVICES,
                       TRIAL_DEVICES, GRACE_DAYS, BILLING_DAY)
 
 _TITLE = f"{_BRAND} — MikroTik Monitoring & Remote Management"
+_DESCRIPTION = ("Monitor and manage every MikroTik router from one dashboard: "
+                "real-time alerts, WAN failover, safe config changes with "
+                "auto-revert and backups, even behind NAT.")
 
 
 def _tier(devices: int) -> dict:
@@ -412,7 +415,7 @@ a{color:var(--accent);text-decoration:none}
   align-items:center;gap:28px;flex-wrap:wrap}
 .proof-item{font-size:13px;color:var(--text-muted);display:flex;
   align-items:center;gap:6px}
-.proof-item b{color:var(--success)}
+.proof-item b{color:var(--success-text)}
 
 /* ── shared section styles ───────────────────────── */
 section{padding:76px 24px}
@@ -456,7 +459,7 @@ section{padding:76px 24px}
 .steps-grid{display:grid;
   grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:36px}
 .step{display:flex;flex-direction:column;gap:12px}
-.step-num{width:40px;height:40px;border-radius:50%;background:var(--accent);
+.step-num{width:40px;height:40px;border-radius:50%;background:var(--accent-fill);
   color:#fff;display:flex;align-items:center;justify-content:center;
   font-size:17px;font-weight:800;flex-shrink:0;
   box-shadow:0 0 0 6px var(--accent-soft)}
@@ -499,13 +502,13 @@ section{padding:76px 24px}
   line-height:1.4}
 .price-card.highlight .price-items li{
   color:#e2e8f0;border-bottom-color:rgba(255,255,255,.07)}
-.price-items li::before{content:"✓";color:var(--success);font-weight:700;
+.price-items li::before{content:"✓";color:var(--success-text);font-weight:700;
   flex-shrink:0}
 .price-card.highlight .price-items li::before{color:#4ade80}
 .price-cta{display:block;text-align:center;padding:11px;border-radius:8px;
   font-size:14px;font-weight:600;transition:.12s}
-.price-cta.solid{background:var(--accent);color:#fff;border:2px solid var(--accent)}
-.price-cta.solid:hover{background:var(--accent-hover);border-color:var(--accent-hover);
+.price-cta.solid{background:var(--accent-fill);color:#fff;border:2px solid var(--accent)}
+.price-cta.solid:hover{background:var(--accent-fill-hover);border-color:var(--accent-hover);
   color:#fff}
 .price-cta.ghost{background:var(--surface);color:var(--text);
   border:2px solid var(--border)}
@@ -554,16 +557,16 @@ footer{background:#0f172a;padding:44px 24px 28px}
 .foot-logo{font-size:17px;font-weight:800;color:#fff;display:flex;
   align-items:center;gap:7px;margin-bottom:8px;text-decoration:none}
 .foot-logo .dot{color:#38bdf8}
-.foot-tag{font-size:13px;color:#64748b;max-width:220px;line-height:1.5}
-.foot-col h4{font-size:11px;font-weight:700;color:#e2e8f0;
+.foot-tag{font-size:13px;color:#94a3b8;max-width:220px;line-height:1.5}
+.foot-col h3{font-size:11px;font-weight:700;color:#e2e8f0;
   text-transform:uppercase;letter-spacing:.07em;margin-bottom:12px}
-.foot-col a{display:block;color:#64748b;font-size:13px;
+.foot-col a{display:block;color:#94a3b8;font-size:13px;
   padding:3px 0;transition:.1s}
 .foot-col a:hover{color:#e2e8f0}
 .foot-bottom{border-top:1px solid rgba(255,255,255,.07);
   padding-top:20px;display:flex;justify-content:space-between;
   align-items:center;flex-wrap:wrap;gap:8px;
-  font-size:12px;color:#64748b}
+  font-size:12px;color:#94a3b8}
 
 /* ── responsive ──────────────────────────────────── */
 @media(max-width:860px){
@@ -621,7 +624,7 @@ _DEMO_CSS = """
 .dt .n{width:20px;height:20px;border-radius:50%;font-size:11px;display:inline-flex;
   align-items:center;justify-content:center;background:var(--surface-2);
   color:var(--text-faint);border:1px solid var(--border)}
-.dt.on{background:var(--accent);border-color:var(--accent);color:#fff;
+.dt.on{background:var(--accent-fill);border-color:var(--accent);color:#fff;
   box-shadow:0 4px 14px rgba(37,99,235,.3)}
 .dt.on .n{background:rgba(255,255,255,.2);color:#fff;border-color:transparent}
 .dmo{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);gap:18px;
@@ -662,7 +665,7 @@ _DEMO_CSS = """
 .ap-chip{background:var(--surface);border:1px solid var(--border);border-radius:12px;
   padding:9px 14px;min-width:92px;box-shadow:var(--shadow)}
 .ap-chip b{display:block;font-size:20px;line-height:1.1;color:var(--text)}
-.ap-chip b.red{color:var(--danger)}
+.ap-chip b.red{color:var(--danger-text)}
 .ap-chip span{font-size:10px;font-weight:700;letter-spacing:.06em;
   text-transform:uppercase;color:var(--text-faint)}
 .ap-card{background:var(--surface);border:1px solid var(--border);
@@ -673,7 +676,7 @@ _DEMO_CSS = """
   box-shadow:var(--shadow);animation:din .4s ease}
 .ap-bk.on{display:block}
 .ap-bk i{font-style:normal;font-size:9.5px;font-weight:700;letter-spacing:.05em;
-  text-transform:uppercase;background:var(--warning-bg);color:var(--warning);
+  text-transform:uppercase;background:var(--warning-bg);color:var(--warning-text);
   border-radius:999px;padding:1px 7px;margin-right:6px}
 .ap-bk b{color:var(--text)}
 .ap-card-head{display:flex;align-items:center;justify-content:space-between;
@@ -683,7 +686,7 @@ _DEMO_CSS = """
 .ap-pills i{font-style:normal;font-size:10.5px;font-weight:600;padding:4px 9px;
   border-radius:999px;background:var(--surface-2);border:1px solid var(--border);
   color:var(--text-muted)}
-.ap-pills i.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.ap-pills i.on{background:var(--accent-fill);border-color:var(--accent);color:#fff}
 .ap-table{width:100%;border-collapse:collapse;font-size:12px}
 .ap-table th{font-size:10px;text-transform:uppercase;letter-spacing:.04em;
   color:var(--text-faint);text-align:left;padding:7px 14px;
@@ -699,12 +702,12 @@ _DEMO_CSS = """
   font-weight:600;white-space:nowrap}
 .bdg{display:inline-block;padding:2px 9px;border-radius:999px;font-size:10.5px;
   font-weight:700}
-.bdg.ok{background:var(--success-bg);color:var(--success)}
-.bdg.warn{background:var(--warning-bg);color:var(--warning)}
-.bdg.crit{background:var(--danger-bg);color:var(--danger)}
+.bdg.ok{background:var(--success-bg);color:var(--success-text)}
+.bdg.warn{background:var(--warning-bg);color:var(--warning-text)}
+.bdg.crit{background:var(--danger-bg);color:var(--danger-text)}
 .abdg{font-size:10.5px;font-weight:700;padding:2px 7px;border-radius:999px}
-.abdg.warn{background:rgba(217,119,6,.14);color:#b45309}
-.abdg.crit{background:var(--danger-bg);color:var(--danger)}
+.abdg.warn{background:rgba(217,119,6,.14);color:var(--warning-text)}
+.abdg.crit{background:var(--danger-bg);color:var(--danger-text)}
 .ap-devhead{display:flex;align-items:center;gap:10px;margin-bottom:8px}
 .ap-tabs{display:flex;gap:2px;border-bottom:2px solid var(--border);
   margin-bottom:12px;overflow:hidden}
@@ -723,7 +726,7 @@ _DEMO_CSS = """
   margin:0 0 8px}
 .ap-chk{font-size:11px;color:var(--text-muted);display:block;margin:0 0 9px}
 .ap-chk b{color:var(--text)}
-.ap-btn{display:inline-block;background:var(--accent);color:#fff;font-size:11.5px;
+.ap-btn{display:inline-block;background:var(--accent-fill);color:#fff;font-size:11.5px;
   font-weight:600;padding:6px 12px;border-radius:7px;transition:transform .15s,
   box-shadow .15s}
 .ap-btn.ghost{background:var(--surface-2);color:var(--text);
@@ -764,7 +767,7 @@ _DEMO_CSS = """
   font-family:Consolas,Menlo,monospace}
 .dm-empty{font-size:12px;color:var(--text-faint);padding:16px 14px;text-align:center}
 .dp{height:3px;background:var(--border)}
-.dp-bar{display:block;height:100%;width:0;background:var(--accent);
+.dp-bar{display:block;height:100%;width:0;background:var(--accent-fill);
   transition:width .6s ease}
 .demo-note{font-size:12px;color:var(--text-faint);margin-top:12px}
 @keyframes din{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
@@ -826,7 +829,7 @@ def _demo_html() -> str:
         f'<span class="ap-pills"><i class="on">All</i><i>Problems</i>'
         f'<i>Offline</i></span></div>'
         f'<table class="ap-table"><thead><tr><th>Name</th><th>Status</th>'
-        f'<th>Alerts</th><th class="vw"></th></tr></thead><tbody></tbody></table></div>'
+        f'<th>Alerts</th><th class="vw"><span class="sr-only">Open</span></th></tr></thead><tbody></tbody></table></div>'
         f'</div>'
         f'<div class="v v-dev">'
         f'<div class="ap-devhead"><h3 class="ap-dname">—</h3>'
@@ -1186,7 +1189,8 @@ def _tier_rows() -> str:
 # Public render function
 # ---------------------------------------------------------------------------
 
-def render_landing(ai_on: bool = False, ai_news: bool = False) -> str:
+def render_landing(ai_on: bool = False, ai_news: bool = False,
+                   base: str = "") -> str:
     """The public page. `ai_on` is whether this server has the AI monitor's
     online check switched on: the page only claims the search when it is
     true -- a claim the product does not back is one a customer catches."""
@@ -1202,6 +1206,9 @@ def render_landing(ai_on: bool = False, ai_news: bool = False) -> str:
     tier_rows = _tier_rows()
     brand = esc(_BRAND)
     from .brand import logo_img, favicon_tags
+    from .web_seo import seo_head
+    seo = seo_head(_TITLE, _DESCRIPTION, base, _FAQ,
+                   f"30 days free with {TRIAL_DEVICES} device")
     mark = logo_img(26)
     favicon = favicon_tags()
 
@@ -1210,13 +1217,14 @@ def render_landing(ai_on: bool = False, ai_news: bool = False) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Monitor and manage every MikroTik router from one dashboard. Real-time alerts, WAN failover, safe config push with auto-revert, automated backups, and remote WebFig access — even behind NAT.">
+  {seo}
   {favicon}
   <title>{esc(_TITLE)}</title>
   {_THEME_INIT_JS}
   <style>{_THEME_VARS}{_CSS}{_DEMO_CSS}</style>
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 
 <!-- ── NAV ─────────────────────────────────────── -->
 <nav class="lnav" id="lnav">
@@ -1242,6 +1250,7 @@ def render_landing(ai_on: bool = False, ai_news: bool = False) -> str:
 </nav>
 
 <!-- ── HERO ────────────────────────────────────── -->
+<main id="main" tabindex="-1">
 <section class="hero">
   <div class="hero-inner">
     <div class="hero-badge">&#10022; Built for MikroTik admins &amp; MSPs</div>
@@ -1349,7 +1358,7 @@ def render_landing(ai_on: bool = False, ai_news: bool = False) -> str:
     </h3>
     <table class="tier-table">
       <thead><tr>
-        <th>Plan</th><th>Devices</th><th>Monthly</th><th>Per device</th><th></th>
+        <th>Plan</th><th>Devices</th><th>Monthly</th><th>Per device</th><th><span class="sr-only">Sign up</span></th>
       </tr></thead>
       <tbody>{tier_rows}</tbody>
     </table>
@@ -1383,6 +1392,7 @@ def render_landing(ai_on: bool = False, ai_news: bool = False) -> str:
 </div>
 
 <!-- ── FOOTER ───────────────────────────────────── -->
+</main>
 <footer>
   <div class="foot-inner">
     <div class="foot-top">
@@ -1393,20 +1403,20 @@ def render_landing(ai_on: bool = False, ai_news: bool = False) -> str:
         <p class="foot-tag">MikroTik monitoring &amp; remote management for IT teams and MSPs.</p>
       </div>
       <div class="foot-col">
-        <h4>Product</h4>
+        <h3>Product</h3>
         <a href="#demo">See it work</a>
         <a href="#features">Features</a>
         <a href="#did-you-know">Did you know?</a>
         <a href="#pricing">Pricing</a>
       </div>
       <div class="foot-col">
-        <h4>Help</h4>
+        <h3>Help</h3>
         <a href="#how-it-works">How it works</a>
         <a href="#faq">FAQ</a>
         <a href="/terms">Terms &amp; Conditions</a>
       </div>
       <div class="foot-col">
-        <h4>Account</h4>
+        <h3>Account</h3>
         <a href="/login">Sign in</a>
         <a href="/signup">Start free trial</a>
       </div>

@@ -28,7 +28,7 @@ def _where_public_key(kind: str) -> str:
 
 def _reach_line(reach: dict, port: int) -> str:
     if reach.get("ok"):
-        return (f'<p style="margin:0 0 12px"><span style="color:var(--success);'
+        return (f'<p style="margin:0 0 12px"><span style="color:var(--success-text);'
                 f'font-weight:700">&#10003;</span> Remote devices will connect '
                 f'to <code>{esc(reach["endpoint"])}:{port}</code>. '
                 f'<span class="muted">{esc(reach.get("why", ""))}</span></p>')
@@ -69,7 +69,7 @@ def users_box(name: str, csrf: str, cur: dict, reach: dict, port: int,
                  + (f' <span class="muted">from {esc(frm)}</span>' if frm else "")
                  + f'</td><td>{rm}</td></tr>')
     table = (f'<table style="margin:0 0 14px"><tr><th>Device</th><th>Address'
-             f'</th><th>Last connected</th><th></th></tr>{rows}</table>'
+             f'</th><th>Last connected</th><th><span class="sr-only">Actions</span></th></tr>{rows}</table>'
              if peers else
              '<p class="muted" style="margin:0 0 14px">No remote users yet.</p>')
     if not can_manage:

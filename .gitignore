@@ -34,3 +34,5 @@ safemode.json
 
 # The Windows antivirus setup's build tools and leftovers (agent/build_windows.py)
 agent/build/
+secrets.key
+secrets-*.key

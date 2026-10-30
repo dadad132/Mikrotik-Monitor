@@ -7,6 +7,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from itertools import count
 
 esc = html.escape
 
@@ -96,9 +97,9 @@ _PAGE_CSS = """
  .tile .num{font-size:28px;font-weight:700;line-height:1}
  .tile .lbl{font-size:11px;color:var(--text-faint);text-transform:uppercase;
    letter-spacing:.04em;margin-top:6px}
- .tile.green{border-top-color:var(--success)}.tile.green .num{color:var(--success)}
- .tile.red{border-top-color:var(--danger)}.tile.red .num{color:var(--danger)}
- .tile.amber{border-top-color:var(--warning)}.tile.amber .num{color:var(--warning)}
+ .tile.green{border-top-color:var(--success)}.tile.green .num{color:var(--success-text)}
+ .tile.red{border-top-color:var(--danger)}.tile.red .num{color:var(--danger-text)}
+ .tile.amber{border-top-color:var(--warning)}.tile.amber .num{color:var(--warning-text)}
  .tile.planned{border-top-color:var(--border)}
  .tile.planned .num{color:var(--text-faint);font-size:20px}
  .tile.planned .lbl::after{content:" · soon";color:var(--text-faint)}
@@ -108,7 +109,7 @@ _PAGE_CSS = """
  .fbtn{background:var(--surface-2);border:0;padding:7px 13px;border-radius:7px;
    cursor:pointer;font-size:13px;color:var(--text)}
  .fbtn:hover{background:var(--border)}
- .fbtn.on{background:var(--accent);color:#fff}
+ .fbtn.on{background:var(--accent-fill);color:#fff}
  .muted{color:var(--text-faint);font-size:12px}
  /* tables */
  table{width:100%;border-collapse:collapse;font-size:13px}
@@ -117,8 +118,8 @@ _PAGE_CSS = """
  td,th{padding:8px 8px;border-bottom:1px solid var(--border);text-align:left;
    vertical-align:middle}
  tr:last-child td{border-bottom:0}
- .probs{margin-top:8px;color:var(--danger);font-size:13px}.probs ul{margin:4px 0 0 18px}
- .ok{margin-top:8px;color:var(--success);font-size:13px}
+ .probs{margin-top:8px;color:var(--danger-text);font-size:13px}.probs ul{margin:4px 0 0 18px}
+ .ok{margin-top:8px;color:var(--success-text);font-size:13px}
  /* layout + forms */
  .wrap{max-width:960px;margin:26px auto;padding:0 20px}
  .box{background:var(--surface);border-radius:10px;padding:20px;margin:16px 0;
@@ -171,7 +172,7 @@ _PAGE_CSS = """
  input.switch:checked::after{left:20px}
  .chk:has(.switch){display:inline-flex;align-items:center;gap:8px}
  .wanrow{display:flex;gap:8px;align-items:center;margin-bottom:7px}
- .wanrow .prio{width:24px;height:24px;border-radius:50%;background:var(--accent);
+ .wanrow .prio{width:24px;height:24px;border-radius:50%;background:var(--accent-fill);
    color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;
    font-weight:700;flex-shrink:0}
  .wanrow input{flex:1;min-width:90px}
@@ -181,15 +182,15 @@ _PAGE_CSS = """
    letter-spacing:.03em;padding:4px 6px;border-bottom:1px solid var(--border)}
  .rowtbl td{padding:4px 6px;border-bottom:1px solid var(--border)}
  .rowtbl input{padding:6px 8px}
- .btn{background:var(--accent);color:#fff;border:0;padding:8px 15px;border-radius:7px;
+ .btn{background:var(--accent-fill);color:#fff;border:0;padding:8px 15px;border-radius:7px;
    cursor:pointer;font:inherit;font-weight:600;text-decoration:none;
-   display:inline-block}.btn:hover{background:var(--accent-hover)}
+   display:inline-block}.btn:hover{background:var(--accent-fill-hover)}
  .btn:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid
    var(--accent);outline-offset:2px}
  /* Destructive, but not the loudest thing on the page: a solid red Delete on
     every row out-shouted the rows themselves. It turns solid on hover, and
     every one of them still asks before it does anything. */
- .btn.red{background:var(--danger-bg);color:var(--danger)}
+ .btn.red{background:var(--danger-bg);color:var(--danger-text)}
  .btn.red:hover{background:var(--danger);color:#fff}
  .btn.ghost{background:var(--surface-2);color:var(--text)}
  .btn.ghost:hover{background:var(--border)}
@@ -222,7 +223,7 @@ _PAGE_CSS = """
  .vbar{flex:1;height:10px;background:var(--border);border-radius:6px;overflow:hidden}
  .vbar i{display:block;height:100%}
  .vn{width:24px;text-align:right;font-weight:700}
- .up{background:var(--warning-bg);color:var(--warning);font-size:10px;font-weight:700;
+ .up{background:var(--warning-bg);color:var(--warning-text);font-size:10px;font-weight:700;
    padding:1px 6px;border-radius:999px;text-transform:uppercase}
  /* gauges + device overview */
  .gauge{margin:8px 0}
@@ -246,7 +247,7 @@ _PAGE_CSS = """
     right so it never competes with the tab you came to click, but always in
     the same place, so it becomes muscle memory rather than something to hunt
     for. */
- .tabs a.helpbtn{margin-left:auto;align-self:center;width:22px;height:22px;
+ .tabs a.helpbtn{margin-left:auto;align-self:center;width:26px;height:26px;
    padding:0;margin-bottom:4px;border:1.5px solid var(--text-faint);
    border-radius:50%;color:var(--text-faint);font-size:13px;font-weight:700;
    line-height:1;display:inline-flex;align-items:center;justify-content:center;
@@ -254,7 +255,7 @@ _PAGE_CSS = """
  .tabs a.helpbtn:hover{color:var(--accent);border-color:var(--accent);
    background:var(--accent-soft)}
  /* Same affordance, next to a box heading instead of on the tab bar. */
- .helpdot{width:19px;height:19px;flex:none;border:1.5px solid var(--text-faint);
+ .helpdot{width:24px;height:24px;flex:none;border:1.5px solid var(--text-faint);
    border-radius:50%;color:var(--text-faint);font-size:12px;font-weight:700;
    line-height:1;display:inline-flex;align-items:center;justify-content:center;
    text-decoration:none;vertical-align:middle}
@@ -272,7 +273,7 @@ _PAGE_CSS = """
  .tipcard{border-left:4px solid var(--accent);background:var(--accent-soft)}
  .tiphead{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
  .tipbadge{font-size:10.5px;font-weight:700;text-transform:uppercase;
-   letter-spacing:.09em;color:#fff;background:var(--accent);
+   letter-spacing:.09em;color:#fff;background:var(--accent-fill);
    padding:3px 8px;border-radius:20px}
  .flash.ok{background:#dcfce7;border-color:#86efac;color:#14532d}
  .flash.bad{background:#fee2e2;border-color:#fca5a5;color:#7f1d1d}
@@ -297,7 +298,7 @@ _PAGE_CSS = """
  .gsteps li{position:relative;padding-left:34px;margin-bottom:11px}
  .gsteps li::before{counter-increment:gstep;content:counter(gstep);
    position:absolute;left:0;top:1px;width:23px;height:23px;border-radius:50%;
-   background:var(--accent);color:#fff;font-size:12px;font-weight:700;
+   background:var(--accent-fill);color:#fff;font-size:12px;font-weight:700;
    display:flex;align-items:center;justify-content:center}
  .gwarn,.fwarn{border-left:3px solid var(--warning);background:var(--warning-bg);
    border-radius:0 8px 8px 0;color:var(--text)}
@@ -315,7 +316,7 @@ _PAGE_CSS = """
  .gtabhead{scroll-margin-top:74px}
  .gtabhead:target h3{color:var(--accent)}
  .gtabhead:target::before{content:"";position:absolute;left:-14px;width:4px;
-   height:22px;border-radius:2px;background:var(--accent)}
+   height:22px;border-radius:2px;background:var(--accent-fill)}
  .gtabhead{position:relative}
  .tabdrop{position:relative;display:flex;align-items:stretch}
  .tabdrop>.dropbtn{padding:8px 13px;font-size:14px;color:var(--text-muted);
@@ -335,7 +336,7 @@ _PAGE_CSS = """
  .tabmenu a:hover,.tabmenu button:hover{background:var(--surface-2);color:var(--text)}
  .tabmenu a.on{color:var(--accent);font-weight:600}
  .tabmenu form{margin:0}
- .tabmenu button.reboot{color:var(--danger)}
+ .tabmenu button.reboot{color:var(--danger-text)}
  .tabmenu button.reboot:hover{background:var(--danger-bg)}
  .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
  /* Device overview columns space their cards with `gap`; a .box's own
@@ -370,12 +371,12 @@ _PAGE_CSS = """
  @media(max-width:640px){.ovgrid{grid-template-columns:minmax(0,1fr)}}
  .badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;
    font-weight:700}
- .badge.ok{background:var(--success-bg);color:var(--success)}
- .badge.warn{background:var(--warning-bg);color:var(--warning)}
- .badge.crit{background:var(--danger-bg);color:var(--danger)}
+ .badge.ok{background:var(--success-bg);color:var(--success-text)}
+ .badge.warn{background:var(--warning-bg);color:var(--warning-text)}
+ .badge.crit{background:var(--danger-bg);color:var(--danger-text)}
  .linkrow{display:flex;align-items:center;gap:10px;padding:8px 0;
    border-bottom:1px solid var(--border)}
- .linkrow .prio{width:22px;height:22px;border-radius:50%;background:var(--accent);
+ .linkrow .prio{width:22px;height:22px;border-radius:50%;background:var(--accent-fill);
    color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;
    font-weight:700;flex-shrink:0}
  /* modal overlay */
@@ -403,7 +404,7 @@ _AI_CSS = """
   margin-bottom:6px}
 .bk-head h2{font-size:15px;margin:0}
 .bk-pill{font-size:11px;font-weight:700;padding:2px 9px;border-radius:999px;
-  background:var(--warning-bg);color:var(--warning);text-transform:uppercase;
+  background:var(--warning-bg);color:var(--warning-text);text-transform:uppercase;
   letter-spacing:.04em}
 .bk-row{padding:9px 0;border-top:1px solid var(--border);font-size:13.5px;
   line-height:1.5}
@@ -416,7 +417,7 @@ _AI_CSS = """
 .bk-src{font-size:12px;margin-right:10px}
 .ai-box h2{display:flex;align-items:center;gap:8px}
 .ai-tag{font-size:10.5px;font-weight:700;letter-spacing:.06em;
-  text-transform:uppercase;color:#fff;background:var(--accent);
+  text-transform:uppercase;color:#fff;background:var(--accent-fill);
   border-radius:999px;padding:2px 8px}
 .ai-verdict{border-left:3px solid var(--accent);background:var(--accent-soft);
   border-radius:0 8px 8px 0;padding:9px 12px;margin:8px 0;font-size:13.5px;
@@ -426,6 +427,12 @@ _AI_CSS = """
   color:var(--text-muted)}
 """
 _PAGE_CSS += _AI_CSS
+_PAGE_CSS += """
+.box h1{font-size:20px;margin:0 0 14px}
+/* A wide table scrolls inside its box. Without this the whole page slid
+   sideways on a phone, taking the buttons at the end of each row with it. */
+@media(max-width:820px){.box{overflow-x:auto}}
+"""
 
 # ---------------------------------------------------------------------------
 # Light/dark theme: CSS custom properties + a persisted toggle. _PAGE_CSS
@@ -437,8 +444,10 @@ _PAGE_CSS += _AI_CSS
 _THEME_VARS = """
 :root{
   --bg:#f1f5f9;--surface:#ffffff;--surface-2:#f8fafc;--border:#e2e8f0;
-  --text:#0f172a;--text-muted:#475569;--text-faint:#8492a6;
+  --text:#0f172a;--text-muted:#475569;--text-faint:#5b6b82;
+  --success-text:#166534;--warning-text:#92400e;--danger-text:#b91c1c;
   --accent:#2563eb;--accent-hover:#1d4ed8;--accent-soft:#eff6ff;
+  --accent-fill:#2563eb;--accent-fill-hover:#1d4ed8;
   --success:#16a34a;--success-bg:#dcfce7;
   --warning:#d97706;--warning-bg:#fef3c7;
   --danger:#dc2626;--danger-bg:#fee2e2;
@@ -448,8 +457,10 @@ _THEME_VARS = """
 @media (prefers-color-scheme:dark){
   :root:not([data-theme="light"]){
     --bg:#0b1220;--surface:#111827;--surface-2:#0d1526;--border:#1f2937;
-    --text:#e5e7eb;--text-muted:#94a3b8;--text-faint:#718199;
-    --accent:#3b82f6;--accent-hover:#60a5fa;--accent-soft:#13213b;
+    --text:#e5e7eb;--text-muted:#94a3b8;--text-faint:#8d9cb2;
+  --success-text:#4ade80;--warning-text:#fbbf24;--danger-text:#f87171;
+    --accent:#60a5fa;--accent-hover:#93c5fd;--accent-soft:#13213b;
+  --accent-fill:#2563eb;--accent-fill-hover:#1d4ed8;
     --success:#22c55e;--success-bg:#052e16;
     --warning:#f59e0b;--warning-bg:#3a2a06;
     --danger:#ef4444;--danger-bg:#3a0d0d;
@@ -459,8 +470,10 @@ _THEME_VARS = """
 }
 :root[data-theme="dark"]{
   --bg:#0b1220;--surface:#111827;--surface-2:#0d1526;--border:#1f2937;
-  --text:#e5e7eb;--text-muted:#94a3b8;--text-faint:#718199;
-  --accent:#3b82f6;--accent-hover:#60a5fa;--accent-soft:#13213b;
+  --text:#e5e7eb;--text-muted:#94a3b8;--text-faint:#8d9cb2;
+  --success-text:#4ade80;--warning-text:#fbbf24;--danger-text:#f87171;
+  --accent:#60a5fa;--accent-hover:#93c5fd;--accent-soft:#13213b;
+  --accent-fill:#2563eb;--accent-fill-hover:#1d4ed8;
   --success:#22c55e;--success-bg:#052e16;
   --warning:#f59e0b;--warning-bg:#3a2a06;
   --danger:#ef4444;--danger-bg:#3a0d0d;
@@ -472,6 +485,26 @@ _THEME_VARS = """
   font-size:15px;display:inline-flex;align-items:center;justify-content:center;
   transition:.12s;flex-shrink:0}
 .theme-toggle:hover{color:var(--text);border-color:var(--accent)}
+/* Off screen until reached with Tab: a keyboard user's way past the nav. */
+.skip-link{position:fixed;top:8px;left:8px;z-index:100;padding:8px 14px;
+  border-radius:8px;background:var(--text);color:var(--surface);font-size:14px;
+  font-weight:600;text-decoration:none;transform:translateY(-200%)}
+.skip-link:focus{transform:none}
+/* Read out, not shown: a name for an empty table heading. */
+.sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;
+  overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+/* In flow, or it escapes the scrolling box around a wide table and widens
+   the whole page. */
+th .sr-only{position:relative}
+main:focus{outline:0}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* A link inside a sentence needs more than its colour to be seen as one. */
+p a:not([class]){text-decoration:underline;text-underline-offset:2px}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;
+    animation-iteration-count:1!important;transition-duration:.01ms!important;
+    scroll-behavior:auto!important}
+}
 """
 
 # ---------------------------------------------------------------------------
@@ -488,6 +521,7 @@ _THEME_VARS = """
 # small edit in reverse.
 # ---------------------------------------------------------------------------
 _NAV_H = 54  # keep in step with body.has-sidebar's margin-top below
+_NAV_H_PHONE = 96  # the same, with the nav on a row of its own
 
 _SHELL_CSS = """
 .dash-side{position:fixed;top:0;left:0;right:0;height:%(h)spx;
@@ -518,20 +552,30 @@ _SHELL_CSS = """
   text-overflow:ellipsis;white-space:nowrap;max-width:190px}
 .dash-who small{display:block;color:var(--text-faint);font-size:11px}
 .dash-logout{font-size:12px;color:var(--text-faint);text-decoration:none;
+  padding:6px 2px;
   flex-shrink:0}
 .dash-logout:hover{color:var(--accent)}
 /* Padding, not margin: a top margin here collapsed into the page's own
    .wrap margin, which left every page title pressed against the nav. */
 body.has-sidebar{padding-top:%(h)spx;min-height:100vh}
+/* So a link to a heading does not leave it under the fixed nav. */
+html{scroll-padding-top:calc(%(h)spx + 12px)}
 @media(max-width:820px){
   /* Narrow: the account block is the first thing worth losing -- the nav
-     itself has to stay reachable, and it already scrolls horizontally. */
-  .dash-side{gap:10px;padding:0 12px}
-  .dash-side-foot{border-left:0;padding-left:0}
+     itself has to stay reachable. It gets a row of its own: squeezed in
+     beside the logo it showed one link and a sliver, with nothing to say
+     there were more. The fade at the end is that hint. */
+  .dash-side{height:auto;flex-wrap:wrap;gap:4px 10px;padding:6px 12px}
+  .dash-side-foot{border-left:0;padding-left:0;margin-left:auto}
   .dash-side-foot .dash-who{display:none}
+  .dash-nav{order:3;flex:0 0 100%%;padding-right:28px;
+    -webkit-mask-image:linear-gradient(90deg,#000 calc(100%% - 28px),transparent);
+    mask-image:linear-gradient(90deg,#000 calc(100%% - 28px),transparent)}
   .dash-nav a{padding:8px 10px}
+  body.has-sidebar{padding-top:%(h2)spx}
+  html{scroll-padding-top:calc(%(h2)spx + 12px)}
 }
-""" % {"h": _NAV_H}
+""" % {"h": _NAV_H, "h2": _NAV_H_PHONE}
 
 # Inline SVG icon bodies for the sidebar, keyed by nav href — stroke=
 # "currentColor" so each one follows the link's own text color (inactive/
@@ -595,6 +639,14 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
 # The toggle itself + setting the button's icon on load. Safe to place
 # anywhere in the page — onclick resolves mmToggleTheme() at click time.
 _THEME_TOGGLE_JS = """<script>
+/* On a phone the nav is a row to swipe: start with this page in view. */
+(function(){
+  var nav=document.querySelector('.dash-nav'),
+      on=document.querySelector('.dash-nav a.on');
+  if(!on||nav.scrollWidth<=nav.clientWidth) return;
+  nav.scrollLeft=on.getBoundingClientRect().left-nav.getBoundingClientRect().left
+    -(nav.clientWidth-on.offsetWidth)/2;
+})();
 function mmThemeIsDark(){
   var t=document.documentElement.getAttribute('data-theme');
   return t?t==='dark':matchMedia('(prefers-color-scheme:dark)').matches;
@@ -757,10 +809,80 @@ def _favicon() -> str:
     return favicon_tags()
 
 
+_SKIP_LINK = '<a class="skip-link" href="#main">Skip to content</a>'
+_APP_DESCRIPTION = (f"{_BRAND}: monitor and manage your MikroTik routers from "
+                    f"one dashboard.")
+
+_LABEL_THEN_FIELD = re.compile(
+    r'<label\b(?![^>]*\bfor=)([^>]*)>'
+    r'((?:(?!<label\b|</label>|<input\b|<select\b|<textarea\b).)*)</label>'
+    r'(\s*)<(input|select|textarea)\b(?![^>]*type="hidden")([^>]*)>',
+    re.S)
+
+
+# A status colour is usually worked out in Python and written into a style
+# attribute. Fixed like that it cannot follow the theme, and these shades are
+# too pale to read as text on a white page and too dark on a black one.
+_TEXT_COLOURS = {"#dc2626": "danger-text", "#b91c1c": "danger-text",
+                 "#d97706": "warning-text", "#b45309": "warning-text",
+                 "#f97316": "warning-text", "#16a34a": "success-text",
+                 "#64748b": "text-faint"}
+_FIXED_COLOUR = re.compile(r'(?<![-\w])color:(%s)(?![0-9a-f])'
+                           % "|".join(_TEXT_COLOURS))
+_STYLE_ATTR = re.compile(r'\bstyle="[^"]*"')
+
+
+def _theme_colours(html_text: str) -> str:
+    """Status colours in a page's markup, as the theme's readable ones. For
+    pages only: an email or a saved invoice has no stylesheet to read them
+    from. Style attributes only: a router script shown on the page is the
+    customer's text, and must read exactly as it does on the router."""
+    def themed(attr):
+        return _FIXED_COLOUR.sub(
+            lambda m: f"color:var(--{_TEXT_COLOURS[m[1]]})", attr[0])
+    return _STYLE_ATTR.sub(themed, html_text)
+
+
+def _link_labels(html_text: str) -> str:
+    """Ties each <label> to the field right after it.
+
+    Forms here are written as a label followed by its field, which looks
+    right and means nothing to the browser: the label was not read out with
+    the field, and tapping it did nothing. Done here, once, so that it holds
+    for every form on every page, and for the next one written. A field that
+    sits inside its label is already tied to it and is left alone.
+    """
+    ids = count(1)
+
+    def link(m):
+        attrs, text, gap, tag, field = m.groups()
+        given = re.search(r'(?<![\w-])id="([^"]+)"', field)
+        fid = given.group(1) if given else f"fld{next(ids)}"
+        if not given:
+            field = f' id="{fid}"{field}'
+        return f'<label for="{fid}"{attrs}>{text}</label>{gap}<{tag}{field}>'
+    # Script blocks are skipped: an id put into a JS string would end it.
+    parts = re.split(r'(<script\b.*?</script>)', html_text, flags=re.S)
+    parts[::2] = [_LABEL_THEN_FIELD.sub(link, p) for p in parts[::2]]
+    return "".join(parts)
+
+
+def _with_main(body: str) -> str:
+    """The page's content in <main>, with the nav left outside it."""
+    nav, sep, rest = body.partition("</aside>")
+    opening = '<main id="main" tabindex="-1">'
+    if sep and nav.startswith('<aside class="dash-side">'):
+        return f'{nav}{sep}{opening}{rest}</main>'
+    return f'{opening}{body}</main>'
+
+
 def _page(title: str, body: str) -> str:
-    return (f'<!doctype html><html><head><meta charset="utf-8">'
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f'<meta name="description" content="{esc(_APP_DESCRIPTION)}">'
             f'{_THEME_INIT_JS}{_favicon()}'
-            f'<title>{esc(title)}</title>'
+            f'<title>{esc(title)} &middot; {esc(_BRAND)}</title>'
             f'<style>{_THEME_VARS}{_SHELL_CSS}{_PAGE_CSS}</style></head>'
-            f'<body class="has-sidebar">{body}{_THEME_TOGGLE_JS}{_BUSY_JS}</body></html>')
+            f'<body class="has-sidebar">{_SKIP_LINK}'
+            f'{_theme_colours(_link_labels(_with_main(body)))}'
+            f'{_THEME_TOGGLE_JS}{_BUSY_JS}</body></html>')

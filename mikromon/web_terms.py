@@ -195,6 +195,7 @@ def render_terms(contact: dict | None = None) -> str:
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="The terms for using {esc(_BRAND)}: billing, cancelling, and what each side is responsible for.">
 {favicon_tags()}
 <title>Terms &amp; Conditions · {esc(_BRAND)}</title>
 {_THEME_INIT_JS}

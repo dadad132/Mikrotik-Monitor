@@ -40,21 +40,27 @@ def _auth_favicon() -> str:
     return favicon_tags()
 
 
-def _auth_page(title, body) -> str:
+_AUTH_DESCRIPTION = (f"Sign in to {_BRAND} to monitor and manage your MikroTik "
+                     f"routers from one dashboard.")
+
+
+def _auth_page(title, body, description=_AUTH_DESCRIPTION) -> str:
     # This page has no logged-in user (no sidebar to carry _THEME_VARS along
     # with it via _header/_page) — _PAGE_CSS now leans on those custom
     # properties for nearly every color, so without defining them here too,
     # var(--border)/var(--surface)/etc resolve to nothing: borders vanish
     # (reset to the "none" initial value) and backgrounds go transparent.
     # Confirmed live: exactly this — invisible input boxes, invisible button.
-    return (f'<!doctype html><html><head><meta charset="utf-8">'
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1">'
-            f'{_THEME_INIT_JS}{_auth_favicon()}<title>{esc(title)}</title>'
+            f'<meta name="description" content="{esc(description)}">'
+            f'{_THEME_INIT_JS}{_auth_favicon()}'
+            f'<title>{esc(title)} &middot; {esc(_BRAND)}</title>'
             f'<style>{_THEME_VARS}{_PAGE_CSS}</style></head><body>'
             f'<div style="position:fixed;top:14px;right:16px">'
             f'{_theme_toggle_btn()}</div>'
-            f'<div class="wrap" style="max-width:400px;margin-top:9vh">'
-            f'{_auth_brand()}<div class="box">{body}</div></div>'
+            f'<main id="main" class="wrap" style="max-width:400px;margin-top:9vh">'
+            f'{_auth_brand()}<div class="box">{body}</div></main>'
             f'{_THEME_TOGGLE_JS}</body></html>')
 
 
@@ -66,17 +72,19 @@ def _region_banner(has_regions: bool, go: str) -> str:
 
 
 def _render_login(error: str = "", has_regions: bool = False) -> str:
-    msg = (f'<p style="color:#dc2626;margin-top:0">{esc(error)}</p>'
+    msg = (f'<p role="alert" style="color:var(--danger-text);margin-top:0">{esc(error)}</p>'
            if error else "")
     return _auth_page("Sign in",
             f'{_region_banner(has_regions, "login")}'
-            f'<h2 style="margin-top:0">Sign in</h2>{msg}'
+            f'<h1 style="margin-top:0">Sign in</h1>{msg}'
             f'<form method="POST" action="/login">'
-            f'<p><input name="email" placeholder="Email" autofocus '
+            f'<p><input name="email" aria-label="Email" placeholder="Email" '
+            f'autocomplete="username" autofocus '
             f'style="width:100%"></p>'
             f'<p class="muted" style="margin:-6px 0 8px;font-size:12px">'
             f'Existing account? You can sign in with your username too.</p>'
-            f'<p><input name="password" type="password" placeholder="Password" '
+            f'<p><input name="password" type="password" aria-label="Password" '
+            f'placeholder="Password" autocomplete="current-password" '
             f'style="width:100%"></p>'
             f'<button class="btn" type="submit" style="width:100%">Sign in</button>'
             f'</form>'
@@ -86,16 +94,16 @@ def _render_login(error: str = "", has_regions: bool = False) -> str:
 
 def _render_login_2fa(pending: str, error: str = "") -> str:
     """Second step of signing in: the code from the phone."""
-    msg = (f'<p style="color:#dc2626;margin-top:0">{esc(error)}</p>'
+    msg = (f'<p role="alert" style="color:var(--danger-text);margin-top:0">{esc(error)}</p>'
            if error else "")
     return _auth_page("Sign in",
-            f'<h2 style="margin-top:0">Enter your code</h2>{msg}'
+            f'<h1 style="margin-top:0">Enter your code</h1>{msg}'
             f'<p class="muted" style="margin-top:0">Open the authenticator '
             f'app on your phone and type the 6-digit code it shows for '
             f'{esc(_BRAND)}.</p>'
             f'<form method="POST" action="/login/2fa">'
             f'<input type="hidden" name="pending" value="{esc(pending)}">'
-            f'<p><input name="code" autocomplete="one-time-code" '
+            f'<p><input name="code" aria-label="6-digit code" autocomplete="one-time-code" '
             f'maxlength="20" placeholder="123456" autofocus '
             f'style="width:100%;font-size:20px;letter-spacing:3px;'
             f'text-align:center"></p>'
@@ -129,7 +137,7 @@ def _render_2fa_setup(csrf: str, secret: str, qr: str, why: str = "",
     """Turning two-factor sign-in on: scan, then type the code to prove it
     worked. Nothing changes until that code is right."""
     grouped = " ".join(secret[i:i + 4] for i in range(0, len(secret), 4))
-    must = (f'<p style="color:#b45309;margin:0 0 12px"><b>{esc(why)}</b> '
+    must = (f'<p style="color:var(--warning-text);margin:0 0 12px"><b>{esc(why)}</b> '
             f'Set it up below to carry on &mdash; it takes about a minute.</p>'
             if why else "")
     qr_html = (f'<div class="mm-qr">{qr}</div>' if qr else
@@ -157,7 +165,7 @@ def _render_2fa_setup(csrf: str, secret: str, qr: str, why: str = "",
         f'<form method="POST" action="/account/2fa">'
         f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
         f'<div class="actions" style="flex-wrap:wrap">'
-        f'<input name="code" inputmode="numeric" autocomplete="one-time-code" '
+        f'<input name="code" aria-label="6-digit code" inputmode="numeric" autocomplete="one-time-code" '
         f'maxlength="8" placeholder="123456" autofocus '
         f'style="font-size:18px;letter-spacing:3px;width:140px">'
         f'<button class="btn" type="submit">Turn on two-factor sign-in'
@@ -200,7 +208,7 @@ def _two_factor_box(user, csrf: str, tf) -> str:
     if tf is None:
         return ""
     hidden = (f'<input type="hidden" name="csrf" value="{esc(csrf)}">')
-    code_in = ('<input name="code" autocomplete="one-time-code" '
+    code_in = ('<input name="code" aria-label="Code from the authenticator app" autocomplete="one-time-code" '
                'maxlength="20" placeholder="code from the app" '
                'style="width:170px">')
     if tf.get("on"):
@@ -210,7 +218,7 @@ def _two_factor_box(user, csrf: str, tf) -> str:
                  f'in takes your password and the 6-digit code from your '
                  f'phone.</p>'
                  f'<p class="muted" style="margin:0 0 12px;'
-                 f'{"color:#b45309" if low else ""}">{left} recovery '
+                 f'{"color:var(--warning-text)" if low else ""}">{left} recovery '
                  f'code{"" if left == 1 else "s"} left'
                  + (' &mdash; make new ones soon.' if low else '.') + '</p>')
         codes = (f'<form method="POST" action="/account" '
@@ -276,7 +284,7 @@ def _twofa_reset_box(csrf: str) -> str:
         f'this.email.value + {esc(json.dumps("?"))})">'
         f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
         f'<div class="actions" style="flex-wrap:wrap">'
-        f'<input name="email" placeholder="email or username" '
+        f'<input name="email" aria-label="Email or username" placeholder="email or username" '
         f'style="width:260px">'
         f'<button class="btn red" type="submit">Reset</button></div></form>'
         f'</div>')
@@ -285,15 +293,15 @@ def _twofa_reset_box(csrf: str) -> str:
 def _render_signup(error: str = "", values=None, has_regions: bool = False,
                    confirm_email: bool = True) -> str:
     v = values or {}
-    msg = (f'<p style="color:#dc2626">{esc(error)}</p>' if error else "")
+    msg = (f'<p role="alert" style="color:var(--danger-text)">{esc(error)}</p>' if error else "")
     # Every account but the very first confirms its address with a code.
     confirm_note = (
-        '<p style="color:#64748b;font-size:12px;margin:-8px 0 4px">'
+        '<p class="muted" style="margin:-8px 0 4px">'
         'We will email a 6-digit code to this address to confirm it is '
         'yours.</p>' if confirm_email else "")
     return _auth_page("Create account",
             f'{_region_banner(has_regions, "signup")}'
-            f'<h2 style="margin-top:0">Create your company account</h2>'
+            f'<h1 style="margin-top:0">Create your company account</h1>'
             f'<p class="muted" style="margin-top:0">You\'ll be the owner: you can '
             f'invite team members and choose which devices each one can see.</p>{msg}'
             f'<form method="POST" action="/signup">'
@@ -304,14 +312,14 @@ def _render_signup(error: str = "", values=None, has_regions: bool = False,
             f'{confirm_note}'
             f'<p><input name="phone" type="tel" placeholder="Mobile number (e.g. +27 82 555 1234)" '
             f'value="{esc(v.get("phone", ""))}" style="width:100%"></p>'
-            f'<p style="color:#64748b;font-size:12px;margin:-8px 0 4px">'
+            f'<p class="muted" style="margin:-8px 0 4px">'
             f'We collect your mobile number to help prevent abuse. '
             f'We will never share it or use it for marketing.</p>'
             f'<p><input name="password" type="password" '
             f'placeholder="Password (min 6 characters)" style="width:100%"></p>'
             f'<p style="margin-top:16px"><b style="font-size:13px">WAN failover '
             f'alert recipients</b><br>'
-            f'<span style="color:#64748b;font-size:12px">Who should receive an '
+            f'<span style="color:var(--text-faint);font-size:12px">Who should receive an '
             f'email when a router switches to its backup WAN link? '
             f'Separate multiple addresses with commas.</span></p>'
             f'<p><input name="alert_emails" type="text" '
@@ -328,17 +336,17 @@ def _render_signup_verify(token: str, email: str, company: str,
                           error: str = "", notice: str = "") -> str:
     """Step two of signing up: the code from the email."""
     from .auth import OTP_TTL
-    msg = (f'<p style="color:#dc2626">{esc(error)}</p>' if error else
-           f'<p style="color:#16a34a">{esc(notice)}</p>' if notice else "")
+    msg = (f'<p role="alert" style="color:var(--danger-text)">{esc(error)}</p>' if error else
+           f'<p style="color:var(--success-text)">{esc(notice)}</p>' if notice else "")
     hidden = f'<input type="hidden" name="t" value="{esc(token)}">'
     return _auth_page("Confirm your email",
-            f'<h2 style="margin-top:0">Check your email</h2>'
+            f'<h1 style="margin-top:0">Check your email</h1>'
             f'<p class="muted" style="margin-top:0">We sent a 6-digit code to '
             f'<b style="color:var(--text);word-break:break-all">{esc(email)}</b>. '
             f'Type it below to finish creating <b style="color:var(--text)">'
             f'{esc(company)}</b>.</p>{msg}'
             f'<form method="POST" action="/signup/verify">{hidden}'
-            f'<p><input name="code" inputmode="numeric" '
+            f'<p><input name="code" aria-label="6-digit code" inputmode="numeric" '
             f'autocomplete="one-time-code" maxlength="7" required autofocus '
             f'pattern="[0-9 ]{{6,7}}" placeholder="000000" aria-label="Code" '
             f'style="width:100%;font-size:24px;letter-spacing:8px;'
@@ -448,13 +456,13 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
         f'<input type="hidden" name="action" value="personal">'
         f'{uname_row}'
         f'<p>Email <span class="muted">({email_hint})</span><br>'
-        f'<input name="email" type="email" value="{esc(user.get("email") or "")}" '
+        f'<input name="email" type="email" aria-label="Email" value="{esc(user.get("email") or "")}" '
         f'style="width:100%;max-width:360px"></p>'
         f'<p>New password <span class="muted">(leave blank to keep current)</span>'
-        f'<br><input name="password" type="password" placeholder="min 6 characters" '
+        f'<br><input name="password" type="password" aria-label="New password" placeholder="min 6 characters" '
         f'autocomplete="new-password" style="width:100%;max-width:360px"></p>'
         f'<p>Current password <span class="muted">(needed to change your '
-        f'email or password)</span><br><input name="current_password" '
+        f'email or password)</span><br><input name="current_password" aria-label="Current password" '
         f'type="password" autocomplete="current-password" '
         f'style="width:100%;max-width:360px"></p>'
         f'<button class="btn" type="submit">Save changes</button>'
@@ -482,7 +490,7 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
         f'else, and the company-wide list on the Company details page keeps '
         f'working alongside it.</p>'
         + ('<p class="muted" style="margin:0 0 12px;font-size:13px;'
-           'color:#b45309">Add an email address above first — there is '
+           'color:var(--warning-text)">Add an email address above first — there is '
            'nowhere to send these yet.</p>' if not user.get("email") else "")
         + f'<button class="btn" type="submit">Save</button>'
         f'</form></div>')
@@ -499,7 +507,7 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
             f'<input type="hidden" name="csrf" value="{csrf}">'
             f'<input type="hidden" name="action" value="company">'
             f'<div class="fields">'
-            f'<label class="f full">Company name <span style="color:#dc2626">*</span>'
+            f'<label class="f full">Company name <span style="color:var(--danger-text)">*</span>'
             f'<input name="org_name" value="{esc(o.get("name", ""))}" '
             f'style="width:100%" required></label>'
             f'<label class="f">Primary contact'
@@ -518,7 +526,7 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
             f'<h3 style="margin:20px 0 8px">Alert notifications</h3>'
             f'<div class="fields">'
             f'<label class="f full">WAN alert recipients'
-            f'<span style="color:#64748b;font-size:12px;font-weight:normal;margin-left:6px">'
+            f'<span style="color:var(--text-faint);font-size:12px;font-weight:normal;margin-left:6px">'
             f'Comma-separated — notified when any WAN uplink changes state</span>'
             f'<div style="display:flex;gap:8px;align-items:center">'
             f'<input name="alert_emails" type="text" id="alert_emails_input" '
@@ -526,7 +534,7 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
             f'placeholder="it@company.com, manager@company.com" '
             f'style="flex:1;min-width:0"></div></label>'
             f'<label class="f full">Status report emails'
-            f'<span style="color:#64748b;font-size:12px;font-weight:normal;margin-left:6px">'
+            f'<span style="color:var(--text-faint);font-size:12px;font-weight:normal;margin-left:6px">'
             f'Send a device status summary to alert recipients</span>'
             f'<select name="report_schedule" style="width:auto">'
             + _sched_opt("none", "Disabled")
@@ -535,7 +543,7 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
             + _sched_opt("monthly", "Monthly (every 30 days)")
             + f'</select></label>'
             f'<label class="f full">While a site runs on its backup line'
-            f'<span style="color:#64748b;font-size:12px;font-weight:normal;'
+            f'<span style="color:var(--text-faint);font-size:12px;font-weight:normal;'
             f'margin-left:6px">Remind the alert recipients that it is still '
             f'on the backup, until the main line is back</span>'
             f'<select name="backup_reminder_hours" style="width:auto">'
@@ -559,7 +567,7 @@ def _render_account(user, csrf: str, msg: str = "", error: str = "",
             f'style="background:#0f766e;border-color:#0f766e" '
             f'onclick="mmSendTestEmail(this)">'
             f'&#9993; Send test email</button>'
-            f'<span style="color:#64748b;font-size:12px">'
+            f'<span style="color:var(--text-faint);font-size:12px">'
             f'Sends a test notification to the alert recipients above</span>'
             f'</div></div>'
             + _EMAIL_POPUP_HTML)
@@ -646,7 +654,7 @@ def _device_chips(known_devices, selected, all_on) -> str:
         f'{" checked" if all_on or d in selected else ""}> {esc(d)}</label>'
         for d in known_devices) or '<span class="muted">no devices yet</span>'
     return (f'<div class="devsel"><div class="chips">'
-            f'<label style="background:#eef2ff"><input type="checkbox" name="all" '
+            f'<label style="background:var(--accent-soft)"><input type="checkbox" name="all" '
             f'class="allbox"{" checked" if all_on else ""}> <b>All devices</b></label>'
             f'{chips}</div></div>')
 
@@ -676,7 +684,7 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user,
               <input type="hidden" name="csrf" value="{csrf}">
               <input type="hidden" name="account" value="{esc(acct)}">
               <div class="actions" style="margin-bottom:8px">
-                <select name="role">
+                <select name="role" aria-label="Role">
                   <option value="member"{' selected' if u['role']=='member' else ''}>member</option>
                   <option value="owner"{' selected' if u['role']=='owner' else ''}>owner</option>
                 </select>
@@ -701,15 +709,15 @@ def _render_admin(auth: AuthStore, known_devices, csrf: str, user,
         f'Company details and alert settings are in '
         f'<a href="/account">Account</a>.</p>'
         f'<div class="box"><table>'
-        f'<tr><th>Email</th><th>Role</th><th>Allowed devices</th><th></th></tr>'
+        f'<tr><th>Email</th><th>Role</th><th>Allowed devices</th><th><span class="sr-only">Actions</span></th></tr>'
         f'{"".join(rows)}</table></div>'
         f'<div class="box"><h2>Add a team member</h2>'
         f'<form method="POST" action="/admin/add">'
         f'<input type="hidden" name="csrf" value="{csrf}">'
         f'<div class="actions" style="margin-bottom:12px;flex-wrap:wrap">'
-        f'<input name="email" type="email" placeholder="email">'
-        f'<input name="password" type="password" placeholder="password (min 6)">'
-        f'<select name="role"><option value="member">member</option>'
+        f'<input name="email" type="email" aria-label="Email" placeholder="email">'
+        f'<input name="password" type="password" aria-label="Password" placeholder="password (min 6)">'
+        f'<select name="role" aria-label="Role"><option value="member">member</option>'
         f'<option value="owner">owner</option></select>'
         f'</div>'
         f'<p class="muted" style="margin:0 0 6px">Which devices may this member see?</p>'
@@ -1031,14 +1039,14 @@ def _orders_box(orders) -> str:
                      'new packet</span>')
             act = ""
         elif o.get("pay_link"):
-            state = '<span style="color:#d97706">Waiting for payment</span>'
+            state = '<span style="color:var(--warning-text)">Waiting for payment</span>'
             act = (f'<a class="btn" style="padding:4px 12px" '
                    f'href="{esc(o["pay_link"])}">Pay</a>')
         elif o.get("due") and not upgrade:
             # A renewal invoice, raised before its 28th. It used to read
             # "Not completed" with nothing to click: the one row a company
             # paying by transfer needed to open.
-            state = '<span style="color:#d97706">Waiting for payment</span>'
+            state = '<span style="color:var(--warning-text)">Waiting for payment</span>'
             act = (f'<a class="btn ghost" style="padding:4px 12px" '
                    f'href="/billing/invoice?id={int(o["id"])}">Invoice</a>')
         else:
@@ -1050,7 +1058,7 @@ def _orders_box(orders) -> str:
                  f'<td>{state}</td><td>{act}</td></tr>')
     return (f'<div class="box"><h2>Payments</h2>'
             f'<table><thead><tr><th>Date</th><th>What</th><th>Amount</th>'
-            f'<th></th><th></th></tr></thead><tbody>{rows}</tbody></table>'
+            f'<th><span class="sr-only">Actions</span></th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>{rows}</tbody></table>'
             f'</div>')
 
 
@@ -1113,13 +1121,15 @@ def _pay_page(order, error: str, *, paid: bool = False,
             f'&mdash; nobody here has to do anything. You can also pay by '
             f'bank transfer using the details on your invoice.</p>')
 
-    return (f'<!doctype html><html><head><meta charset="utf-8">'
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1">'
-            f'{_THEME_INIT_JS}{_auth_favicon()}<title>Pay your invoice</title>'
+            f'<meta name="description" content="Pay your {esc(_BRAND)} invoice.">'
+            f'{_THEME_INIT_JS}{_auth_favicon()}'
+            f'<title>Pay your invoice &middot; {esc(_BRAND)}</title>'
             f'<style>{_THEME_VARS}{_PAGE_CSS}</style></head><body>'
-            f'<div class="wrap" style="max-width:420px;margin-top:9vh">'
+            f'<main id="main" class="wrap" style="max-width:420px;margin-top:9vh">'
             f'{_auth_brand()}<div class="box">{inner}</div>'
-            f'</div></body></html>')
+            f'</main></body></html>')
 
 
 def _invoice_money(order: dict, settled: bool, local: str = "",
@@ -1530,7 +1540,7 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
     if status in ("active", "trialing"):
         limit_label = (f"{device_limit} device{'s' if device_limit != 1 else ''}"
                        if device_limit else "unlimited devices")
-        status_html = (f'<p style="margin:0"><span style="color:#16a34a;font-weight:700">'
+        status_html = (f'<p style="margin:0"><span style="color:var(--success-text);font-weight:700">'
                        f'Active</span> &middot; {esc(plan_name or "Subscribed")}'
                        f' &middot; {limit_label}</p>')
     elif status == "trial":
@@ -1546,17 +1556,17 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                   if grace_end else "soon")
         contact_p = (f'<p class="muted" style="margin:4px 0 0">{_contact_line(contact)}</p>'
                     if _contact_line(contact) else "")
-        status_html = (f'<p style="margin:0"><span style="color:#d97706;font-weight:700">'
+        status_html = (f'<p style="margin:0"><span style="color:var(--warning-text);font-weight:700">'
                        f'Grace Period</span> &middot; pay before {ge_fmt} to '
                        f'avoid lockout</p>{contact_p}')
     elif status in ("canceled", "locked", "inactive"):
         contact_p = (f'<p class="muted" style="margin:4px 0 0">{_contact_line(contact)}</p>'
                     if _contact_line(contact) else "")
-        status_html = ('<p style="margin:0"><span style="color:#dc2626;font-weight:700">'
+        status_html = ('<p style="margin:0"><span style="color:var(--danger-text);font-weight:700">'
                        'Suspended</span> &middot; choose a plan below to reactivate</p>'
                        + contact_p)
     else:
-        status_html = (f'<p style="margin:0"><span style="color:#64748b;font-weight:700">'
+        status_html = (f'<p style="margin:0"><span style="color:var(--text-faint);font-weight:700">'
                        f'Free plan</span> &middot; {FREE_DEVICES} '
                        f'device{"" if FREE_DEVICES == 1 else "s"} &middot; '
                        f'choose a packet to add more</p>')
@@ -1596,7 +1606,7 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                 f'onsubmit="return confirm({esc(json.dumps(warn))});">'
                 f'<input type="hidden" name="csrf" value="{csrf}">'
                 f'<button class="btn ghost" type="submit" '
-                f'style="color:#dc2626;border-color:#dc2626">'
+                f'style="color:var(--danger-text);border-color:#dc2626">'
                 f'Cancel subscription</button></form>')
     # The old PayFast subscription, for any company still on one.
     if pf_token and status in ("active", "trialing"):
@@ -1605,7 +1615,7 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                       f'onsubmit="{confirm_attr("Cancel your subscription? You will keep access until the end of the grace period.")}">'
                       f'<input type="hidden" name="csrf" value="{csrf}">'
                       f'<button class="btn ghost" type="submit" '
-                      f'style="color:#dc2626;border-color:#dc2626">Cancel subscription</button>'
+                      f'style="color:var(--danger-text);border-color:#dc2626">Cancel subscription</button>'
                       f'</form>')
 
     status_box = (f'<div class="box">'
@@ -1741,7 +1751,7 @@ def _render_billing(user, bill: dict | None, pf_enabled: bool, csrf: str,
                   f'{ladder_open}'
                   f'<table><thead><tr>'
                   f'<th>Packet</th><th>Devices</th><th>Monthly</th>'
-                  f'<th>Per device</th><th></th>'
+                  f'<th>Per device</th><th><span class="sr-only">Actions</span></th>'
                   f'</tr></thead><tbody>{plan_rows}</tbody></table>'
                   f'{ladder_close}</div>')
 
@@ -1905,7 +1915,7 @@ def _render_locked(user, contact: dict | None = None,
     inner = (f'<div class="wrap" style="max-width:560px;margin-top:10vh;text-align:center">'
              f'{_flash(msg, error)}'
              f'<div class="box">'
-             f'<h1 style="color:#dc2626;margin-bottom:8px">Account Suspended</h1>'
+             f'<h1 style="color:var(--danger-text);margin-bottom:8px">Account Suspended</h1>'
              f'{why}'
              f'{contact_p}'
              + _locked_pay_block(user, csrf, yoco_on, bill, contact,
@@ -1928,7 +1938,7 @@ def _sample_bar(html: str, what: str, plan_name: str) -> str:
            f'color:#fff;padding:9px 16px;font:600 13px/1.4 system-ui,'
            f'sans-serif;display:flex;gap:12px;align-items:center;'
            f'flex-wrap:wrap">'
-           f'<span style="background:#fff;color:#b45309;padding:1px 7px;'
+           f'<span style="background:#fff;color:var(--warning-text);padding:1px 7px;'
            f'border-radius:3px;letter-spacing:.06em">SAMPLE</span>'
            f'<span>{esc(what)} for the {esc(plan_name)} packet. Nothing was '
            f'charged, nothing was sent, and no order exists.</span>'
@@ -1945,7 +1955,7 @@ def _invoice_template_box(csrf: str, have: bool, warnings=()) -> str:
     """Upload your own invoice design, or go back to the built-in one."""
     warn = ""
     if warnings:
-        warn = ("<ul style=\"margin:0 0 10px;padding-left:18px;color:#b45309\">"
+        warn = ("<ul style=\"margin:0 0 10px;padding-left:18px;color:var(--warning-text)\">"
                 + "".join(f"<li>{esc(str(w))}</li>" for w in warnings)
                 + "</ul>")
     if have:
@@ -1974,7 +1984,7 @@ def _invoice_template_box(csrf: str, have: bool, warnings=()) -> str:
             f'enctype="multipart/form-data" style="display:flex;gap:8px;'
             f'flex-wrap:wrap;align-items:center;margin-top:6px">'
             f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
-            f'<input type="file" name="template" accept=".html,.htm,text/html">'
+            f'<input type="file" name="template" aria-label="Invoice template file" accept=".html,.htm,text/html">'
             f'<button class="btn" type="submit">Upload</button>'
             f'<a class="btn ghost" '
             f'href="/superadmin/invoice-template?example=1">Download a '
@@ -2007,7 +2017,7 @@ def _test_invoice_page(user, plan, plan_name: str, subject: str, body: str,
         f'{p["devices"]} devices &mdash; ${p["price_usd"]:,.2f} per month'
         f'</option>' for p in PLANS)
     warn = "" if link else (
-        '<p class="muted" style="color:#dc2626;margin:0 0 12px">'
+        '<p class="muted" style="color:var(--danger-text);margin:0 0 12px">'
         '<b>There is no pay link in this email</b>, because card payment '
         'is off or no public address is set. A real invoice would go out '
         'the same way, offering a bank transfer instead, and every renewal '
@@ -2084,7 +2094,7 @@ def _paylink_base_box(base: str, csrf: str) -> str:
                 f'you are reading this on.</p>')
         tone = ""
     else:
-        body = ('<p class="muted" style="margin:0 0 8px;color:#dc2626">'
+        body = ('<p class="muted" style="margin:0 0 8px;color:var(--danger-text)">'
                 '<b>Invoices are going out with no way to pay them.</b> '
                 'Open this panel on your public address (not an IP, not '
                 'localhost) and it records itself, or set it here.</p>')
@@ -2095,7 +2105,7 @@ def _paylink_base_box(base: str, csrf: str) -> str:
             f'<form method="post" action="/superadmin/pay-base" '
             f'style="display:flex;gap:8px;flex-wrap:wrap">'
             f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
-            f'<input name="base" value="{esc(base)}" '
+            f'<input name="base" aria-label="Public address" value="{esc(base)}" '
             f'placeholder="https://your.domain" style="flex:1;min-width:220px">'
             f'<button type="submit">Save</button></form></div>')
 
@@ -2159,7 +2169,7 @@ def _suspend_button(org_id, status: str, csrf: str,
                    "Suspend this company? They lose access to the site and "
                    "stop receiving alert emails until you restore them.") + '"')
     style = ("padding:5px 12px;margin-top:6px;width:100%"
-             + ("" if suspended else ";color:#dc2626;border-color:#dc2626"))
+             + ("" if suspended else ";color:var(--danger-text);border-color:#dc2626"))
     return (f'<form method="POST" action="/superadmin/{action}" '
             f'style="margin-top:6px">'
             f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
@@ -2247,7 +2257,7 @@ def _dormant_box(rows, names, csrf: str) -> str:
             f'funds, press the button and they are left alone for '
             f'{int(FUNDS_HOLD_DAYS)} days.</p>'
             f'<table><thead><tr><th>Company</th><th>Suspended</th>'
-            f'<th>Was on</th><th>Asked</th><th></th></tr></thead>'
+            f'<th>Was on</th><th>Asked</th><th><span class="sr-only">Actions</span></th></tr></thead>'
             f'<tbody>{"".join(out)}</tbody></table></div>')
 
 
@@ -2267,7 +2277,7 @@ def _quoted_plan_form(org_id, bill, csrf) -> str:
                 and plan_by_name(plan) is None and plan != "free")
     warn = ""
     if unpriced:
-        warn = ('<div style="color:#dc2626;font-size:11px;margin-bottom:4px">'
+        warn = ('<div style="color:var(--danger-text);font-size:11px;margin-bottom:4px">'
                 '<b>No price.</b> Nothing invoices this company.</div>')
     elif cents:
         warn = (f'<div class="muted" style="font-size:11px;margin-bottom:4px">'
@@ -2421,7 +2431,7 @@ def _billing_contact_box(contact, csrf) -> str:
         # anyone notices is when an invoice goes unpaid.
         + ('<p style="margin:14px 0 6px;font-size:12px;padding:8px 10px;'
            'border-radius:6px;background:rgba(217,119,6,0.12);'
-           'color:#b45309">&#9888; <b>No bank details set.</b> Every '
+           'color:var(--warning-text)">&#9888; <b>No bank details set.</b> Every '
            'company&rsquo;s billing page is currently showing a payment '
            'reference with nowhere to send the money. Fill these in and they '
            'can pay by EFT.</p>'
@@ -2473,7 +2483,7 @@ def _yoco_box(cfg, csrf: str, webhook_url: str = "") -> str:
         # but nothing tells us they paid, so nobody's plan ever changes.
         state = ('<p style="margin:0 0 10px;font-size:12px;padding:8px 10px;'
                  'border-radius:6px;background:rgba(217,119,6,0.12);'
-                 'color:#b45309">&#9888; <b>Half configured.</b> Customers '
+                 'color:var(--warning-text)">&#9888; <b>Half configured.</b> Customers '
                  'can be charged, but without the webhook secret nothing '
                  'tells this server they paid, so their packet will not '
                  'change. Add the signing secret below.</p>')
@@ -2501,7 +2511,7 @@ def _yoco_box(cfg, csrf: str, webhook_url: str = "") -> str:
         # rejected registration is a poor way to learn it.
         hook = (f'<p style="font-size:12px;margin:10px 0 0;padding:8px 10px;'
                 f'border-radius:6px;background:rgba(217,119,6,0.12);'
-                f'color:#b45309">&#9888; Yoco only sends payment '
+                f'color:var(--warning-text)">&#9888; Yoco only sends payment '
                 f'notifications to an <b>https://</b> address, and this '
                 f'server is currently reached at '
                 f'<code>{esc(webhook_url)}</code>. Put it behind HTTPS '
@@ -2585,7 +2595,7 @@ def _outstanding_box(rows, csrf: str) -> str:
             chase = ('<span style="color:#b91c1c">'
                      f'{age:.0f} days outstanding</span>')
         elif age > 7:
-            chase = f'<span style="color:#b45309">{age:.0f} days</span>'
+            chase = f'<span style="color:var(--warning-text)">{age:.0f} days</span>'
         else:
             chase = f'<span class="muted">{age:.0f} days</span>'
         trs.append(
@@ -2612,7 +2622,7 @@ def _outstanding_box(rows, csrf: str) -> str:
         f'both at once, so the books and the service cannot disagree.</p>'
         f'<table><thead><tr><th>Company</th><th>Packet</th>'
         f'<th>Raised</th><th style="text-align:right">Amount</th>'
-        f'<th></th></tr></thead><tbody>{"".join(trs)}</tbody></table>'
+        f'<th><span class="sr-only">Actions</span></th></tr></thead><tbody>{"".join(trs)}</tbody></table>'
         f'</div>')
 
 
@@ -2668,7 +2678,7 @@ def _upcoming_box(rows, status=None) -> str:
             if r["already_raised"]:
                 state = ('<span style="color:#15803d">invoice sent</span>')
             elif days <= 0:
-                state = ('<span style="color:#b45309">due on the next pass'
+                state = ('<span style="color:var(--warning-text)">due on the next pass'
                          '</span>')
             elif days < 1:
                 state = f'<b>today</b>'
@@ -2717,7 +2727,7 @@ def _tunnel_health_box(rows, wg_err: str = "") -> str:
     if wg_err:
         note = (f'<p style="margin:0 0 10px;font-size:12px;padding:8px 10px;'
                 f'border-radius:6px;background:rgba(217,119,6,0.12);'
-                f'color:#b45309">&#9888; Cannot read what WireGuard is '
+                f'color:var(--warning-text)">&#9888; Cannot read what WireGuard is '
                 f'actually running ({esc(wg_err)}), so the last two columns '
                 f'are blank. That reading is the difference between "the hub '
                 f'never loaded this router" and "the router is not reaching '
@@ -2739,10 +2749,10 @@ def _tunnel_health_box(rows, wg_err: str = "") -> str:
 
     body = ""
     for r in rows:
-        tick = ('<span style="color:#16a34a">&#10003;</span>' if r["ok"]
-                else '<span style="color:#dc2626">&#10007;</span>')
-        yn = lambda v: ('<span style="color:#16a34a">yes</span>' if v
-                        else '<span style="color:#dc2626">no</span>')
+        tick = ('<span style="color:var(--success-text)">&#10003;</span>' if r["ok"]
+                else '<span style="color:var(--danger-text)">&#10007;</span>')
+        yn = lambda v: ('<span style="color:var(--success-text)">yes</span>' if v
+                        else '<span style="color:var(--danger-text)">no</span>')
         heard = "&mdash;"
         if r["loaded"]:
             heard = ("never" if r["age"] is None
@@ -2797,7 +2807,7 @@ def _share_box(device: str, shares, csrf: str, org_name: str = "") -> str:
             f'<button class="btn ghost" style="padding:4px 12px" '
             f'type="submit">Stop sharing</button></form></td></tr>')
     table = (f'<table style="margin:10px 0"><thead><tr><th>Person</th>'
-             f'<th>Rights</th><th>Since</th><th></th></tr></thead>'
+             f'<th>Rights</th><th>Since</th><th><span class="sr-only">Actions</span></th></tr></thead>'
              f'<tbody>{rows}</tbody></table>' if rows else
              '<p class="muted" style="font-size:13px;margin:8px 0">'
              'Not shared with anyone outside this company.</p>')
@@ -2906,7 +2916,7 @@ def _incoming_transfers_box(offers, csrf: str, names=None) -> str:
             f'company wants to hand these over. Accept one and it moves into '
             f'your account with its history and settings, and counts towards '
             f'your packet.</p>'
-            f'<table><thead><tr><th>Router</th><th>From</th><th></th></tr>'
+            f'<table><thead><tr><th>Router</th><th>From</th><th><span class="sr-only">Actions</span></th></tr>'
             f'</thead><tbody>{rows}</tbody></table></div>')
 
 
@@ -3018,7 +3028,7 @@ def _regions_box(regions, csrf) -> str:
         f'line: <code>Name|https://url</code></p>'
         f'<form method="POST" action="/superadmin/regions">'
         f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
-        f'<textarea name="regions" rows="4" style="width:100%;'
+        f'<textarea name="regions" aria-label="Regions" rows="4" style="width:100%;'
         f'font-family:ui-monospace,monospace" '
         f'placeholder="South Africa|https://sa.easymikrotik.com&#10;'
         f'USA|https://us.easymikrotik.com">{esc(text)}</textarea>'
@@ -3087,7 +3097,7 @@ def _render_region_picker(regions, go: str, this_url: str = "",
     if not rows:
         rows = f'<a class="btn" href="/{go}">Continue</a>'
     return _auth_page("Choose your region",
-            f'<h2 style="margin-top:0">Choose your region</h2>'
+            f'<h1 style="margin-top:0">Choose your region</h1>'
             f'<p class="muted" style="margin-top:0">Pick whichever server is '
             f'closest to your routers for the best performance.</p>'
             f'{rows}')
@@ -3202,7 +3212,7 @@ def _quote_inbox(quotes, org_names: dict | None = None, csrf: str = "") -> str:
             f'Reach out, agree a price, then assign a cap with '
             f'<b>Unlimited</b> or a custom limit below.</p>'
             f'<table><thead><tr><th>Company</th><th>Needs</th>'
-            f'<th>Contact</th><th>Notes</th><th></th></tr></thead>'
+            f'<th>Contact</th><th>Notes</th><th><span class="sr-only">Actions</span></th></tr></thead>'
             f'<tbody>{rows}</tbody></table></div>')
 
 
@@ -3225,13 +3235,13 @@ def _offsite_box(data, csrf: str) -> str:
         state = (f'<p style="color:#15803d;margin:0 0 10px"><b>Last backup '
                  f'{esc(when(st["last_run"]))}: uploaded</b>, {mb:,.1f} MB'
                  + ('' if st.get("wireguard") else
-                    ' &mdash; <span style="color:#dc2626">without the hub\'s '
+                    ' &mdash; <span style="color:var(--danger-text)">without the hub\'s '
                     'WireGuard key</span> (re-run deploy/install.sh)')
                  + '</p>')
     elif st.get("last_run") and st.get("error") and s.get("enabled"):
         ok = (f' The last one that worked was {esc(when(st["last_ok"]))}.'
               if st.get("last_ok") else " None has worked yet.")
-        state = (f'<p style="color:#dc2626;margin:0 0 10px"><b>Last backup '
+        state = (f'<p role="alert" style="color:var(--danger-text);margin:0 0 10px"><b>Last backup '
                  f'{esc(when(st["last_run"]))} FAILED:</b> '
                  f'{esc(st["error"])}.{ok}</p>')
     elif s.get("enabled"):
@@ -3239,7 +3249,7 @@ def _offsite_box(data, csrf: str) -> str:
                  'first one runs tonight around 02:30, or press Back up now.'
                  '</p>')
     else:
-        state = ('<p style="color:#d97706;margin:0 0 10px"><b>Off.</b> If '
+        state = ('<p style="color:var(--warning-text);margin:0 0 10px"><b>Off.</b> If '
                  'this server were lost tonight, so would every backup of it.'
                  '</p>')
     secret = s.get("secret_key") or ""
@@ -3420,7 +3430,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
             f'{esc(payment_reference(r["id"], r.get("name", "")))}</code></td>'
             f'<td><span style="color:{color};font-weight:700">{label}</span>'
             f'{f"<br><span class=\'muted\' style=\'font-size:11px\'>trial ends {trial_str}</span>" if trial_str else ""}'
-            f'{f"<br><span class=\'muted\' style=\'font-size:11px;color:#d97706\'>grace ends {grace_str}</span>" if grace_str else ""}'
+            f'{f"<br><span class=\'muted\' style=\'font-size:11px;color:var(--warning-text)\'>grace ends {grace_str}</span>" if grace_str else ""}'
             f'{cut_str}'
             f'</td>'
             f'<td>{esc(plan) if plan else "<span class=\'muted\'>—</span>"}</td>'
@@ -3501,7 +3511,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
     _no_backups = '<tr><td colspan=4 class="muted">No backups yet — create one below.</td></tr>'
     backup_table = (
         f'<table style="min-width:600px"><thead><tr>'
-        f'<th>Backup</th><th>Size</th><th>Created</th><th></th>'
+        f'<th>Backup</th><th>Size</th><th>Created</th><th><span class="sr-only">Actions</span></th>'
         f'</tr></thead><tbody>{backup_rows or _no_backups}</tbody></table>'
     )
 
@@ -3527,7 +3537,7 @@ def _render_superadmin(user, rows: list, backups: list, csrf: str = "",
         f'enctype="multipart/form-data" '
         f'onsubmit="{confirm_attr(_RESTORE_UPLOAD_ASK)}">'
         f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
-        f'<input type="file" name="archive" accept=".gz,.tar.gz" required> '
+        f'<input type="file" name="archive" aria-label="Backup archive" accept=".gz,.tar.gz" required> '
         f'<button class="btn ghost" type="submit">Restore uploaded file</button>'
         f'</form>'
         f'</div>'
@@ -4176,6 +4186,6 @@ def _sa_tile(value, label: str, color: str) -> str:
     return (f'<div style="background:var(--surface);border-radius:10px;padding:12px 16px;'
             f'box-shadow:var(--shadow);border-top:3px solid {color}">'
             f'<div style="font-size:26px;font-weight:700;color:{color}">{value}</div>'
-            f'<div style="font-size:11px;color:#64748b;text-transform:uppercase;'
+            f'<div style="font-size:11px;color:var(--text-faint);text-transform:uppercase;'
             f'letter-spacing:.04em;margin-top:4px">{label}</div>'
             f'</div>')
