@@ -1109,6 +1109,21 @@ PY
         -in "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" 2>/dev/null \
         | cut -d= -f2)"
     [[ -n "${CERT_END}" ]] && log "Certificate valid until ${CERT_END}."
+    # With HTTPS working, the plain-HTTP dashboard port is only kept as a way
+    # in from the office network and the VPN, for the day the domain or the
+    # certificate breaks. From the internet it would carry passwords
+    # unencrypted and skip nginx's timeouts and limits. (Step 8 opens it to
+    # everyone on every run; this narrows it again, so a re-run is safe.)
+    if command -v ufw &>/dev/null \
+       && [[ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]]; then
+      ufw delete allow "${WEB_PORT}/tcp" >/dev/null 2>&1 || true
+      for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10; do
+        ufw allow from "${net}" to any port "${WEB_PORT}" proto tcp \
+            comment "mikromon dashboard (LAN and VPN only)" >/dev/null 2>&1 || true
+      done
+      log "Port ${WEB_PORT} now answers the local network and the VPN only;"
+      log "from the internet, use https://${DOMAIN}."
+    fi
   else
     log "WARN: domain setup failed. Check: cat ${DOMAIN_LOG}"
     log "      Make sure ${DOMAIN} DNS A record points to this server first."

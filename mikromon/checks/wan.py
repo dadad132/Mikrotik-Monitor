@@ -56,6 +56,28 @@ def _is_active(route: dict) -> bool:
     return "unreachable" not in str(route.get("gateway-status", "")).lower()
 
 
+def _is_usable(route: dict) -> bool:
+    """Whether a route COULD carry traffic, as opposed to whether it does.
+
+    RouterOS marks only the best route to a destination "active": a backup
+    line's route, with its higher distance, is not active while the primary
+    works -- that is what standing by means. Asking `_is_active` of a backup
+    called every healthy backup DOWN. A route is unusable when it is switched
+    off, when RouterOS 7 flags it inactive, or when its gateway is
+    unreachable (how RouterOS 6, and check-gateway, say it)."""
+    if as_bool(route.get("disabled")) or as_bool(route.get("inactive")):
+        return False
+    return "unreachable" not in str(route.get("gateway-status", "")).lower()
+
+
+def _in_main(route: dict) -> bool:
+    """A route of the main routing table: the one ordinary traffic uses.
+    Policy-routing tables (and a line test's own temporary table) are not
+    what failover is about."""
+    table = str(route.get("routing-table", "") or "main")
+    return table == "main" and not route.get("routing-mark")
+
+
 def _iface_of(route: dict) -> str:
     """Best-effort interface name a route exits through."""
     m = re.search(r"via\s+(\S+)", str(route.get("gateway-status", "")))
@@ -245,7 +267,8 @@ class WanCheck(Check):
         # poll and leave the existing conditions alone.
         if "route" in snap.errors:
             return
-        defaults = [r for r in snap.rows("route") if _is_default(r)]
+        defaults = [r for r in snap.rows("route")
+                    if _is_default(r) and _in_main(r)]
         want_failover = dev.check_enabled("wan_failover")
         want_down = dev.check_enabled("internet_down")
         links = dev.wan.links
@@ -332,7 +355,9 @@ class WanCheck(Check):
                         ep_routes = [r for r in defaults
                                     if _fo_route_idx(str(r.get("comment", "")), links) == idx]
                     if ep_routes:
-                        link_up = any(_is_active(r) for r in ep_routes)
+                        # Could it take over -- not "is it carrying traffic":
+                        # a standing-by backup is not the active route.
+                        link_up = any(_is_usable(r) for r in ep_routes)
                         gw_status = str(ep_routes[0].get("gateway-status", "unknown"))
                     else:
                         link_up = False

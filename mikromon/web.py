@@ -29,6 +29,7 @@ import tempfile
 import re
 import secrets
 import shutil
+import threading
 import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -70,6 +71,14 @@ _SESSION_TTL = 12 * 3600
 # phone, short enough that a half-finished sign-in does not linger.
 _TWOFA_TTL = 5 * 60
 _TWOFA_TRIES = 5
+# Wrong two-factor codes, however many times the password is typed again to
+# start over: past 10 in the window from one address (an IPv6 /64), codes for
+# that login from there are refused until the window has passed; past 30 from
+# anywhere, from everywhere. Per address first, so somebody who has the
+# password but not the phone cannot lock the owner out of their own account.
+_TWOFA_ADDR_MAX = 10
+_TWOFA_LOGIN_MAX = 30
+_TWOFA_WINDOW = 15 * 60
 
 
 # ============================ data assembly ================================
@@ -186,6 +195,19 @@ def safe_location(location, *, external: bool = False) -> str:
             or location.startswith("//")):
         return "/"
     return location
+
+
+def _line_shown_offline(d: dict, i: int) -> bool:
+    """Whether the WAN Status box shows line `i` of this device as Offline:
+    the router is unreachable or has no internet at all, the primary is
+    down and a backup is carrying traffic, or a backup is itself down. The
+    WAN tab's line test asks the same question, so the two always agree."""
+    if not d.get("up") or d.get("wan_health") == "down":
+        return True
+    if d.get("wan_health") == "partial" and i == 0:
+        return True
+    keys = {p.get("key") for p in d.get("problems") or []}
+    return i > 0 and f"wan_link:{i}" in keys
 
 
 def _known_devices(store, state) -> list:
@@ -2713,6 +2735,10 @@ def _render_device(store, state, name, user, csrf="",
         priority = "Primary" if i == 0 else f"Backup {i}"
         sub_html = (f'<span style="font-size:10px;color:var(--text-faint);'
                     f'margin-left:4px">({sub})</span>') if sub else ""
+        if tone == "bad" and d["up"]:
+            # Offline while the router answers: the line can be tested.
+            sub_html += (f' <a href="/device?name={q}&amp;tab=wan#wan-test" '
+                         f'style="font-size:11px;margin-left:6px">Test it</a>')
         wan_rows += (
             f'<div class="wst {tone}">'
             f'<span style="width:10px;height:10px;border-radius:50%;'
@@ -2730,7 +2756,7 @@ def _render_device(store, state, name, user, csrf="",
         center_wan = (
             f'<div class="box"><h2>WAN Status</h2>'
             f'<p class="muted">No WAN uplinks configured. Go to the '
-            f'<a href="/device/{q}?tab=wan">WAN tab</a> and add your ISP lines '
+            f'<a href="/device?name={q}&amp;tab=wan">WAN tab</a> and add your ISP lines '
             f'(interface name, e.g. <code>ether1</code> or <code>pppoe-out1</code>) '
             f'to see live status here.</p></div>')
 
@@ -3810,6 +3836,39 @@ def _signup_code_email(code: str, company: str) -> tuple:
             f'<p style="color:#64748b;font-size:12px">Not you? Ignore this '
             f'email &mdash; no account is created without the code.</p></div>')
     return subject, text, html
+
+
+def _send_new_login_email(auth, smtp_cfg, user: dict, ip: str, agent: str,
+                          when: float) -> None:
+    """Tell someone their account was just signed in to from an address it
+    has never been used from. Nothing is blocked: the point is that a
+    password somebody else has is noticed the first time it is used."""
+    from email.message import EmailMessage
+
+    from .notify.org_email import _smtp_send, effective_smtp
+    to = (user.get("email") or "").strip()
+    smtp = effective_smtp(auth, smtp_cfg) if auth is not None else None
+    if not to or not (smtp and getattr(smtp, "host", "")):
+        return
+    stamp = time.strftime("%d %b %Y %H:%M", time.localtime(when))
+    msg = EmailMessage()
+    msg["Subject"] = (f"{smtp.subject_prefix} New sign-in to your "
+                      f"{_BRAND} account").strip()
+    msg["From"] = smtp.from_addr
+    msg["To"] = to
+    msg.set_content(
+        f"Hello,\n\n"
+        f"Your {_BRAND} account ({to}) was signed in to on {stamp} from an "
+        f"address it has not been used from before:\n\n"
+        f"  Address: {ip}\n"
+        f"  Browser: {(agent or 'not given')[:200]}\n\n"
+        f"If that was you -- a new phone, a new office, travelling -- there is "
+        f"nothing to do.\n\n"
+        f"If it was not you, somebody has your password. Sign in, change it "
+        f"under Account (that signs every other session out), and turn on "
+        f"two-factor sign-in there.\n\n"
+        f"{_BRAND}\n")
+    _smtp_send(smtp, msg)
 
 
 def _send_signup_code(smtp_cfg, to: str, code: str, company: str) -> None:
@@ -7662,6 +7721,61 @@ def _wan_is_dialup_type(itype: str) -> bool:
     return any(k in t for k in ("pppoe", "pptp", "l2tp", "sstp"))
 
 
+_WAN_TEST_STYLE = {
+    "healthy":   ("#16a34a", "✓ This line works"),
+    "attention": ("#d97706", "⚠ This line works, but something around it is wrong"),
+    "failed":    ("#dc2626", "✗ Found the problem"),
+}
+
+
+def _wan_test_box(name, links, csrf) -> str:
+    """One "Test this line" button per saved uplink. Separate small forms:
+    the uplink editor above is one form, and forms cannot nest."""
+    if not links:
+        return ""
+    rows = ""
+    for i, ep in enumerate(links):
+        role = "Primary" if i == 0 else f"Backup {i}"
+        rows += (f'<tr><td><b>{esc(ep.label(i))}</b><br><span class="muted">'
+                 f'{role}</span></td><td><code>{esc(ep.interface or ep.gateway)}'
+                 f'</code></td><td style="text-align:right">'
+                 f'<form method="POST" action="/device/wan-test" style="margin:0">'
+                 f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+                 f'<input type="hidden" name="device" value="{esc(name)}">'
+                 f'<input type="hidden" name="link" value="{i}">'
+                 f'<button class="btn ghost" type="submit">Test this line'
+                 f'</button></form></td></tr>')
+    return (f'<div class="box" id="wan-test"><h2>Test a line</h2>'
+            f'<p class="muted" style="margin:0 0 10px">The router pings the '
+            f'internet out of that one line, from its own address, whichever '
+            f'line it is using at the moment. If the line answers while the '
+            f'dashboard says it is offline, the router\'s setup for it is '
+            f'checked and whatever is wrong is shown. Takes a few seconds. '
+            f'To send the ping out of that line the router is given a route '
+            f'of its own in a separate table that no other traffic uses, '
+            f'removed again straight after; nothing else on the router is '
+            f'changed. Lines are tested as saved above.</p>'
+            f'<div style="overflow-x:auto"><table><thead><tr><th>Line</th>'
+            f'<th>Interface</th><th></th></tr></thead><tbody>{rows}</tbody>'
+            f'</table></div></div>')
+
+
+def _wan_test_report_html(report, label) -> str:
+    color, title = _WAN_TEST_STYLE.get(report.get("status"),
+                                       ("var(--text-muted)", "Line test"))
+    items = []
+    for st in report.get("steps", []):
+        icon, c = _WG_STEP.get(st.get("level"), ("•", "var(--text-muted)"))
+        items.append(f'<li style="margin:6px 0"><span style="color:{c};'
+                     f'font-weight:bold">{icon}</span> {esc(st.get("msg", ""))}</li>')
+    return (f'<div class="box" style="border-left:4px solid {color}">'
+            f'<h2 style="margin-top:0;color:{color}">{esc(label)}: {esc(title)}</h2>'
+            f'<ul style="list-style:none;padding:0;margin:0">{"".join(items)}</ul>'
+            f'<p class="muted" style="margin:10px 0 0;font-size:12px">A line '
+            f'that is limited to some devices by policy routing can behave '
+            f'differently for them than for this test.</p></div>')
+
+
 def _wan_uplink_editor(name, cfg, csrf, ifaces=None, online_ifaces=None,
                        detected_gateways=None, failover_on=False) -> str:
     """Editable WAN uplink list (saved to the device record, not pushed).
@@ -8392,6 +8506,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                                      online_ifaces=online_ifaces,
                                      detected_gateways=detected_gateways,
                                      failover_on=failover_on)
+                  + _wan_test_box(name, list(cfg.wan.links), csrf)
                   if slug == "wan" and preview is None else "")
     logbox = _recent_log_box(recent or [], device=name)
     # What this tab is FOR now lives in the guide, one click away on the "?".
@@ -8976,6 +9091,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
     # office, and a ceiling on what a leaked key can write.
     from .webguard import TokenBuckets
     edr_limit = TokenBuckets(2.0, 200)
+    # Wrong two-factor codes: {(login, address group): [times]} and
+    # {login: [times]} (see _TWOFA_ADDR_MAX). Shared by every request thread.
+    _twofa_fails: dict = {}
+    _twofa_lock = threading.Lock()
+    # One line test per router at a time (see _device_wan_test_post).
+    _wan_tests: dict = {}
+    _wan_tests_lock = threading.Lock()
     _pf_merchant_id = billing_cfg.get("payfast_merchant_id", "")
     _pf_merchant_key = billing_cfg.get("payfast_merchant_key", "")
     _pf_passphrase = billing_cfg.get("payfast_passphrase", "")
@@ -13734,6 +13856,103 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 name, user, "remote",
                 report_html=_remote_test_report_html(report, tunnel_ip))
 
+        def _device_wan_test_post(self, flat, user):
+            """"Test this line" on the WAN tab: the router pings the internet
+            out of one uplink, and the line's setup on the router is checked
+            (wantest.py). Read-only on the router; a few seconds."""
+            import dataclasses
+
+            from . import wantest
+            from .config import build_device
+            from .device import DeviceError
+            from .push import PushError, rw_device
+            from .push.api import PushApi
+
+            name = flat.get("device", "")
+            if not self._can_manage_device(user, name):
+                return self._send(403, "forbidden")
+            raw = self._device_raw(name)
+            if raw is None:
+                return self._send(404, "no such device")
+            cfg = build_device(raw, defaults)
+            links = list(cfg.wan.links)
+            try:
+                idx = int(str(flat.get("link", "")).strip())
+            except ValueError:
+                idx = -1
+            if not 0 <= idx < len(links):
+                return self._send(400, "That line is not in this device's WAN "
+                                       "uplinks list.")
+            label = links[idx].label(idx)
+            # One test per router at a time, and not again within 10 seconds:
+            # each one opens a session on the router and makes it send pings
+            # for a few seconds, and a router has only so many API sessions.
+            now = time.time()
+            with _wan_tests_lock:
+                if _wan_tests.get(name, 0) > now:
+                    return self._feature_tab_page(
+                        name, user, "wan", report_html=_wan_test_report_html(
+                            {"status": "attention", "steps": [{
+                                "level": "warn",
+                                "msg": "A test of this router is already running, "
+                                       "or has only just finished. Try again in a "
+                                       "few seconds."}]}, label))
+                _wan_tests[name] = now + 60          # until this one finishes
+            try:
+                return self._run_wan_test(name, user, cfg, links, idx, label)
+            finally:
+                with _wan_tests_lock:
+                    _wan_tests[name] = time.time() + 10
+
+        def _run_wan_test(self, name, user, cfg, links, idx, label):
+            import dataclasses
+
+            from . import wantest
+            from .device import DeviceError
+            from .push import PushError, rw_device
+            from .push.api import PushApi
+
+            store = self._store()
+            try:
+                shown_offline = _line_shown_offline(
+                    _device_view(store, _load_state(state_file), name), idx)
+            finally:
+                store.close()
+            # Short: somebody is waiting on the page.
+            dev = rw_device(dataclasses.replace(cfg, timeout=min(cfg.timeout, 10)))
+            api = PushApi(dev)
+            err = None
+            try:
+                try:
+                    api.connect()
+                    test = wantest.test_line(api, links[idx],
+                                             cfg.wan.ping_targets or None)
+                    findings = wantest.diagnose_line(
+                        api.fetch, links, idx, shown_offline=shown_offline,
+                        ping_ok=test["ok"], source=test["source"])
+                except (DeviceError, PushError) as exc:
+                    err = str(exc)[:200]
+            finally:
+                dev.close()
+            if err is not None:
+                report = {"status": "failed", "steps": [{
+                    "level": "error",
+                    "msg": f"Could not reach the router to test {label}: {err}. "
+                           f"Check that it is online and that its read-write "
+                           f"login on the Devices page works."}]}
+            else:
+                report = wantest.report_from(test, findings, label, shown_offline)
+            audit = self._auditlog()
+            if audit:
+                audit.append(name, (user or {}).get("login", ""), "wan", "test-line",
+                             "ok" if report["status"] == "healthy" else report["status"],
+                             f"{label}: {report['status']}",
+                             "; ".join(st["msg"] for st in report["steps"]))
+                audit.close()
+            return self._feature_tab_page(
+                name, user, "wan",
+                report_html=_wan_test_report_html(report, label))
+
         def _device_remote_regenerate_post(self, flat, user):
             """"Forgot to copy it" fix for the Remote access tab: revoke the
             named temporary login and recreate it immediately under the same
@@ -15389,7 +15608,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                              "/device/departments",
                              "/dashboard/suggestion",
                              "/device/remote-regenerate", "/device/remote-test",
-                             "/device/ai-recheck")
+                             "/device/ai-recheck", "/device/wan-test")
             if path in _DEVICE_WRITE:
                 if not self._can_manage_device(user, flat.get("device", "")):
                     return self._deny_manage(user, flat.get("device", ""), path)
@@ -15449,6 +15668,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     return self._device_remote_regenerate_post(flat, user)
                 if path == "/device/remote-test":
                     return self._device_remote_test_post(flat, user)
+                if path == "/device/wan-test":
+                    return self._device_wan_test_post(flat, user)
             # Everything below is OWNER-ONLY (org-level: inventory, users,
             # billing, server ops).
             if not AuthStore.is_admin(user or {}):
@@ -16649,11 +16870,43 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             return self._redirect("/billing?error=" + quote(
                 "Could not cancel the subscription. Please contact support."))
 
+        def _client_address(self) -> str:
+            """The visitor's address: the socket's, or the one nginx states
+            for a request it forwarded (webguard.py says when that is
+            believed)."""
+            from .webguard import WebGuard
+            return WebGuard.client_ip(self.client_address[0], self.headers) or ""
+
+        def _signed_in(self, user: dict) -> None:
+            """Remember where a sign-in came from, and email the owner of the
+            login when it is an address it has never been used from."""
+            ip = self._client_address()
+            agent = self.headers.get("User-Agent", "")
+            try:
+                new = auth.note_login(user["id"], ip, agent)
+            except Exception:  # noqa: BLE001 -- never stand between a person and their login
+                log.exception("could not record the sign-in of %s", user.get("login"))
+                return
+            if not new:
+                return
+            log.info("sign-in to %s from a new address %s", user.get("login"), ip)
+            when = time.time()
+
+            def send():
+                try:
+                    _send_new_login_email(auth, smtp_cfg, user, ip, agent, when)
+                except Exception:  # noqa: BLE001
+                    log.exception("new sign-in email to %s failed", user.get("login"))
+            import threading
+            threading.Thread(target=send, name="mikromon-new-login",
+                             daemon=True).start()
+
         def _post_login(self):
             flat, _ = self._form()
             # Accept either an email or a (legacy) username as the identifier.
             ident = flat.get("email", "") or flat.get("username", "")
-            user = auth.verify(ident, flat.get("password", ""))
+            user = auth.verify(ident, flat.get("password", ""),
+                               ip=self._client_address())
             if not user:
                 time.sleep(0.5)  # mild brute-force friction
                 return self._redirect("/login?error=1")
@@ -16664,6 +16917,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                   "text/html; charset=utf-8",
                                   {"Cache-Control": "no-store"})
             token = sessions.create(user["login"])
+            self._signed_in(user)
             return self._redirect("/dashboard", self._cookie_header(token))
 
         def _post_login_2fa(self):
@@ -16677,6 +16931,34 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             if not p:
                 return self._redirect("/login?error=2")
             login = p["login"]
+            from .auth import address_group
+            here = (login, address_group(self._client_address()))
+            now = time.time()
+            with _twofa_lock:
+                for k in (here, login):
+                    kept = [t for t in _twofa_fails.get(k, ()) if now - t < _TWOFA_WINDOW]
+                    if kept:
+                        _twofa_fails[k] = kept
+                    else:
+                        _twofa_fails.pop(k, None)
+                n_here = len(_twofa_fails.get(here, ()))
+                n_all = len(_twofa_fails.get(login, ()))
+                over = n_here >= _TWOFA_ADDR_MAX or n_all >= _TWOFA_LOGIN_MAX
+                if not over:
+                    # Counted now, before the check, and taken back if the
+                    # code is right: guesses sent in parallel cannot all slip
+                    # under the limit together.
+                    for k in (here, login):
+                        _twofa_fails.setdefault(k, []).append(now)
+                    while len(_twofa_fails) > 20000:
+                        _twofa_fails.pop(next(iter(_twofa_fails)))
+            if over:
+                # Starting over with the password again buys no more guesses.
+                sessions.end_2fa(pending)
+                log.warning("two-factor sign-in: %s has had too many wrong "
+                            "codes in %d minutes; refused for now", login,
+                            _TWOFA_WINDOW // 60)
+                return self._redirect("/login?error=3")
             try:
                 before = auth.totp_recovery_left(login)
                 ok = auth.totp_check(login, flat.get("code", ""))
@@ -16696,7 +16978,15 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                              "shows now."),
                     "text/html; charset=utf-8", {"Cache-Control": "no-store"})
             sessions.end_2fa(pending)
+            with _twofa_lock:
+                _twofa_fails.pop(here, None)
+                mine = _twofa_fails.get(login) or []
+                if now in mine:
+                    mine.remove(now)          # this one was right after all
             token = sessions.create(login)
+            signed = auth.get_user(login)
+            if signed:
+                self._signed_in(signed)
             left = auth.totp_recovery_left(login)
             if left < before:
                 return self._redirect("/account?ok=" + quote(

@@ -58,6 +58,20 @@ class PushApi:
         except Exception as exc:  # noqa: BLE001 — normalize to PushError
             raise PushError(f"read {'/'.join(path)} failed: {exc}") from exc
 
+    def ping_rows(self, **params) -> list:
+        """Run /ping on the router (address=, count=, interface=,
+        src-address=, ...) and return its rows; the last one has the totals.
+        Raises PushError with the router's own words when it refuses -- no
+        "test" permission, an unknown interface -- because those words are
+        what tells a refused ping from a line that does not answer."""
+        api = self.device.api
+        if api is None:
+            raise PushError("not connected")
+        try:
+            return list(api.path("ping")("", **params))
+        except Exception as exc:  # noqa: BLE001 — normalize to PushError
+            raise PushError(str(exc)) from exc
+
     def execute(self, op):
         """Carry out one Operation. Returns the new id for an 'add'."""
         api = self.device.api

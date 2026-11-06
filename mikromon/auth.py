@@ -125,6 +125,21 @@ class AuthError(Exception):
     pass
 
 
+def address_group(ip: str) -> str:
+    """The unit an address is counted in for login limits: an IPv4 address
+    itself, an IPv6 address's /64. One home or office gets a whole /64 and
+    can use a fresh address from it for every try, so counting single IPv6
+    addresses would let one machine dodge every per-address limit."""
+    ip = (ip or "").strip()
+    if ":" not in ip:
+        return ip
+    import ipaddress
+    try:
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    except ValueError:
+        return ip
+
+
 class AuthStore:
     # Settings holding a password or a key: sealed at rest (vault.py).
     _SEALED_SETTINGS = frozenset({"smtp", "yoco", "ai", "nextdns",
@@ -135,11 +150,22 @@ class AuthStore:
         self._dir = os.path.dirname(os.path.abspath(path))
         self._lock = threading.Lock()
         self._login_fails: dict = {}
+        self._acct_fails: dict = {}      # login -> [failure times]
+        self._ip_fails: dict = {}        # address -> [failure times]
         self.db = sqlite3.connect(path, check_same_thread=False)
         # WAL avoids "database is locked" when the engine thread reads while
         # the web thread writes.
         self.db.execute("PRAGMA journal_mode=WAL")
         self._ensure_schema()
+        # Where each login has signed in from: a sign-in from an address it
+        # has never used is emailed to its owner, and an address it has used
+        # is never locked out by somebody else's guessing.
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS login_history ("
+            "user_id INTEGER NOT NULL, ip TEXT NOT NULL, agent TEXT NOT NULL "
+            "DEFAULT '', first REAL NOT NULL, last REAL NOT NULL, "
+            "count INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (user_id, ip))")
+        self.db.commit()
 
     # ----- schema / migration ----------------------------------------------
     def _columns(self, table: str) -> list:
@@ -1346,47 +1372,84 @@ class AuthStore:
             self.db.commit()
             return cur.rowcount > 0
 
-    # Brute-force throttle: after this many consecutive failures for one
-    # login identifier, further attempts are rejected for the lockout window.
+    # Brute-force throttle, three ways, so that guessing is slow and a
+    # stranger cannot lock the owner out:
+    #   one login from one address   8 wrong passwords -> 5 minutes off
+    #   one login from anywhere      40 in 15 minutes -> off for addresses it
+    #                                has never signed in from (a botnet
+    #                                guessing one account; the owner, from
+    #                                an address they have used, still gets in)
+    #   one address, any logins      30 in 15 minutes -> that address is off
+    #                                (one machine trying many accounts)
     _MAX_FAILURES = 8
     _LOCKOUT_S = 300
+    _WINDOW_S = 900
+    _ACCOUNT_MAX = 40
+    _IP_MAX = 30
+    _TRACK_MAX = 20000               # entries kept per table, oldest dropped
 
-    def _login_locked(self, ident: str) -> bool:
+    def _recent(self, table: dict, key, now: float) -> list:
+        times = [t for t in table.get(key, ()) if now - t < self._WINDOW_S]
+        if times:
+            table[key] = times
+        else:
+            table.pop(key, None)
+        return times
+
+    def _login_locked(self, ident: str, ip: str = "",
+                      user_id: int | None = None, known: str = "") -> bool:
+        now = time.time()
         with self._lock:
-            rec = self._login_fails.get(ident)
-            if not rec:
-                return False
-            if rec["until"] and rec["until"] > time.time():
+            rec = self._login_fails.get((ident, ip))
+            if rec and rec["until"]:
+                if rec["until"] > now:
+                    return True
+                self._login_fails.pop((ident, ip), None)   # expired: fresh start
+            if ip and len(self._recent(self._ip_fails, ip, now)) >= self._IP_MAX:
                 return True
-            if rec["until"]:  # lockout expired — start fresh
-                self._login_fails.pop(ident, None)
-            return False
+            if len(self._recent(self._acct_fails, ident, now)) < self._ACCOUNT_MAX:
+                return False
+        known = known or ip
+        return not (user_id is not None and known
+                    and self.known_login_ip(user_id, known))
 
-    def _note_login_result(self, ident: str, ok: bool) -> None:
+    def _note_login_result(self, ident: str, ok: bool, ip: str = "") -> None:
+        now = time.time()
         with self._lock:
             if ok:
-                self._login_fails.pop(ident, None)
+                self._login_fails.pop((ident, ip), None)
                 return
-            rec = self._login_fails.setdefault(ident, {"n": 0, "until": 0.0})
+            rec = self._login_fails.setdefault((ident, ip), {"n": 0, "until": 0.0})
             rec["n"] += 1
             if rec["n"] >= self._MAX_FAILURES:
-                rec["until"] = time.time() + self._LOCKOUT_S
+                rec["until"] = now + self._LOCKOUT_S
                 rec["n"] = 0
+            self._acct_fails.setdefault(ident, []).append(now)
+            if ip:
+                self._ip_fails.setdefault(ip, []).append(now)
+            for table in (self._login_fails, self._acct_fails, self._ip_fails):
+                while len(table) > self._TRACK_MAX:
+                    table.pop(next(iter(table)))
 
-    def verify(self, identifier: str, password: str) -> dict | None:
+    def verify(self, identifier: str, password: str,
+               ip: str = "") -> dict | None:
+        """The user, if the password is right and this login is not locked
+        out for `ip` (the address the attempt comes from)."""
         ident = (identifier or "").strip().lower()
-        if self._login_locked(ident):
+        known = (ip or "").strip()           # the address itself, for "signed in from here before"
+        ip = address_group(known)            # what the limits count
+        user = self.get_user(identifier)
+        if self._login_locked(ident, ip, user["id"] if user else None, known):
             # Burn comparable time so a lockout is not a timing oracle.
             hash_password(password)
             return None
-        user = self.get_user(identifier)
         if not user:
             # Spend ~equal time to reduce account enumeration via timing.
             hash_password(password)
-            self._note_login_result(ident, False)
+            self._note_login_result(ident, False, ip)
             return None
         if _verify(password, user["salt"], user["pw_hash"], user["iterations"]):
-            self._note_login_result(ident, True)
+            self._note_login_result(ident, True, ip)
             # First person ever to log in becomes the platform superadmin
             # (or, if a bootstrap email is configured, only that email does).
             if (not user["is_superadmin"] and not self._has_superadmin()
@@ -1394,8 +1457,51 @@ class AuthStore:
                         user["id"], user.get("email") or "")):
                 user["is_superadmin"] = True
             return user
-        self._note_login_result(ident, False)
+        self._note_login_result(ident, False, ip)
         return None
+
+    # ----- where people sign in from ---------------------------------------------
+    def known_login_ip(self, user_id: int, ip: str) -> bool:
+        return self.db.execute(
+            "SELECT 1 FROM login_history WHERE user_id = ? AND ip = ?",
+            (int(user_id), ip)).fetchone() is not None
+
+    def note_login(self, user_id: int, ip: str, agent: str = "",
+                   now: float | None = None) -> bool:
+        """Remember a successful sign-in. True when it came from an address
+        this login has never used before -- but not for its very first
+        sign-in, which has nothing to be compared with."""
+        now = time.time() if now is None else now
+        ip = (ip or "").strip()[:64]
+        if not ip:
+            return False
+        with self._lock:
+            seen_any = self.db.execute(
+                "SELECT 1 FROM login_history WHERE user_id = ? LIMIT 1",
+                (int(user_id),)).fetchone() is not None
+            self.db.execute(
+                "INSERT INTO login_history (user_id, ip, agent, first, last) "
+                "VALUES (?,?,?,?,?) ON CONFLICT(user_id, ip) DO UPDATE SET "
+                "last = excluded.last, agent = excluded.agent, "
+                "count = count + 1",
+                (int(user_id), ip, (agent or "")[:300], now, now))
+            fresh = self.db.execute(
+                "SELECT count FROM login_history WHERE user_id = ? AND ip = ?",
+                (int(user_id), ip)).fetchone()[0] == 1
+            # The 50 most recent addresses per login are enough.
+            self.db.execute(
+                "DELETE FROM login_history WHERE user_id = ? AND ip NOT IN "
+                "(SELECT ip FROM login_history WHERE user_id = ? "
+                "ORDER BY last DESC LIMIT 50)", (int(user_id), int(user_id)))
+            self.db.commit()
+        return seen_any and fresh
+
+    def login_history(self, user_id: int, limit: int = 10) -> list:
+        """Most recent first: {"ip", "agent", "first", "last", "count"}."""
+        return [{"ip": r[0], "agent": r[1], "first": r[2], "last": r[3],
+                 "count": r[4]} for r in self.db.execute(
+            "SELECT ip, agent, first, last, count FROM login_history WHERE "
+            "user_id = ? ORDER BY last DESC LIMIT ?", (int(user_id), int(limit)))]
 
     def list_orgs_summary(self) -> list:
         """All orgs with their owner email — for the superadmin panel."""

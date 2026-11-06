@@ -127,6 +127,41 @@ alerts = poll(0, T0 + 180)
 check("the second answered poll says the internet is back",
       len(alerts) == 1 and alerts[0].recovery)
 
+print("A backup line standing by")
+from mikromon.config import WanEndpoint  # noqa: E402
+
+TWO = [WanEndpoint(interface="ether1", gateway="41.0.0.1", name="Fibre"),
+       WanEndpoint(interface="ether2", gateway="10.0.0.1", name="LTE")]
+
+
+def backup_state(backup_route):
+    seen = {}
+    routes = [{"dst-address": "0.0.0.0/0", "gateway": "41.0.0.1", "distance": "1",
+               "active": "true", "gateway-status": "41.0.0.1 reachable via ether1"},
+              dict({"dst-address": "0.0.0.0/0", "gateway": "10.0.0.1", "distance": "2"},
+                   **backup_route)]
+    snap = NS(errors={}, handle=Handle(0), rows=lambda n: routes if n == "route" else [])
+    dev = NS(check_enabled=lambda k: k in ("wan_failover", "internet_down"),
+             wan=NS(links=TWO, ping_targets=[]))
+    ctx = NS(store=NS(data={}), device="r1", now=T0, memory=lambda ns: {"answered": T0},
+             transition=lambda key, healthy, **kw: seen.update({key: healthy}))
+    WanCheck().run(snap, dev, ctx)
+    return seen.get("wan_link:1")
+
+
+check("RouterOS marks only the route in use 'active': a healthy backup is not DOWN",
+      backup_state({"active": "false", "gateway-status": "10.0.0.1 reachable via ether2"}) is True)
+check("...on RouterOS 7 too, where an unusable route is flagged 'inactive'",
+      backup_state({"active": "false", "inactive": "false",
+                    "gateway-status": "10.0.0.1 reachable via ether2"}) is True)
+check("a backup whose gateway does not answer is DOWN",
+      backup_state({"active": "false", "gateway-status": "10.0.0.1 unreachable"}) is False)
+check("...and one RouterOS 7 has flagged inactive",
+      backup_state({"active": "false", "inactive": "true",
+                    "gateway-status": "10.0.0.1 reachable via ether2"}) is False)
+check("...and one that is switched off",
+      backup_state({"disabled": "true", "gateway-status": "10.0.0.1 reachable via ether2"}) is False)
+
 print()
 print("FAILED: " + ", ".join(FAILS) if FAILS else "ALL WAN PROBE TESTS PASSED")
 sys.exit(1 if FAILS else 0)
