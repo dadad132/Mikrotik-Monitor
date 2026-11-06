@@ -314,18 +314,22 @@ class Device:
                       "/".join(path), cmd, exc)
             return False, str(exc) or exc.__class__.__name__
 
-    def ping(self, address: str, count: int = 3):
+    def ping(self, address: str, count: int = 3, interval: str = ""):
         """Best-effort ICMP ping FROM the router. Returns packet-loss % or None.
 
-        Used only to enrich the 'why' of an internet-down alert. Any failure
-        (older API, permissions, command shape) degrades silently to None.
+        Used to tell a line that is up from one that reaches the internet
+        (checks/wan.py). Any failure (older API, an API user without the
+        "test" policy, command shape) degrades silently to None. `interval`
+        ("300ms") shortens the wait between packets, so a probe on every poll
+        costs well under a second on a working line.
         """
         from .util import as_int
 
+        params = {"address": str(address), "count": str(count)}
+        if interval:
+            params["interval"] = str(interval)
         try:
-            rows = list(self.api.path("ping")(
-                "", address=str(address), count=str(count)
-            ))
+            rows = list(self.api.path("ping")("", **params))
         except Exception:  # noqa: BLE001
             return None
         if not rows:

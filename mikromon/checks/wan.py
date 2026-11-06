@@ -16,6 +16,7 @@ config produces friendlier messages and lets you pin which link is primary.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 
 from ..alert import Severity
@@ -23,6 +24,11 @@ from ..util import as_bool, as_int
 from .base import Check
 
 _DEFAULT_DST = ("0.0.0.0/0", "0.0.0.0/0%main")
+log = logging.getLogger(__name__)
+# A ping with no answer only means "no internet" on a router whose pings have
+# been answered before, recently. A router whose firewall (or ISP) drops ICMP
+# never answers at all, and must not be called down for it.
+_PROBE_TRUST_SECONDS = 30 * 86400
 
 
 def _norm_iface(s) -> str:
@@ -370,19 +376,54 @@ class WanCheck(Check):
             down = not active
             cause = ""
             facts = {}
-            if down:
+            # A gateway that answers ARP keeps its route "active" when the
+            # ISP behind it is dead (modem up, no internet): green on the
+            # dashboard, no internet for the users. So a route is not proof;
+            # ask the router to reach something real.
+            title = "Internet DOWN — all WAN uplinks unreachable"
+            if active:
+                mem = ctx.memory("internet_probe")
+                loss, lost_to = self._probe(dev, snap, count=2, interval="300ms")
+                if loss is None:
+                    # Could not ping at all (an API user without the "test"
+                    # policy, an old RouterOS): not knowing is not "down".
+                    facts["internet_probe"] = "unavailable"
+                    if not mem.get("unavailable_logged"):
+                        mem["unavailable_logged"] = True
+                        log.info("%s: cannot ping from the router, so a dead "
+                                 "ISP behind a working modem will not be seen",
+                                 ctx.device)
+                else:
+                    mem.pop("unavailable_logged", None)
+                    facts["ping_packet_loss_pct"] = loss
+                    if loss < 100:
+                        mem["answered"] = ctx.now
+                    elif ctx.now - float(mem.get("answered") or 0) <= _PROBE_TRUST_SECONDS:
+                        down = True
+                        title = ("Internet DOWN — the line is up but nothing "
+                                 "gets through")
+                        cause = ("The router still has an active internet "
+                                 "route, so the line looks up, but it cannot "
+                                 "reach the internet through it: no answer "
+                                 "from " + ", ".join(lost_to) + ". The fault "
+                                 "is usually the ISP or the modem. (If "
+                                 "this router's firewall was just changed "
+                                 "to block pings, that would look the same.)")
+                    else:
+                        facts["internet_probe"] = ("no ping has ever been "
+                                                   "answered here; not used")
+            if down and not cause:
                 statuses = [f"{r.get('gateway', '?')}: "
                             f"{r.get('gateway-status', 'no status')}"
                             for r in sorted(defaults, key=by_distance)]
                 cause = "All WAN gateways are unreachable — " + "; ".join(statuses)
-                loss = self._probe(dev, snap)
+                loss, _ = self._probe(dev, snap)
                 if loss is not None:
                     facts["ping_packet_loss_pct"] = loss
                     cause += f". Active ping test from router: {loss}% packet loss."
             ctx.transition(
                 "internet_down", healthy=not down, severity=Severity.CRITICAL,
-                title="Internet DOWN — all WAN uplinks unreachable",
-                cause=cause, facts=facts,
+                title=title, cause=cause, facts=facts,
                 recovery_title="Internet restored — a WAN uplink is reachable again",
             )
             if down:
@@ -457,14 +498,31 @@ class WanCheck(Check):
             recovery_detail=f"Traffic is flowing via {_label(current)} again.",
         )
 
-    @staticmethod
-    def _probe(dev, snap):
-        """Optional active ping enrichment for internet-down alerts."""
-        targets = getattr(dev.wan, "ping_targets", None)
-        if not targets or snap.handle is None:
-            return None
-        for target in targets:
-            loss = snap.handle.ping(target, count=3)
-            if loss is not None:
-                return loss
-        return None
+    _DEFAULT_TARGETS = ("1.1.1.1", "8.8.8.8")
+
+    @classmethod
+    def _targets(cls, dev):
+        return list(getattr(dev.wan, "ping_targets", None) or cls._DEFAULT_TARGETS)
+
+    @classmethod
+    def _probe(cls, dev, snap, count=3, interval=""):
+        """Active ping from the router: (lowest packet loss over the targets,
+        the targets that did not answer at all). The loss is None when no
+        ping could be run. One target answering is enough: one that is
+        blocked does not condemn a working line."""
+        if snap.handle is None:
+            return None, []
+        best, lost_to = None, []
+        for target in cls._targets(dev):
+            if interval:
+                loss = snap.handle.ping(target, count=count, interval=interval)
+            else:
+                loss = snap.handle.ping(target, count=count)
+            if loss is None:
+                continue
+            if loss >= 100:
+                lost_to.append(target)
+            best = loss if best is None else min(best, loss)
+            if best < 100:
+                break
+        return best, lost_to

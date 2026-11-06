@@ -167,6 +167,27 @@ def _device_view(store, state, name) -> dict:
             "_conditions": conditions}
 
 
+def safe_location(location, *, external: bool = False) -> str:
+    """Where a redirect may send the browser: a page of this site, or -- only
+    with `external`, for the payment page whose address Yoco's own API just
+    returned -- an https address. Anything else becomes "/".
+
+    Browsers drop tabs and line breaks from a Location and read a backslash
+    as a slash, so "/<tab>/evil.example" would be "//evil.example" and a line
+    break would start a header of its own: any control character, space or
+    backslash is refused outright."""
+    location = str(location or "/")
+    if any(c <= " " or c in "\x7f\\" for c in location):
+        return "/"
+    parts = urlparse(location)
+    if external:
+        return location if parts.scheme == "https" and parts.hostname else "/"
+    if (parts.scheme or parts.netloc or not location.startswith("/")
+            or location.startswith("//")):
+        return "/"
+    return location
+
+
 def _known_devices(store, state) -> list:
     return sorted(set(store.devices()) | set(state.get("devices", {}).keys()))
 
@@ -9076,7 +9097,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 with open(path, "rb") as fh:
                     shutil.copyfileobj(fh, self.wfile, length=1024 * 1024)
 
-        def _redirect(self, location, headers=None):
+        def _redirect(self, location, headers=None, *, external=False):
+            location = safe_location(location, external=external)
             self.send_response(303)
             self.send_header("Location", location)
             for k, v in (headers or {}).items():
@@ -16007,7 +16029,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     None, f"Card payment could not be started: {exc}"),
                     "text/html; charset=utf-8")
             billing.set_order_checkout(int(order["id"]), res.get("id", ""))
-            return self._redirect(res["redirectUrl"])
+            return self._redirect(res["redirectUrl"], external=True)
 
         def _checkout_owed(self, order, flat, user, cfg):
             """Send a company that has fallen behind to Yoco to pay the
@@ -16077,7 +16099,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             log.info("Yoco checkout %s: org %s pays its outstanding invoice "
                      "%s (R%.2f)", res.get("id"), user["org_id"], order["id"],
                      cents / 100)
-            return self._redirect(url)
+            return self._redirect(url, external=True)
 
         def _post_billing_checkout(self, flat, user):
             """Send an owner to Yoco to pay for a packet.
@@ -16190,7 +16212,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                      res.get("id"), org_id, plan["name"],
                      "pro rata to the 28th" if kind == "first" else "a month",
                      amount_cents / 100, order_id)
-            return self._redirect(url)
+            return self._redirect(url, external=True)
 
         def _post_yoco_webhook(self):
             """Yoco telling us a payment settled. The only thing we trust.
