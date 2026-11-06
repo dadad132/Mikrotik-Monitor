@@ -7725,6 +7725,7 @@ _WAN_TEST_STYLE = {
     "healthy":   ("#16a34a", "✓ This line works"),
     "attention": ("#d97706", "⚠ This line works, but something around it is wrong"),
     "failed":    ("#dc2626", "✗ Found the problem"),
+    "not_run":   ("#d97706", "⚠ The test could not be run"),
 }
 
 
@@ -7747,14 +7748,14 @@ def _wan_test_box(name, links, csrf) -> str:
                  f'</button></form></td></tr>')
     return (f'<div class="box" id="wan-test"><h2>Test a line</h2>'
             f'<p class="muted" style="margin:0 0 10px">The router pings the '
-            f'internet out of that one line, from its own address, whichever '
-            f'line it is using at the moment. If the line answers while the '
+            f'internet out of that one line, whichever line it is using at '
+            f'the moment. If the line answers while the '
             f'dashboard says it is offline, the router\'s setup for it is '
             f'checked and whatever is wrong is shown. Takes a few seconds. '
-            f'To send the ping out of that line the router is given a route '
-            f'of its own in a separate table that no other traffic uses, '
-            f'removed again straight after; nothing else on the router is '
-            f'changed. Lines are tested as saved above.</p>'
+            f'For some lines the router is given a temporary route of its own, '
+            f'which no other traffic uses, and which is removed again straight '
+            f'after; nothing else on the router is changed. Lines are tested '
+            f'as saved above.</p>'
             f'<div style="overflow-x:auto"><table><thead><tr><th>Line</th>'
             f'<th>Interface</th><th></th></tr></thead><tbody>{rows}</tbody>'
             f'</table></div></div>')
@@ -13929,7 +13930,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                              cfg.wan.ping_targets or None)
                     findings = wantest.diagnose_line(
                         api.fetch, links, idx, shown_offline=shown_offline,
-                        ping_ok=test["ok"], source=test["source"])
+                        ping_ok=test["ok"], source=test["source"],
+                        ran=test["ran"], weak=test["weak"], reason=test["reason"])
                 except (DeviceError, PushError) as exc:
                     err = str(exc)[:200]
             finally:

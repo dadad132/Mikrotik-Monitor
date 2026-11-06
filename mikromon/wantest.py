@@ -27,12 +27,22 @@ from .push.plan import Operation
 
 TARGETS = ("1.1.1.1", "8.8.8.8")
 TAG = "mikromon:failover:"
-# A ping is sent out of one line by a route of its own in a routing table
-# nothing else uses, removed again straight after. ("interface=" alone does
-# not do it: on an Ethernet line the router then looks for the internet
-# address on the cable itself instead of going through the line's gateway.)
+# How a ping is sent out of one line, by RouterOS version and kind of line:
+#   PPPoE and other point-to-point lines: out of the interface. Reliable on
+#     every version, and nothing on the router changes.
+#   Ethernet lines on RouterOS 7: out of the interface first; if nothing
+#     answers, confirmed through a temporary VRF that holds one route via the
+#     line's gateway (RouterOS 7's ping has no routing-table option; only
+#     vrf=). The VRF's answer is the one believed.
+#   Ethernet lines on RouterOS 6: a temporary route with a routing mark,
+#     pinged with routing-table= (out of the interface alone times out there).
+# Every temporary route and VRF carries TEST_TAG and is removed straight
+# after, or at the start of the next test if one was ever left behind.
 TEST_TABLE = "mikromon-linetest"
+TEST_VRF = TEST_TABLE
 TEST_TAG = "mikromon:linetest"
+_UNSUPPORTED = ("unknown parameter", "no such command", "expected end of command",
+                "bad command name")
 BUDGET_SECONDS = 20.0
 
 
@@ -58,6 +68,9 @@ def _ms(value) -> float | None:
 def explain_trap(text: str, interface: str = "") -> str:
     """The router's refusal, in words a person can act on."""
     low = (text or "").lower()
+    if any(k in low for k in _UNSUPPORTED):
+        return (f"This RouterOS version does not accept that way of pinging "
+                f"({text[:80]}).")
     if "permission" in low or "not enough" in low:
         return ("The router's login used by this website is not allowed to "
                 "run ping (it needs the \"test\" permission). Add it to that "
@@ -75,13 +88,16 @@ def explain_trap(text: str, interface: str = "") -> str:
 
 
 def ping_via(api, address: str, *, interface: str = "", src_address: str = "",
-             routing_table: str = "", count: int = 3, interval: str = "300ms") -> dict:
+             routing_table: str = "", vrf: str = "", count: int = 3,
+             interval: str = "300ms") -> dict:
     """Ping `address` from the router, out of `interface` and from
-    `src_address`. Returns {"address", "interface", "src_address", "sent",
-    "received", "loss", "avg_ms", "error"}; `error` is set (and loss None)
-    when the router would not run the ping at all."""
+    `src_address` (or in a routing table, or a VRF). Returns {"address",
+    "interface", "src_address", "sent", "received", "loss", "avg_ms",
+    "error", "raw"}; `error` is set (and loss None) when the router would not
+    run the ping at all, and `raw` holds the router's own words."""
     out = {"address": address, "interface": interface, "src_address": src_address,
-           "sent": 0, "received": 0, "loss": None, "avg_ms": None, "error": ""}
+           "sent": 0, "received": 0, "loss": None, "avg_ms": None, "error": "",
+           "raw": ""}
     params = {"address": address, "count": str(count), "interval": interval}
     if interface:
         params["interface"] = interface
@@ -89,9 +105,12 @@ def ping_via(api, address: str, *, interface: str = "", src_address: str = "",
         params["src-address"] = src_address
     if routing_table:
         params["routing-table"] = routing_table
+    if vrf:
+        params["vrf"] = vrf
     try:
         rows = list(api.ping_rows(**params))
     except Exception as exc:  # noqa: BLE001 -- the router's words are the evidence
+        out["raw"] = str(exc)[:200]
         out["error"] = explain_trap(str(exc), interface)
         return out
     summary = next((r for r in reversed(rows) if "sent" in r), None)
@@ -204,101 +223,171 @@ def _major(fetch) -> int:
     return int(head) if head.isdigit() else 0
 
 
-def _cleanup(api, major: int, table_added: bool = False) -> None:
-    """Remove the test's route (and, on RouterOS 7, its table) -- this run's,
-    or one a broken earlier run left behind."""
+def _remove(api, path, rid) -> None:
+    try:
+        api.execute(Operation("remove", path, {".id": rid}))
+    except Exception:  # noqa: BLE001 -- the next test tries again
+        pass
+
+
+def _cleanup(api) -> None:
+    """Remove what a test puts on the router -- this run's, or what a broken
+    earlier run left: the route first, then the VRF it is in, then the
+    routing table the first version of this test made on RouterOS 7. Only
+    things carrying the test's own tag or name are touched."""
     for r in _safe(api.fetch, ("ip", "route")):
         if r.get("comment") == TEST_TAG and r.get(".id"):
-            try:
-                api.execute(Operation("remove", ("ip", "route"), {".id": r[".id"]}))
-            except Exception:  # noqa: BLE001 -- the next test tries again
-                pass
-    if major >= 7 or major == 0:
-        for t in _safe(api.fetch, ("routing", "table")):
-            if t.get("name") == TEST_TABLE and t.get(".id") \
-                    and (table_added or t.get("comment") == TEST_TAG):
-                try:
-                    api.execute(Operation("remove", ("routing", "table"),
-                                          {".id": t[".id"]}))
-                except Exception:  # noqa: BLE001
-                    pass
+            _remove(api, ("ip", "route"), r[".id"])
+    for v in _safe(api.fetch, ("ip", "vrf")):
+        # Ours: tagged -- or, where the router would not take the tag, our
+        # name with no comment and no interfaces, as the test makes it.
+        ours = v.get("comment") == TEST_TAG or (
+            v.get("name") == TEST_VRF and not v.get("comment")
+            and str(v.get("interfaces", "") or "none").lower() in ("none", ""))
+        if ours and v.get(".id"):
+            _remove(api, ("ip", "vrf"), v[".id"])
+    for t in _safe(api.fetch, ("routing", "table")):
+        if t.get("name") == TEST_TABLE and t.get("comment") == TEST_TAG and t.get(".id"):
+            _remove(api, ("routing", "table"), t[".id"])
 
 
-def _add_test_route(api, major: int, gateway: str) -> str:
-    """Put this line's route in the test's own table. Returns "" when done,
-    else why not."""
+def _add(api, path, params) -> str:
+    """Add a row; "" when done, else the router's reason. A router that does
+    not take a comment on this menu gets the row without one."""
     try:
-        if major >= 7 or major == 0:
-            if not any(t.get("name") == TEST_TABLE
-                       for t in _safe(api.fetch, ("routing", "table"))):
-                api.execute(Operation("add", ("routing", "table"),
-                                      {"name": TEST_TABLE, "fib": "yes",
-                                       "comment": TEST_TAG}))
-            field = "routing-table"
-        else:
-            field = "routing-mark"
-        api.execute(Operation("add", ("ip", "route"),
-                              {"dst-address": "0.0.0.0/0", "gateway": gateway,
-                               field: TEST_TABLE, "comment": TEST_TAG}))
+        api.execute(Operation("add", path, params))
         return ""
     except Exception as exc:  # noqa: BLE001
-        return str(exc)[:200]
+        why = str(exc)[:200]
+    if "comment" in params and "comment" in why.lower():
+        rest = {k: v for k, v in params.items() if k != "comment"}
+        try:
+            api.execute(Operation("add", path, rest))
+            return ""
+        except Exception as exc:  # noqa: BLE001
+            why = str(exc)[:200]
+    return why
+
+
+def _setup(api, method: str, gateway: str) -> str:
+    """Put the temporary route (and on RouterOS 7, its VRF) on the router.
+    Returns "" when done, else why not."""
+    if method == "mark":
+        return _add(api, ("ip", "route"), {"dst-address": "0.0.0.0/0", "gateway": gateway,
+                                           "routing-mark": TEST_TABLE, "comment": TEST_TAG})
+    why = _add(api, ("ip", "vrf"), {"name": TEST_VRF, "interfaces": "none",
+                                    "comment": TEST_TAG})
+    if why:
+        return why
+    # The gateway is reached in the main table ("@main"); a version that does
+    # not take that form gets the plain address.
+    for gw in dict.fromkeys((gateway if "@" in gateway else f"{gateway}@main", gateway)):
+        why = _add(api, ("ip", "route"), {"dst-address": "0.0.0.0/0", "gateway": gw,
+                                          "routing-table": TEST_VRF, "comment": TEST_TAG})
+        if not why:
+            return ""
+    return why
+
+
+def _methods(source: dict, major: int, gateway: str) -> list:
+    """The ways to try, in order: see the comment at the top."""
+    if source.get("kind") == "ppp" or not gateway:
+        return ["interface"]
+    if 0 < major < 7:
+        return ["mark"]
+    if major >= 7:
+        return ["interface", "vrf"]
+    return ["interface", "vrf", "mark"]          # version unknown: every way
+
+
+def _unsupported(r: dict) -> bool:
+    return any(k in (r.get("raw") or "").lower() for k in _UNSUPPORTED)
 
 
 def test_line(api, ep, targets=None, *, clock=time.monotonic) -> dict:
     """Ping the internet through one line, stopping at the first answer.
-    Returns {"source": pick_source(), "gateway", "via": "route"|"interface",
-    "note", "tried": [ping_via() ...], "ok": bool}.
 
-    The ping goes out by a route of the test's own, in a table nothing else
-    uses, which is removed again afterwards -- the only router change, and
-    it touches no traffic. Where that route cannot be added, the router is
-    asked to ping out of the interface instead, which is reliable for a
-    PPPoE line and only a hint for an Ethernet one (said in `note`)."""
+    Returns {"source": pick_source(), "gateway", "method": the way that
+    answered (or the last tried), "via": "route"|"interface", "tried": [ping
+    results, each with its "method"], "ok": something answered, "ran": at
+    least one ping was actually sent, "weak": only a way that can miss on
+    an Ethernet line was used, "reason": why nothing ran, "note"}."""
     source = pick_source(api.fetch, ep)
-    out = {"source": source, "gateway": "", "via": "", "note": "", "tried": [],
-           "ok": False}
+    out = {"source": source, "gateway": "", "method": "", "via": "", "note": "",
+           "tried": [], "ok": False, "ran": False, "weak": False, "reason": ""}
     if not source["interface"]:
+        out["reason"] = source.get("problem") or "No way out of this line was found."
         return out
-    gateway = _line_gateway(api.fetch, ep, source)
+    gateway = _line_gateway(api.fetch, ep, source) if source.get("kind") != "ppp" else ""
     out["gateway"] = gateway
-    major = _major(api.fetch)
-    table = ""
-    if gateway:
-        _cleanup(api, major)
-        why = _add_test_route(api, major, gateway)
-        if why:
-            out["note"] = (f"The test route could not be added ({why}), so the "
-                           f"router was asked to ping out of {source['interface']} "
-                           f"instead; on an Ethernet line that may fail even when "
-                           f"the line works.")
-        else:
-            table = TEST_TABLE
-    else:
-        out["note"] = ("No gateway was found for this line, so the router was "
-                       f"asked to ping out of {source['interface']} instead; on "
-                       f"an Ethernet line that may fail even when the line works.")
-    out["via"] = "route" if table else "interface"
+    chain = _methods(source, _major(api.fetch), gateway)
+    if any(m != "interface" for m in chain):
+        _cleanup(api)
+    targets = list(targets) if targets else list(TARGETS)
     deadline = clock() + BUDGET_SECONDS
-    try:
-        for target in (list(targets) if targets else list(TARGETS)):
-            if clock() > deadline:
-                break
-            if table:
-                r = ping_via(api, target, src_address=source["src_address"],
-                             routing_table=table)
-            else:
-                r = ping_via(api, target, interface=source["interface"],
-                             src_address=source["src_address"])
-            out["tried"].append(r)
-            if r["received"] > 0:
-                break
-            if r["error"] and "permission" in r["error"]:
-                break                      # the next target will be refused too
-    finally:
-        if table:
-            _cleanup(api, major, table_added=True)
+    setup_failed = []
+    for method in chain:
+        if clock() > deadline:
+            break
+        if method != "interface":
+            why = _setup(api, method, gateway)
+            if why:
+                setup_failed.append(why)
+                _cleanup(api)
+                continue
+        results = []
+        try:
+            for target in targets:
+                if clock() > deadline:
+                    break
+                if method == "interface":
+                    r = ping_via(api, target, interface=source["interface"],
+                                 src_address=source["src_address"])
+                elif method == "vrf":
+                    # No source address: inside the VRF the router picks it
+                    # from the route, and a local address is not "in" it.
+                    r = ping_via(api, target, vrf=TEST_VRF)
+                else:
+                    r = ping_via(api, target, src_address=source["src_address"],
+                                 routing_table=TEST_TABLE)
+                r["method"] = method
+                results.append(r)
+                if r["received"] > 0:
+                    break
+                if r["error"] and ("permission" in r["error"] or _unsupported(r)):
+                    break                  # another target will be refused the same way
+        finally:
+            if method != "interface":
+                _cleanup(api)
+        out["tried"] += results
+        out["method"] = method
+        if any(r["received"] > 0 for r in results):
+            break
+        if any(r["error"] and "permission" in r["error"] for r in results):
+            break                          # no way of pinging is allowed at all
     out["ok"] = any(r["received"] > 0 for r in out["tried"])
+    ran = [r for r in out["tried"] if not r["error"]]
+    out["ran"] = bool(ran)
+    out["via"] = "route" if out["method"] in ("vrf", "mark") else "interface"
+    if not out["ran"]:
+        out["reason"] = (next((r["error"] for r in out["tried"] if r["error"]), "")
+                         or "; ".join(setup_failed) or "No way of pinging was possible.")
+    elif not out["ok"] and source.get("kind") != "ppp" \
+            and all(r["method"] in ("interface", "vrf") for r in ran):
+        # On an Ethernet line neither way can prove a line DEAD: out of the
+        # interface alone it can stay silent while the line works, and a
+        # RouterOS 7 VRF is not proven to get its answers back on every
+        # version. An answer is proof; silence here is only a strong hint.
+        out["weak"] = True
+        if any(r["method"] == "vrf" for r in ran):
+            out["note"] = ("Nothing answered either way it was tried. On an "
+                           "Ethernet line on RouterOS 7 that is a strong hint, "
+                           "not proof, that the line is down.")
+        else:
+            out["note"] = ("Pinged out of the interface only, which on an Ethernet "
+                           "line can fail while the line works"
+                           + (f"; the surer way could not be used ({setup_failed[0]})."
+                              if setup_failed else "."))
     return out
 
 
@@ -312,7 +401,8 @@ def _yes(value) -> bool:
 
 
 def diagnose_line(fetch, links, idx: int, *, shown_offline: bool, ping_ok: bool,
-                  source: dict | None = None) -> list:
+                  source: dict | None = None, ran: bool = True, weak: bool = False,
+                  reason: str = "") -> list:
     """Read the line's setup on the router and say what is wrong with it.
     Returns [{"level": "error"|"warn"|"ok", "code", "msg", "fix"}], errors
     first."""
@@ -503,7 +593,21 @@ def diagnose_line(fetch, links, idx: int, *, shown_offline: bool, ping_ok: bool,
                                      "uplinks list does not match this line on the "
                                      "router."),
                       ""))
-    if not ping_ok and not [x for x in out if x["level"] == "error"]:
+    if not ran:
+        # A ping that was never sent says nothing about the line.
+        out.append(_f("error", "test_not_run",
+                      f"The test could not be run on the router: {reason}",
+                      "This is not a fault on the line; the checks below are "
+                      "still right. Tell support, with this message."))
+    elif not ping_ok and weak and not [x for x in out if x["level"] == "error"]:
+        out.append(_f("warn", "test_weak",
+                      f"{label} did not answer, and nothing on the router "
+                      f"explains it. On this kind of line the test cannot be "
+                      f"completely sure, but most likely the modem or the ISP "
+                      f"is down.",
+                      "If users on this line have no internet, restart the "
+                      "modem, then call the ISP."))
+    elif not ping_ok and not [x for x in out if x["level"] == "error"]:
         out.append(_f("error", "isp_down",
                       f"{label} is set up correctly on the router, but nothing on "
                       f"the internet answers through it.",
@@ -516,35 +620,62 @@ def diagnose_line(fetch, links, idx: int, *, shown_offline: bool, ping_ok: bool,
 
 
 # ---- the report ---------------------------------------------------------------------------
-def report_from(test: dict, findings: list, label: str, shown_offline: bool) -> dict:
-    """{"status": "healthy"|"attention"|"failed", "steps": [{"level", "msg"}]},
-    the shape the tab's report box shows."""
-    steps = []
+def _way(test: dict, r: dict) -> str:
     src = test.get("source") or {}
-    way = (f" through {src.get('interface')}" if src.get("interface") else "") + \
-          (f" (from {src.get('src_address')}" if src.get("src_address") else "") + \
-          (f", via {test.get('gateway')})" if src.get("src_address") and test.get("via") == "route"
-           else ")" if src.get("src_address") else "")
+    method = r.get("method") or ("route" if test.get("via") == "route" else "interface")
+    if method == "interface":
+        return (f" out of {src.get('interface')}"
+                + (f" (from {src.get('src_address')})" if src.get("src_address") else ""))
+    return (f" through {src.get('interface')} by a temporary route via "
+            f"{test.get('gateway')}"
+            + (f" (from {src.get('src_address')})" if method == "mark"
+               and src.get("src_address") else ""))
+
+
+def report_from(test: dict, findings: list, label: str, shown_offline: bool) -> dict:
+    """{"status": "healthy"|"attention"|"failed"|"not_run", "steps": [{"level",
+    "msg"}]}, the shape the tab's report box shows."""
+    steps = []
+    ran = test.get("ran", True)
+    if not ran:
+        steps.append({"level": "error",
+                      "msg": f"The test could not be run, so it says nothing about "
+                             f"whether {label} works: {test.get('reason') or 'unknown reason'}"})
     if test.get("note"):
         steps.append({"level": "warn", "msg": test["note"]})
     for r in test.get("tried") or []:
         if r["error"]:
-            steps.append({"level": "error", "msg": f"Ping {r['address']}{way}: {r['error']}"})
+            steps.append({"level": "warn" if not ran or test.get("ok") else "error",
+                          "msg": f"Ping {r['address']}{_way(test, r)}: {r['error']}"})
             continue
         avg = f", average {r['avg_ms']:g} ms" if r["avg_ms"] is not None else ""
-        steps.append({"level": "ok" if r["received"] else "error",
-                      "msg": f"Ping {r['address']}{way}: {r['sent']} sent, "
-                             f"{r['received']} answered, {r['loss']}% lost{avg}."})
-    if not test.get("tried"):
-        steps.append({"level": "error",
-                      "msg": f"{label} could not be pinged: {src.get('problem') or 'no way out found'}"})
+        msg = (f"Ping {r['address']}{_way(test, r)}: {r['sent']} sent, "
+               f"{r['received']} answered, {r['loss']}% lost{avg}.")
+        if r["received"]:
+            level = "ok"
+        elif test.get("ok") and r.get("method") != test.get("method"):
+            # Silent out of the interface alone, then answered the surer
+            # way: normal for an Ethernet line, not a problem.
+            level = "ok"
+            msg += " (Normal for this kind of line; the next way answered.)"
+        elif test.get("ok") or test.get("weak"):
+            level = "warn"
+        else:
+            level = "error"
+        steps.append({"level": level, "msg": msg})
     steps.append({"level": "warn" if shown_offline else "ok",
                   "msg": f"The dashboard shows {label} as "
                          f"{'OFFLINE' if shown_offline else 'online'}."})
     for f in findings:
+        if f["code"] == "test_not_run":
+            continue                       # said first, above
         steps.append({"level": f["level"],
                       "msg": f["msg"] + (f" What to do: {f['fix']}" if f.get("fix") else "")})
     levels = {s["level"] for s in steps}
-    status = ("failed" if not test.get("ok") or "error" in levels
-              else "attention" if "warn" in levels else "healthy")
+    if not ran:
+        status = "not_run"
+    elif test.get("ok"):
+        status = "failed" if "error" in levels else "attention" if "warn" in levels else "healthy"
+    else:
+        status = "attention" if test.get("weak") and "error" not in levels else "failed"
     return {"status": status, "steps": steps}
