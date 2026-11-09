@@ -8049,26 +8049,29 @@ def _feature_titles() -> dict:
 
 
 def _safe_apply(pusher, plan, *, slug, device, hub_ip, safe, tracker,
-                user="", org_id=None) -> dict:
+                user="", org_id=None, no_backup=False) -> dict:
     """Send a committed change the safe way, and say what was armed.
 
     1. Take down any safe-mode timer an earlier, unconfirmed change left, so
        the backup below never contains one (a restored backup carrying a
        live timer would revert again on its own).
-    2. Back the router up. No backup, no change.
+    2. Back the router up. No backup, no change -- unless the flash has no
+       room for one and the reader said to go ahead without (`no_backup`):
+       then there is nothing to go back to, and no Safe mode either.
     3. Arm the timer -- BEFORE the change, so a change that cuts the
        connection while it is being sent is still undone.
     4. Send the change. If it fails part-way, apply() has rolled back what it
        could; the timer is then taken down again, unless the failure took the
        connection with it, in which case it is left to do its job.
 
-    Returns {"backup", "token", "mode"} ("token" is "" without safe mode).
+    Returns {"backup", "token", "mode", "no_backup"} ("token" is "" without
+    safe mode; "no_backup" is True when it went out without a backup).
     Raises PushError with a message that says whether anything changed.
     """
     from .push import PushError
 
     armed = _safe_arm(pusher, slug=slug, hub_ip=hub_ip,
-                      safe=safe, tracker=tracker)
+                      safe=safe, tracker=tracker, no_backup=no_backup)
     safe, backup = bool(armed["token"]), armed["backup"]
     token, mode = armed["token"], armed["mode"]
     try:
@@ -8097,16 +8100,21 @@ def _safe_apply(pusher, plan, *, slug, device, hub_ip, safe, tracker,
     return armed
 
 
-def _safe_arm(pusher, *, slug, hub_ip, safe, tracker) -> dict:
+def _safe_arm(pusher, *, slug, hub_ip, safe, tracker, no_backup=False) -> dict:
     """Steps 1-3 of _safe_apply: clear old timers, back up, arm a new one.
 
     Separate for the one writer that does not send a Plan (the WireGuard
     self-repair), which arms first and then decides for itself whether
-    anything changed. Returns {"backup", "token", "mode"}; "token" is "" when
-    no timer was armed. The caller registers the token with the watcher once
-    something has actually been sent.
+    anything changed. Returns {"backup", "token", "mode", "no_backup"};
+    "token" is "" when no timer was armed. The caller registers the token
+    with the watcher once something has actually been sent.
+
+    `no_backup` only matters when the flash is full (FlashFullError): the
+    change then goes out with no backup and no Safe mode, since the timer
+    works by loading that backup. With room on the flash a backup is made
+    as always.
     """
-    from .push import PushError
+    from .push import FlashFullError, PushError
     from .push.safemode import new_token
 
     # A timer nobody is watching reverts every change two minutes later, good
@@ -8121,6 +8129,21 @@ def _safe_arm(pusher, *, slug, hub_ip, safe, tracker) -> dict:
                             f"changed.") from None
     try:
         pusher.apply(pusher.plan_backup(backup), feature=slug + ":backup")
+    except FlashFullError as exc:
+        if not no_backup:
+            raise FlashFullError(
+                f"Could not create the safety backup before applying ({exc}) "
+                f"Nothing was changed.") from None
+        log.warning("%s: %s sent WITHOUT a safety backup, as asked: the "
+                    "router's flash has no room for one (%s)",
+                    pusher.cfg.name, slug, exc)
+        if pusher.audit:
+            pusher.audit.append(pusher.cfg.name, pusher.user, slug + ":backup",
+                                "apply", "skipped",
+                                "sent without a safety backup: the flash is "
+                                "full, and this change cannot be undone",
+                                str(exc))
+        return {"backup": "", "token": "", "mode": "", "no_backup": True}
     except PushError as exc:
         raise PushError(f"Could not create the safety backup before applying "
                         f"({exc}). Nothing was changed — free up flash space or "
@@ -8145,7 +8168,7 @@ def _safe_arm(pusher, *, slug, hub_ip, safe, tracker) -> dict:
             raise PushError(f"Could not arm Safe mode on the router ({exc}). "
                             f"Nothing was changed. Untick Safe mode to send it "
                             f"without the safety net.") from None
-    return {"backup": backup, "token": token, "mode": mode}
+    return {"backup": backup, "token": token, "mode": mode, "no_backup": False}
 
 
 def _router_reaches_hub(api, hub_ip):
@@ -8314,6 +8337,14 @@ def _friendly_push_error(error: str) -> str:
             'Safe mode needs this too: its safety timer is a scheduler '
             'entry, so until Device Mode allows them a change can only be '
             'sent with Safe mode unticked on the preview, unprotected.')
+    # The router answered fine; it is its storage that is full. "Could not
+    # reach the router" would send somebody off to check the connection.
+    if "Not enough free flash on the router" in error:
+        detail = error[error.index("Not enough free flash"):]
+        detail = detail.split(") Nothing was changed.")[0].rstrip(")")
+        return ('<b>Nothing was changed: the router\'s storage is too full '
+                'for the safety backup that is taken before every change.</b>'
+                f'<br><span class="muted">{esc(detail)}</span>')
     # A refused plan (push.api.PlanRefused): the router was read fine, and
     # saying "could not reach the router" above a list of reasons would send
     # somebody off to check the wrong thing.
@@ -8326,6 +8357,45 @@ def _friendly_push_error(error: str) -> str:
     return ""
 
 
+def _no_backup_offer(name, slug, csrf, submitted, confirm_action) -> str:
+    """The way on when the flash has no room for the safety backup: send the
+    same change again without one -- only once the reader has ticked that
+    they understand it cannot be undone. Safe mode goes with the backup (its
+    timer restores that file), so it is dropped from the resubmitted form."""
+    q = quote(name)
+    hidden = _hidden_from_multi(
+        submitted, skip=("csrf", "apply", "safe_revert", "no_backup"),
+        device=name, feature=slug)
+    return (
+        f'<div class="box" style="border-left:4px solid var(--danger)">'
+        f'<h2>Send it without a backup?</h2>'
+        f'<p>The router has no room left for a backup, so this change can '
+        f'only go out without one.</p>'
+        f'<p style="color:var(--danger-text)"><b>&#9888; Warning:</b> if this '
+        f'change breaks the router, it <b>cannot be returned to a previous '
+        f'backup</b>: there is not enough space on it to save one. Safe mode '
+        f'cannot protect it either, because Safe mode works by restoring that '
+        f'backup. A router that is cut off may need someone on site to bring '
+        f'it back.</p>'
+        f'<p class="muted">The safer way is to free up space first: Backups '
+        f'tab &rarr; Check for space to free, then apply the change again.</p>'
+        f'<form method="POST" action="{esc(confirm_action)}">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        f'<input type="hidden" name="apply" value="1">'
+        f'<input type="hidden" name="no_backup" value="1">'
+        f'{hidden}'
+        f'<label class="chk" style="display:flex;margin:10px 0">'
+        f'<input type="checkbox" name="no_backup_ok" value="1" required> '
+        f'I understand there will be no backup to go back to if this goes '
+        f'wrong</label>'
+        f'<div class="actions">'
+        f'<button class="btn red" type="submit">Send without a backup</button>'
+        f'<a class="btn" href="/device?name={q}&tab=backups">Free up space '
+        f'first</a>'
+        f'<a class="btn ghost" href="/device?name={q}&tab={esc(slug)}">'
+        f'Cancel</a></div></form></div>')
+
+
 def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                         fields=None, preview=None, submitted=None, error="",
                         msg="", recent=None, facts=None, unmanaged=None,
@@ -8334,7 +8404,7 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
                         wan_ifaces=None, online_ifaces=None,
                         detected_gateways=None, can_manage=None,
                         failover_on=False, seen_tips=None,
-                        lead_html="") -> str:
+                        lead_html="", offer_no_backup=False) -> str:
     if can_manage is None:
         can_manage = AuthStore.is_admin(user or {})
     tabbar = _device_tabbar(name, slug, can_manage, csrf)
@@ -8349,6 +8419,8 @@ def _render_feature_tab(name, user, slug, feature, csrf, *, summary_lines=None,
               f'error. Check the host and the read-write push user on the '
               f'Devices page.</span>')
            + '</div>' if error else "")
+    if offer_no_backup and submitted and can_manage:
+        err += _no_backup_offer(name, slug, csrf, submitted, confirm_action)
 
     if preview is not None and slug == "remote":
         # This tab needs to work for someone who's never seen RouterOS: no
@@ -12614,7 +12686,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
 
         def _feature_tab_page(self, name, user, slug, preview=None,
                               submitted=None, error="", msg="",
-                              confirm_action="/device/push", report_html=""):
+                              confirm_action="/device/push", report_html="",
+                              offer_no_backup=False):
             from .push import FEATURES
 
             feature = FEATURES.get(slug)
@@ -12847,7 +12920,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 wan_ifaces=wan_ifaces, online_ifaces=online_ifaces,
                 detected_gateways=detected_gateways, can_manage=can_manage,
                 failover_on=wan_failover_on,
-                seen_tips=(auth.seen_tips(user["login"]) if auth else set()))
+                seen_tips=(auth.seen_tips(user["login"]) if auth else set()),
+                offer_no_backup=offer_no_backup)
             return self._send(200, page, "text/html; charset=utf-8")
 
         def _nextdns_push(self, cfg, user) -> str:
@@ -13022,7 +13096,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
         def _device_push_post(self, flat, multi, user, view_slug=None):
             from .config import build_device
             from .device import DeviceError
-            from .push import FEATURES, Pusher, PushError, rw_device
+            from .push import (FEATURES, FlashFullError, Pusher, PushError,
+                               rw_device)
             from .push.api import PushApi
 
             slug = flat.get("feature", "")
@@ -13120,11 +13195,20 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 if commit and not plan.empty:
                     safe = (flat.get("safe_revert") == "1"
                             and slug != "update")
+                    # Only from the "Send without a backup" box, which is
+                    # offered when the flash has no room for one.
+                    no_backup = (flat.get("no_backup") == "1"
+                                 and flat.get("no_backup_ok") == "1")
                     try:
                         armed = _safe_apply(
                             pusher, plan, slug=slug, device=name,
                             hub_ip=hub_ip, safe=safe, tracker=safemode,
-                            user=uname, org_id=(user or {}).get("org_id"))
+                            user=uname, org_id=(user or {}).get("org_id"),
+                            no_backup=no_backup)
+                    except FlashFullError as exc:
+                        return self._feature_tab_page(
+                            name, user, view, error=str(exc),
+                            submitted=multi, offer_no_backup=True)
                     except PushError as exc:
                         return self._feature_tab_page(name, user, view,
                                                       error=str(exc))
@@ -13140,6 +13224,11 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 # The router has its new DNS, so NextDNS can go now.
                 done = (self._nextdns_leave(name, leave_nextdns) + " "
                         if leave_nextdns else "")
+                if armed.get("no_backup"):
+                    done = ("Sent WITHOUT a backup: the router's storage is "
+                            "full, so this change cannot be undone "
+                            "automatically. Free up space on the Backups tab "
+                            "so the next change has one. " + done)
                 # A change that restarts the router: say so to the monitor,
                 # so the router going offline is held as a restart rather
                 # than emailed as an outage (restarts.py).
@@ -13193,7 +13282,7 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     # reader nothing about a restart they have just booked.
                     return self._redirect(
                         f"/device?name={quote(name)}&tab={view}&msg="
-                        + quote(plan.note))
+                        + quote(done + plan.note))
                 if armed["token"]:
                     # A flipped switch goes back to the switch. The watching
                     # page is right when somebody deliberately pressed Apply

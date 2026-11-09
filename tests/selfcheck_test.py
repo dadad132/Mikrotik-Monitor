@@ -698,16 +698,16 @@ check("a Let's Encrypt path is trusted WITHOUT having to stat it -- this "
 
 _ip_cfg = {"nginx_http_conf": "/x", "hub_host": "172.16.1.246",
            "tls_cert": "/etc/ssl/easymikrotik-172.16.1.246.crt"}
-f = one(sc.check_webfig_cert(_ip_cfg, "easymikrotik.com"), "webfig:cert")
+# With no domain the links really do use the private address.
+f = one(sc.check_webfig_cert(_ip_cfg, ""), "webfig:cert")
 check("for an IP address it never suggests certbot -- no certificate "
       "authority issues one for a private address, so that 'fix' could only "
       "fail", "certbot" not in f["fix"])
 check("...and does not claim HSTS walls it off: browsers never apply HSTS "
       "to an IP address, so this is a warning, not 'cannot be opened at all'",
       f["warn"] and "cannot be opened" not in f["title"])
-check("...pointing at the dashboard's domain instead, the same fix as the "
-      "address check", f["fix"]
-      == "sudo ACCESS_HOST=easymikrotik.com bash deploy/install.sh")
+check("...pointing at a domain instead, the same fix as the address check",
+      f["fix"] == "sudo ACCESS_HOST=your.domain bash deploy/install.sh")
 
 _real_hsts = sc._hsts_hosts
 try:
@@ -725,6 +725,14 @@ try:
         "webfig:cert")
     check("...but HSTS on the dashboard's domain does not wall off a "
           "different host", f["warn"])
+    f = one(sc.check_webfig_cert(_ip_cfg, "easymikrotik.com"), "webfig:cert")
+    check("a private hub_host is judged by the domain its links really use: "
+          "with no trusted certificate there and HSTS on it, that is the wall "
+          "-- it was reported as a warning to click through, and WebFig "
+          "could not be opened at all",
+          not f["ok"] and not f["warn"]
+          and "cannot be opened at all" in f["title"]
+          and "easymikrotik.com" in f["fix"])
 finally:
     sc._hsts_hosts = _real_hsts
 
@@ -737,6 +745,9 @@ f = one(sc.check_webfig_cert(
 check("a Let's Encrypt certificate root can see for the host counts, as it "
       "does when access-apply (root) picks it -- the dashboard cannot list "
       "/etc/letsencrypt itself", f["ok"])
+f = one(sc.check_webfig_cert(_ip_cfg, "easymikrotik.com"), "webfig:cert")
+check("...and for a private hub_host it is the domain's certificate that "
+      "counts, the one access-apply now serves", f["ok"])
 _unsnap("certs.tsv")
 
 check("no remote access configured means nothing to say",

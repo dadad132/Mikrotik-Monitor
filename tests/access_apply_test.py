@@ -170,6 +170,45 @@ try:
     check("the first emerg line is the one quoted",
           access.first_complaint("x\nnginx: [emerg] 1#1: bad thing\nmore")
           == "bad thing")
+
+    print("\nA NATed server: hub_host is a private address")
+    # The links go to the dashboard's domain (the address the browser used),
+    # so the WebFig port has to serve the domain's certificate. Picking it
+    # for the private address served the self-signed fallback, and with HSTS
+    # on the domain the browser refused it outright.
+    live = os.path.join(tmp, "live")
+    os.makedirs(os.path.join(live, "easymikrotik.com"))
+    for f in ("fullchain.pem", "privkey.pem"):
+        open(os.path.join(live, "easymikrotik.com", f), "w").close()
+    was_live = access.LETSENCRYPT_LIVE
+    access.LETSENCRYPT_LIVE = live
+    nat = types.SimpleNamespace(
+        access={**ACC, "hub_host": "172.16.1.246",
+                "tls_cert": "/etc/ssl/easymikrotik-172.16.1.246.crt",
+                "tls_key": "/etc/ssl/easymikrotik-172.16.1.246.key"},
+        web_domain="easymikrotik.com")
+    try:
+        SCRIPT.clear()
+        SCRIPT.update({"nginx -t": (0, "ok"), "systemctl reload": (0, "")})
+        access.ports_not_open = lambda ports, **k: []
+        cli._cmd_access_apply(nat)
+        with open(http_conf, encoding="utf-8") as fh:
+            served = fh.read()
+        check("the WebFig port serves the domain's Let's Encrypt certificate",
+              f"ssl_certificate {live}/easymikrotik.com/fullchain.pem;"
+              in served and "172.16.1.246.crt" not in served)
+        check("cert_host: a private hub_host gives the domain",
+              access.cert_host("172.16.1.246", "easymikrotik.com")
+              == "easymikrotik.com")
+        check("...a public address or a name is kept as it is",
+              access.cert_host("38.54.63.107", "easymikrotik.com")
+              == "38.54.63.107"
+              and access.cert_host("hub.example.test", "easymikrotik.com")
+              == "hub.example.test")
+        check("...and with no domain there is nothing better to use",
+              access.cert_host("172.16.1.246", "") == "172.16.1.246")
+    finally:
+        access.LETSENCRYPT_LIVE = was_live
 finally:
     subprocess.run = real_run
     access.ports_not_open = real_not_open

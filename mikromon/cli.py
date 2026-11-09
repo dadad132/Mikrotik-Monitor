@@ -512,7 +512,10 @@ def _cmd_access_apply(config) -> int:
     ports = access.apply_hub_config(
         acc["grants_file"], acc.get("tls_cert", ""), acc.get("tls_key", ""),
         acc["nginx_http_conf"], acc["nginx_stream_conf"],
-        host=acc.get("hub_host", ""))
+        # The certificate is for the name the links use: the dashboard's
+        # domain when hub_host is a private address it never links to.
+        host=access.cert_host(acc.get("hub_host", ""),
+                              getattr(config, "web_domain", "")))
     status = {"ran": started, "ports": ports, "ok": True, "error": "",
               "detail": ""}
 

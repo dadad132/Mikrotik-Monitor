@@ -281,6 +281,22 @@ def link_host(hub_host: str, cert_source: str, hsts: bool,
         f"address is not covered by HSTS, so this link can still be opened.")
 
 
+def cert_host(hub_host: str, domain: str = "") -> str:
+    """The name the WebFig port's certificate has to be for: the one the
+    links are drawn with.
+
+    A private hub_host (a NATed server's 172.16.x.x, found by install-time
+    detection) is never put in a link: the dashboard swaps in the address
+    the browser reached it on, which is its domain. Picking the certificate
+    for the private address served the self-signed fallback on a link to
+    the domain -- and the domain sends HSTS, so the browser refused it with
+    no way past, and WebFig would not open at all.
+    """
+    if _unroutable(hub_host) and (domain or "").strip():
+        return domain.strip()
+    return hub_host
+
+
 def resolve_cert(host: str, cert: str = "", key: str = "") -> tuple:
     """(cert, key, source) for the WebFig leg, decided NOW rather than at
     install time.

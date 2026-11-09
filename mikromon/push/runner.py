@@ -116,6 +116,12 @@ def _human(n: int) -> str:
     return f"{max(n, 0)} bytes"
 
 
+class FlashFullError(PushError):
+    """No room on the router's flash for the safety backup. Its own kind so a
+    change can be offered without one -- only ever when the reader chooses
+    it, since such a change cannot be put back."""
+
+
 def _flash_full_message(files, free: int, need: int) -> str:
     """Why the backup was refused, and what is taking the space."""
     others = sorted(
@@ -316,8 +322,8 @@ class Pusher:
         flash needs the room. Backups somebody named themselves are never
         touched, nor the one a pending Safe mode timer would restore.
 
-        Raises PushError when even with all of the app's old backups gone
-        the new one would leave less than FLASH_RESERVE_BYTES free."""
+        Raises FlashFullError when even with all of the app's old backups
+        gone the new one would leave less than FLASH_RESERVE_BYTES free."""
         try:
             all_files = self.api.fetch(("file",))
         except Exception:
@@ -355,7 +361,7 @@ class Pusher:
                 doomed.append(r)
                 room += max(0, _bytes(r.get("size")))
             if room < need:
-                raise PushError(_flash_full_message(all_files, free, need))
+                raise FlashFullError(_flash_full_message(all_files, free, need))
         return [
             Operation("remove", ("file",), {".id": r[".id"]},
                       desc=f"prune old backup '{r['name']}'")

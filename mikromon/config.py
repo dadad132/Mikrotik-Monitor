@@ -229,6 +229,7 @@ class AppConfig:
     web_port: int = 8080
     auth_db: str | None = None      # if set, the dashboard requires login
     web_secure_cookies: bool = False  # set True when serving behind HTTPS
+    web_domain: str = ""            # the dashboard's own domain (web.domain)
     metrics_token: str | None = None  # bearer/query token for Prometheus scraping
     devices_db: str | None = None   # if set, devices are managed in the dashboard
     push_log_db: str | None = None  # if set, config-push actions are logged here
@@ -342,6 +343,7 @@ def load_config(path: str) -> AppConfig:
         web_host=str((raw.get("web") or {}).get("host", "127.0.0.1")),
         web_port=int((raw.get("web") or {}).get("port", 8080)),
         web_secure_cookies=bool((raw.get("web") or {}).get("secure_cookies", False)),
+        web_domain=str((raw.get("web") or {}).get("domain") or "").strip(),
         metrics_token=(raw.get("web") or {}).get("metrics_token") or None,
         auth_db=raw.get("auth_db") or None,
         devices_db=devices_db,

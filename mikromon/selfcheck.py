@@ -729,11 +729,13 @@ def check_webfig_cert(access_cfg=None, domain=""):
     """
     cfg = access_cfg or {}
     cert = str(cfg.get("tls_cert", "") or "")
-    host = str(cfg.get("hub_host", "") or "")
     if not cfg.get("nginx_http_conf") or not cert:
         return []
 
-    from .access import resolve_cert
+    from .access import cert_host, resolve_cert
+    # The name the links use, which is the one access-apply serves a
+    # certificate for: the domain, when hub_host is a private address.
+    host = cert_host(str(cfg.get("hub_host", "") or ""), domain)
     live, _key, source = resolve_cert(host, cert, cfg.get("tls_key", ""))
     # access-apply runs as root and switches to a Let's Encrypt certificate
     # for the host by itself. From here /etc/letsencrypt cannot be listed, so
