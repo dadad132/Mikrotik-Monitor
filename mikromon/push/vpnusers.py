@@ -433,8 +433,8 @@ def client_config(*, private_key: str, address: str, router_pubkey: str,
                   endpoint: str, port: int, allowed: list,
                   dns: str = "", label: str = "") -> str:
     """The [Interface]/[Peer] file the WireGuard app imports. With no
-    private key (the device made its own), the PrivateKey line says to keep
-    the one the app created."""
+    private key (the device made its own) there is no PrivateKey line, so
+    nothing can overwrite the one the app created."""
     lines = [f"# {label} — easymikrotik remote access" if label else
              "# easymikrotik remote access", "[Interface]"]
     if private_key:

@@ -189,9 +189,10 @@ def _steps(kind: str, made_keys: bool) -> str:
                  "the window you created it in")
         items = [f"Go back to {where} (the one showing the Public key you "
                  f"pasted here).",
-                 "Below its <b>PrivateKey = …</b> line, paste the lines shown "
-                 "here. Keep the PrivateKey line the app made: it pairs with "
-                 "the public key you gave.",
+                 "Leave its first two lines as they are (<b>[Interface]</b> "
+                 "and <b>PrivateKey = …</b>): that private key pairs with the "
+                 "public key you gave, and is what lets the device join.",
+                 "Paste the lines shown here underneath them, on a new line.",
                  "Give it a name, save it, and <b>Activate</b>."]
     return "<ol>" + "".join(f"<li>{i}</li>" for i in items) + "</ol>"
 
@@ -215,15 +216,33 @@ def config_page_inner(name: str, label: str, conf: str, *, made_keys: bool,
                 f'{esc(fname)}.conf</a></p>')
         shown = conf
     else:
-        head = ('<p>The device made its own keys, so nothing secret is on '
-                'this page. Add these lines to the tunnel you started in the '
-                'WireGuard app:</p>')
-        shown = "\n".join(line for line in conf.splitlines()
-                          if not line.startswith("#"))
+        # The tunnel started in the app already has "[Interface]" and its own
+        # "PrivateKey = ..." line. Shown whole, this read as a complete file:
+        # pasted over the tunnel it wiped that key out ("Interface's private
+        # key is required"), and pasted under it, it added a second
+        # [Interface] the app refuses. Only the lines that go under the key
+        # are shown.
+        body = [line for line in conf.splitlines() if not line.startswith("#")]
+        if body and body[0].strip() == "[Interface]":
+            body = body[1:]
+        shown = "\n".join(body)
+        head = ('<p>The device made its own keys, so its <b>private key stays '
+                'on the device</b> and is not on this page. That is why there '
+                'is no PrivateKey line below: the one the WireGuard app made '
+                'is the one to use.</p>'
+                '<p>In the WireGuard app, <b>keep the two lines the tunnel '
+                'already has</b> (<code>[Interface]</code> and '
+                '<code>PrivateKey = …</code>) and paste these lines '
+                '<b>underneath</b> them:</p>')
     safe = ('<p class="muted" style="font-size:12.5px">Safe mode is checking '
             'the change on the router in the background (about a minute). '
             'If it had cut the router off, it would put itself back and you '
             'would be told.</p>' if safe_note else "")
+    if not made_keys:
+        safe += ('<p class="muted" style="font-size:12.5px">Rather have a '
+                 'ready-made file with the private key in it, to import in one '
+                 'step? Remove this device on the VPN tab and add it again '
+                 'with <b>Make the keys for me</b>.</p>')
     return (
         f'<div class="wrap" style="max-width:760px">'
         f'<div class="box" style="border-left:4px solid var(--success)">'

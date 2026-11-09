@@ -279,6 +279,18 @@ try:
     check("...and no private key anywhere: the laptop keeps its own",
           not re.search(r"PrivateKey = [A-Za-z0-9+/]{43}=", done)
           and laptop_priv not in done)
+    shown = re.search(r"<pre[^>]*>(.*?)</pre>", done, re.S).group(1)
+    check("only the lines that go UNDER the app's own key are shown: a second "
+          "[Interface] heading made the app refuse the tunnel, and pasted over "
+          "the tunnel it wiped out the private key",
+          "[Interface]" not in shown and shown.startswith("Address = ")
+          and "[Peer]" in shown)
+    check("...and the page says to keep the [Interface] and PrivateKey lines "
+          "the app made, and why there is no private key here",
+          "keep the two lines the tunnel already has" in done
+          and "private key stays on the device" in done)
+    check("...pointing to the ready-made file for anyone who would rather "
+          "import one", "Make the keys for me" in done)
     with open(os.path.join(tmp, "hub.json")) as fh:
         hub = json.load(fh)
     check("the subnet is recorded so no other router is given it",
@@ -294,6 +306,8 @@ try:
     check("when the dashboard makes the keys, the file carries the private "
           "key -- shown once, with a download",
           m is not None and "download=" in done2 and "only time" in done2)
+    check("...as a whole file, [Interface] and all, ready to import",
+          "[Interface]\nPrivateKey = " in done2)
     check("...and the router only ever received its public half",
           m is not None and peer2 and peer2[0]["public-key"] == public_key(m.group(1))
           and not any(m.group(1) in json.dumps(e) for e in ROUTER.log))
