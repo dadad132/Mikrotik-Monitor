@@ -7142,6 +7142,40 @@ def _queue_script_box(name, csrf, facts=None) -> str:
     )
 
 
+def _voip_box(name, csrf, cur, lines, fields) -> str:
+    """VoIP priority on the Queues tab: what it is doing now, the settings,
+    and Preview. Not an instant form -- the preview is the review, since
+    switching it on turns FastTrack off."""
+    q = quote(name)
+    head = f'<h2>VoIP priority{_help_dot("voip", "VoIP priority")}</h2>'
+    if cur.get("unsupported"):
+        return (f'<div class="box" id="voip">{head}<p>{esc(lines[0])} '
+                f'<a href="/device?name={q}&tab=update">Open the Update '
+                f'tab</a></p></div>')
+    items = ""
+    for ln in lines:
+        style = (' style="color:var(--warning-text)"'
+                 if ln.startswith("⚠") else "")
+        items += f"<li{style}>{esc(ln)}</li>"
+    hidden = (f'<input type="hidden" name="csrf" value="{csrf}">'
+              f'<input type="hidden" name="device" value="{esc(name)}">'
+              f'<input type="hidden" name="feature" value="voip">'
+              f'<input type="hidden" name="view" value="qos">')
+    on = bool(cur.get("on"))
+    label = "Preview changes" if on else "Preview switching it on"
+    form = (f'<form method="POST" action="/device/push">{hidden}'
+            f'<input type="hidden" name="voip_on" value="on">'
+            f'<div class="fields">{"".join(_field_html(d) for d in fields)}'
+            f'</div><div class="actions" style="margin-top:14px">'
+            f'<button class="btn" type="submit">{label}</button></div></form>')
+    off = (f'<form method="POST" action="/device/push" style="margin-top:10px">'
+           f'{hidden}<input type="hidden" name="voip_on" value="off">'
+           f'<button class="btn ghost" type="submit">Preview switching it '
+           f'off</button></form>' if on else "")
+    return (f'<div class="box" id="voip">{head}'
+            f'<ul style="margin:0 0 12px 18px">{items}</ul>{form}{off}</div>')
+
+
 # Greys out the timer fields that do not apply: all of them until
 # Recurring is ticked, and the day unless the timer is weekly. Greyed fields
 # are disabled, so they are not sent; the server applies the same rule
@@ -12884,7 +12918,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                                                    clock=script_clock(pusher.api))
                                       + _SCHED_FORM_JS)
                     elif slug == "qos":
-                        extra_html = _queue_script_box(name, csrf, facts)
+                        extra_html = (self._voip_html(name, pusher, cfg, csrf)
+                                      + _queue_script_box(name, csrf, facts))
                     elif slug == "hubtunnel":
                         extra_html = _hubtunnel_box(name, current, csrf, devices_db)
                     elif slug == "tunnel":
@@ -13342,6 +13377,21 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             reach = _vu.reachability(cur, self._hub_seen_ip(name))
             return users_box(name, csrf, cur, reach, _vu._port(cur),
                              bool(can_manage))
+
+        def _voip_html(self, name, pusher, cfg, csrf) -> str:
+            """The VoIP priority box on the Queues tab. A router it cannot
+            read still gets the rest of the tab."""
+            from .push import voip as _vp
+            try:
+                cur = _vp.read(pusher, cfg)
+                return _voip_box(name, csrf, cur, _vp.summary(cur, cfg),
+                                 [] if cur.get("unsupported")
+                                 else _vp.form(cur, cfg))
+            except Exception as exc:  # noqa: BLE001
+                log.exception("VoIP priority: could not read %s", name)
+                return (f'<div class="box" id="voip"><h2>VoIP priority</h2>'
+                        f'<p class="muted">Could not read VoIP priority from '
+                        f'the router: {esc(str(exc))}</p></div>')
 
         def _prep_vpnusers(self, name, flat, commit) -> None:
             """What push/vpnusers.plan needs from outside the router: the

@@ -197,6 +197,33 @@ TABS = [
                "<b>Preview</b>, then <b>Apply</b>."],
      "warn": ""},
 
+    {"slug": "voip", "title": "Queues — VoIP priority", "art": None,
+     "what": "Phone calls go first on the upload, so they do not break up "
+             "while somebody else is sending a large file. The router shapes "
+             "its own upload to just under the line's speed, so the queue "
+             "forms on the router, where calls can jump it, instead of in the "
+             "ISP's modem, where they cannot.",
+     "steps": ["Run a speed test while the office is quiet and note the "
+               "upload speed.",
+               "Choose the internet line. For a PPPoE line pick the "
+               "<code>pppoe-out</code> connection, not the port under it.",
+               "Set <b>Shape the upload to</b> about 90% of that speed, e.g. "
+               "18 on a 20 Mbps upload. Set it at or above the real speed "
+               "and nothing changes, because the queue still forms in the "
+               "modem.",
+               "Pick the phone system, or ask your provider which voice "
+               "(RTP) ports it uses and choose Other.",
+               "<b>Preview switching it on</b>, then confirm with Safe mode "
+               "ticked.",
+               "Switching it off removes everything it added, and turns "
+               "FastTrack and the SIP helper back on exactly as they were."],
+     "warn": "It turns FastTrack off, so the router's processor handles every "
+             "packet: a small router on a fast line can slow down, so check "
+             "System → Resources at a busy time. Only the line you choose is "
+             "shaped; while the router is on a backup line, calls get no "
+             "priority. Calls already in progress keep their old path until "
+             "they end, and calls carried inside a VPN are not recognised."},
+
     {"slug": "portfwd", "title": "Port forwarding", "art": None,
      "what": "Opens an external port through to a device inside the LAN — a "
              "camera recorder, a PBX, a server. Forwards the router already "

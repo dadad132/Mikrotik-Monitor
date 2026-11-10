@@ -21,7 +21,8 @@ import hashlib
 import ipaddress
 import re
 
-from ..util import uptime_to_seconds
+from ..util import as_bool, mbps_text, mbps_to_bps, rate_bps, uptime_to_seconds
+from . import voip as _voip
 from . import vpnusers as _vu
 from . import wgextra as _wgx
 from .api import PlanRefused, PushError
@@ -1628,10 +1629,14 @@ def qos_summary(current, cfg):
 def qos_form(current, cfg):
     rows = []
     for r in current:
+        # The router hands the limit back in bits ("20000000/50000000"),
+        # whatever it was written as; shown as bits, a re-save would add an
+        # "M" and make every limit a million times bigger.
         up, _, down = str(r.get("max-limit", "/")).partition("/")
         rows.append({"name": r.get("name", ""), "target": r.get("target", ""),
-                     "down": down.replace("M", ""), "up": up.replace("M", ""),
-                     "off": "yes" if _norm(r.get("disabled", "")) == "true" else ""})
+                     "down": mbps_text(rate_bps(down)),
+                     "up": mbps_text(rate_bps(up)),
+                     "off": "yes" if as_bool(r.get("disabled")) else ""})
     return [{"type": "rows", "name": "q", "label": "Queues (speed limits)",
              "cols": [("name", "name", "office"),
                       ("target", "target subnet/iface/IP", "192.168.88.10"),
@@ -1643,12 +1648,17 @@ def qos_form(current, cfg):
 
 def qos_plan(pusher, cfg, flat, multi):
     # Keyed by the queue name (preserved as-is) so adopted queues round-trip.
-    desired = []
+    desired, bad = [], []
     for r in _rows(multi, "q", ("name", "target", "down", "up", "off")):
         if not r["name"] or not r["target"]:
             continue
-        down = (r["down"] or "0") + "M"
-        up = (r["up"] or "0") + "M"
+        # Sent in bits, the way the router reads it back, so an unchanged
+        # row compares equal and is left alone.
+        down = mbps_to_bps(r["down"] or "0")
+        up = mbps_to_bps(r["up"] or "0")
+        if down < 0 or up < 0:
+            bad.append(f"{r['name']}: give the speeds in Mbps, like 20.")
+            continue
         paused = r["off"].strip().lower() in ("yes", "y", "1", "true", "off")
         # MikroTik's boolean fields are normally yes/no, but /queue simple is
         # a confirmed exception — disabled reads back as true/false on the
@@ -1660,6 +1670,9 @@ def qos_plan(pusher, cfg, flat, multi):
                         "max-limit": f"{up}/{down}",
                         "disabled": "true" if paused else "false",
                         "comment": _QOS_TAG + r["name"]})
+    if bad:
+        raise PlanRefused("Nothing was sent to the router.\n"
+                          + "\n".join(bad))
     return pusher.plan_managed_list(_QUEUE, "name", desired,
                                     owns=_prefix_owner(_QOS_TAG), label="queue")
 
@@ -3948,6 +3961,11 @@ FEATURES = {
     # connect straight to this router. See push/vpnusers.py.
     "vpnusers": {"title": "VPN remote users", "write": True,
                  "read": _vu.read, "plan": _vu.plan},
+    # Shown on the Queues tab (its own box, not a tab): phone calls first on
+    # the upload. No "form" here on purpose -- a generic form would post
+    # without voip_on, which plan() refuses. See push/voip.py.
+    "voip": {"title": "VoIP priority", "write": True,
+             "read": _voip.read, "plan": _voip.plan},
 }
 
 # tab label -> url slug (Overview/Backups handled elsewhere)

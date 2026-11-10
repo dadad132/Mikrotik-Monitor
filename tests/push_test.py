@@ -1035,9 +1035,16 @@ plan = F.qos_plan(pq, devcfg, {},
                   {"q__name": ["office"], "q__target": ["192.168.88.0/24"],
                    "q__down": ["50"], "q__up": ["20"]})
 q = [o for o in plan.ops if o.action == "add"][0]
-check("qos builds a simple queue with up/down limit",
+check("qos builds a simple queue with up/down limit, in bits per second -- "
+      "the form the router reads it back in, so an unchanged row is no change",
       q.params["name"] == "office" and q.params["comment"] == "mikromon:qos:office"
-      and q.params["max-limit"] == "20M/50M")
+      and q.params["max-limit"] == "20000000/50000000")
+_qf = F.qos_form([{"name": "office", "target": "192.168.88.0/24",
+                   "max-limit": "20000000/50000000", "disabled": False}],
+                 devcfg)[0]["rows"][0]
+check("a limit the router reports in bits shows as Mbps: re-saved as bits it "
+      "made every limit a million times bigger",
+      _qf["up"] == "20" and _qf["down"] == "50" and _qf["off"] == "")
 
 # port-forward rows -> dst-nat
 api = FakeApi({("ip", "firewall", "nat"): []})
@@ -1057,9 +1064,9 @@ print("adoption:")
 QUEUE = ("queue", "simple")
 api = FakeApi({QUEUE: [
     {".id": "*1", "name": "office", "target": "192.168.88.0/24",
-     "max-limit": "20M/50M", "disabled": "false"},              # unmanaged
+     "max-limit": "20000000/50000000", "disabled": "false"},    # unmanaged
     {".id": "*2", "name": "mm", "target": "10.0.0.0/24",
-     "max-limit": "5M/5M", "disabled": "false",
+     "max-limit": "5000000/5000000", "disabled": "false",
      "comment": "mikromon:qos:mm"},                             # already managed
 ]})
 qcfg = _t.SimpleNamespace(name="R1", wan=_t.SimpleNamespace(links=[]))
@@ -1083,13 +1090,9 @@ check("adopted queue now appears in the managed editor",
       any(r["name"] == "office" for r in F.qos_read(pa, qcfg)))
 # round-trip: re-applying the editor's view makes NO changes (no churn)
 cur = F.qos_read(pa, qcfg)
-multi = {"q__name": [r.get("name", "") for r in cur],
-         "q__target": [r.get("target", "") for r in cur],
-         "q__down": [str(r.get("max-limit", "/")).split("/")[1].replace("M", "")
-                     for r in cur],
-         "q__up": [str(r.get("max-limit", "/")).split("/")[0].replace("M", "")
-                   for r in cur],
-         "q__off": ["" for r in cur]}
+_rows_shown = F.qos_form(cur, qcfg)[0]["rows"]
+multi = {f"q__{k}": [r[k] for r in _rows_shown]
+         for k in ("name", "target", "down", "up", "off")}
 roundtrip = F.qos_plan(pa, qcfg, {}, multi)
 check("re-applying adopted+managed queues is a no-op (no churn)",
       roundtrip.empty)

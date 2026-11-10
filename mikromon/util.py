@@ -36,6 +36,43 @@ def as_int(value, default: int = 0) -> int:
     return default
 
 
+_RATE_UNITS = {"": 1, "k": 1_000, "m": 1_000_000, "g": 1_000_000_000}
+
+
+def rate_bps(value) -> int:
+    """A RouterOS rate in bits per second; -1 when it cannot be read.
+
+    The API hands queue limits back in bits ("18000000", or an int), while
+    a person types "18M" -- both forms are read here, so a limit compares
+    equal however it was written. Rates are decimal: 1M is 1,000,000."""
+    if value is None or isinstance(value, bool):
+        return -1
+    if isinstance(value, (int, float)):
+        return int(value)
+    m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*([kKmMgG]?)\s*$", str(value))
+    if not m:
+        return -1
+    return int(round(float(m.group(1)) * _RATE_UNITS[m.group(2).lower()]))
+
+
+def mbps_text(bps) -> str:
+    """Bits per second as a plain Mbps number for a form ("18", "0.5");
+    "" when unknown."""
+    if bps is None or isinstance(bps, bool) or bps < 0:
+        return ""
+    return ("%.3f" % (bps / 1_000_000)).rstrip("0").rstrip(".")
+
+
+def mbps_to_bps(text) -> int:
+    """A speed typed into a form, in bits per second: a bare number is Mbps
+    ("18", "0.5"), a unit is taken as written ("512k", "1G"). -1 when it is
+    not a speed."""
+    s = str(text or "").strip()
+    if re.fullmatch(r"\d+(?:\.\d+)?", s):
+        return int(round(float(s) * 1_000_000))
+    return rate_bps(s) if s else -1
+
+
 def as_float(value, default: float = 0.0) -> float:
     try:
         if isinstance(value, str):
