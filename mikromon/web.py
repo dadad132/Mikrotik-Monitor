@@ -76,6 +76,8 @@ _TWOFA_TRIES = 5
 # that login from there are refused until the window has passed; past 30 from
 # anywhere, from everywhere. Per address first, so somebody who has the
 # password but not the phone cannot lock the owner out of their own account.
+# A person needs more than this many seconds to fill in the sign-up form.
+_SIGNUP_MIN_SECONDS = 3
 _TWOFA_ADDR_MAX = 10
 _TWOFA_LOGIN_MAX = 30
 _TWOFA_WINDOW = 15 * 60
@@ -9198,6 +9200,34 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
     # office, and a ceiling on what a leaked key can write.
     from .webguard import TokenBuckets
     edr_limit = TokenBuckets(2.0, 200)
+    # The sign-up form's time stamp: signed with a key made at start-up, so a
+    # bot cannot make one up. A form from before a restart is simply asked
+    # to be filled in again.
+    _stamp_key = secrets.token_bytes(32)
+
+    def _signup_stamp(now: float | None = None) -> str:
+        t = str(int(time.time() if now is None else now))
+        mac = hmac.new(_stamp_key, t.encode(), "sha256").hexdigest()[:24]
+        return f"{t}.{mac}"
+
+    def _signup_looks_automated(flat: dict, now: float | None = None) -> str:
+        """"" for a person; "trap" when the hidden field was filled in;
+        otherwise why the time stamp was refused. People take more than a
+        few seconds to fill in five fields; a page left open over two hours
+        is asked to be filled in again rather than trusted."""
+        if (flat.get("website") or "").strip():
+            return "trap"
+        t, _, mac = (flat.get("form_stamp") or "").partition(".")
+        if not t.isdigit() or not hmac.compare_digest(
+                mac, hmac.new(_stamp_key, t.encode(), "sha256").hexdigest()[:24]):
+            return "no valid time stamp"
+        age = (time.time() if now is None else now) - int(t)
+        if age < _SIGNUP_MIN_SECONDS:
+            return "sent too quickly"
+        if age > 2 * 3600:
+            return "page open too long"
+        return ""
+
     # Wrong two-factor codes: {(login, address group): [times]} and
     # {login: [times]} (see _TWOFA_ADDR_MAX). Shared by every request thread.
     _twofa_fails: dict = {}
@@ -9524,8 +9554,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 err = parse_qs(url.query).get("error", [""])[0]
                 return self._send(200, _render_signup(
                     err, has_regions=bool(auth.get_regions()),
-                    confirm_email=auth.count_users() > 0),
-                    "text/html; charset=utf-8")
+                    confirm_email=auth.count_users() > 0,
+                    form_stamp=_signup_stamp()),
+                    "text/html; charset=utf-8", {"Cache-Control": "no-store"})
             if path == "/signup/verify":
                 if self._session():
                     return self._redirect("/dashboard")
@@ -16047,6 +16078,17 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                           for e in flat.get("alert_emails", "").split(",")
                           if e.strip()]
             if auth.count_users() > 0:
+                why = _signup_looks_automated(flat)
+                if why == "trap":
+                    # A bot: it is told nothing useful, and nothing is sent.
+                    log.warning("signup: bot refused (hidden field filled) "
+                                "for %s", email)
+                    return self._redirect("/signup")
+                if why:
+                    log.info("signup: form refused (%s) for %s", why, email)
+                    return self._redirect("/signup?error=" + quote(
+                        "Please fill in the form again: it was sent too "
+                        "quickly, or the page was open too long."))
                 return self._start_signup(flat, email, phone, alert_list)
             # The very first account -- the platform's own superadmin, on a
             # server whose mail is not set up yet -- is made straight away;

@@ -187,7 +187,16 @@ def opener(follow=True):
             else urllib.request.build_opener(jar, _NoRedirect))
 
 
+def stamp(op):
+    """The sign-up form's time stamp, as a browser gets it with the page."""
+    _, page, _, _ = req(op, "/signup")
+    m = re.search(r'name="form_stamp" value="([^"]*)"', page)
+    return m.group(1) if m else ""
+
+
 def req(op, path, data=None):
+    if path == "/signup" and data is not None and "form_stamp" not in data:
+        data = dict(data, form_stamp=stamp(op))
     body = urllib.parse.urlencode(data).encode() if data else None
     try:
         r = op.open(urllib.request.Request(BASE + path, data=body), timeout=10)
@@ -198,6 +207,8 @@ def req(op, path, data=None):
                 e.headers.get("Location", ""), e.headers)
 
 
+# The form's minimum fill-in time is tested on its own below.
+web._SIGNUP_MIN_SECONDS = 0
 FORM = {"company": "Beta", "email": "own@beta.test", "password": "secret123",
         "phone": "0821234567", "agree": "1",
         "alert_emails": "noc@beta.test"}
@@ -279,6 +290,34 @@ try:
               ("two@gamma.test",)).fetchone()[0] == 0)
     a.close()
     send_fails.clear()
+
+    print("Bots")
+    n = len(sent)
+    _, page, url, _ = req(opener(), "/signup", dict(
+        FORM, email="bot1@trap.test", website="http://spam.example"))
+    a = AuthStore(adb)
+    check("a form with the hidden field filled in (a bot) sends nothing and "
+          "says nothing useful", len(sent) == n and "error" not in url
+          and a.db.execute("SELECT COUNT(*) FROM pending_signups WHERE "
+                           "email='bot1@trap.test'").fetchone()[0] == 0)
+    a.close()
+    _, page, url, _ = req(opener(), "/signup", dict(
+        FORM, email="bot2@trap.test", form_stamp="1700000000.forged"))
+    check("a made-up time stamp is refused: nothing is sent",
+          len(sent) == n and "fill in the form again" in page)
+    _, page, url, _ = req(opener(), "/signup", dict(
+        FORM, email="bot3@trap.test", form_stamp=""))
+    check("...and so is none at all", len(sent) == n and "fill in the form again" in page)
+    web._SIGNUP_MIN_SECONDS = 3
+    o = opener()
+    _, page, url, _ = req(o, "/signup", dict(FORM, email="bot4@trap.test",
+                                             form_stamp=stamp(o)))
+    check("a form sent a moment after the page loaded is refused",
+          len(sent) == n and "too quickly" in page)
+    web._SIGNUP_MIN_SECONDS = 0
+    page_html = req(opener(), "/signup")[1]
+    check("the hidden field is out of sight and out of the tab order",
+          'name="website" tabindex="-1"' in page_html and 'aria-hidden="true"' in page_html)
 finally:
     srv.shutdown()
     srv.server_close()
@@ -308,6 +347,29 @@ check("the code leads the email's subject, so a phone shows it",
       subject.startswith("042917 is your"))
 check("...and the email says what to do if it was not you",
       "Not you? Ignore this email" in text and "&lt;Ltd&gt;" in html)
+
+
+
+print("A cap on codes sent to anybody")
+cap_db = os.path.join(tempfile.mkdtemp(), "cap.db")
+st = AuthStore(cap_db)
+T = 1_800_000_000.0
+made = 0
+for i in range(A.OTP_MAX_SENDS_ALL_PER_HOUR + 5):
+    try:
+        st.start_signup(f"person{i}@many.test", "secret123", f"Co {i}", now=T + i)
+        made += 1
+    except AuthError as exc:
+        last_error = str(exc)
+check(f"at most {A.OTP_MAX_SENDS_ALL_PER_HOUR} codes an hour go out, to whoever",
+      made == A.OTP_MAX_SENDS_ALL_PER_HOUR and "very busy" in last_error)
+try:
+    st.start_signup("later@many.test", "secret123", "Later", now=T + 3700)
+    later = True
+except AuthError:
+    later = False
+check("...and an hour later sign-ups work again", later)
+st.close()
 
 print()
 if FAILS:

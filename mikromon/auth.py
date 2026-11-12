@@ -77,6 +77,12 @@ OTP_TTL = 15 * 60
 OTP_MAX_ATTEMPTS = 5
 OTP_RESEND_COOLDOWN = 60
 OTP_MAX_SENDS_PER_HOUR = 5
+# Codes sent to ANY address. A sign-up form is a way to make this server
+# email whoever a bot names; sent to spam-trap addresses in bulk, those
+# emails got the domain on Spamhaus's blocklist (Nov 2026). Real sign-ups
+# are a handful a day, so these only ever stop a flood.
+OTP_MAX_SENDS_ALL_PER_HOUR = 30
+OTP_MAX_SENDS_ALL_PER_DAY = 150
 # "Still on the backup line" reminders: the choices offered, and the default
 # for a company that never picked one.
 BACKUP_REMINDER_CHOICES = (0, 1, 2, 4, 8, 12)
@@ -833,6 +839,20 @@ class AuthStore:
             "SELECT COUNT(*) FROM signup_codes_sent WHERE email=? AND ts>?",
             (email, now - 3600)).fetchone()[0]
 
+    def _check_send_budget(self, now: float) -> None:
+        """Refuse when the whole site has sent too many codes lately."""
+        hour, day = self.db.execute(
+            "SELECT SUM(ts > ?), COUNT(*) FROM signup_codes_sent WHERE ts > ?",
+            (now - 3600, now - 86400)).fetchone()
+        if (hour or 0) >= OTP_MAX_SENDS_ALL_PER_HOUR \
+                or (day or 0) >= OTP_MAX_SENDS_ALL_PER_DAY:
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                        "signup: %s codes in the last hour, %s today -- "
+                        "refusing more for now", hour or 0, day or 0)
+            raise AuthError("Sign-ups are very busy just now. Please try "
+                            "again in an hour.")
+
     def start_signup(self, email: str, password: str, company: str,
                      phone: str = "", extra: dict | None = None,
                      now: float | None = None) -> tuple:
@@ -848,6 +868,7 @@ class AuthStore:
         if self._sends_last_hour(email, now) >= OTP_MAX_SENDS_PER_HOUR:
             raise AuthError("Too many codes have been sent to this address. "
                             "Please try again in an hour.")
+        self._check_send_budget(now)
         salt, pw_hash, iters = hash_password(password)
         token = secrets.token_urlsafe(24)
         code = f"{secrets.randbelow(10 ** 6):06d}"
@@ -905,6 +926,7 @@ class AuthStore:
         if self._sends_last_hour(p["email"], now) >= OTP_MAX_SENDS_PER_HOUR:
             raise AuthError("Too many codes have been sent to this address. "
                             "Please try again in an hour.")
+        self._check_send_budget(now)
         code = f"{secrets.randbelow(10 ** 6):06d}"
         with self._lock:
             self.db.execute(

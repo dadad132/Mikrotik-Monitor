@@ -291,7 +291,7 @@ def _twofa_reset_box(csrf: str) -> str:
 
 
 def _render_signup(error: str = "", values=None, has_regions: bool = False,
-                   confirm_email: bool = True) -> str:
+                   confirm_email: bool = True, form_stamp: str = "") -> str:
     v = values or {}
     msg = (f'<p role="alert" style="color:var(--danger-text)">{esc(error)}</p>' if error else "")
     # Every account but the very first confirms its address with a code.
@@ -305,6 +305,14 @@ def _render_signup(error: str = "", values=None, has_regions: bool = False,
             f'<p class="muted" style="margin-top:0">You\'ll be the owner: you can '
             f'invite team members and choose which devices each one can see.</p>{msg}'
             f'<form method="POST" action="/signup">'
+            # Bot protection: a time stamp the server signed when it made
+            # this page, and a field people never see (bots fill in every
+            # field they find). See _signup_looks_automated in web.py.
+            f'<input type="hidden" name="form_stamp" value="{esc(form_stamp)}">'
+            f'<div aria-hidden="true" style="position:absolute;left:-10000px;'
+            f'top:auto;width:1px;height:1px;overflow:hidden">'
+            f'<label>Leave this empty<input name="website" tabindex="-1" '
+            f'autocomplete="off"></label></div>'
             f'<p><input name="company" placeholder="Company name" autofocus '
             f'value="{esc(v.get("company", ""))}" style="width:100%"></p>'
             f'<p><input name="email" type="email" placeholder="Your email" '
