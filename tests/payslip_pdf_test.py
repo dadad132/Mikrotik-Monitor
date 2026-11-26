@@ -253,12 +253,17 @@ op = urllib.request.build_opener(
     urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
 
-def get(path):
+def raw_get(path, opener=None):
     try:
-        r = op.open(urllib.request.Request(BASE + path), timeout=15)
-        return r.status, r.read().decode("utf-8", "replace")
+        r = (opener or op).open(urllib.request.Request(BASE + path), timeout=15)
+        return r.status, r.read(), r.headers
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8", "replace")
+        return e.code, e.read(), e.headers
+
+
+def get(path, opener=None):
+    status, body, _ = raw_get(path, opener)
+    return status, body.decode("utf-8", "replace")
 
 
 def post_form(path, fields):
@@ -412,6 +417,101 @@ try:
     org_email._smtp_send = real_send
     check("a mail-relay failure is contained: the EFT still records and "
           "builds both PDFs", posted and got_mail and len(parts) == 2)
+
+    print("\nRe-downloading the payslip from the dashboard")
+    bs.set_plan(owner, "d5", period_end=PAID_UNTIL)
+    mine_paid = bs.create_order(owner, "d5", 2500, currency="USD",
+                                due=PAID_UNTIL)
+    sent.clear()
+    check("the owner's payment can be recorded", mark_paid(mine_paid))
+    mine_unpaid = bs.create_order(owner, "d5", 2500, currency="USD",
+                                  due=PAID_UNTIL)
+    year = time.strftime("%Y", time.localtime(NOW))
+    st_, body, hdr = raw_get(f"/billing/payslip.pdf?id={mine_paid}")
+    expected_name = (r'attachment; filename="EasyMikroTik-payslip-EMT-'
+                     + year + r'-' + f"{mine_paid:04d}" + r'\.pdf"')
+    check("a paid order's payslip downloads as a named PDF",
+          st_ == 200 and body.startswith(b"%PDF")
+          and hdr.get("Content-Type") == "application/pdf"
+          and hdr.get("Cache-Control") == "no-store, private"
+          and re.search(expected_name, hdr.get("Content-Disposition", "")))
+    check("...with no pay link and an explicit no-VAT confirmation",
+          b"/URI" not in body and "No VAT has been charged." in pdf_text(body))
+    st_, body, _ = raw_get(f"/billing/payslip.pdf?id={mine_unpaid}")
+    check("an unpaid order has no payslip to download",
+          st_ == 404 and not body.startswith(b"%PDF"))
+    st_, body, _ = raw_get(f"/billing/payslip.pdf?id={card_id}")
+    check("another company's payslip cannot be had by guessing its id",
+          st_ == 404 and not body.startswith(b"%PDF"))
+    auth.add_member(owner, "member@eca.test", "secret123")
+    member = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(
+        http.cookiejar.CookieJar()))
+    member.open(urllib.request.Request(BASE + "/login", data=urllib.parse.urlencode(
+        {"email": "member@eca.test", "password": "secret123"}).encode()),
+        timeout=15)
+    st_, body, _ = raw_get(f"/billing/payslip.pdf?id={mine_paid}",
+                           opener=member)
+    check("a non-admin member cannot download an owner's payslip",
+          st_ == 403 and not body.startswith(b"%PDF"))
+    st_, page = get(f"/billing/invoice?id={mine_paid}")
+    check("the paid invoice page offers the receipt and the payslip together",
+          st_ == 200 and f"/billing/invoice.pdf?id={mine_paid}" in page
+          and f"/billing/payslip.pdf?id={mine_paid}" in page
+          and "Download Payslip" in page)
+    st_, page = get(f"/billing/invoice?id={mine_unpaid}")
+    check("the unpaid invoice page offers no payslip",
+          st_ == 200 and "/billing/payslip.pdf" not in page)
+    st_, page = get("/billing")
+    check("the Payments table offers a payslip beside each paid invoice",
+          st_ == 200 and f"/billing/payslip.pdf?id={mine_paid}" in page
+          and f"/billing/invoice?id={mine_paid}" in page)
+    check("...and none for an unpaid order",
+          st_ == 200 and f"/billing/payslip.pdf?id={mine_unpaid}" not in page)
+
+    print("\nThe payslip in Platform admin's preview")
+    st_, page = get("/superadmin/test-invoice")
+    check("the preview page links to the payslip",
+          st_ == 200 and "doc=payslip" in page
+          and "Open the payslip PDF" in page)
+    before = bs.db.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+    mail_before = len(sent)
+    st_, body, _ = raw_get("/superadmin/test-invoice?doc=payslip")
+    after = bs.db.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+    slip_text = pdf_text(body)
+    check("the payslip previews as a stamped PDF that says no VAT was charged",
+          st_ == 200 and body.startswith(b"%PDF") and "SAMPLE" in slip_text
+          and "No VAT has been charged." in slip_text)
+    check("...without writing an order or sending mail or offering a way "
+          "to pay twice",
+          after == before and len(sent) == mail_before and b"/URI" not in body)
+    viewer_org = new_org("viewer@eca.test")
+    plain = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(
+        http.cookiejar.CookieJar()))
+    plain.open(urllib.request.Request(BASE + "/login", data=urllib.parse.urlencode(
+        {"email": "viewer@eca.test", "password": "secret123"}).encode()),
+        timeout=15)
+    st_, page = get("/superadmin/test-invoice?doc=payslip", opener=plain)
+    check("a company owner cannot reach the platform preview",
+          st_ == 403 and not page.startswith("%PDF"))
+
+    viewer_paid = bs.create_order(viewer_org, "d5", 2500, currency="USD",
+                                  due=PAID_UNTIL)
+    check("the viewer's payment can be recorded", mark_paid(viewer_paid))
+    bs.suspend(viewer_org)
+    st_, body, _ = raw_get(f"/billing/payslip.pdf?id={viewer_paid}",
+                           opener=plain)
+    check("a suspended company can still download a payslip it paid for",
+          st_ == 200 and body.startswith(b"%PDF"))
+    bs.unsuspend(viewer_org)
+
+    real_slip_render = P.render
+    P.render = lambda d, **kw: (_ for _ in ()).throw(
+        RuntimeError("no payslip fonts"))
+    st_, body, _ = raw_get(f"/billing/payslip.pdf?id={mine_paid}")
+    P.render = real_slip_render
+    check("a payslip that cannot be drawn fails cleanly, without a traceback "
+          "or a broken PDF", st_ == 500 and not body.startswith(b"%PDF")
+          and b"Traceback" not in body)
 finally:
     srv.shutdown()
     org_email._smtp_send = orig_send

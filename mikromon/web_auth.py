@@ -1028,8 +1028,13 @@ def _orders_box(orders) -> str:
                            f'{money(_amt["charged"], _amt["charged_currency"])}'
                            f')</span>')
             state = '<span class="badge ok">Paid</span>'
-            act = (f'<a class="btn ghost" style="padding:4px 12px" '
-                   f'href="/billing/invoice?id={int(o["id"])}">Invoice</a>')
+            act = (
+                '<span style="display:inline-flex;gap:6px;flex-wrap:wrap">'
+                f'<a class="btn ghost" style="padding:4px 12px" '
+                f'href="/billing/invoice?id={int(o["id"])}">Invoice</a>'
+                f'<a class="btn ghost" style="padding:4px 12px" '
+                f'href="/billing/payslip.pdf?id={int(o["id"])}">Payslip</a>'
+                '</span>')
         elif o.get("status") == "lapsed" and not upgrade:
             state = ('<span class="muted">Lapsed &mdash; the month it was '
                      'for ended unpaid</span>')
@@ -1451,7 +1456,7 @@ def _invoice_pay_block(pay_link: str, ref: str) -> str:
 def _render_invoice(user, org: dict, order: dict, contact: dict | None,
                     brand: str = "", pay_link: str = "",
                     due_days: int = 7, local: str = "",
-                    pdf_href: str = "") -> str:
+                    pdf_href: str = "", payslip_href: str = "") -> str:
     """The invoice, as a document.
 
     One code path: the built-in design and an uploaded one are both
@@ -1472,23 +1477,28 @@ def _render_invoice(user, org: dict, order: dict, contact: dict | None,
     html = _tpl.render(_tpl.load(),
                        _invoice_fields(org, order, contact, pay_link,
                                        due_days, local=local))
-    return _invoice_actions(html, pdf_href)
+    return _invoice_actions(html, pdf_href, payslip_href)
 
 
-def _invoice_actions(html: str, pdf_href: str = "") -> str:
+def _invoice_actions(html: str, pdf_href: str = "",
+                     payslip_href: str = "") -> str:
     """A print/back bar on the document, which the document does not carry.
 
     Injected into the page rather than written into the design, so it cannot
     end up on a printed invoice and an uploaded design does not have to know
-    about it. `pdf_href` adds the PDF the email carries, to download.
+    about it. The PDF links are the documents the email carries, to download;
+    the payslip is offered only for an invoice that was actually settled.
     """
-    pdf = (f'<a href="{esc(pdf_href)}" style="background:#2563eb;color:#fff;'
-           f'border-radius:6px;padding:10px 18px;font:600 14px system-ui,'
-           f'sans-serif;text-decoration:none">Download PDF</a>'
-           if pdf_href else "")
+    def link(href: str, label: str) -> str:
+        return (f'<a href="{esc(href)}" style="background:#2563eb;color:#fff;'
+                f'border-radius:6px;padding:10px 18px;font:600 14px system-ui,'
+                f'sans-serif;text-decoration:none">{esc(label)}</a>')
+
+    pdf = link(pdf_href, "Download PDF") if pdf_href else ""
+    payslip = link(payslip_href, "Download Payslip") if payslip_href else ""
     bar = ('<div class="mm-actions" style="max-width:860px;margin:18px auto '
            '0;padding:0 18px;display:flex;gap:10px;flex-wrap:wrap">'
-           + pdf +
+           + pdf + payslip +
            '<button type="button" onclick="window.print()" '
            'style="background:#2563eb;color:#fff;border:0;border-radius:6px;'
            'padding:10px 18px;font:600 14px system-ui,sans-serif;'
@@ -2068,7 +2078,10 @@ def _test_invoice_page(user, plan, plan_name: str, subject: str, body: str,
         f'one.</p>'
         f'<a class="btn" target="_blank" '
         f'href="/superadmin/test-invoice?doc=receipt&plan={esc(plan_name)}">'
-        f'Open the receipt</a></div>'
+        f'Open the receipt</a> '
+        f'<a class="btn ghost" target="_blank" '
+        f'href="/superadmin/test-invoice?doc=payslip&plan={esc(plan_name)}">'
+        f'Open the payslip PDF</a></div>'
         f'<div class="box">'
         f'<h2 style="margin-top:0">4. The invoice itself, before it is '
         f'paid</h2>'

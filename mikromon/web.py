@@ -9672,7 +9672,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                     # The invoice too: a suspended company asking for it
                     # again needs to see what it owes, and where to pay.
                     if path not in ("/billing", "/billing/invoice",
-                                    "/billing/invoice.pdf"):
+                                    "/billing/invoice.pdf",
+                                    "/billing/payslip.pdf"):
                         return self._redirect("/billing")
                 elif billing.in_grace_period(org_id):
                     self._grace_banner = _grace_banner_html(
@@ -9701,6 +9702,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._serve_invoice(url, user)
             if path == "/billing/invoice.pdf":
                 return self._serve_invoice_pdf(url, user)
+            if path == "/billing/payslip.pdf":
+                return self._serve_payslip_pdf(url, user)
             if path == "/billing":
                 return self._serve_billing(url, user)
             if path == "/superadmin":
@@ -16876,6 +16879,22 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(200, invoice_pdf.render(d),
                                   "application/pdf")
 
+            if doc == "payslip":
+                # The confirmation that goes beside the receipt in the
+                # payment email, drawn by the same renderer from the same
+                # settled sample order. Still inert: no order, no mail.
+                from . import payslip_pdf
+                from .web_auth import _invoice_data
+                d = _invoice_data(
+                    {"name": _SAMPLE_ORG, "email": "accounts@sample.example"},
+                    order, auth.get_billing_contact() if auth else None,
+                    pay_link="", local=self._local_currency(None))
+                return self._send(
+                    200, payslip_pdf.render(
+                        d, payment_id="sample_yoco",
+                        paid_until=first_billing_date(), sample=True),
+                    "application/pdf")
+
             if doc in ("invoice", "receipt"):
                 paid = doc == "receipt"
                 shown = dict(order)
@@ -16962,7 +16981,9 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 pay_link=self._pay_order_link(order),
                 due_days=_DEFAULT_DUE_DAYS,
                 local=self._local_currency(user),
-                pdf_href=f"/billing/invoice.pdf?id={int(order['id'])}"),
+                pdf_href=f"/billing/invoice.pdf?id={int(order['id'])}",
+                payslip_href=(f"/billing/payslip.pdf?id={int(order['id'])}"
+                              if order.get("paid") else "")),
                 "text/html; charset=utf-8")
 
         def _local_currency(self, user) -> str:
@@ -17003,6 +17024,51 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 200, invoice_pdf.render(d), "application/pdf",
                 headers={"Content-Disposition":
                          f'attachment; filename="{invoice_pdf.filename(d)}"'})
+
+        def _serve_payslip_pdf(self, url, user):
+            """Re-download the payslip for a settled order of this company.
+
+            The confirmation travels in the payment email, but mail gets
+            deleted and invoices get filed years later. Same company check as
+            the invoice PDF, and unpaid orders have no payslip to hand out: a
+            confirmation of money that was never received would be a lie.
+            """
+            if not AuthStore.is_admin(user) or not billing or auth is None:
+                return self._send(403, "forbidden")
+            try:
+                order_id = int(parse_qs(url.query).get("id", ["0"])[0])
+            except ValueError:
+                order_id = 0
+            order = billing.order(order_id) if order_id else None
+            if not order or int(order["org_id"]) != int(user["org_id"]):
+                return self._send(404, "not found")
+            if not order.get("paid"):
+                return self._send(404, "not found")
+            from . import payslip_pdf
+            from .billing_runner import _DEFAULT_DUE_DAYS
+            from .web_auth import _invoice_data
+            org_id = int(user["org_id"])
+            try:
+                d = _invoice_data(
+                    {"name": auth.org_name(org_id) or "",
+                     "email": user.get("email", "")}, order,
+                    auth.get_billing_contact(), pay_link="",
+                    due_days=_DEFAULT_DUE_DAYS,
+                    local=self._local_currency(user))
+                paid_until = (billing.get(org_id) or {}).get(
+                    "current_period_end")
+                pdf = payslip_pdf.render(
+                    d, payment_id=str(order.get("payment_id") or ""),
+                    paid_until=paid_until)
+            except Exception:  # noqa: BLE001
+                log.exception("could not draw the payslip for order %s",
+                              order_id)
+                return self._send(500, "payslip unavailable")
+            return self._send(
+                200, pdf, "application/pdf",
+                headers={"Content-Disposition":
+                         f'attachment; filename="{payslip_pdf.filename(d)}"',
+                         "Cache-Control": "no-store, private"})
 
         def _post_billing_subscribe(self, flat, user):
             """Redirect the owner to the PayFast payment page for their chosen plan."""
