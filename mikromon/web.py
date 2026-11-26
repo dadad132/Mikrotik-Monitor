@@ -3933,8 +3933,41 @@ def _invoice_pdf(auth, billing, order, link: str = "", to=None):
         return None
 
 
+def _payslip_pdf(auth, billing, order, to=None):
+    """(bytes, filename) of the payslip for a settled order; None otherwise.
+
+    Drawn from the same invoice values as the receipt that goes beside it, so
+    the two documents cannot disagree about what was paid. A PDF that cannot
+    be drawn is logged and left out -- it must never hold up the payment
+    email, which is best effort after the packet has already been granted.
+    """
+    if not order or not order.get("paid"):
+        return None
+    try:
+        from . import payslip_pdf
+        from .billing_runner import _DEFAULT_DUE_DAYS
+        from .web_auth import _invoice_data
+        org_id = int(order["org_id"])
+        org = {"name": ((auth.org_name(org_id) if auth else "") or ""),
+               "email": (list(to or []) or [""])[0]}
+        d = _invoice_data(org, order,
+                          auth.get_billing_contact() if auth else None,
+                          pay_link="", due_days=_DEFAULT_DUE_DAYS,
+                          local=_company_currency(billing, org_id))
+        paid_until = ((billing.get(org_id) or {}).get("current_period_end")
+                      if billing else None)
+        return (payslip_pdf.render(d,
+                                   payment_id=str(order.get("payment_id") or ""),
+                                   paid_until=paid_until),
+                payslip_pdf.filename(d))
+    except Exception:  # noqa: BLE001
+        log.exception("could not draw the payslip for order %s",
+                      order.get("id"))
+        return None
+
+
 def _attach(msg, pdf) -> None:
-    """Put an (_invoice_pdf) attachment on a message whose text is set."""
+    """Put an (_invoice_pdf or _payslip_pdf) attachment on a message."""
     if pdf:
         msg.add_attachment(pdf[0], maintype="application", subtype="pdf",
                            filename=pdf[1])
@@ -4160,7 +4193,8 @@ def _email_renewal(auth, smtp_cfg, org_id, order_id, plan, amount, currency,
 
 
 def _payment_received_text(order, org_name, paid_until=None,
-                           attached: bool = False) -> str:
+                           attached: bool = False,
+                           payslip: bool = False) -> str:
     """The "payment received" email, in the currency the card was charged.
 
     It said "we have received R25.00" for a $25 invoice charged R411: the
@@ -4188,11 +4222,19 @@ def _payment_received_text(order, org_name, paid_until=None,
                      f"is active now.")
     else:
         lines.append("Your packet is active now.")
-    lines.append(("Your receipt is attached as a PDF, and is also on the "
-                  "Billing page of the dashboard, under Payments.")
-                 if attached else
-                 "Your invoice is on the Billing page of the dashboard, under "
-                 "Payments.")
+    if attached and payslip:
+        lines.append("Your receipt is attached as a PDF along with your "
+                     "payslip, and both are also on the Billing page of the "
+                     "dashboard, under Payments.")
+    elif attached:
+        lines.append("Your receipt is attached as a PDF, and is also on the "
+                     "Billing page of the dashboard, under Payments.")
+    elif payslip:
+        lines.append("Your payslip is attached as a PDF, and your invoice is "
+                     "on the Billing page of the dashboard, under Payments.")
+    else:
+        lines.append("Your invoice is on the Billing page of the dashboard, "
+                     "under Payments.")
     return "\n\n".join(lines) + "\n"
 
 
@@ -11426,6 +11468,13 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._redirect("/superadmin?ok=" + quote(note))
             log.info("payment recorded for order %s by %s",
                      flat.get("order"), user.get("email", "?"))
+            try:
+                # An EFT is invisible to Yoco's webhook, so this is the only
+                # chance to send the same receipt + payslip a card gets.
+                self._email_invoice(billing.order(int(flat.get("order") or 0)))
+            except Exception:  # noqa: BLE001 - the payment is already recorded
+                log.exception("could not email the invoice for order %s",
+                              flat.get("order"))
             return self._redirect("/superadmin?ok=" + quote(
                 "Payment recorded, and that packet carries on."))
 
@@ -16737,14 +16786,22 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 f"#{int(order['id']):05d}").strip()
             msg["From"] = smtp.from_addr
             msg["To"] = ", ".join(to)
-            # The receipt itself, as the invoice marked paid.
+            # Both documents for one payment: the invoice marked paid, and
+            # the payslip saying what it bought and how long it runs.
             pdf = _invoice_pdf(auth, billing, order, "", to)
+            slip = _payslip_pdf(auth, billing, order, to)
             msg.set_content(_payment_received_text(
                 order, org_name,
                 (billing.get(org_id) or {}).get("current_period_end")
-                if billing else None, attached=bool(pdf)))
+                if billing else None, attached=bool(pdf),
+                payslip=bool(slip)))
             _attach(msg, pdf)
-            _smtp_send(smtp, msg)
+            _attach(msg, slip)
+            try:
+                _smtp_send(smtp, msg)
+            except Exception:  # noqa: BLE001 - the packet is already granted
+                log.exception("could not email the payment receipt for order "
+                              "%s", order["id"])
 
         def _serve_invoice_template(self, url, user):
             """Hand back a template to start from, or the current one.
