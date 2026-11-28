@@ -68,11 +68,21 @@ CREATE TABLE IF NOT EXISTS departments (
     resolvers  TEXT,
     ports      TEXT,
     note       TEXT,
+    down_mbps  REAL,
+    up_mbps    REAL,
     created    REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_dept_device ON departments(device);
 CREATE UNIQUE INDEX IF NOT EXISTS ix_dept_name ON departments(device, name);
 """)
+        # Older stores have a departments table without the speed caps. Add
+        # them in place: existing rows read back as unlimited, and nothing
+        # already saved is rewritten or lost.
+        dept_cols = [r[1] for r in self.db.execute(
+            "PRAGMA table_info(departments)")]
+        for col in ("down_mbps", "up_mbps"):
+            if col not in dept_cols:
+                self.db.execute(f"ALTER TABLE departments ADD COLUMN {col} REAL")
         self.db.commit()
         self._migrate_checks()
         self._seal_existing()
@@ -235,14 +245,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS ix_dept_name ON departments(device, name);
         from .departments import DepartmentError, make
 
         rows = self.db.execute(
-            "SELECT name, vlan, subnet, profile_id, resolvers, ports, note "
+            "SELECT name, vlan, subnet, profile_id, resolvers, ports, note, "
+            "down_mbps, up_mbps "
             "FROM departments WHERE device = ? ORDER BY vlan",
             (device,)).fetchall()
         out = []
-        for name, vlan, subnet, pid, res, ports, note in rows:
+        for name, vlan, subnet, pid, res, ports, note, down, up in rows:
             try:
                 out.append(make(name, vlan, subnet, pid or "", res or "",
-                                note or "", ports or ""))
+                                note or "", ports or "",
+                                down_mbps=down, up_mbps=up))
             except DepartmentError as exc:
                 log.warning("department %r on %s is unusable: %s",
                             name, device, exc)
@@ -257,13 +269,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS ix_dept_name ON departments(device, name);
                 (device, original_name or dept["name"]))
             self.db.execute(
                 "INSERT INTO departments (device, name, vlan, subnet, "
-                "profile_id, resolvers, ports, note, created) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "profile_id, resolvers, ports, note, down_mbps, up_mbps, "
+                "created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (device, dept["name"], dept["vlan"], dept["subnet"],
                  dept.get("profile_id") or "",
                  ",".join(dept.get("resolvers") or []),
                  ",".join(dept.get("ports") or []),
-                 dept.get("note") or "", time.time()))
+                 dept.get("note") or "", dept.get("down_mbps"),
+                 dept.get("up_mbps"), time.time()))
             self.db.commit()
 
     def delete_department(self, device: str, name: str) -> None:

@@ -248,6 +248,92 @@ check("...and only the ones actually missing a profile are named",
 check("no departments at all needs nothing",
       D.needs_own_profiles([]) is False)
 
+print("\nSpeed caps on an address or a whole department")
+
+check("a blank, None or zero speed means unlimited, not a slow pipe",
+      D.parse_speed_mbps(None) is None and D.parse_speed_mbps("") is None
+      and D.parse_speed_mbps("0") is None and D.parse_speed_mbps(0) is None)
+check("50, 50M and 50 Mbps all mean the same 50 Mbps, as a number",
+      D.parse_speed_mbps("50") == 50.0 and D.parse_speed_mbps("50M") == 50.0
+      and D.parse_speed_mbps("50 Mbps") == 50.0
+      and D.parse_speed_mbps(50) == 50.0 and D.parse_speed_mbps(0.5) == 0.5)
+bad, why = refuses(D.parse_speed_mbps, "fast")
+check("nonsense is refused with the shape of a real speed",
+      bad and "Mbps" in why)
+for _v in ("-1", "0.05", "10001", "50 km/h"):
+    bad, why = refuses(D.parse_speed_mbps, _v)
+    check(f"...{_v!r} is refused with the range it has to be in",
+          bad and "0.1" in why and "10000" in why)
+
+capped = D.make("Sales", 20, "10.20.20.0/24", down_mbps="50M", up_mbps="50")
+check("a department stores validated caps as numbers",
+      capped["down_mbps"] == 50.0 and capped["up_mbps"] == 50.0)
+one_way = D.make("Support", 30, "10.20.30.0/24", down_mbps="20")
+check("one direction alone is allowed; the other stays unlimited",
+      one_way["down_mbps"] == 20.0 and one_way["up_mbps"] is None)
+check("old callers get unlimited caps without changing their call",
+      sales["down_mbps"] is None and sales["up_mbps"] is None
+      and "down_mbps" in sales)
+
+qo = D.queue_ops(capped)
+check("a cap becomes one simple queue, named and tagged for the Queues tab",
+      len(qo) == 1 and qo[0].action == "add"
+      and qo[0].path == ("queue", "simple")
+      and qo[0].params["name"] == "mm-dept-sales"
+      and qo[0].params["target"] == "10.20.20.0/24"
+      and qo[0].params["comment"] == "mikromon:qos:dept-sales")
+check("...with 50 Mbps in each direction, sent in the router's bits",
+      qo[0].params["max-limit"] == "50000000/50000000")
+check("...and a desc a person can read",
+      "cap Sales (10.20.20.0/24)" in qo[0].desc and "50" in qo[0].desc)
+check("an unlimited direction is written as 0, not left to guess",
+      D.queue_ops(one_way)[0].params["max-limit"] == "0/20000000")
+check("no cap means no queue at all", D.queue_ops(sales) == [])
+
+capped_plan = D.build_plan("R1", [capped, one_way, accounts])
+check("the cap queue is part of the department plan",
+      any(o.params.get("name") == "mm-dept-sales" for o in capped_plan.ops
+          if o.path == ("queue", "simple")))
+check("...and the summary says how many are capped",
+      "2 with speed caps" in capped_plan.summary)
+
+print("\nCaps survive in the database, including an old database")
+
+import sqlite3  # noqa: E402
+import tempfile  # noqa: E402
+
+from mikromon.devices_store import DevicesStore  # noqa: E402
+
+_old_dir = tempfile.mkdtemp()
+_old_db = os.path.join(_old_dir, "old.db")
+_raw = sqlite3.connect(_old_db)
+_raw.executescript("""
+CREATE TABLE departments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, device TEXT NOT NULL,
+    name TEXT NOT NULL, vlan INTEGER NOT NULL, subnet TEXT NOT NULL,
+    profile_id TEXT, resolvers TEXT, ports TEXT, note TEXT,
+    created REAL NOT NULL);
+INSERT INTO departments (device, name, vlan, subnet, profile_id, resolvers,
+                         ports, note, created)
+VALUES ('R2', 'Old', 20, '10.20.20.0/24', '', '', '', '', 0);
+""")
+_raw.commit()
+_raw.close()
+_store = DevicesStore(_old_db)
+_cols = [r[1] for r in _store.db.execute("PRAGMA table_info(departments)")]
+check("an old departments table gains both cap columns, with its data intact",
+      "down_mbps" in _cols and "up_mbps" in _cols
+      and [d["name"] for d in _store.departments("R2")] == ["Old"]
+      and _store.departments("R2")[0]["down_mbps"] is None)
+_new = D.make("Phones", 30, "10.20.30.0/24", down_mbps="50", up_mbps="25")
+_store.save_department("R2", _new)
+_store.close()
+_store = DevicesStore(_old_db)
+check("...and caps written now read back as numbers after a restart",
+      any(d["name"] == "Phones" and d["down_mbps"] == 50.0
+          and d["up_mbps"] == 25.0 for d in _store.departments("R2")))
+_store.close()
+
 print("\nThe tab somebody actually uses")
 
 from mikromon.web import _departments_box  # noqa: E402
@@ -270,6 +356,16 @@ check("the port picker offers the router's real interface names",
 check("the RouterOS limit is explained where the decision is made, rather "
       "than left for somebody to rediscover",
       "only hold ONE DNS-over-HTTPS profile" in box)
+
+box = _departments_box("R1", "tok", [capped, sales], ports=[])
+check("speed limit is its own column, with both directions shown",
+      "Speed limit" in box and "50 ↓ / 50 ↑ Mbps" in box)
+check("...and an uncapped department says Unlimited rather than 0 Mbps",
+      "Unlimited" in box)
+check("...while the add form takes both caps, with a plain example",
+      'name="down_mbps"' in box and 'name="up_mbps"' in box
+      and "Download cap (Mbps)" in box and "Upload cap (Mbps)" in box
+      and "e.g. 50" in box)
 
 box = _departments_box("R1", "tok", [], ports=[])
 check("a router with no departments says what that means rather than "
@@ -394,6 +490,22 @@ check("removing one takes its ROW off the tab and leaves the other -- "
       "checked by its delete form rather than by its name, which also "
       "appears in the tab's own explanation",
       'value="Support"' not in _page and 'value="Sales"' in _page)
+
+_post(name="Phones", vlan="50", subnet="10.20.50.0/24",
+      down_mbps="50M", up_mbps="50 Mbps")
+_page = _html.unescape(_tab())
+check("a cap typed in the browser is saved and shown back on the tab",
+      "Phones" in _page and "50 ↓ / 50 ↑ Mbps" in _page)
+_bad_post = _op.open(urllib.request.Request(
+    _B + "/device/departments",
+    data=urllib.parse.urlencode({"csrf": _CSRF, "device": "R1",
+                                 "action": "save", "name": "TooFast",
+                                 "vlan": "60", "subnet": "10.20.60.0/24",
+                                 "down_mbps": "20000"}).encode()), timeout=10)
+_bad_page = _html.unescape(_bad_post.read().decode("utf-8", "replace"))
+_page = _tab()
+check("an impossible cap is refused with the range, and never stored",
+      "TooFast" not in _page and "0.1" in _bad_page and "10000" in _bad_page)
 
 print("\nAgainst what the router already has")
 

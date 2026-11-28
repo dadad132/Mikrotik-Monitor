@@ -51,6 +51,12 @@ _INTERFACE = ("interface",)
 _PPPOE = ("interface", "pppoe-client")
 _VLAN = ("interface", "vlan")
 _ROUTE = ("ip", "route")
+_ROUTING_TABLE = ("routing", "table")
+
+# The WAN tab removes stale "mm-*" routing tables on every apply. This table
+# belongs to VoIP, so it must live outside that prefix or a later WAN apply
+# would delete it while leaving the pinned route and marks behind.
+ROUTE_TABLE = "mikromon-voip-wan"
 
 TAG = "mikromon:voip:"               # rows this feature owns
 STATE_TAG = "mikromon:voip-state:"   # the inert row recording what it changed
@@ -71,9 +77,13 @@ _TUNNEL_IFACES = ("mikromon", _USERS_IFACE)
 # invalid...) are left out, or the put-back itself would fail.
 _MANGLE_FIELDS = ("chain", "action", "protocol", "dst-port", "dscp",
                   "connection-mark", "new-connection-mark", "packet-mark",
-                  "new-packet-mark", "passthrough", "comment", "disabled")
+                  "new-packet-mark", "passthrough", "comment", "disabled",
+                  "new-routing-mark", "src-address", "dst-address-type")
 _TREE_FIELDS = ("name", "parent", "packet-mark", "limit-at", "max-limit",
                 "priority", "queue", "comment", "disabled")
+_RT_FIELDS = ("name", "fib", "comment", "disabled")
+_ROUTE_FIELDS = ("dst-address", "gateway", "routing-table", "check-gateway",
+                 "distance", "comment", "disabled")
 # A FastTrack rule is recognised by these if its .id has changed by the
 # time the feature is switched off.
 _SIG_FIELDS = ("chain", "connection-state", "connection-mark", "hw-offload",
@@ -171,6 +181,23 @@ def _looks_ip(s) -> bool:
         return False
 
 
+def _ipv4_gateway(s) -> bool:
+    import ipaddress
+    try:
+        return ipaddress.ip_address(str(s).strip()).version == 4
+    except ValueError:
+        return False
+
+
+def _ipv4_subnet(s) -> bool:
+    """An IPv4 host or CIDR: a phone VLAN or one PBX address."""
+    import ipaddress
+    try:
+        return ipaddress.ip_network(str(s).strip(), strict=False).version == 4
+    except ValueError:
+        return False
+
+
 def _version(rows) -> tuple:
     ver = str(rows[0].get("version", "")) if rows else ""
     m = re.match(r"(\d+)\.(\d+)", ver)
@@ -203,7 +230,6 @@ def read(pusher, cfg) -> dict:
     out["marker"] = markers[0] if markers else None
     out["marker_dupes"] = markers[1:]
     out["state"] = _state(out["marker"])
-    out["on"] = bool(out["marker"] or out["mangle"] or out["tree"])
     out["fasttrack"] = [r for r in filters
                         if _text(r.get("action")) == "fasttrack-connection"
                         and not as_bool(r.get("dynamic"))]
@@ -216,6 +242,24 @@ def read(pusher, cfg) -> dict:
     out["foreign_tree"] = [r for r in tree
                            if not str(r.get("comment", "")).startswith(TAG)]
     out["simple"] = _safe(api, _SIMPLE)
+
+    # WAN pinning: a routing table, one default route in it, and the mangle
+    # rules that send calls into it. Read best-effort like the other menus:
+    # a board without /routing/table is not a reason to hide the rest of the
+    # Queues tab.
+    routes_all = _safe(api, _ROUTE)
+    out["rt_table"], out["rt_table_dupes"] = _owned(
+        _safe(api, _ROUTING_TABLE), TAG)
+    out["routes"], out["routes_dupes"] = _owned(routes_all, TAG)
+    default_in_table = out["routes"].get("rt-default") or {}
+    out["route_via"] = _text(default_in_table.get("gateway", ""))
+    out["route_failover"] = (
+        _norm(default_in_table.get("check-gateway")) == "ping"
+        if default_in_table else True)
+    phones = out["mangle"].get("route-phones") or {}
+    out["phone_src"] = _text(phones.get("src-address", ""))
+    out["on"] = bool(out["marker"] or out["mangle"] or out["tree"]
+                     or out["rt_table"] or out["routes"])
 
     # Interfaces, and which PPPoE connection runs over which port: a PPPoE
     # line's traffic leaves through pppoe-out1, and a queue on the port
@@ -280,7 +324,7 @@ def read(pusher, cfg) -> dict:
     out["choices"] = choices
 
     active = ""
-    for r in _safe(api, _ROUTE):
+    for r in routes_all:
         if (str(r.get("dst-address", "")).startswith("0.0.0.0/0")
                 and as_bool(r.get("active", True))
                 and _norm(r.get("routing-table") or "main") == "main"):
@@ -327,6 +371,44 @@ def _settings(flat: dict, cur: dict) -> tuple:
                         f"router.")
     else:
         iface = cur["ifaces"][n]
+
+    # The line calls are PINNED to, which need not be the line whose upload
+    # is shaped. A gateway address is accepted as well as an interface: the
+    # WAN tab already lets somebody choose a line that way. Tunnels and the
+    # physical port under PPPoE are refused for the same reason as above --
+    # neither is where the traffic actually leaves.
+    route_via = ""
+    raw_via = (flat.get("voip_route_via") or "").strip()
+    if raw_via:
+        n = _norm(raw_via)
+        if n in _TUNNEL_IFACES:
+            problems.append(f"{raw_via} is a VPN tunnel, not an internet line.")
+        elif n in cur.get("ppp_over", {}):
+            problems.append(f"{raw_via} carries the PPPoE connection "
+                            f"{cur['ppp_over'][n]}: choose {cur['ppp_over'][n]}, "
+                            f"which is where the traffic actually leaves.")
+        elif n in cur.get("ifaces", {}):
+            route_via = cur["ifaces"][n]
+        elif _ipv4_gateway(raw_via):
+            route_via = raw_via
+        else:
+            problems.append(f"There is no interface called {raw_via} on this "
+                            f"router, and it is not an IPv4 gateway address.")
+
+    phone_src = ""
+    raw_src = (flat.get("voip_phone_src") or "").strip()
+    if raw_src:
+        if _ipv4_subnet(raw_src):
+            phone_src = raw_src
+        else:
+            problems.append(f"{raw_src} is not an IPv4 address or subnet. "
+                            f"Use 10.20.30.0/24 for a phone VLAN, or "
+                            f"192.168.88.50 for one PBX.")
+
+    # The form sends "" from a hidden field when the box is unticked, since
+    # a browser omits unchecked boxes altogether. An absent key is an older
+    # caller that has not answered yet, and keeps the safe default.
+    route_failover = (flat.get("voip_route_failover", "1") == "1")
 
     up = mbps_to_bps(flat.get("voip_up"))
     if not 1_000_000 <= up <= 10_000_000_000:
@@ -389,7 +471,9 @@ def _settings(flat: dict, cur: dict) -> tuple:
             break
     want = {"iface": iface, "up": up, "guar": guar, "floor": floor,
             "rtp": rtp, "sip": sip, "dscp": flat.get("voip_dscp") == "1",
-            "alg": flat.get("voip_alg") == "1"}
+            "alg": flat.get("voip_alg") == "1",
+            "route_via": route_via, "phone_src": phone_src,
+            "route_failover": route_failover}
     return want, problems
 
 
@@ -428,6 +512,19 @@ def _desired_mangle(w) -> list:
         rows.append(("dscp", {**conn, "dscp": "46"},
                      "recognise calls: anything the phones mark as voice "
                      "(DSCP 46)"))
+    if w.get("route_via"):
+        route = {"chain": "prerouting", "dst-address-type": "!local",
+                 "action": "mark-routing", "new-routing-mark": ROUTE_TABLE,
+                 "passthrough": "yes"}
+        rows.append(("route-calls",
+                     {**route, "connection-mark": CONN_MARK},
+                     f"send recognised calls out {w['route_via']} instead of "
+                     f"the router's default WAN line"))
+        if w.get("phone_src"):
+            rows.append(("route-phones",
+                         {**route, "src-address": w["phone_src"]},
+                         f"send all traffic from {w['phone_src']} out "
+                         f"{w['route_via']}, phone system included"))
     # passthrough=yes so rules added after this one -- the WAN tab's policy
     # routing appends its rules -- still see call packets.
     rows.append(("pkt", {"chain": "prerouting", "connection-mark": CONN_MARK,
@@ -506,8 +603,41 @@ def _row_ops(path, desired, owned, dupes, fields, what,
 
 
 def _on_ops(cur: dict, w: dict) -> list:
-    ops = _row_ops(_TREE, _desired_tree(w), cur["tree"], cur["tree_dupes"],
-                   _TREE_FIELDS, "queue")
+    # A route cannot use a table that does not exist yet, and a routing mark
+    # on a rule before that route would send calls into the default table.
+    # Turning pinning off takes them down in the opposite order.
+    if w.get("route_via"):
+        route_params = {"dst-address": "0.0.0.0/0",
+                        "gateway": w["route_via"],
+                        "routing-table": ROUTE_TABLE,
+                        "distance": "1"}
+        # Send the off value explicitly: leaving the field out would make
+        # _row_ops() see no change on a route that already has ping failover,
+        # so unticking the box would appear to work and change nothing.
+        route_params["check-gateway"] = (
+            "ping" if w.get("route_failover") else "none")
+        route_ops = _row_ops(
+            _ROUTING_TABLE,
+            [("rt-table", {"name": ROUTE_TABLE, "fib": "yes"},
+              f"routing table for calls pinned to {w['route_via']}")],
+            cur["rt_table"], cur["rt_table_dupes"], _RT_FIELDS,
+            "routing table")
+        route_ops += _row_ops(
+            _ROUTE,
+            [("rt-default", route_params,
+              f"default route for calls via {w['route_via']}")],
+            cur["routes"], cur["routes_dupes"], _ROUTE_FIELDS, "route")
+    else:
+        route_ops = _row_ops(
+            _ROUTE, [], cur["routes"], cur["routes_dupes"],
+            _ROUTE_FIELDS, "route")
+        route_ops += _row_ops(
+            _ROUTING_TABLE, [], cur["rt_table"], cur["rt_table_dupes"],
+            _RT_FIELDS, "routing table")
+
+    ops = route_ops + _row_ops(
+        _TREE, _desired_tree(w), cur["tree"], cur["tree_dupes"],
+        _TREE_FIELDS, "queue")
     # A connection rule added after the packet-marking rule exists goes in
     # front of it, so the first packet of a newly recognised call is
     # labelled too.
@@ -599,6 +729,21 @@ def _off_ops(cur: dict) -> list:
     """Everything this feature added, and what it switched off switched
     back on. FastTrack is only touched when the record says so."""
     ops = []
+    # Routes before their routing table, and both before the marks that
+    # point at them: a partial apply or rollback must never leave a route
+    # referring to a table that is already gone.
+    for key, row in cur.get("routes", {}).items():
+        ops.append(_remove(_ROUTE, row, _ROUTE_FIELDS,
+                           f"remove pinned route {key}", f"route {key}"))
+    for row in cur.get("routes_dupes", []):
+        ops.append(_remove(_ROUTE, row, _ROUTE_FIELDS,
+                           "remove a duplicate pinned route", "route"))
+    for key, row in cur.get("rt_table", {}).items():
+        ops.append(_remove(_ROUTING_TABLE, row, _RT_FIELDS,
+                           f"remove routing table {key}", f"table {key}"))
+    for row in cur.get("rt_table_dupes", []):
+        ops.append(_remove(_ROUTING_TABLE, row, _RT_FIELDS,
+                           "remove a duplicate routing table", "table"))
     state = cur["state"]
     marker = cur.get("marker")
     by_id = {str(r.get(".id")): r for r in cur.get("fasttrack", [])}
@@ -703,6 +848,9 @@ def _current(cur: dict) -> dict:
         "dscp": bool(mangle.get("dscp")) or not cur.get("on"),
         "alg": (as_bool(svc.get("disabled")) if svc and cur.get("on")
                 else bool(svc)),
+        "route_via": cur.get("route_via", ""),
+        "phone_src": cur.get("phone_src", ""),
+        "route_failover": bool(cur.get("route_failover", True)),
     }
 
 
@@ -712,10 +860,29 @@ def form(cur: dict, cfg) -> list:
     choices = list(cur.get("choices") or [])
     if c["iface"] and all(_norm(v) != _norm(c["iface"]) for v, _l in choices):
         choices.append((c["iface"], c["iface"]))
+    if (c["route_via"]
+            and all(_norm(v) != _norm(c["route_via"]) for v, _l in choices)):
+        choices.append((c["route_via"], c["route_via"]))
     fields = [
         {"type": "select", "name": "voip_iface", "label": "Internet line",
          "options": choices or [("", "No internet line found")],
          "value": c["iface"]},
+        {"type": "select", "name": "voip_route_via",
+         "label": "Point phones / calls to WAN line (optional)",
+         "options": [("", "Follow router default WAN (no pinning)")]
+                    + choices,
+         "value": c["route_via"]},
+        {"type": "text", "name": "voip_phone_src",
+         "label": "Phone subnet or PBX IP to pin (optional, e.g. "
+                  "10.20.30.0/24)",
+         "value": c["phone_src"], "placeholder": "e.g. 10.20.30.0/24"},
+        # A browser omits an unticked checkbox. This hidden field supplies
+        # "", so the untick reaches the form parser as a real answer.
+        {"type": "hidden", "name": "voip_route_failover", "value": ""},
+        {"type": "check", "name": "voip_route_failover",
+         "label": "Fall back to another WAN line if the pinned line goes "
+                  "down (check-gateway ping)",
+         "on": c["route_failover"]},
         {"type": "text", "name": "voip_up",
          "label": "Shape the upload to (Mbps) — about 90% of the line's "
                   "real upload speed",
@@ -775,6 +942,14 @@ def summary(cur: dict, cfg) -> list:
                  f"voice on ports {rtp}"
                  + (", and anything the phones mark as voice."
                     if mangle.get("dscp") else "."))
+    if cur.get("route_via"):
+        src = (f" from {cur['phone_src']}" if cur.get("phone_src") else "")
+        lines.append(f"Calls{src} are pinned out through {cur['route_via']}"
+                     + (" and fall back to another line if it goes down."
+                        if cur.get("route_failover") else " (no failover)."))
+    else:
+        lines.append("Calls follow the router's default WAN line "
+                     "(no pinning).")
     state = cur.get("state") or {}
     if state.get("ft"):
         lines.append(f"FastTrack: {len(state['ft'])} rule(s) switched off by "
@@ -817,6 +992,11 @@ def warnings(cur: dict, cfg) -> list:
         out.append(f"⚠ Internet traffic is going out through {active} right "
                    f"now, not {parent}: calls get no priority until it is "
                    f"back on {parent}.")
+    via = cur.get("route_via", "")
+    if via and parent and _norm(via) != _norm(parent):
+        out.append(f"⚠ Calls are pinned to {via}, but the upload is shaped "
+                   f"on {parent}: shape {via} instead, or the pinned line "
+                   f"gets no call priority.")
     vias = [v for v in cur.get("policy_via", []) if _norm(v) != _norm(parent)]
     if vias:
         out.append(f"⚠ The WAN tab sends some devices out through "

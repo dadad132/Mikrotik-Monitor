@@ -165,6 +165,15 @@ def owned(api, path):
             if str(r.get("comment", "")).startswith(vp.TAG)]
 
 
+def refused(state=None, **over):
+    a = FakeApi(state or router())
+    try:
+        plan_for(a, **over)
+        return ""
+    except PlanRefused as exc:
+        return str(exc) if not a.executed else "EXECUTED"
+
+
 TREE, MANGLE, FILTER = vp._TREE, vp._MANGLE, vp._FILTER
 SVC = vp._SERVICE_PORT
 
@@ -273,27 +282,224 @@ check("ticking it again puts the rule in front of the packet label, so a new "
       len(add) == 1 and add[0].params.get("place-before") == pkt_id)
 apply(api)
 
+print("\npinning phones and calls to a WAN line")
+ON_PIN = {**ON, "voip_route_via": "ether2", "voip_phone_src": "10.20.30.0/24"}
+api = FakeApi(router())
+pl = plan_for(api, **ON_PIN)
+rt_ops = ops_on(pl, vp._ROUTING_TABLE)
+route_ops = ops_on(pl, vp._ROUTE)
+mg_add = [o for o in ops_on(pl, MANGLE) if o.action == "add"]
+idx = {id(o): i for i, o in enumerate(pl.ops)}
+calls = next(o for o in mg_add
+             if o.params["comment"] == vp.TAG + "route-calls")
+phones = next(o for o in mg_add
+              if o.params["comment"] == vp.TAG + "route-phones")
+check("a routing table is created BEFORE the route and the routing rules",
+      len(rt_ops) == 1
+      and rt_ops[0].params == {"name": vp.ROUTE_TABLE, "fib": "yes",
+                               "comment": vp.TAG + "rt-table"}
+      and idx[id(rt_ops[0])] < idx[id(route_ops[0])]
+      < idx[id(calls)])
+check("the default route in that table points at the chosen line, with ping "
+      "failover on by default",
+      len(route_ops) == 1
+      and route_ops[0].params == {
+          "dst-address": "0.0.0.0/0", "gateway": "ether2",
+          "routing-table": vp.ROUTE_TABLE, "distance": "1",
+          "check-gateway": "ping", "comment": vp.TAG + "rt-default"})
+check("calls marked as VoIP get routed out that line",
+      calls.params == {"chain": "prerouting",
+                       "connection-mark": vp.CONN_MARK,
+                       "dst-address-type": "!local",
+                       "action": "mark-routing",
+                       "new-routing-mark": vp.ROUTE_TABLE,
+                       "passthrough": "yes",
+                       "comment": vp.TAG + "route-calls"})
+check("...and so does every packet from the phone subnet / PBX",
+      phones.params == {"chain": "prerouting",
+                        "src-address": "10.20.30.0/24",
+                        "dst-address-type": "!local",
+                        "action": "mark-routing",
+                        "new-routing-mark": vp.ROUTE_TABLE,
+                        "passthrough": "yes",
+                        "comment": vp.TAG + "route-phones"})
+check("the pinned table is outside the WAN tab's mm- cleanup prefix",
+      not vp.ROUTE_TABLE.startswith("mm-"))
+check("unticking failover writes RouterOS's explicit off value",
+      ops_on(plan_for(api, **{**ON_PIN, "voip_route_failover": ""}),
+             vp._ROUTE)[0].params["check-gateway"] == "none")
+check("without a phone subnet, only recognised calls are pinned",
+      not any(o.params.get("comment") == vp.TAG + "route-phones"
+              for o in ops_on(plan_for(api, voip_route_via="ether2"), MANGLE)))
+check("a gateway address may name the WAN line instead of an interface",
+      ops_on(plan_for(api, voip_route_via="100.64.0.1"),
+             vp._ROUTE)[0].params["gateway"] == "100.64.0.1")
+
+apply(api, **ON_PIN)
+cur = vp.read(Pusher(cfg, api), cfg)
+check("the tab reads the pinned line, phone subnet and failover back off the "
+      "router", cur["route_via"] == "ether2"
+      and cur["phone_src"] == "10.20.30.0/24"
+      and cur["route_failover"] is True)
+check("applying the same pinning twice sends nothing",
+      plan_for(api, **ON_PIN).empty)
+f = {d["name"]: d for d in vp.form(cur, cfg)}
+check("the form offers 'follow the default' plus the real WAN lines",
+      f["voip_route_via"]["options"][0]
+      == ("", "Follow router default WAN (no pinning)")
+      and any(v == "ether2" for v, _l in f["voip_route_via"]["options"])
+      and f["voip_route_via"]["value"] == "ether2"
+      and f["voip_phone_src"]["value"] == "10.20.30.0/24"
+      and f["voip_route_failover"]["on"] is True)
+fields = vp.form(cur, cfg)
+i_hidden = next(i for i, d in enumerate(fields)
+                if d.get("type") == "hidden"
+                and d.get("name") == "voip_route_failover")
+i_check = next(i for i, d in enumerate(fields)
+               if d.get("type") == "check"
+               and d.get("name") == "voip_route_failover")
+check("an unticked browser box still sends an answer, through a hidden "
+      "field before it",
+      i_hidden < i_check and fields[i_hidden]["value"] == "")
+text = "\n".join(vp.summary(cur, cfg))
+check("the summary says which line and which phone subnet calls are pinned to",
+      "ether2" in text and "10.20.30.0/24" in text)
+
+NO_FAILOVER = {**ON_PIN, "voip_route_failover": ""}
+pl = plan_for(api, **NO_FAILOVER)
+check("unticking failover on an ALREADY pinned route sends one real change",
+      len(ops_on(pl, vp._ROUTE)) == 1
+      and ops_on(pl, vp._ROUTE)[0].action == "set"
+      and ops_on(pl, vp._ROUTE)[0].params.get("check-gateway") == "none"
+      and ops_on(pl, vp._ROUTE)[0].inverse.params.get("check-gateway")
+      == "ping")
+apply(api, **NO_FAILOVER)
+check("the tab reads failover as off after the untick",
+      vp.read(Pusher(cfg, api), cfg)["route_failover"] is False)
+apply(api, **ON_PIN)
+check("ticking it again puts ping failover back on the route",
+      vp.read(Pusher(cfg, api), cfg)["route_failover"] is True)
+
+NO_PHONES = {**ON_PIN, "voip_phone_src": ""}
+pl = plan_for(api, **NO_PHONES)
+phone_id = next(r[".id"] for r in api.state[MANGLE]
+                if r.get("comment") == vp.TAG + "route-phones")
+rm_phone = [o for o in ops_on(pl, MANGLE) if o.action == "remove"
+            and o.params.get(".id") == phone_id]
+check("clearing the phone subnet removes only that routing rule",
+      len(rm_phone) == 1 and not ops_on(pl, vp._ROUTE)
+      and not ops_on(pl, vp._ROUTING_TABLE)
+      and not any(o.action == "remove" and o.params.get(".id") != phone_id
+                  for o in ops_on(pl, MANGLE)))
+apply(api, **NO_PHONES)
+cur = vp.read(Pusher(cfg, api), cfg)
+check("...the tab no longer offers a stale phone subnet, but still the pin",
+      cur["phone_src"] == "" and cur["route_via"] == "ether2"
+      and not any(r.get("comment") == vp.TAG + "route-phones"
+                  for r in api.state[MANGLE]))
+apply(api, **ON_PIN)
+
+pl = plan_for(api, **{**ON_PIN, "voip_route_via": "pppoe-out1"})
+check("moving the pinned line only updates the route's gateway",
+      len(ops_on(pl, vp._ROUTE)) == 1
+      and ops_on(pl, vp._ROUTE)[0].action == "set"
+      and ops_on(pl, vp._ROUTE)[0].params["gateway"] == "pppoe-out1"
+      and ops_on(pl, vp._ROUTING_TABLE) == [])
+
+pl = plan_for(api, **{**ON_PIN, "voip_route_via": ""})
+rid = next(r[".id"] for r in api.state[vp._ROUTE]
+           if str(r.get("comment", "")).startswith(vp.TAG))
+tid = next(r[".id"] for r in api.state[vp._ROUTING_TABLE]
+           if str(r.get("comment", "")).startswith(vp.TAG))
+rm_route = [o for o in ops_on(pl, vp._ROUTE) if o.action == "remove"]
+rm_table = [o for o in ops_on(pl, vp._ROUTING_TABLE) if o.action == "remove"]
+rm_mangle = [o for o in ops_on(pl, MANGLE)
+             if o.action == "remove"
+             and o.params[".id"] in (
+                 r[".id"] for r in api.state[MANGLE]
+                 if str(r.get("comment", "")).startswith(vp.TAG))]
+check("clearing the pin removes the route BEFORE the routing table",
+      len(rm_route) == 1 and rm_route[0].params[".id"] == rid
+      and len(rm_table) == 1 and rm_table[0].params[".id"] == tid
+      and {id(o): i for i, o in enumerate(pl.ops)}[id(rm_route[0])]
+      < {id(o): i for i, o in enumerate(pl.ops)}[id(rm_table[0])])
+check("...and takes the routing-mark rules with it, all reversibly",
+      len(rm_mangle) >= 2
+      and all(o.inverse and o.inverse.action == "add" for o in rm_mangle)
+      and set(rm_route[0].inverse.params) <= set(vp._ROUTE_FIELDS)
+      and set(rm_table[0].inverse.params) <= set(vp._RT_FIELDS))
+apply(api, **{**ON_PIN, "voip_route_via": ""})
+check("after clearing the pin no route or routing table of ours is left",
+      not owned(api, vp._ROUTE) and not owned(api, vp._ROUTING_TABLE)
+      and not any(str(r.get("comment", "")).startswith(vp.TAG)
+                  for r in api.state[MANGLE]
+                  if r.get("action") == "mark-routing"))
+
+apply(api, **ON_PIN)
+off = vp.plan(Pusher(cfg, api, dry_run=True), cfg, {"voip_on": "off"}, {})
+rem = [o for o in off.ops if o.action == "remove"]
+route_rm = next(o for o in rem if o.path == vp._ROUTE)
+table_rm = next(o for o in rem if o.path == vp._ROUTING_TABLE)
+check("switching VoIP off removes the pinned route before its routing table",
+      {id(o): i for i, o in enumerate(off.ops)}[id(route_rm)]
+      < {id(o): i for i, o in enumerate(off.ops)}[id(table_rm)]
+      and all(o.inverse and o.inverse.action == "add" for o in rem))
+Pusher(cfg, api, dry_run=False).apply(off)
+check("...and leaves no route, table or mangle rule of ours behind",
+      not owned(api, vp._ROUTE) and not owned(api, vp._ROUTING_TABLE)
+      and not owned(api, MANGLE))
+
+for what, over, needle in [
+        ("a VPN tunnel as the pinned line",
+         dict(voip_route_via="mikromon"), "VPN tunnel"),
+        ("the port under a PPPoE line",
+         dict(voip_route_via="ether1"), "choose pppoe-out1"),
+        ("a name that is not an interface",
+         dict(voip_route_via="not-a-line"), "no interface called"),
+        ("an impossible phone subnet mask",
+         dict(voip_route_via="ether2", voip_phone_src="10.20.30.0/33"),
+         "not an IPv4"),
+        ("a phone address that is not IPv4",
+         dict(voip_route_via="ether2", voip_phone_src="phones.example"),
+         "not an IPv4")]:
+    got = refused(**over)
+    check(f"refused: {what}",
+          got.startswith("Nothing was sent to the router.") and needle in got)
+
+api = FakeApi(router())
+apply(api, **ON_PIN)  # shaped on pppoe-out1, pinned to ether2
+text = "\n".join(vp.summary(vp.read(Pusher(cfg, api), cfg), cfg))
+check("a pinned line that is not the shaped line is warned about",
+      "⚠ Calls are pinned to ether2" in text
+      and "pppoe-out1" in text and "shape" in text.lower())
+api = FakeApi(router())
+apply(api, **{**ON_PIN, "voip_iface": "ether2"})
+text = "\n".join(vp.summary(vp.read(Pusher(cfg, api), cfg), cfg))
+check("a matching pinned and shaped line does not get that warning",
+      "⚠ Calls are pinned to" not in text)
+
 print("\nFastTrack switched back on by hand, or a new one added")
 next(r for r in api.state[FILTER] if r[".id"] == "*5")["disabled"] = "no"
 cur = vp.read(Pusher(cfg, api), cfg)
 check("the summary says calls are skipping the queues again",
       any("FastTrack rule is switched on again" in ln
           for ln in vp.summary(cur, cfg)))
-pl = plan_for(api)
+ON_PINNED_SHAPED = {**ON_PIN, "voip_iface": "ether2"}
+pl = plan_for(api, **ON_PINNED_SHAPED)
 check("applying again switches it off again, and nothing else",
       [(o.path, o.params) for o in pl.ops]
       == [(FILTER, {".id": "*5", "disabled": "yes"})])
-apply(api)
+apply(api, **ON_PINNED_SHAPED)
 api.state[FILTER].append({".id": "*8", "chain": "forward",
                           "action": "fasttrack-connection", "disabled": "no",
                           "comment": "added later"})
-pl = plan_for(api)
+pl = plan_for(api, **ON_PINNED_SHAPED)
 check("a new FastTrack rule is switched off and added to the record",
       any(o.path == FILTER and o.params == {".id": "*8", "disabled": "yes"}
           for o in pl.ops)
       and any(o.action == "set" and "*8/" in o.params.get("comment", "")
               and "*5/" in o.params.get("comment", "") for o in pl.ops))
-apply(api)
+apply(api, **ON_PINNED_SHAPED)
 
 print("\nswitching it off")
 api.state[MANGLE].append({".id": "*90", "chain": "prerouting",
@@ -308,7 +514,8 @@ check("the SIP helper comes back on",
           for o in pl.ops))
 order = [o.params.get(".id") for o in pl.ops if o.action == "remove"]
 names = {r[".id"]: (r.get("comment") or "") for r in
-         api.state[MANGLE] + api.state[TREE]}
+         api.state[MANGLE] + api.state[TREE] + api.state[vp._ROUTE]
+         + api.state[vp._ROUTING_TABLE] if r.get(".id")}
 seq = [names[i][len(vp.TAG):] if names[i].startswith(vp.TAG) else names[i]
        for i in order]
 check("the packet label goes before the rules that feed it, the children "
@@ -355,15 +562,6 @@ pl = vp.plan(Pusher(cfg, api, dry_run=True), cfg, {"voip_on": "off"}, {})
 check("...so switching off does not turn it on", not ops_on(pl, SVC))
 
 print("\nrefusals send nothing")
-
-
-def refused(state=None, **over):
-    a = FakeApi(state or router())
-    try:
-        plan_for(a, **over)
-        return ""
-    except PlanRefused as exc:
-        return str(exc) if not a.executed else "EXECUTED"
 
 
 def with_rows(path, rows):
@@ -627,6 +825,9 @@ ds = DevicesStore(ddb)
 ds.upsert({"name": "R1", "host": "10.10.3.7", "username": "u", "password": "p",
            "wan": {"links": [{"name": "Vodacom", "interface": "ether1"}]}},
           DEFAULT_THRESHOLDS, org_id=org)
+from mikromon import departments as _dept  # noqa: E402
+ds.save_department("R1", _dept.make("Phones", 30, "10.20.30.0/24",
+                                    down_mbps="50"))
 ds.close()
 srv = ThreadingHTTPServer(("127.0.0.1", 0), web.make_handler(
     mdb, sfile, AuthStore(adb), web.SessionManager(), secure_cookies=False,
@@ -651,6 +852,10 @@ try:
                    "password": "a-password-for-the-test"})
     st, page = req("/device?name=R1&tab=qos")
     tok = re.search(r'name="csrf" value="([^"]+)"', page).group(1)
+    check("the Queues tab quick-fills saved departments for a speed cap",
+          "Quick-fill department / address speed cap" in page
+          and "10.20.30.0/24" in page and "Phones" in page
+          and 'id="mm-dept-targets"' in page and 'id="qb-target"' in page)
     box = page[page.index('id="voip"'):]
     box = box[:box.index("Queue Setup Builder")]
     check("the Queues tab has a VoIP priority box that says it is off",
@@ -664,6 +869,9 @@ try:
           "data-mm-instant-form" not in box)
     check("...offering pppoe-out1 as the line", re.search(
         r'<option value="pppoe-out1" selected>', box) is not None)
+    check("...and the failover box has a hidden empty answer, so an untick "
+          "is actually submitted",
+          'type="hidden" name="voip_route_failover" value=""' in box)
 
     form = {"csrf": tok, "device": "R1", "feature": "voip", "view": "qos",
             **ON}
@@ -699,6 +907,29 @@ try:
     check("the tab now says it is on, with a way to switch it off",
           "On: calls on pppoe-out1 go first" in page
           and "Preview switching it off" in page)
+
+    # What a browser sends when the failover box is unticked: the hidden
+    # field's "". The old plain checkbox omitted the key and silently kept
+    # failover on.
+    before_pin = len(ROUTER.log)
+    st, pinned = req("/device/push", {**form, "apply": "1",
+                                      "safe_revert": "1",
+                                      "voip_route_via": "ether2",
+                                      "voip_phone_src": "10.20.30.0/24",
+                                      "voip_route_failover": ""})
+    route_adds = [e for e in ROUTER.log[before_pin:]
+                  if e[0] == "add" and e[1] == vp._ROUTE]
+    check("a browser POST with failover unticked pins calls without ping "
+          "failover",
+          st == 200 and any(e[2].get("check-gateway") == "none"
+                            for e in route_adds)
+          and any(e[0] == "add" and e[1] == vp._ROUTING_TABLE
+                  and e[2].get("name") == vp.ROUTE_TABLE
+                  for e in ROUTER.log[before_pin:]))
+    st, page = req("/device?name=R1&tab=qos")
+    check("...and the tab reads that untick back, not the old default",
+          "10.20.30.0/24" in page and "ether2" in page
+          and "(no failover)" in page)
 
     real_read = vp.read
     vp.read = lambda *a, **k: (_ for _ in ()).throw(PushError("read failed"))

@@ -36,6 +36,8 @@ import ipaddress
 import logging
 import re
 
+from .util import mbps_to_bps
+
 log = logging.getLogger(__name__)
 
 # VLAN 1 is the native/untagged VLAN on essentially every switch, and 4095 is
@@ -157,8 +159,39 @@ def parse_ports(text) -> list:
     return out
 
 
+_SPEED_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(?:mbps|mb/s|m)?\s*$", re.I)
+_SPEED_HINT = "Use 0.1 to 10000 Mbps; blank or 0 means unlimited."
+
+
+def parse_speed_mbps(value) -> float | None:
+    """A bandwidth cap in Mbps, or None for unlimited.
+
+    People type "50", "50M" or "50 Mbps" in the same box, so all three are
+    the same number here. The bounds are generous enough for a real line but
+    tight enough to catch the two expensive typos: a decimal point keyed as
+    a cap of 0.05 Mbps, and a whole number in kbps mistaken for Mbps.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    m = _SPEED_RE.match(text)
+    if not m:
+        raise DepartmentError(
+            f"{value!r} is not a speed in Mbps. {_SPEED_HINT}")
+    mbps = float(m.group(1))
+    if mbps == 0:
+        return None
+    if not 0.1 <= mbps <= 10000:
+        raise DepartmentError(f"{value!r} is outside the speed range. "
+                              f"{_SPEED_HINT}")
+    return mbps
+
+
 def make(name: str, vlan: int, subnet: str, profile_id: str = "",
-         resolvers: str = "", note: str = "", ports=None) -> dict:
+         resolvers: str = "", note: str = "", ports=None,
+         down_mbps=None, up_mbps=None) -> dict:
     """One validated department. Raises DepartmentError with the reason."""
     clean = (name or "").strip()
     if not _NAME_OK.match(clean):
@@ -179,6 +212,8 @@ def make(name: str, vlan: int, subnet: str, profile_id: str = "",
         "resolvers": parse_resolvers(resolvers),
         "note": (note or "").strip(),
         "ports": parse_ports(ports),
+        "down_mbps": parse_speed_mbps(down_mbps),
+        "up_mbps": parse_speed_mbps(up_mbps),
     }
 
 
@@ -387,6 +422,35 @@ def _iface(dept: dict) -> str:
     return f"vlan{dept['vlan']}-{dept['slug']}"
 
 
+def queue_ops(dept: dict) -> list:
+    """Cap a department's whole subnet with one simple queue, if it has one.
+
+    RouterOS writes max-limit as upload/download, and 0 means unlimited for
+    that direction -- so a department capped only downwards is not secretly
+    given a mirror upload cap. The comment carries the same mikromon:qos:
+    prefix as the Queues tab, which makes this queue show up there as a
+    normal, adopted queue instead of a second invisible copy of it.
+    """
+    down = dept.get("down_mbps")
+    up = dept.get("up_mbps")
+    if down is None and up is None:
+        return []
+    down_bps = int(mbps_to_bps(down)) if down is not None else 0
+    up_bps = int(mbps_to_bps(up)) if up is not None else 0
+
+    def shown(v):
+        return "unlimited" if v is None else f"{v:g}"
+
+    slug = dept["slug"]
+    return [_op("add", ("queue", "simple"),
+                {"name": f"mm-dept-{slug}",
+                 "target": dept["subnet"],
+                 "max-limit": f"{up_bps}/{down_bps}",
+                 "comment": f"mikromon:qos:dept-{slug}"},
+                f"cap {dept['name']} ({dept['subnet']}) at "
+                f"{shown(down)}↓/{shown(up)}↑ Mbps")]
+
+
 def vlan_ops(dept: dict, bridge: str = "bridge") -> list:
     """The VLAN interface a department's traffic actually arrives on."""
     return [_op("add", ("interface", "vlan"),
@@ -575,10 +639,14 @@ def build_plan(device_name: str, departments: list, bridge: str = "bridge"):
         ops += vlan_ops(d, bridge)
         ops += address_ops(d)
         ops += dhcp_ops(d)
+        ops += queue_ops(d)
     ops += port_ops(departments, bridge)
     ops += isolation_ops(departments)
 
     filtered = sum(1 for d in departments if d.get("resolvers"))
+    capped = sum(1 for d in departments
+                 if d.get("down_mbps") is not None
+                 or d.get("up_mbps") is not None)
     return Plan(device_name, ops,
                 summary=(f"{len(departments)} department(s), {filtered} with "
-                         f"their own DNS filtering"))
+                         f"their own DNS filtering, {capped} with speed caps"))
