@@ -614,6 +614,18 @@ _SIDE_ICONS["/antivirus"] = _SIDE_ICONS["/superadmin/antivirus"] = (
     '<line x1="7" y1="16.8" x2="13" y2="16.8"/>'
     '<line x1="10" y1="13.5" x2="10" y2="16.8"/>'
     '<polyline points="7.2,8.6 9.2,10.5 12.9,6.6"/>')
+# A controller with two radiating arcs: the fleet side of Wi-Fi.
+_SIDE_ICONS["/capsman"] = (
+    '<rect x="7" y="12.2" width="6" height="4.5" rx="1"/>'
+    '<line x1="10" y1="12.2" x2="10" y2="8.6"/>'
+    '<path d="M6.4 6.8a5 5 0 0 1 7.2 0"/>'
+    '<path d="M3.9 4.4a8.4 8.4 0 0 1 12.2 0"/>')
+# A guest with a signal: the captive-portal / lead-capture side.
+_SIDE_ICONS["/guest-wifi"] = (
+    '<circle cx="10" cy="5.4" r="2.2"/>'
+    '<path d="M5.2 16.4c0-3.2 2.1-5.2 4.8-5.2s4.8 2 4.8 5.2"/>'
+    '<path d="M14.8 3.2a6.8 6.8 0 0 1 0 5.1"/>'
+    '<path d="M16.8 1.6a9.2 9.2 0 0 1 0 8.3"/>')
 
 
 def _dash_icon(href) -> str:
@@ -688,6 +700,8 @@ def _nav_items(user) -> list:
                   ("/admin", "Users")]
         if user.get("_show_antivirus"):
             items.append(("/antivirus", "Antivirus"))
+        items += [("/capsman", "Wi-Fi / CAPsMAN"),
+                  ("/guest-wifi", "Guest Wi-Fi")]
         if user.get("_show_billing"):
             items.append(("/billing", "Billing"))
     items += [("/guide", "Guide"), ("/account", "Account")]

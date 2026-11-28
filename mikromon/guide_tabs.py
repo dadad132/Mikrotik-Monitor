@@ -184,8 +184,10 @@ TABS = [
              "whatever easymikrotik last set."},
 
     {"slug": "qos", "title": "Queues (QoS)", "art": None,
-     "what": "Speed limits. Each row is a simple queue capping upload and "
-             "download for a subnet or an interface.",
+     "what": "Speed limits for a subnet, an interface or a whole department. "
+             "Each row is a simple queue capping upload and download. Use "
+             "this for a department's ceiling, and the VoIP tab to pin calls "
+             "to one internet line so they keep priority.",
      "steps": ["Add a row and pick the target — a subnet like "
                "<code>192.168.1.0/24</code>, or an interface.",
                "In the Queue Setup Builder, leaving the LAN subnet blank "
@@ -196,6 +198,47 @@ TABS = [
                "back on.",
                "<b>Preview</b>, then <b>Apply</b>."],
      "warn": ""},
+
+    {"slug": "capsman", "title": "Wi-Fi / CAPsMAN", "art": None,
+     "what": "One page for every wireless site: the routers running "
+             "CAPsMAN, their access points, the SSIDs and VLANs they "
+             "broadcast, the clients connected right now, and the MAC "
+             "addresses you have blocked.",
+     "steps": ["Add each router as a controller and choose its driver — "
+               "Auto detect works for both RouterOS 7 wifi and legacy "
+               "caps-man. Pending APs are listed; press Adopt to approve one.",
+               "Save an SSID profile for each network. Give staff and IoT "
+               "their own VLAN and passphrase; leave guest networks isolated.",
+               "Use Block on a live client to add it to the denied ACL "
+               "immediately, or Disconnect to make it authenticate again. "
+               "Unblock removes the rule from the same list.",
+               "Press <b>Sync All</b> when the profiles are right. It "
+               "publishes them and the blocked-MAC list to every enabled "
+               "controller, and records the result against each router."],
+     "warn": "Sync All writes to every enabled controller, not just the one "
+             "you are looking at. A router that is offline is skipped and "
+             "reported; the other sites still receive the change. Read the "
+             "sync result before pressing it again."},
+
+    {"slug": "guest-wifi", "title": "Guest Wi-Fi", "art": None,
+     "what": "A branded splash page for visitors. It asks for the details "
+             "you choose, saves them as leads, then hands the guest to the "
+             "hotspot login on the router. The portal URL is public — share "
+             "it with anyone who needs guest access.",
+     "steps": ["In Portal Studio, set the brand name, headline, colours and "
+               "terms. Pick the router and hotspot interface, then set the "
+               "guest speed and session length.",
+               "Decide which fields are required. Marketing opt-in is off "
+               "unless you tick it; accepted terms are always recorded.",
+               "Copy the portal URL from the preview, and put the "
+               "login.html override shown there into Files → hotspot on "
+               "the router so guests are sent to your page first.",
+               "Press <b>Push to hotspot</b> to provision the user profile, "
+               "hotspot, guest account and walled garden. Leads are "
+               "searched and exported as CSV on the same page."],
+     "warn": "The guest password is public by design — it is printed on the "
+             "splash page handoff. Do not reuse it for staff Wi-Fi. Leads "
+             "are personal data: keep the opt-in and your terms accurate."},
 
     {"slug": "voip", "title": "Queues — VoIP priority", "art": None,
      "what": "Phone calls go first on the upload, so they do not break up "
@@ -324,7 +367,8 @@ TABS = [
              "Sales can reach Instagram because that is where the customers "
              "are, and Support cannot, but keeps YouTube for the guides. "
              "Departments cannot reach each other; all of them reach the "
-             "internet.",
+             "internet. Give each one a speed limit on the Queues tab, and "
+             "pin VoIP calls to the internet line you want them to use.",
      "steps": ["Add a department: a name, a VLAN number, an IP range like "
                "<code>10.20.20.0/24</code>, and the ports its desks are "
                "plugged into.",

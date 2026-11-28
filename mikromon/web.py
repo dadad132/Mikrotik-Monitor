@@ -33,7 +33,7 @@ import threading
 import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import guide_tabs
 from .auth import AuthStore
@@ -9207,6 +9207,94 @@ _UPLOAD_PATHS = frozenset({"/superadmin/backup/restore-upload",
                            "/superadmin/invoice-template"})
 
 
+# ---- Wi-Fi sidecars --------------------------------------------------------
+# Both features keep their own SQLite file beside devices.db (or beside the
+# state file on older installs). They are opened per request, like the other
+# sidecar stores: a long-lived web handler must not hold a connection that a
+# background sync also writes.
+def _wifi_sidecar_path(base, filename: str) -> str:
+    root = os.path.dirname(os.path.abspath(base)) if base else os.getcwd()
+    return os.path.join(root, filename)
+
+
+def _capsman_connect(cfg):
+    """A read-write RouterOS connection for a CAPsMAN action.
+
+    Kept at module scope so the HTTP tests can stand in for a router: every
+    route goes through this one seam, rather than reaching for librouteros
+    directly in a dozen places.
+    """
+    from .push.api import PushApi
+    from .push.runner import rw_device
+    return PushApi(rw_device(cfg)).connect()
+
+
+def _wifi_connect(cfg):
+    """The same seam for provisioning a guest hotspot."""
+    return _capsman_connect(cfg)
+
+
+def _capsman_device_configs(devices_db, defaults, names, org_id=None) -> list:
+    """Build DeviceConfigs for named routers, optionally only this org's.
+
+    A controller row can outlive a device transfer. Sync must not use that
+    stale row as permission to write to a router that now belongs to someone
+    else, so the caller passes the acting owner's org and we check it here.
+    """
+    if not devices_db:
+        return []
+    from .config import build_device
+    from .devices_store import DevicesStore
+    store = DevicesStore(devices_db)
+    out = []
+    try:
+        for name in names or []:
+            if org_id is not None and store.org_of(name) != org_id:
+                continue
+            raw = store.raw(name)
+            if raw is None:
+                continue
+            try:
+                out.append(build_device(raw, defaults or {}))
+            except Exception:  # noqa: BLE001 - one bad row must not stop sync
+                log.exception("capsman: device %s has an invalid config", name)
+    finally:
+        store.close()
+    return out
+
+
+def _capsman_error_text(value) -> str:
+    """Keep a router error readable but bounded; the renderer escapes it."""
+    text = str(value or "")
+    text = "".join(ch for ch in text if ch in "\n\t" or ord(ch) >= 32)
+    return text[:1000]
+
+
+def _wifi_enabled(row) -> bool:
+    return str((row or {}).get("enabled", 1)).lower() in (
+        "1", "on", "yes", "true")
+
+
+def _wifi_flag(flat, key, default=0) -> int:
+    raw = flat.get(key)
+    if raw is None:
+        return int(default)
+    return 1 if str(raw).strip().lower() in ("1", "on", "yes", "true") else 0
+
+
+def _wifi_clean_base(value) -> str:
+    """A public URL safe to print in an attribute, or '' if it is not one.
+
+    A Host header is ordinary input, not a trusted constant: quotes and
+    whitespace must never survive into the portal preview's href.
+    """
+    text = str(value or "").strip()
+    if not text or any(ch.isspace() or ch in "\"'<>" or ord(ch) < 32
+                       for ch in text):
+        return ""
+    return text.rstrip("/")
+
+
 def make_handler(metrics_db, state_file, auth: AuthStore | None,
                  sessions: SessionManager, secure_cookies=False,
                  metrics_token=None, devices_db=None, defaults=None,
@@ -9299,6 +9387,10 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
     # office, and a ceiling on what a leaked key can write.
     from .webguard import TokenBuckets
     edr_limit = TokenBuckets(2.0, 200)
+    # A public guest portal has no session to throttle it. Five attempts per
+    # portal per address, refilling slowly: enough for a person to correct a
+    # mistyped email, not enough to turn the splash page into a lead flood.
+    portal_limit = TokenBuckets(0.2, 5)
     # The sign-up form's time stamp: signed with a key made at start-up, so a
     # bot cannot make one up. A form from before a restart is simply asked
     # to be filled in again.
@@ -9596,6 +9688,42 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._send(200, render_terms(contact),
                                   "text/html; charset=utf-8")
 
+            # The branded guest portal is public: a hotspot redirects a guest
+            # here before they have (or can) log in to the dashboard. /guest/
+            # is the URL the backend's login.html override emits; /portal/ is
+            # the stable public address operators hand out.
+            if path.startswith(("/portal/", "/guest/")):
+                bits = path.strip("/").split("/")
+                if len(bits) == 2:
+                    slug = unquote(bits[1])
+                    from . import guest_wifi as W
+                    store = self._guest_wifi_store()
+                    try:
+                        portal = store.get_portal_by_slug(slug)
+                    finally:
+                        store.close()
+                    if portal is None or not _wifi_enabled(portal):
+                        return self._send(404, "not found")
+                    q = parse_qs(url.query)
+                    values = {k: q.get(k, [""])[0] for k in (
+                        "link-login-only", "link-orig", "mac", "ip")}
+                    values = {"link_login_only": values["link-login-only"],
+                              "link_orig": values["link-orig"],
+                              "client_mac": values["mac"],
+                              "client_ip": values["ip"]}
+                    try:
+                        html = W.render_splash_html(portal, **values)
+                    except W.GuestWifiError as exc:
+                        # A malformed MAC/IP in the query must not turn the
+                        # splash into a 500; show the reason and an empty field.
+                        values["client_mac"] = ""
+                        values["client_ip"] = ""
+                        html = W.render_splash_html(
+                            portal, error=str(exc), **values)
+                    return self._send(
+                        200, html, "text/html; charset=utf-8",
+                        {"Cache-Control": "no-store"})
+
             # Also reachable directly for previewing the landing page in
             # isolation — the real entry point is "/" below.
             if path == "/landing":
@@ -9802,6 +9930,31 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._serve_admin(user)
             if path == "/devices":
                 return self._serve_devices(url, user)
+            if path in ("/guest-wifi", "/guest-wifi/leads.csv", "/capsman"):
+                if not AuthStore.is_owner(user):
+                    return self._send(403, "forbidden")
+                if path == "/guest-wifi":
+                    return self._wifi_guest_page(
+                        user, search=parse_qs(url.query).get("search", [""])[0],
+                        flash=parse_qs(url.query).get("ok", [""])[0],
+                        error=parse_qs(url.query).get("error", [""])[0])
+                if path == "/capsman":
+                    return self._wifi_capsman_page(
+                        user, flash=parse_qs(url.query).get("ok", [""])[0],
+                        error=parse_qs(url.query).get("error", [""])[0])
+                # The CSV is always scoped by the signed-in owner's org; a
+                # portal id from another company simply matches no rows.
+                org = user.get("org_id")
+                portal_id = parse_qs(url.query).get("portal_id", [""])[0]
+                store = self._guest_wifi_store()
+                try:
+                    csv_text = store.export_leads_csv(org, portal_id=portal_id)
+                finally:
+                    store.close()
+                return self._send(
+                    200, csv_text, "text/csv; charset=utf-8",
+                    {"Content-Disposition": 'attachment; filename="guest-leads.csv"',
+                     "Cache-Control": "no-store"})
             if path == "/logs":
                 return self._serve_logs(user)
 
@@ -11874,6 +12027,154 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return None
             from .devices_store import DevicesStore
             return DevicesStore(devices_db)
+
+        def _guest_wifi_store(self):
+            from .guest_wifi import GuestWifiStore
+            return GuestWifiStore(_wifi_sidecar_path(
+                devices_db or state_file, "guest_wifi.db"))
+
+        def _capsman_store(self):
+            from .capsman import CapsmanStore
+            return CapsmanStore(_wifi_sidecar_path(
+                devices_db or state_file, "capsman.db"))
+
+        def _wifi_cfg(self, device, user):
+            """A DeviceConfig only when this router belongs to this owner.
+
+            A name that does not exist passes the generic _owns_target check
+            (it may be a router being added), but every Wi-Fi action here
+            talks to an existing router, so it gets checked again.
+            """
+            if not device or not user:
+                return None
+            ds = self._devstore()
+            try:
+                if ds is None or ds.org_of(device) != user.get("org_id"):
+                    return None
+                raw = ds.raw(device)
+            finally:
+                if ds:
+                    ds.close()
+            if raw is None:
+                return None
+            from .config import build_device
+            try:
+                return build_device(raw, defaults or {})
+            except Exception:  # noqa: BLE001 - a bad row is not a 500
+                log.exception("wifi: device %s has an invalid config", device)
+                return None
+
+        def _wifi_portal_base(self):
+            base = _wifi_clean_base(_public_base(auth))
+            if base:
+                return base
+            host = _wifi_clean_base(self.headers.get("Host", ""))
+            return ("https://" if self._is_https() else "http://") + (
+                host or "localhost")
+
+        def _wifi_hostname(self, value) -> str:
+            """Just the hostname of a URL or bare host:port inventory value."""
+            text = str(value or "").strip()
+            if not text:
+                return ""
+            try:
+                parsed = urlparse(text if "://" in text else "//" + text)
+                return (parsed.hostname or "").strip("[]").lower().rstrip(".")
+            except ValueError:
+                return ""
+
+        def _wifi_portal_hosts(self, portal) -> set:
+            """Hosts allowed to receive this portal's hotspot login form.
+
+            Only the operator's configured public base and the portal's own
+            router count. The submitted hidden field decides neither of them:
+            without this check it hands the guest credential to whatever host
+            a stranger put in the form.
+            """
+            hosts = set()
+            base = self._wifi_hostname(_public_base(auth))
+            if base:
+                hosts.add(base)
+            device = (portal or {}).get("device", "")
+            if device:
+                ds = self._devstore()
+                try:
+                    if (ds is not None and ds.org_of(device)
+                            == (portal or {}).get("org_id")):
+                        host = self._wifi_hostname((ds.raw(device) or {}).get(
+                            "host"))
+                        if host:
+                            hosts.add(host)
+                finally:
+                    if ds:
+                        ds.close()
+            return hosts
+
+        def _wifi_fleet_live(self, controllers, user):
+            """Read every enabled controller; keep one dead site off the page."""
+            from . import capsman as C
+            out = []
+            for row in controllers:
+                if not _wifi_enabled(row):
+                    continue
+                device = str(row.get("device", ""))
+                driver = str(row.get("driver", "auto") or "auto")
+                blank = {"device": device, "driver": driver,
+                         "capsman_enabled": False, "aps": [], "ssids": [],
+                         "clients": [], "blocked": [], "error": ""}
+                cfg = self._wifi_cfg(device, user)
+                if cfg is None:
+                    out.append({**blank, "error": "This router is no longer "
+                                "in your company's inventory."})
+                    continue
+                api = None
+                try:
+                    api = _capsman_connect(cfg)
+                    view = C.read_controller(api, device, driver)
+                except Exception as exc:  # noqa: BLE001 - other sites still show
+                    view = {**blank, "error": _capsman_error_text(exc)}
+                finally:
+                    if api is not None and hasattr(api, "close"):
+                        try:
+                            api.close()
+                        except Exception:  # noqa: BLE001 - teardown is best effort
+                            log.exception("wifi: could not close %s", device)
+                out.append(view)
+            return out
+
+        def _wifi_guest_page(self, user, *, flash="", error="", search=""):
+            from .web_wifi import render_guest_wifi_page
+            org = user.get("org_id")
+            store = self._guest_wifi_store()
+            try:
+                portals = store.list_portals(org)
+                leads = store.list_leads(org, search=search)
+                stats = store.lead_stats(org)
+            finally:
+                store.close()
+            page = render_guest_wifi_page(
+                user, self._session()["csrf"], portals, leads, stats,
+                self._org_routers(org), base_url=self._wifi_portal_base(),
+                flash=flash, error=error, search=search)
+            return self._send(200, page, "text/html; charset=utf-8")
+
+        def _wifi_capsman_page(self, user, *, flash="", error="",
+                               sync_results=None):
+            from .web_wifi import render_capsman_page
+            org = user.get("org_id")
+            store = self._capsman_store()
+            try:
+                controllers = store.list_controllers(org)
+                ssids = store.list_ssids(org)
+                blocked = store.list_blocked_macs(org)
+            finally:
+                store.close()
+            page = render_capsman_page(
+                user, self._session()["csrf"], controllers, ssids, blocked,
+                self._wifi_fleet_live(controllers, user),
+                self._org_routers(org), flash=flash, error=error,
+                sync_results=sync_results)
+            return self._send(200, page, "text/html; charset=utf-8")
 
         def _access_store(self):
             """The on-demand access grant store, or None when the feature is
@@ -15759,6 +16060,90 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
                 return self._post_billing_itn()
             if path == "/billing/yoco-webhook":
                 return self._post_yoco_webhook()
+            # A guest submitting the splash page has no dashboard session and
+            # no CSRF token: the portal slug, a slow bucket and the portal's
+            # own required fields are the authority here.
+            if path.startswith(("/portal/", "/guest/")):
+                bits = path.strip("/").split("/")
+                if len(bits) == 3 and bits[2] == "connect":
+                    slug = unquote(bits[1])
+                    wait = portal_limit.take(
+                        f"{self._client_address()}:{slug}")
+                    if wait:
+                        return self._send(
+                            429, "Too many attempts. Please wait "
+                            f"{wait} seconds and try again.",
+                            headers={"Retry-After": str(wait)})
+                    from . import guest_wifi as W
+                    flat, _multi = self._form()
+                    store = self._guest_wifi_store()
+                    try:
+                        portal = store.get_portal_by_slug(slug)
+                        if portal is None or not _wifi_enabled(portal):
+                            return self._send(404, "not found")
+                        hidden = {"link_login_only": flat.get(
+                            "link-login-only", ""),
+                            "link_orig": flat.get("link-orig", ""),
+                            "client_mac": flat.get("mac", ""),
+                            "client_ip": flat.get("ip", "")}
+                        submitted = {k: flat.get(k, "") for k in (
+                            "name", "email", "phone", "company")}
+                        submitted["marketing_optin"] = _wifi_flag(
+                            flat, "marketing_optin")
+
+                        def splash(error=""):
+                            values = dict(hidden)
+                            try:
+                                return W.render_splash_html(
+                                    portal, error=error, values=submitted,
+                                    **values)
+                            except W.GuestWifiError:
+                                # A tampered hidden MAC/IP should not hide the
+                                # error behind another exception.
+                                values["client_mac"] = ""
+                                values["client_ip"] = ""
+                                return W.render_splash_html(
+                                    portal, error=error or "Check the hotspot "
+                                    "details and try again.",
+                                    values=submitted, **values)
+
+                        allowed = self._wifi_portal_hosts(portal)
+                        action = hidden["link_login_only"]
+                        if action and not W.safe_hotspot_url(
+                                action, allowed_hosts=allowed):
+                            return self._send(
+                                400, splash("That hotspot login address is "
+                                            "not trusted."),
+                                "text/html; charset=utf-8",
+                                {"Cache-Control": "no-store"})
+                        if not _wifi_flag(flat, "terms"):
+                            return self._send(
+                                400, splash("You must accept the terms before "
+                                            "connecting."),
+                                "text/html; charset=utf-8",
+                                {"Cache-Control": "no-store"})
+                        try:
+                            store.record_lead(
+                                portal, name=submitted["name"],
+                                email=submitted["email"],
+                                phone=submitted["phone"],
+                                company=submitted["company"],
+                                marketing_optin=submitted["marketing_optin"],
+                                client_mac=hidden["client_mac"],
+                                client_ip=hidden["client_ip"])
+                        except W.GuestWifiError as exc:
+                            return self._send(
+                                400, splash(str(exc)),
+                                "text/html; charset=utf-8",
+                                {"Cache-Control": "no-store"})
+                    finally:
+                        store.close()
+                    html = W.render_connected_html(
+                        portal, link_login_only=hidden["link_login_only"],
+                        link_orig=hidden["link_orig"], allowed_hosts=allowed)
+                    return self._send(
+                        200, html, "text/html; charset=utf-8",
+                        {"Cache-Control": "no-store"})
             if auth is None:
                 return self._send(404, "not found")
             # Paying an invoice from its emailed link: public, like the page
@@ -15969,6 +16354,8 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             # billing, server ops).
             if not AuthStore.is_admin(user or {}):
                 return self._send(403, "forbidden")
+            if path.startswith(("/guest-wifi/", "/capsman/")):
+                return self._post_wifi(path, flat, user)
             # Billing routes (owner only, no device ownership check needed).
             if path == "/billing/subscribe":
                 return self._post_billing_subscribe(flat, user)
@@ -16056,6 +16443,283 @@ def make_handler(metrics_db, state_file, auth: AuthStore | None,
             except Exception as exc:  # noqa: BLE001 — surface as a simple message
                 return self._send(400, f"Error: {exc}")
             return self._redirect("/admin")
+
+        def _post_wifi(self, path, flat, user):
+            """The owner-only Guest Wi-Fi and CAPsMAN forms.
+
+            Every device named in a form is checked against the owner's org
+            before a store is touched or a router is opened. Router failures
+            are shown on the page rather than turning a single dead site into
+            a 500 with no way back.
+            """
+            from . import capsman as C
+            from . import guest_wifi as W
+            from .device import DeviceError
+            from .push import Pusher
+            from .push.api import PushError
+
+            org = user.get("org_id")
+            actor = (user.get("login") or user.get("email")
+                     or user.get("username") or "")
+
+            def problem(exc):
+                text = _capsman_error_text(exc)
+                return text or "The router refused that change."
+
+            def pusher_for(cfg, api, audit=None):
+                # sync_all_controllers accepts a ready Pusher as well as a
+                # bare API. Keep the same convention for the single-site
+                # actions; anything handed here is always committed.
+                if (hasattr(api, "apply") and hasattr(api, "api")
+                        and hasattr(api.api, "fetch")):
+                    if not getattr(api, "dry_run", True):
+                        return api
+                    return Pusher(cfg, api.api, dry_run=False, audit=audit,
+                                  user=actor)
+                return Pusher(cfg, api, dry_run=False, audit=audit, user=actor)
+
+            if path.startswith("/guest-wifi/"):
+                if not self._owns_target({"device": flat.get("device", "")},
+                                         user):
+                    return self._send(403, "forbidden")
+                store = self._guest_wifi_store()
+                try:
+                    if path == "/guest-wifi/save":
+                        fields = (
+                            "id", "slug", "device", "brand_name", "headline",
+                            "subheadline", "logo_url", "accent_color",
+                            "bg_color", "terms_text", "redirect_url",
+                            "hotspot_iface", "subnet", "vlan_id", "down_mbps",
+                            "up_mbps", "session_minutes", "guest_username",
+                            "guest_password", "shared_secret")
+                        data = {k: flat[k] for k in fields if k in flat}
+                        # HTML checkboxes are absent when unchecked. Treat an
+                        # absent key as off here; the renderer also emits a
+                        # hidden 0 so a checked box still arrives as "1".
+                        for flag in ("require_name", "require_email",
+                                     "require_phone", "require_company",
+                                     "show_marketing_optin", "enabled"):
+                            data[flag] = _wifi_flag(flat, flag)
+                        if data.get("device") and self._wifi_cfg(
+                                data["device"], user) is None:
+                            return self._wifi_guest_page(
+                                user, error="Choose one of your company's "
+                                "routers.")
+                        try:
+                            store.upsert_portal(org, data)
+                        except (W.GuestWifiError, ValueError) as exc:
+                            return self._wifi_guest_page(user, error=str(exc))
+                        return self._wifi_guest_page(user, flash="Portal saved")
+
+                    if path == "/guest-wifi/delete":
+                        if not store.delete_portal(org, flat.get("id", "")):
+                            return self._wifi_guest_page(
+                                user, error="That portal does not belong to "
+                                "this organisation.")
+                        return self._wifi_guest_page(user, flash="Portal removed")
+
+                    if path == "/guest-wifi/push":
+                        portal = store.get_portal(
+                            org, flat.get("portal_id") or None)
+                        if portal is None:
+                            return self._wifi_guest_page(
+                                user, error="That portal does not belong to "
+                                "this organisation.")
+                        device = flat.get("device") or portal.get("device", "")
+                        cfg = self._wifi_cfg(device, user)
+                        if cfg is None:
+                            return self._wifi_guest_page(
+                                user, error="Choose one of your company's "
+                                "routers.")
+                        api = None
+                        audit = self._auditlog()
+                        try:
+                            api = _wifi_connect(cfg)
+                            pusher = pusher_for(cfg, api, audit)
+                            host = (urlparse(self._wifi_portal_base()).hostname
+                                    or "portal")
+                            plan = W.build_hotspot_plan(
+                                pusher, cfg, portal, host)
+                            pusher.apply(plan, feature="guestwifi")
+                        except (W.GuestWifiError, PushError, DeviceError,
+                                ValueError, OSError) as exc:
+                            log.exception("guest wifi: push to %s failed", device)
+                            return self._wifi_guest_page(
+                                user, error=problem(exc))
+                        finally:
+                            if api is not None and hasattr(api, "close"):
+                                try:
+                                    api.close()
+                                except Exception:  # noqa: BLE001
+                                    log.exception("guest wifi: close failed")
+                            if audit:
+                                audit.close()
+                        return self._wifi_guest_page(
+                            user, flash="Hotspot provisioned")
+                finally:
+                    store.close()
+                return self._not_found(user)
+
+            if not path.startswith("/capsman/"):
+                return self._not_found(user)
+
+            if not self._owns_target({"device": flat.get("device", "")}, user):
+                return self._send(403, "forbidden")
+            audit = self._auditlog()
+            store = self._capsman_store()
+            try:
+                controllers = store.list_controllers(org)
+
+                def caps_error(exc):
+                    return self._wifi_capsman_page(user, error=problem(exc))
+
+                def target():
+                    """(cfg, controller row, device) for a router action."""
+                    device = (flat.get("device", "")
+                              or (controllers[0]["device"] if controllers else ""))
+                    cfg = self._wifi_cfg(device, user)
+                    if cfg is None:
+                        return None
+                    row = next((c for c in controllers
+                                if c["device"] == device), {})
+                    return cfg, row, device
+
+                if path == "/capsman/controller":
+                    device = flat.get("device", "")
+                    if self._wifi_cfg(device, user) is None:
+                        return self._wifi_capsman_page(
+                            user, error="Choose one of your company's routers.")
+                    driver = flat.get("driver", "auto") or "auto"
+                    try:
+                        store.set_controller(
+                            org, device,
+                            enabled=_wifi_flag(flat, "enabled"),
+                            driver=driver)
+                    except (C.CapsmanError, ValueError) as exc:
+                        return caps_error(exc)
+                    return self._wifi_capsman_page(
+                        user, flash="Controller saved")
+
+                if path == "/capsman/ssid-save":
+                    fields = ("id", "name", "ssid", "purpose", "vlan_id",
+                              "security_mode", "passphrase", "bridge", "band",
+                              "down_mbps", "up_mbps")
+                    data = {k: flat[k] for k in fields if k in flat}
+                    data["client_isolation"] = _wifi_flag(
+                        flat, "client_isolation")
+                    data["enabled"] = _wifi_flag(flat, "enabled")
+                    try:
+                        store.upsert_ssid(org, data)
+                    except (C.CapsmanError, ValueError) as exc:
+                        return caps_error(exc)
+                    return self._wifi_capsman_page(user, flash="SSID saved")
+
+                if path == "/capsman/ssid-delete":
+                    if not store.delete_ssid(org, flat.get("id", "")):
+                        return self._wifi_capsman_page(
+                            user, error="That SSID does not belong to this "
+                            "organisation.")
+                    return self._wifi_capsman_page(user, flash="SSID removed")
+
+                if path == "/capsman/sync-all":
+                    names = [c["device"] for c in controllers
+                             if _wifi_enabled(c)]
+                    configs = _capsman_device_configs(
+                        devices_db, defaults, names, org_id=org)
+                    results = C.sync_all_controllers(
+                        org, store, configs, connect_fn=_capsman_connect,
+                        user=actor, audit=audit)
+                    return self._wifi_capsman_page(
+                        user, flash="Fleet sync finished", sync_results=results)
+
+                if path == "/capsman/client-unblock":
+                    mac = flat.get("mac", "")
+                    pair = target()
+                    if pair is None:
+                        # No controller to change: the local list is the only
+                        # ACL there is, so clearing it is still a success.
+                        try:
+                            store.unblock_mac(org, mac)
+                        except (C.CapsmanError, ValueError) as exc:
+                            return caps_error(exc)
+                        return self._wifi_capsman_page(
+                            user, flash="Client unblocked")
+                    cfg, row, device = pair
+                    api = None
+                    try:
+                        api = _capsman_connect(cfg)
+                        pusher = pusher_for(cfg, api, audit)
+                        plan = C.unblock_client_plan(
+                            pusher, cfg, mac,
+                            driver_pref=str(row.get("driver", "auto") or "auto"))
+                        pusher.apply(plan, feature="capsman")
+                        # Only forget the block once the router agrees. A
+                        # failed apply leaves the row for the next Sync All.
+                        store.unblock_mac(org, mac)
+                    except Exception as exc:  # noqa: BLE001 - ACL is still set
+                        log.exception("capsman: unblock on %s failed", device)
+                        return caps_error(exc)
+                    finally:
+                        if api is not None and hasattr(api, "close"):
+                            try:
+                                api.close()
+                            except Exception:  # noqa: BLE001
+                                log.exception("capsman: close failed")
+                    return self._wifi_capsman_page(
+                        user, flash="Client unblocked")
+
+                if path not in ("/capsman/adopt", "/capsman/client-disconnect",
+                                "/capsman/client-block"):
+                    return self._not_found(user)
+                pair = target()
+                if pair is None:
+                    return self._wifi_capsman_page(
+                        user, error="Choose one of your company's routers.")
+                cfg, row, device = pair
+                driver = str(row.get("driver", "auto") or "auto")
+                api = None
+                try:
+                    api = _capsman_connect(cfg)
+                    if path == "/capsman/adopt":
+                        plan = C.build_adopt_ap_plan(
+                            api, cfg, ap_mac=flat.get("ap_mac", ""),
+                            ap_name=flat.get("ap_name", ""),
+                            driver_pref=driver)
+                        pusher_for(cfg, api, audit).apply(
+                            plan, feature="capsman")
+                        return self._wifi_capsman_page(
+                            user, flash="AP adopted")
+                    if path == "/capsman/client-disconnect":
+                        C.disconnect_client(
+                            api, client_id=flat.get("client_id", ""),
+                            mac=flat.get("mac", ""), driver_pref=driver)
+                        return self._wifi_capsman_page(
+                            user, flash="Client disconnected")
+                    mac = flat.get("mac", "")
+                    reason = flat.get("reason", "")
+                    pusher = pusher_for(cfg, api, audit)
+                    plan = C.block_client_plan(
+                        pusher, cfg, mac, reason=reason, driver_pref=driver)
+                    pusher.apply(plan, feature="capsman")
+                    # Remember the block only after the router accepted it;
+                    # otherwise the page and the device disagree after a
+                    # failed write and Sync All would undo the wrong thing.
+                    store.block_mac(org, mac, reason=reason, blocked_by=actor)
+                    return self._wifi_capsman_page(
+                        user, flash="Client blocked")
+                except Exception as exc:  # noqa: BLE001 - show it on the page
+                    log.exception("capsman: %s on %s failed", path, device)
+                    return caps_error(exc)
+                finally:
+                    if api is not None and hasattr(api, "close"):
+                        try:
+                            api.close()
+                        except Exception:  # noqa: BLE001
+                            log.exception("capsman: close failed")
+            finally:
+                store.close()
+                if audit:
+                    audit.close()
 
         def _same_org(self, identifier, user) -> bool:
             """True if `identifier` (email or username) is a user in the acting
