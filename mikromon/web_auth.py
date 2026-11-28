@@ -42,6 +42,11 @@ def _auth_favicon() -> str:
 
 _AUTH_DESCRIPTION = (f"Sign in to {_BRAND} to monitor and manage your MikroTik "
                      f"routers from one dashboard.")
+# /signup is in the sitemap, so it gets its own description: inheriting the
+# one above put "Sign in to ..." on the page that creates an account.
+_SIGNUP_DESCRIPTION = (f"Sign up for {_BRAND}: {_TRIAL_DAYS} days free with "
+                       f"{TRIAL_DEVICES} device, no card needed. Monitor and "
+                       f"manage MikroTik routers from one dashboard.")
 
 
 def _auth_page(title, body, description=_AUTH_DESCRIPTION) -> str:
@@ -337,7 +342,8 @@ def _render_signup(error: str = "", values=None, has_regions: bool = False,
             f'<button class="btn" type="submit" style="width:100%">'
             f'{"Continue" if confirm_email else "Create account"}</button></form>'
             f'<p class="muted" style="margin:14px 0 0;text-align:center">'
-            f'Already have an account? <a href="/login">Sign in</a></p>')
+            f'Already have an account? <a href="/login">Sign in</a></p>',
+            description=_SIGNUP_DESCRIPTION)
 
 
 def _render_signup_verify(token: str, email: str, company: str,

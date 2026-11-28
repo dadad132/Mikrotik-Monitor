@@ -26,10 +26,12 @@ from .web_shared import (
 from .billing import (PLANS, MAX_TIER_DEVICES, TIER_STEP, QUOTE_ABOVE_DEVICES,
                       TRIAL_DEVICES, GRACE_DAYS, BILLING_DAY)
 
-_TITLE = f"{_BRAND} — MikroTik Monitoring & Remote Management"
-_DESCRIPTION = ("Monitor and manage every MikroTik router from one dashboard: "
-                "real-time alerts, WAN failover, safe config changes with "
-                "auto-revert and backups, even behind NAT.")
+_TITLE = f"{_BRAND} — Manage MikroTik Routers Across Client Sites"
+# Kept under ~155 characters so a search result does not truncate it, and
+# deliberately free of "real-time": routers are polled every 60 seconds.
+_DESCRIPTION = ("Monitor and manage MikroTik routers across client sites from "
+                "one dashboard. Failover alerts, safe config push, remote "
+                "Winbox. Free 30-day trial.")
 
 
 def _tier(devices: int) -> dict:
@@ -125,7 +127,9 @@ _FEATURES = [
      "One-click backups saved on the router's own flash, plus an automatic "
      "one before every change. The newest 10 are kept (2 on small 16 MB "
      "routers, so backups never fill their flash); backups you made "
-     "yourself are never touched."),
+     "yourself are never touched. Any of them can be downloaded to your "
+     "own computer, so a stolen or reset router does not take its backups "
+     "with it."),
     ("monitor", "Remote WebFig & Winbox",
      "Open WebFig or Winbox through the encrypted tunnel with one click, even "
      "behind CGNAT. Every link closes itself after 15 minutes."),
@@ -133,6 +137,13 @@ _FEATURES = [
      "Block malware, ads and adult content with built-in presets, or give "
      "each router its own NextDNS profile with encrypted DNS and its own "
      "blocklists."),
+    ("shield", "Departments, each filtered its own way",
+     "Sales, support and accounts on one router and one internet line, each "
+     "on its own VLAN and unable to reach the others. The router can only "
+     "hold one NextDNS profile, so each department's DHCP hands out the "
+     "resolver addresses of its own profile and its machines talk to "
+     "NextDNS directly. A department with no resolver addresses entered is "
+     "reported as unfinished, never pushed as filtered."),
     ("lock", "WireGuard dial-home tunnel",
      "Routers connect out to us, so they need no public IP and no port "
      "forwarding. Ideal for LTE, home offices and sites you cannot reach."),
@@ -155,9 +166,17 @@ _DID_YOU_KNOW = [
      "pushed minutes before? It says which, from what the router saw and "
      "from your other sites on the same ISP.__AI_SEARCH__"),
     ("alert", "It keeps reminding you",
-     "While a site runs on its backup line you are reminded every two hours, "
-     "with how long it has been and how much data the backup has used, "
-     "until the main line is back."),
+     "While a site runs on its backup line you are reminded every two hours "
+     "by default, with how long it has been and how much data the backup "
+     "has used, until the main line is back."),
+    ("rotate", "A restart you started is not an outage",
+     "Reboots, RouterOS updates, restored backups and scripts that restart "
+     "the router take it offline for a minute or three. The dashboard "
+     "records the restart it started, shows the router as Restarting and "
+     "holds its alerts while it comes back, so you do not get an "
+     "unreachable email and a reachable-again one about something you did "
+     "yourself. If it is still down after five minutes, the alert goes out "
+     "and says it was restarted from the dashboard."),
     ("trending", "It learns what normal looks like",
      "Traffic and connected devices are compared with the same hour over the "
      "last several days, so an unusual spike, or an unusual drop like an "
@@ -167,15 +186,29 @@ _DID_YOU_KNOW = [
      "working day gets flagged: users with no working internet while every "
      "light on the router is green."),
     ("lock", "Laptops straight onto a site",
-     "Add a laptop or phone from a router's VPN tab. Paste its WireGuard key "
-     "and you get the settings to connect, with its own address and its own "
-     "off switch."),
+     "Add a laptop or phone from the Remote users box on a router's VPN tab. "
+     "Paste its WireGuard public key and you get the settings to connect, "
+     "with its own address and its own off switch. If the router has no "
+     "address a laptop could reach, because it sits behind CGNAT or another "
+     "router, it tells you that and which UDP port would need forwarding."),
+    ("shuffle", "It puts a router on a VPN service",
+     "On a router's Extra WireGuard page, paste the [Interface] and [Peer] "
+     "sections of the config file a service such as AdGuard VPN hands out, "
+     "and the router dials it beside the tunnel we manage it over. RouterOS "
+     "does not turn AllowedIPs into routes the way phone and PC apps do, so "
+     "a route is added for each allowed range and only traffic for those "
+     "ranges goes down it. The management tunnel's own settings are never "
+     "touched."),
     ("share", "Share one router with a contractor",
      "Give one person at another company access to a single router, read-only "
      "or with rights to change it, and take it back whenever you like."),
     ("key", "Router logins that delete themselves",
      "Give a technician a temporary router login that removes itself after 30 "
      "minutes. No cleanup, nothing left behind."),
+    ("lock", "Two-factor on your own login",
+     "Each person can turn on two-factor sign-in for themselves, with any "
+     "authenticator app, so a stolen password is no longer enough. The "
+     "owner's team list shows who has it on and who does not."),
     ("alert", "It notices break-in attempts",
      "Failed logins, a new admin session, or a config change made outside the "
      "dashboard: each one raises an alert."),
@@ -985,7 +1018,7 @@ _DEMO_JS = r"""
   var SC = [
     {title:'Internet line fails', init:reset, steps:[
       {d:2600, cap:'The dashboard: every router, one row each.'},
-      {d:2800, cap:'09:41 — Branch · Durban’s fibre stops answering. The router moves to its LTE backup: its row turns Partial, and an On backup card stays at the top until the line is back.',
+      {d:2800, cap:'09:41 — Branch · Durban’s fibre stops answering. The router moves to its backup line: its row turns Partial, and an On backup card stays at the top until the line is back.',
        f:function(){ setRow('Branch · Durban', {st:'warn', al:1, hl:true});
          var bk = document.getElementById('dm-bk'); if (bk) bk.classList.add('on'); }},
       {d:3800, cap:'You get an email saying what happened, and the likely cause: two other sites on the same ISP dropped too.',
@@ -993,7 +1026,7 @@ _DEMO_JS = r"""
          ['[WARNING] Primary WAN "Vumatel" is DOWN — running on backup "LTE"',
           'Why: Primary uplink Vumatel is not carrying traffic. Likely cause: 2 other sites on Vumatel lost their line within 20 minutes of this one, so this is an outage at Vumatel, not a fault on site.']); }},
       /*AI_STEP*/
-      {d:3400, cap:'Two hours later it is still on LTE, so you are reminded, with how much data the backup has carried.',
+      {d:3400, cap:'Two hours later it is still on its backup line, so you are reminded, with how much data that line has carried.',
        f:function(){ mail('warn', '11:41', '[EasyMikrotik] Branch · Durban is still on its backup line (2 hours)',
          ['Branch · Durban: Vumatel line down since 09:41 (2 hours), running on LTE, 1.8 GB used on it.']); }},
       {d:3400, cap:'When the fibre answers again, the row goes back to Healthy and a last email says so.',
@@ -1205,10 +1238,16 @@ def render_landing(ai_on: bool = False, ai_news: bool = False,
     price_cards = "\n".join(_price_card(p) for p in _PLANS)
     tier_rows = _tier_rows()
     brand = esc(_BRAND)
-    from .brand import logo_img, favicon_tags
+    from .brand import logo_img, favicon_tags, BRAND
+    from .billing import _TRIAL_DAYS
     from .web_seo import seo_head
+    # brand=: the structured data's product name, so it does not have to be
+    # split back out of the title. plans=: the real price ladder, so the
+    # offer cannot drift from what billing charges.
     seo = seo_head(_TITLE, _DESCRIPTION, base, _FAQ,
-                   f"30 days free with {TRIAL_DEVICES} device")
+                   f"{_TRIAL_DAYS} days free with {TRIAL_DEVICES} device",
+                   brand=BRAND, plans=PLANS,
+                   features=[t for i, t, _b in _FEATURES if i != "card"])
     mark = logo_img(26)
     favicon = favicon_tags()
 

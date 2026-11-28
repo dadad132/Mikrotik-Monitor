@@ -29,7 +29,7 @@ SEO_TYPES = {
 # The pages worth finding. Everything else is behind a login or is one
 # customer's own link, and is listed in robots.txt so it is not crawled.
 _SITEMAP = ("/", "/terms", "/signup")
-_PRIVATE = ("/account", "/admin", "/antivirus", "/api/", "/billing",
+_PRIVATE = ("/account", "/admin", "/api/", "/billing",
             "/dashboard", "/device", "/devices", "/guide", "/logout", "/logs",
             "/metrics", "/pay", "/regions", "/superadmin")
 
@@ -60,17 +60,39 @@ def llms_txt(base: str, brand: str) -> str:
             f"- [Terms & Conditions]({base}/terms)\n")
 
 
-def _json_ld(title: str, description: str, faq, trial: str) -> str:
-    data = [{
+def _json_ld(title: str, description: str, faq, trial: str, base: str = "",
+             brand: str = "", plans=None, features=()) -> str:
+    app = {
         "@context": "https://schema.org",
         "@type": "SoftwareApplication",
-        "name": title.split(" — ")[0],
+        "name": brand or title.split(" — ")[0],
         "applicationCategory": "BusinessApplication",
         "operatingSystem": "Web",
         "description": description,
-        "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD",
-                   "description": trial},
-    }, {
+        "softwareRequirements": "MikroTik RouterOS 7.1 or later on the "
+                                "routers you manage",
+    }
+    if base:
+        app["url"] = f"{base}/"
+    if features:
+        app["featureList"] = list(features)
+    # Priced per month by device count, so this is an AggregateOffer built
+    # from billing's own PLANS rather than numbers written out here. It used
+    # to send a single Offer at price 0, which tells a crawler the product is
+    # free -- true of the trial only, not of the product.
+    if plans:
+        prices = [float(p["price_usd"]) for p in plans]
+        counts = [int(p["devices"]) for p in plans]
+        app["offers"] = {
+            "@type": "AggregateOffer", "priceCurrency": "USD",
+            "lowPrice": f"{min(prices):.2f}",
+            "highPrice": f"{max(prices):.2f}",
+            "offerCount": len(plans),
+            "description": (f"Per month, by device count: {min(counts)} to "
+                            f"{max(counts)} devices. {trial}. Over "
+                            f"{max(counts)} devices is quoted."),
+        }
+    data = [app, {
         "@context": "https://schema.org",
         "@type": "FAQPage",
         "mainEntity": [{
@@ -83,7 +105,8 @@ def _json_ld(title: str, description: str, faq, trial: str) -> str:
     return f'<script type="application/ld+json">{text}</script>'
 
 
-def seo_head(title: str, description: str, base: str, faq, trial: str) -> str:
+def seo_head(title: str, description: str, base: str, faq, trial: str,
+             brand: str = "", plans=None, features=()) -> str:
     """The landing page's description, link preview and structured data.
 
     `base` is the address set for this server. Without one the tags that
@@ -95,6 +118,8 @@ def seo_head(title: str, description: str, base: str, faq, trial: str) -> str:
             '<meta name="theme-color" content="#0f172a">',
             f'<meta property="og:title" content="{t}">',
             f'<meta property="og:description" content="{d}">',
+            f'<meta property="og:site_name" '
+            f'content="{escape(brand or title.split(" — ")[0])}">',
             '<meta property="og:type" content="website">',
             '<meta name="twitter:card" content="summary_large_image">']
     if base:
@@ -105,5 +130,6 @@ def seo_head(title: str, description: str, base: str, faq, trial: str) -> str:
                  f'content="{site}{OG_IMAGE_PATH}">',
                  '<meta property="og:image:width" content="1200">',
                  '<meta property="og:image:height" content="630">']
-    tags.append(_json_ld(title, description, faq, trial))
+    tags.append(_json_ld(title, description, faq, trial, base, brand,
+                         plans, features))
     return "\n  ".join(tags)
